@@ -78,6 +78,44 @@ at connect time. Either way, on connect the operator introspects
 logged and degrades the `clickhouse-schema` readiness probe (it does not
 crash-loop).
 
+## Custom Resources (`kubestream.io/v1alpha1`)
+
+Three CRDs express the two-tier model: a **sink** says *where* state goes, a **rule** says *what* to stream there. They are validated entirely by CRD structural schemas and CEL (`x-kubernetes-validations`) — kubestream registers no admission webhooks and needs no cert-manager.
+
+> **Status:** the types, CRDs and samples ship now; the reconcilers and the dynamic watch pool that consume them land later in Phase 1. Until then the operator is still configured by the flags and environment variables in the next section, and applying a rule has no runtime effect.
+
+| Kind | Scope | Purpose |
+|---|---|---|
+| `ClickHouseSink` | Cluster | One ClickHouse instance the operator may write to: connection, per-sink write-path tuning, and an admission policy over what may be written to it. The password lives in a Secret, never in the CR. |
+| `StreamRule` | Namespaced | Streams the resources it names **in its own namespace** to a sink. Delegable: a team can opt their own workloads into the audit trail without cluster-level privileges. Naming a cluster-scoped kind here is invalid. |
+| `ClusterStreamRule` | Cluster | A `StreamRule` spec plus `spec.namespaceSelector` (nil = all namespaces, including ones created later). The only type permitted to name cluster-scoped kinds. |
+
+Install them with `make install`; they are also part of `make deploy` / `make build-installer`. Working examples live in [`config/samples/`](config/samples/).
+
+```yaml
+apiVersion: kubestream.io/v1alpha1
+kind: StreamRule
+metadata: {name: team-payments-workloads, namespace: payments}
+spec:
+  sinkRef: default          # immutable — see below
+  resources:
+  - {group: apps, version: v1, kind: Deployment}
+  - group: ""
+    version: v1
+    kind: ConfigMap
+    labelSelector: {matchLabels: {kubestream.io/audit: "true"}}
+```
+
+**Validation worth knowing about**
+
+- `kind` must be the Kind (`Deployment`), not the plural resource (`deployments`); `version` must look like `v1` / `v2beta1`; `group` must be empty (core) or a DNS-1123 subdomain. `resources` must be non-empty.
+- `spec.sinkRef` defaults to `default` and is **immutable**. Moving a rule to another sink is delete + recreate: re-pointing a live rule would strand the dedup/diff baseline the pipeline built for every object in scope, so records would either re-emit as duplicates or be written as diffs against a baseline the new sink never received. Recreating re-warms the cache from the new sink's own history instead.
+- `spec.connection.credentialsSecretRef.namespace` defaults to the **operator's own namespace**, and that default is a security boundary rather than a convenience: the operator's ClusterRole grants Secret reads only there, so a cluster-scoped sink cannot be used to make it read a Secret its RBAC never intended to expose.
+- `spec.policy.allowedGVKs` restricts what a sink accepts; `kinds: ["*"]` means every kind in the group and the list rejects duplicates server-side. Omitting `allowedGVKs` allows everything **except** the hard deny-list — `v1/Secret` is never watchable in `v1alpha1`, and no policy can re-enable it.
+- Writer knobs are bounded: `workers` in `[1, 64]`, `batchMaxRows` in `[1, 100000]`. Omitted fields default to the same values as the `--writer-*` flags below.
+
+`kubectl get` renders `READY`, `SINK`, `WATCHES`, `AGE` for both rule kinds, and `READY`, `ADDR`, `AGE` for sinks. `ADDR` shows the full `host:port`: CRD printer columns are plain JSONPath with no string functions, so the host cannot be split out declaratively.
+
 ## Configuration
 
 Every setting is available as both a CLI flag and an environment variable (flag wins if both are set), except `CH_PASSWORD`, which is environment-only.
@@ -139,7 +177,7 @@ kubestream registers the following pipeline metrics on controller-runtime's glob
 - `kubectl`, and access to a Kubernetes cluster
 - A reachable ClickHouse instance, with the schema v1 tables created — either apply [`deploy/clickhouse/schema/*.sql`](deploy/clickhouse/schema/) yourself or start the operator with `--ch-auto-create-schema=true` (see [ClickHouse schema](#clickhouse-schema))
 
-This project does not define a CRD — there is nothing to `make install` beyond the operator itself; it only watches existing built-in resource types (or others you configure via `WATCHED_GVKS`).
+`make deploy` installs the [`kubestream.io/v1alpha1` CRDs](#custom-resources-kubestreamiov1alpha1) alongside the operator; `make install` installs the CRDs alone. Which resource types are actually watched is still governed by `WATCHED_GVKS` until the Phase 1 reconcilers land.
 
 ### Deploying to a cluster
 
@@ -171,7 +209,8 @@ This project does not define a CRD — there is nothing to `make install` beyond
 ### Uninstalling
 
 ```sh
-make undeploy
+make undeploy   # operator + CRDs
+make uninstall  # CRDs only
 ```
 
 ## Local Development

@@ -15,4 +15,25 @@ resources:
   kind: ResourceStream
   path: k8s.io/api/core/v1
   version: v1
+- api:
+    crdVersion: v1
+    namespaced: false
+  domain: kubestream.io
+  kind: ClickHouseSink
+  path: github.com/yelzhy/kubestream/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: kubestream.io
+  kind: StreamRule
+  path: github.com/yelzhy/kubestream/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: false
+  domain: kubestream.io
+  kind: ClusterStreamRule
+  path: github.com/yelzhy/kubestream/api/v1alpha1
+  version: v1alpha1
 version: "3"
