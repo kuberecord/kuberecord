@@ -1,0 +1,7 @@
+# Manifests for the samples you can `kubectl apply -k config/samples`.
+# Not referenced by config/default: samples are examples, not part of a deploy.
+resources:
+- kubestream.io_v1alpha1_clickhousesink.yaml
+- kubestream.io_v1alpha1_streamrule.yaml
+- kubestream.io_v1alpha1_clusterstreamrule.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

@@ -1,0 +1,38 @@
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  connection:
+    addr: clickhouse.kubestream-system.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      # namespace is omitted on purpose: it defaults to the operator's own
+      # namespace, which is the only place the operator holds Secret read
+      # rights (Task 1.9).
+      name: kubestream-clickhouse
+    dialTimeout: 5s
+    readTimeout: 10s
+  writer:
+    queueSize: 5000
+    workers: 4
+    batchMaxRows: 1000
+    batchMaxWait: 1s
+    enqueueTimeout: 2s
+    drainTimeout: 15s
+  policy:
+    # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
+    # entirely to admit everything except the hard deny-list (D8: v1/Secret).
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds: ["*"]
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+      - Service
