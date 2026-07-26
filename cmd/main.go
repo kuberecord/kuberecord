@@ -346,7 +346,11 @@ func main() {
 	// writer runnable, the connect-time schema-validation runnable, and the
 	// schema readyz check into the manager. The data plane then depends only on
 	// the sink interfaces, never on ClickHouse directly.
-	chWriter, err := clickhouse.Open(chConfig, pipeline.PipelineMetricsInstance())
+	// Write-path metrics are per sink (sink=<name>), and this env-var-configured
+	// writer has no ClickHouseSink CR to take a name from — Task 1.10 replaces this
+	// whole block with the SinkManager, which labels each instance with its CR's
+	// name. Until then its series are labelled "default".
+	chWriter, err := clickhouse.Open(chConfig, pipeline.PipelineMetricsInstance().ForSink("default"))
 	if err != nil {
 		setupLog.Error(err, "Failed to open ClickHouse connection")
 		os.Exit(1)
@@ -357,15 +361,16 @@ func main() {
 	}
 
 	// The data plane is not wired yet. The per-GVK stream reconcilers were
-	// replaced by internal/pipeline, and the components that feed it now exist —
-	// the WatchManager (Task 1.4, answering pipeline.ListerRegistry and
+	// replaced by internal/pipeline, and every component that feeds it now exists
+	// — the WatchManager (Task 1.4, answering pipeline.ListerRegistry and
 	// pipeline.ScopeStates), the scope-epoch recorder and warm/GC coordinator
-	// (Task 1.6) — but the SinkManager that answers pipeline.SinkRouter,
-	// pipeline.StateReaderRouter and the scope-event routers (Task 1.8) does not,
-	// and neither do the reconcilers that translate CRs into watch targets (Task
-	// 1.7). Until Task 1.10 assembles them here, the operator starts healthy and
-	// streams nothing, which is exactly the Phase 1 end state for a cluster with
-	// no ClickHouseSink and no rules.
+	// (Task 1.6), and the SinkManager that answers pipeline.SinkRouter,
+	// pipeline.StateReaderRouter and pipeline.ScopeEventRouter (Task 1.8) — but the
+	// reconcilers that translate CRs into watch targets and into sink
+	// configurations (Task 1.7) do not, so nothing yet calls SinkManager.Ensure or
+	// consumes its probe results. Until Task 1.10 assembles them here, the operator
+	// starts healthy and streams nothing, which is exactly the Phase 1 end state
+	// for a cluster with no ClickHouseSink and no rules.
 	//
 	// clusterID is threaded into pipeline.Options at that point; it stays a flag
 	// because it labels every row this operator writes, independent of any CR.

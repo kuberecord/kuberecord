@@ -437,9 +437,11 @@ func (r *sinkStateRegistry) remove(name string) {
 	r.mu.Lock()
 	delete(r.states, name)
 	r.mu.Unlock()
-	// Delete the sink's gauge series too: leaving it behind would report a stale
-	// entry count for a sink that no longer exists.
+	// Delete the sink's series too: leaving them behind would report a stale entry
+	// count, queue depth and capacity for a sink that no longer exists — which
+	// reads as a live-but-idle backend rather than an absent one.
 	r.metrics.hashcacheEntries.DeleteLabelValues(name)
+	r.metrics.deleteSinkSeries(name)
 }
 
 func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
