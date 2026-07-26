@@ -60,6 +60,22 @@ const (
 	// worst-case latency from "rule applied" to "informer starting" is bounded by
 	// this value.
 	defaultDebounceDelay = 500 * time.Millisecond
+
+	// defaultSettleQuietPeriod is how long the registry must go without a change
+	// notification before the desired state is declared settled (see Settled).
+	//
+	// It exists for exactly one consumer: Task 1.6's boot reconciliation, which
+	// closes scope epochs the sink's history shows as open but that no rule wants
+	// any more. Running that judgement too early is actively harmful — at process
+	// start the reconcilers have not necessarily written their rules to the
+	// registry yet, so every still-valid scope would look orphaned, be closed, and
+	// be reopened seconds later. A quiet window (rather than a fixed delay from
+	// boot) is what makes the wait proportionate: an operator with three rules is
+	// settled almost immediately, while a GitOps apply of hundreds keeps the gate
+	// shut until the churn stops. Five seconds is comfortably longer than the
+	// debounce window and short enough that a genuinely orphaned scope is closed
+	// while an operator is still looking at the deletion they just made.
+	defaultSettleQuietPeriod = 5 * time.Second
 )
 
 // Pipeline is the data plane as the WatchManager needs it: somewhere to hand work
@@ -80,14 +96,54 @@ type Pipeline interface {
 	EvictScope(sinkName string, scope pipeline.ScopeKey)
 }
 
-// ScopeRecorder is handed watch-scope transitions as they happen: a (sink, scope)
-// pair gained its first interested rule, or lost its last.
+// ScopeTransition is one watch-scope edge as the WatchManager observes it: a
+// single (sink, informer-target) interest started being served, or stopped being
+// wanted.
+//
+// It is an interest-level edge, not a scope-level one. Deriving "the scope started"
+// from it is the recorder's job (see ScopeRecorder), because that is where the
+// transition semantics — one row per scope, whatever the number of contributing
+// rules or informers — belong.
+type ScopeTransition struct {
+	// Sink is the ClickHouseSink name this interest streams to.
+	Sink string
+
+	// Scope is the version-agnostic (group, kind, namespace) triple the pipeline
+	// evicts and warms by.
+	Scope pipeline.ScopeKey
+
+	// Target distinguishes two interests that share a Scope. Two rules naming
+	// apps/v1 and apps/v2 of one resource are two informers but one
+	// version-agnostic scope (Invariant 7), so a recorder that refcounted by
+	// (sink, scope) alone could not tell their edges apart — and an unpaired
+	// Stopped would then close a scope another interest still holds.
+	Target string
+
+	// APIVersion is the version this interest's informer watches. It is provenance
+	// for the recorded row only; scope identity never includes it.
+	APIVersion string
+
+	// RuleKeys are the rules contributing this interest, sorted (the registry
+	// guarantees the ordering), so a transition is always attributable.
+	RuleKeys []string
+
+	// At is when the manager observed the edge. It is stamped once per reconcile
+	// pass and handed to the recorder rather than re-derived downstream, because
+	// two consumers need to agree on it exactly: the recorded row's timestamp and
+	// the cutoff the warm coordinator's epoch check uses (see
+	// pipeline.WarmTarget.EpochStart). A later re-stamp would let the epoch check
+	// see the very row this transition is about to write.
+	At time.Time
+}
+
+// ScopeRecorder is handed watch-scope transitions as they happen: an interest in a
+// (sink, scope) pair appeared, or vanished.
 //
 // The WatchManager is the only component that can observe these edges — it is
 // where the desired-state registry meets running informers — but it deliberately
-// knows nothing about how they are recorded. Task 1.6's recorder consumes this,
-// applies the transition semantics (one Started row per scope, not per rule), and
-// writes watch_scopes rows.
+// knows nothing about how they are recorded, nor about the transition semantics
+// that turn interest edges into scope epochs. Task 1.6's ScopeEpochRecorder
+// consumes this, applies those semantics, and writes the scope log.
 //
 // Implementations MUST NOT block: these calls happen inline on the reconcile
 // loop, between deregistering a scope and evicting its cache, and a recorder that
@@ -95,27 +151,27 @@ type Pipeline interface {
 // behind an unreachable database (Invariant 1). A recorder that cannot write yet
 // must queue and retry on its own.
 type ScopeRecorder interface {
-	// ScopeStarted reports that scope is now being watched for sink, contributed
-	// by ruleKeys. It fires once the informer serving the scope is actually
-	// running, so a recorded Started is never a promise the data plane failed to
-	// keep.
-	ScopeStarted(sink string, scope pipeline.ScopeKey, ruleKeys []string)
+	// ScopeStarted reports that an interest is now being served. It fires once the
+	// informer serving the scope is actually running, so a recorded Started is
+	// never a promise the data plane failed to keep.
+	ScopeStarted(transition ScopeTransition)
 
-	// ScopeStopped reports that scope is no longer watched for sink, and names the
-	// ruleKeys that had been holding it. It fires after the scope is deregistered
-	// (so no further event can be attributed to it) and before its cache is
-	// evicted.
-	ScopeStopped(sink string, scope pipeline.ScopeKey, ruleKeys []string)
+	// ScopeStopped reports that an interest is no longer wanted. It fires after the
+	// interest is deregistered (so no further event can be attributed to it) and
+	// before its cache is evicted. It may fire for an interest no ScopeStarted was
+	// ever reported for — one whose informer never came up — which is exactly why
+	// ScopeTransition carries Target.
+	ScopeStopped(transition ScopeTransition)
 }
 
-// nopRecorder is the default when no ScopeRecorder is supplied, which is the
-// state until Task 1.6 lands: watches start and stop correctly, they are simply
-// not narrated to the sink yet. A no-op implementation keeps the call sites free
-// of nil checks.
+// nopRecorder is the default when no ScopeRecorder is supplied: watches start and
+// stop correctly, they are simply not narrated to the sink. A no-op implementation
+// keeps the call sites free of nil checks, and it is what a deployment with a
+// Writer-only sink effectively runs with.
 type nopRecorder struct{}
 
-func (nopRecorder) ScopeStarted(string, pipeline.ScopeKey, []string) {}
-func (nopRecorder) ScopeStopped(string, pipeline.ScopeKey, []string) {}
+func (nopRecorder) ScopeStarted(ScopeTransition) {}
+func (nopRecorder) ScopeStopped(ScopeTransition) {}
 
 // Options configures a WatchManager. Everything without a documented default is
 // mandatory.
@@ -136,8 +192,8 @@ type Options struct {
 	// state a stopped scope's eviction drops. Required.
 	Pipeline Pipeline
 
-	// Recorder receives scope transitions. Nil means they are not recorded (the
-	// pre-Task-1.6 state); watch lifecycle is unaffected either way.
+	// Recorder receives scope transitions. Nil means they are not recorded; watch
+	// lifecycle is unaffected either way.
 	Recorder ScopeRecorder
 
 	// ResyncPeriod overrides defaultResyncPeriod. Zero or negative means the
@@ -148,6 +204,11 @@ type Options struct {
 	// default; tests shorten it so a debounce assertion does not wait on real
 	// pacing.
 	DebounceDelay time.Duration
+
+	// SettleQuietPeriod overrides defaultSettleQuietPeriod, the quiet window that
+	// decides when the desired state is considered settled (see Settled). Zero or
+	// negative means the default.
+	SettleQuietPeriod time.Duration
 
 	// StopTimeout overrides how long stopping an informer waits for its goroutine
 	// (stopWaitTimeout). Zero or negative means the default.
@@ -178,8 +239,15 @@ type WatchManager struct {
 	table *interestTable
 	pool  *pool
 
-	resyncPeriod  time.Duration
-	debounceDelay time.Duration
+	resyncPeriod      time.Duration
+	debounceDelay     time.Duration
+	settleQuietPeriod time.Duration
+
+	// settled is closed once the desired state has been quiet for
+	// settleQuietPeriod (see Settled). It is closed from the reconcile loop
+	// goroutine only, guarded by settleDone so a second close can never panic.
+	settled    chan struct{}
+	settleDone bool
 
 	// startedTargets are the (informer, sink) pairs a ScopeStarted has already
 	// been reported for. It is read and written only from the reconcile loop
@@ -229,18 +297,24 @@ func New(opts Options) (*WatchManager, error) {
 	if debounce <= 0 {
 		debounce = defaultDebounceDelay
 	}
+	settleQuiet := opts.SettleQuietPeriod
+	if settleQuiet <= 0 {
+		settleQuiet = defaultSettleQuietPeriod
+	}
 
 	table := newInterestTable()
 	m := &WatchManager{
-		registry:       opts.Registry,
-		resolver:       opts.Resolver,
-		pipeline:       opts.Pipeline,
-		recorder:       recorder,
-		table:          table,
-		pool:           newPool(opts.Dynamic, table, opts.Pipeline, logf.Log.WithName("watch")),
-		resyncPeriod:   resync,
-		debounceDelay:  debounce,
-		startedTargets: make(map[interestID]struct{}),
+		registry:          opts.Registry,
+		resolver:          opts.Resolver,
+		pipeline:          opts.Pipeline,
+		recorder:          recorder,
+		table:             table,
+		pool:              newPool(opts.Dynamic, table, opts.Pipeline, logf.Log.WithName("watch")),
+		resyncPeriod:      resync,
+		debounceDelay:     debounce,
+		settleQuietPeriod: settleQuiet,
+		settled:           make(chan struct{}),
+		startedTargets:    make(map[interestID]struct{}),
 	}
 	if opts.StopTimeout > 0 {
 		m.pool.stopTimeout = opts.StopTimeout
@@ -280,6 +354,14 @@ func (m *WatchManager) Start(ctx context.Context) error {
 	ticker := time.NewTicker(m.resyncPeriod)
 	defer ticker.Stop()
 
+	// The settle timer runs from the moment the loop starts and is restarted by
+	// every change notification, so it fires only once the registry has been quiet
+	// for settleQuietPeriod. Go 1.23 onwards guarantees Reset leaves no stale value
+	// buffered in the channel, so a notification arriving just as the timer fires
+	// cannot produce a premature settle.
+	settle := time.NewTimer(m.settleQuietPeriod)
+	defer settle.Stop()
+
 	// One pass before waiting on anything: rules that already existed when this
 	// runnable started (the common case after a restart, since reconcilers run
 	// concurrently with it) have already posted their notification, and it may
@@ -294,15 +376,48 @@ func (m *WatchManager) Start(ctx context.Context) error {
 			log.Info("Watch manager stopped")
 			return nil
 		case <-changes:
+			if !m.settleDone {
+				settle.Reset(m.settleQuietPeriod)
+			}
 			if !m.debounce(ctx, changes) {
 				// Cancelled mid-window; let the ctx.Done branch shut down.
 				continue
 			}
 			m.reconcilePool(ctx)
+		case <-settle.C:
+			m.markSettled(log)
 		case <-ticker.C:
 			m.reconcilePool(ctx)
 		}
 	}
+}
+
+// Settled is closed once the desired state has been quiet for the settle quiet
+// period — i.e. every rule that already existed when this process started has had
+// its chance to reach the registry.
+//
+// It exists for Task 1.6's boot reconciliation, which is the one judgement in the
+// operator that is only safe to make against a complete desired state: it closes
+// scope epochs that history shows as open but that nothing wants any more, and an
+// incomplete desired state would make it close scopes whose rules simply had not
+// been reconciled yet. Every other part of the data plane is level-triggered and
+// therefore needs no such signal.
+//
+// The channel is never closed if the manager never runs, which is correct: a
+// non-leader has no desired state of its own to settle, and the boot pass is
+// leader-gated for the same reason the watches are.
+func (m *WatchManager) Settled() <-chan struct{} { return m.settled }
+
+// markSettled closes the settle channel exactly once. It runs only on the
+// reconcile loop goroutine, so the guard needs no lock.
+func (m *WatchManager) markSettled(log logr.Logger) {
+	if m.settleDone {
+		return
+	}
+	m.settleDone = true
+	close(m.settled)
+	log.Info("Desired state settled", "quiet_period", m.settleQuietPeriod.String(),
+		"interests", m.table.size(), "informers", m.pool.size())
 }
 
 // NeedLeaderElection makes the WatchManager a manager.LeaderElectionRunnable that
@@ -391,6 +506,45 @@ func (m *WatchManager) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, 
 // future caller can classify it; today every caller simply retries.
 var errInformerNotRunning = errors.New("watch scope is registered but its informer is not running")
 
+// ScopeDesired reports whether any rule currently wants this (sink, scope) pair.
+// It implements half of pipeline.ScopeStates.
+//
+// The interest table — not the pool — is the authority, and deliberately so: the
+// question a caller is really asking is "does the operator still intend to watch
+// this?", which is true from the moment a rule names the scope, whether or not the
+// informer serving it has managed to come up yet. Task 1.6's boot reconciliation
+// depends on that reading: a false answer there closes a scope's epoch, so
+// answering "no" for a scope whose informer is merely slow (or whose kind is not
+// installed yet) would close an epoch the very next pass reopens.
+func (m *WatchManager) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
+	return len(m.table.interestsForScope(sinkName, scope)) > 0
+}
+
+// ScopeSynced reports whether every informer serving this (sink, scope) pair has
+// completed its initial List. It implements the other half of
+// pipeline.ScopeStates.
+//
+// It is the gate on the per-scope zombie GC pass, so it is deliberately
+// conservative in both directions: a scope nothing is registered for is *not*
+// synced (there is no cache to compare against), and a scope served by two
+// informers — two versions of one resource, one version-agnostic scope — is synced
+// only when both are, since a seeded object may live in either one's indexer.
+// Reporting a premature "yes" would make every seeded object look absent and turn
+// the GC pass into a mass-deletion event.
+func (m *WatchManager) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
+	interests := m.table.interestsForScope(sinkName, scope)
+	if len(interests) == 0 {
+		return false
+	}
+	for _, in := range interests {
+		entry, running := m.pool.entryFor(in.informer)
+		if !running || !entry.informer.HasSynced() {
+			return false
+		}
+	}
+	return true
+}
+
 // PoolSize reports how many informers are currently running. It is exported for
 // the operator's own diagnostics (Task 1.10 logs it at startup); the pool's
 // internal counter is what the sharing tests assert.
@@ -411,13 +565,18 @@ func (m *WatchManager) reconcilePool(ctx context.Context) {
 	snapshot := m.registry.Snapshot()
 	desired, wanted := m.translate(snapshot, log)
 
+	// One instant for the whole pass. Every transition it reports carries it, so
+	// the recorded rows and the warm coordinator's epoch cutoff cannot disagree
+	// about when this pass's edges happened (see ScopeTransition.At).
+	at := time.Now().UTC()
+
 	removed := m.table.replace(desired)
 	for _, in := range removed {
 		// Deregistered above; settle the state it leaves behind. The recorder is
 		// told before the cache is evicted so the Stopped row's timestamp cannot
 		// fall after a subsequent epoch's rows for the same scope.
 		delete(m.startedTargets, in.id())
-		m.recorder.ScopeStopped(in.sink, in.scope, in.ruleKeys)
+		m.recorder.ScopeStopped(in.transition(at))
 		m.pipeline.EvictScope(in.sink, in.scope)
 		log.Info("Watch scope stopped",
 			"sink", in.sink, "group", in.scope.Group, "kind", in.scope.Kind,
@@ -428,7 +587,7 @@ func (m *WatchManager) reconcilePool(ctx context.Context) {
 
 	for _, in := range m.newlyServing(desired) {
 		m.startedTargets[in.id()] = struct{}{}
-		m.recorder.ScopeStarted(in.sink, in.scope, in.ruleKeys)
+		m.recorder.ScopeStarted(in.transition(at))
 		log.Info("Watch scope started",
 			"sink", in.sink, "group", in.scope.Group, "kind", in.scope.Kind,
 			"namespace", in.scope.Namespace, "rules", in.ruleKeys)
@@ -557,6 +716,7 @@ func (m *WatchManager) debounce(ctx context.Context, changes <-chan struct{}) bo
 // that has nothing to do with either contract.
 var (
 	_ pipeline.ListerRegistry        = (*WatchManager)(nil)
+	_ pipeline.ScopeStates           = (*WatchManager)(nil)
 	_ manager.Runnable               = (*WatchManager)(nil)
 	_ manager.LeaderElectionRunnable = (*WatchManager)(nil)
 	_ Pipeline                       = (*pipeline.Pipeline)(nil)

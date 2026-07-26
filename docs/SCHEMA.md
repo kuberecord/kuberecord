@@ -112,27 +112,88 @@ never off sentinel values in the data columns.
 
 ## `watch_scopes`
 
-The watch-scope epoch log. **Created and frozen now, but not written to until
-Task 1.6** — with dynamic rules, "we stopped watching X" and "X was deleted"
-are different truths and must be recorded differently, or the audit trail lies.
-A `Stopped` row means the operator stopped observing a scope; it is *not* a
+The watch-scope epoch log. With dynamic rules, "we stopped watching X" and "X was
+deleted" are different truths and must be recorded differently, or the audit trail
+lies. A `Stopped` row means the operator stopped observing a scope; it is *not* a
 statement that the objects in that scope were deleted.
 
 | Column | Type | Semantics |
 |---|---|---|
-| `ts` | `DateTime64(9, 'UTC')` | Transition timestamp (`Delta, ZSTD(1)` codec). |
+| `ts` | `DateTime64(9, 'UTC')` | Transition timestamp (`Delta, ZSTD(1)` codec). Stamped when the transition was observed, never when the row was written — a retried write records when the watch really started or stopped. |
 | `cluster_id` | `LowCardinality(String)` | Cluster this operator serves. |
 | `api_group` | `LowCardinality(String)` | API group of the watched scope. |
-| `api_version` | `LowCardinality(String)` | API version of the watched scope. |
+| `api_version` | `LowCardinality(String)` | API version of the watch target that triggered the transition. **Provenance only** — scope identity, like object identity, is version-agnostic, and one scope can be served by informers on two versions of the same resource at once. |
 | `kind` | `LowCardinality(String)` | Kind of the watched scope. |
-| `namespace` | `String` | Watched namespace; `""` means cluster-scoped or all-namespaces. |
+| `namespace` | `String` | Watched namespace; `""` means cluster-scoped or all-namespaces. It is part of the scope's **identity**: a rule pinned to one namespace and a cluster-wide rule over the same kind are two scopes with two independent epochs, so `namespace = ''` must be matched exactly rather than treated as a wildcard. |
 | `action` | `LowCardinality(String)` | `Started` when a `(sink, scope)` gains its first interested rule; `Stopped` when it loses its last. |
-| `rule_ref` | `String` | The rule that triggered the transition: `"<namespace>/<name>"` for a `StreamRule`, `"<name>"` for a `ClusterStreamRule`. |
+| `rule_ref` | `String` | The rule that triggered the transition: `"<namespace>/<name>"` for a `StreamRule`, `"<name>"` for a `ClusterStreamRule`. Empty for a `Stopped` row written by boot reconciliation (below), where the rule that had held the scope no longer exists. |
 
 ```sql
 ENGINE = MergeTree
 ORDER BY (cluster_id, api_group, kind, namespace, ts)
 ```
+
+### Transition semantics
+
+Rows are **transitions of a `(sink, scope)` pair**, not of a rule and not of an
+informer:
+
+- Two rules asking for the same scope on the same sink produce **one** `Started`
+  row. Removing one of them produces **no** row; removing the last produces one
+  `Stopped` row.
+- A rule edit that only changes a selector produces no row at all — the scope never
+  stopped being watched.
+- `Started` is written only once the informer serving the scope is actually
+  running, so a recorded `Started` is never a promise the operator failed to keep.
+
+Multi-rule attribution deliberately lives in the owning CR's status, not here: this
+is an append-only log, and a row naming one of several contributing rules could
+never be corrected.
+
+### Restarts, and epochs left open
+
+A process exiting writes **no** `Stopped` row. Shutdown is not a rule going away,
+and recording one would put a spurious epoch boundary in the trail on every
+restart. Two consequences follow:
+
+1. A scope whose most recent action is `Started` is either being watched right now
+   or was left open by a process that did not come back.
+2. On startup — once the desired state has settled — the operator enumerates the
+   scopes whose most recent action is `Started`, and writes one `Stopped` row for
+   each that no rule wants any more (the rule was deleted while it was down). It
+   writes **zero** `Deleted` rows for the objects those scopes covered.
+
+### Reading the log
+
+Two queries drive the operator's own decisions, and both are useful to a consumer:
+
+```sql
+-- Was this scope watched in a previous epoch, as of a given instant?
+-- (Used to decide whether an object missing from the cluster but present in
+-- resource_states is a genuine deletion or merely pre-history.)
+SELECT argMax(action, ts) = 'Started'
+FROM watch_scopes
+WHERE cluster_id = ? AND api_group = ? AND kind = ? AND namespace = ? AND ts < ?;
+
+-- Which scopes are currently open for this cluster?
+SELECT api_group, kind, namespace
+FROM watch_scopes
+WHERE cluster_id = ?
+GROUP BY api_group, kind, namespace
+HAVING argMax(action, ts) = 'Started';
+```
+
+The `ts <` cutoff in the first query matters: scope rows are written
+asynchronously, so a scope's *own* `Started` row may land at any moment while its
+warm-up is running. Anchoring the question to the instant the current epoch began
+is what keeps "was it watched **before** now?" from answering itself.
+
+### What a `Stopped` row means for `resource_states`
+
+Nothing was deleted. The objects in the scope keep whatever last-known state
+`resource_states` holds for them, correctly dated to on or before the `Stopped`
+row. A consumer reconstructing "what existed when" should treat a scope's
+last-known states as *as-of its `Stopped` row*, not as current.
 
 ---
 

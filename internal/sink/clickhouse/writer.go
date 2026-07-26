@@ -15,10 +15,11 @@ limitations under the License.
 */
 
 // Package clickhouse is the ClickHouse implementation of the sink contract
-// (internal/sink). CHWriter implements both sink.Writer (batched, asynchronous
-// inserts off the caller's hot path) and sink.StateReader (cache warm-up
-// history), and owns the single shared ClickHouse connection for both, plus
-// connect-time schema validation.
+// (internal/sink). CHWriter implements sink.Writer (batched, asynchronous
+// resource_states inserts off the caller's hot path), sink.ScopeEventWriter (a
+// separate small batcher for watch_scopes epoch rows) and sink.StateReader (cache
+// warm-up history plus the scope-epoch reads), and owns the single shared
+// ClickHouse connection for all of them, plus connect-time schema validation.
 package clickhouse
 
 import (
@@ -159,8 +160,9 @@ type writeJob struct {
 // CHWriter decouples ClickHouse inserts from the caller's hot path. Writes
 // are handed off to a bounded queue and drained by a small worker pool, so a
 // slow or unavailable ClickHouse connection never blocks a reconcile. A single
-// CHWriter is shared across all watched GVKs. It implements sink.Writer and
-// sink.StateReader (see statereader.go), sharing one connection for both.
+// CHWriter is shared across all watched GVKs. It implements sink.Writer,
+// sink.ScopeEventWriter (see scopewriter.go) and sink.StateReader (see
+// statereader.go), sharing one connection for all three.
 type CHWriter struct {
 	conn driver.Conn
 	// database is the schema-introspection target for connect-time validation;
@@ -171,6 +173,23 @@ type CHWriter struct {
 
 	jobs    chan writeJob
 	workers int
+
+	// scopeEvents is the dedicated hand-off queue for watch-scope epoch
+	// transitions, drained by a single scopeWorker with its own batching and
+	// retry queue (see scopewriter.go). It is deliberately not the jobs channel:
+	// a scope epoch must not queue behind a resource_states backlog, and it has
+	// no commit contract to settle.
+	scopeEvents chan sink.ScopeEvent
+	// scopeRetryMu guards scopeRetries, the events whose insert failed after
+	// backoff and that the scope worker re-attempts on its next tick. A scope
+	// transition happens once and cannot be re-derived, so it is retried rather
+	// than dropped.
+	scopeRetryMu sync.Mutex
+	scopeRetries []sink.ScopeEvent
+	// scopeMaxRetryBackoff bounds one flush's retry window before its events go
+	// back on scopeRetries. A field (not the constant directly) so tests can
+	// shorten it without waiting out production backoff.
+	scopeMaxRetryBackoff time.Duration
 
 	// batchMaxRows / batchMaxWait govern client-side batching: a worker flushes
 	// its accumulated batch once it holds batchMaxRows jobs or batchMaxWait has
@@ -256,6 +275,8 @@ func NewCHWriter(conn driver.Conn, queueSize, workers, batchMaxRows int, insertT
 		conn:                 conn,
 		jobs:                 make(chan writeJob, queueSize),
 		workers:              workers,
+		scopeEvents:          make(chan sink.ScopeEvent, scopeQueueSize),
+		scopeMaxRetryBackoff: defaultScopeMaxRetryBackoff,
 		batchMaxRows:         batchMaxRows,
 		batchMaxWait:         batchMaxWait,
 		enqueueTimeout:       enqueueTimeout,
@@ -384,15 +405,16 @@ func (w *CHWriter) Enqueue(ctx context.Context, job sink.Job) error {
 //  2. Swap in a fresh, shutdownDrainTimeout-bounded drainCtx for any job
 //     processed from here on — see attemptContext for why the original ctx
 //     (already cancelled by this point) can't be reused for these attempts.
-//  3. Wait for any Enqueue call already past the closing check to finish
-//     sending (or bail via its own ctx/timeout) — after this, jobs can
-//     receive no further sends from anyone.
-//  4. Close jobs. Each worker receives from it until it is drained and closed,
-//     flushing its partial in-flight batch on the final (closed) receive, then
-//     exits cleanly — no worker can exit "too early" and leave a job (or a
-//     buffered batch) stranded.
-//  5. Wait for otherUsers — the LastKnownStates / schema-validation goroutines
-//     that share conn.
+//  3. Wait for any Enqueue / EnqueueScopeEvent call already past the closing
+//     check to finish sending (or bail via its own ctx/timeout) — after this,
+//     neither queue can receive further sends from anyone.
+//  4. Close jobs and scopeEvents. Each worker receives from its channel until it
+//     is drained and closed, flushing its partial in-flight batch (and, for the
+//     scope worker, its retry queue) on the final (closed) receive, then exits
+//     cleanly — no worker can exit "too early" and leave a job (or a buffered
+//     batch) stranded.
+//  5. Wait for otherUsers — the state-read / schema-validation goroutines that
+//     share conn.
 //  6. Close conn — guaranteed safe now, since nothing can still be using it.
 func (w *CHWriter) Start(ctx context.Context) error {
 	log := logf.Log.WithName("chwriter")
@@ -407,6 +429,12 @@ func (w *CHWriter) Start(ctx context.Context) error {
 			w.worker(ctx, log)
 		})
 	}
+	// One scope worker, always: per-scope epoch ordering depends on a single
+	// drainer (see scopeWorker). It joins the same WaitGroup so the drain phase
+	// covers scope events too.
+	wg.Go(func() {
+		w.scopeWorker(ctx, log)
+	})
 
 	<-ctx.Done()
 
@@ -419,6 +447,7 @@ func (w *CHWriter) Start(ctx context.Context) error {
 	w.mu.Unlock()
 	w.inflight.Wait()
 	close(w.jobs)
+	close(w.scopeEvents)
 	wg.Wait()
 
 	w.otherUsers.Wait()

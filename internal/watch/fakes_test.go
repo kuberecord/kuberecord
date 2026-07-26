@@ -135,38 +135,37 @@ func (f *fakePipeline) waitForKeys(t *testing.T, want int) []pipeline.Key {
 }
 
 // fakeRecorder records the scope transitions the WatchManager reports, standing in
-// for Task 1.6's watch_scopes recorder.
+// for the production ScopeEpochRecorder (whose own semantics are the subject of
+// scope_recorder_test.go).
 type fakeRecorder struct {
 	mu          sync.Mutex
-	transitions []scopeTransition
+	transitions []recordedTransition
 }
 
-// scopeTransition is one ScopeStarted / ScopeStopped call.
-type scopeTransition struct {
-	action   string
-	sink     string
-	scope    pipeline.ScopeKey
-	ruleKeys []string
+// recordedTransition is one ScopeStarted / ScopeStopped call, with the action
+// spelled out so a test can filter on it.
+type recordedTransition struct {
+	action string
+	ScopeTransition
 }
 
-func (r *fakeRecorder) ScopeStarted(sink string, scope pipeline.ScopeKey, ruleKeys []string) {
-	r.record("Started", sink, scope, ruleKeys)
+func (r *fakeRecorder) ScopeStarted(transition ScopeTransition) {
+	r.record("Started", transition)
 }
 
-func (r *fakeRecorder) ScopeStopped(sink string, scope pipeline.ScopeKey, ruleKeys []string) {
-	r.record("Stopped", sink, scope, ruleKeys)
+func (r *fakeRecorder) ScopeStopped(transition ScopeTransition) {
+	r.record("Stopped", transition)
 }
 
-func (r *fakeRecorder) record(action, sink string, scope pipeline.ScopeKey, ruleKeys []string) {
+func (r *fakeRecorder) record(action string, transition ScopeTransition) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.transitions = append(r.transitions, scopeTransition{
-		action: action, sink: sink, scope: scope, ruleKeys: slices.Clone(ruleKeys),
-	})
+	transition.RuleKeys = slices.Clone(transition.RuleKeys)
+	r.transitions = append(r.transitions, recordedTransition{action: action, ScopeTransition: transition})
 }
 
 // recorded returns the transitions seen so far, in order.
-func (r *fakeRecorder) recorded() []scopeTransition {
+func (r *fakeRecorder) recorded() []recordedTransition {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return slices.Clone(r.transitions)

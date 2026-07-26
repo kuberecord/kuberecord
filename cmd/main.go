@@ -357,13 +357,15 @@ func main() {
 	}
 
 	// The data plane is not wired yet. The per-GVK stream reconcilers were
-	// replaced by internal/pipeline, whose two dependencies —
-	// the WatchManager that answers pipeline.ListerRegistry (Task 1.4) and the
-	// SinkManager that answers pipeline.SinkRouter (Task 1.8) — do not exist
-	// yet, and neither does the CRD-driven configuration that tells them what to
-	// watch. Until Task 1.10 assembles them here, the operator starts healthy
-	// and streams nothing, which is exactly the Phase 1 end state for a cluster
-	// with no ClickHouseSink and no rules.
+	// replaced by internal/pipeline, and the components that feed it now exist —
+	// the WatchManager (Task 1.4, answering pipeline.ListerRegistry and
+	// pipeline.ScopeStates), the scope-epoch recorder and warm/GC coordinator
+	// (Task 1.6) — but the SinkManager that answers pipeline.SinkRouter,
+	// pipeline.StateReaderRouter and the scope-event routers (Task 1.8) does not,
+	// and neither do the reconcilers that translate CRs into watch targets (Task
+	// 1.7). Until Task 1.10 assembles them here, the operator starts healthy and
+	// streams nothing, which is exactly the Phase 1 end state for a cluster with
+	// no ClickHouseSink and no rules.
 	//
 	// clusterID is threaded into pipeline.Options at that point; it stays a flag
 	// because it labels every row this operator writes, independent of any CR.

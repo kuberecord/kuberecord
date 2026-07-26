@@ -1,0 +1,900 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package pipeline
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/cenkalti/backoff/v4"
+	"github.com/go-logr/logr"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/yelzhy/kubestream/internal/sink"
+)
+
+// Pacing of the warm/GC coordinator. Every value is overridable through
+// WarmOptions so tests never wait on production pacing.
+const (
+	// defaultWarmRetryMaxInterval caps the backoff between warm attempts. The
+	// retry itself is unbounded in time (only ctx cancellation gives up), because
+	// the alternative to retrying is leaving a scope permanently in Snapshot mode
+	// — correct, but blind to genuine "Added" transitions for as long as the
+	// sink stays unreachable.
+	defaultWarmRetryMaxInterval = 30 * time.Second
+
+	// defaultSyncPollInterval is how often a warm re-checks whether the informer
+	// serving its scope has finished its initial List. It is a poll rather than a
+	// notification because client-go exposes HasSynced as a predicate, and a
+	// hundred-millisecond granularity is invisible next to the List itself.
+	defaultSyncPollInterval = 100 * time.Millisecond
+
+	// defaultBootInterval is how often the coordinator looks for a sink that
+	// still needs its boot reconciliation pass. Sinks appear at runtime (a
+	// ClickHouseSink CR created hours after boot), and a newly-live sink may
+	// carry scopes some earlier process left open, so the pass is level-triggered
+	// per sink rather than run once for the process.
+	defaultBootInterval = 30 * time.Second
+)
+
+// errNoStateReader marks a sink that is live but cannot read its own history
+// back. Warm-up, zombie GC and scope-epoch reconciliation are all disabled for
+// it (see sink.StateReader's optionality note); its scopes stay in Snapshot mode
+// permanently, which is the safe direction.
+var errNoStateReader = errors.New("sink has no StateReader; warm-up and zombie GC are disabled for it")
+
+// errSinkNotLive is the retryable condition behind a warm for a sink that has no
+// live instance yet — the rule naming it was applied before its ClickHouseSink CR
+// became ready, or the sink is mid-recycle after a credential change.
+var errSinkNotLive = errors.New("sink has no live instance yet")
+
+// errScopeStopped aborts a warm whose scope was deregistered while it ran. It is
+// not a failure: the scope's cache is being evicted and its Stopped row written,
+// so there is nothing left to warm or garbage-collect.
+var errScopeStopped = errors.New("watch scope stopped while warming")
+
+// WarmTarget is one per-scope warm/GC request: seed this (sink, scope) pair's
+// dedup baselines from the sink's own history, then reconcile that history
+// against live reality.
+//
+// EpochStart is what makes the request answerable rather than ambiguous, so it is
+// part of the target rather than something the coordinator stamps for itself —
+// see the field's doc comment.
+type WarmTarget struct {
+	// Sink is the name of the sink whose history seeds this scope.
+	Sink string
+
+	// Scope is the (group, kind, namespace) triple to warm, version-agnostic like
+	// every other in-process scope key.
+	Scope ScopeKey
+
+	// EpochStart is the instant this scope became watched — the same instant the
+	// scope's Started row carries.
+	//
+	// It is the cutoff for the epoch check (see sink.StateReader.ScopeWasActive):
+	// "was this scope watched *before now*" can only be answered against a fixed
+	// instant, because the current epoch's own Started row is written
+	// asynchronously and may land in the middle of the warm. Taking the instant
+	// from the caller (the scope recorder, which stamps it once for both the row
+	// and this target) is what keeps the two from disagreeing.
+	EpochStart time.Time
+}
+
+// scopeRef identifies one (sink, scope) pair, the granularity at which warm-up,
+// GC and Snapshot-tagging readiness are all tracked.
+type scopeRef struct {
+	sink  string
+	scope ScopeKey
+}
+
+// logValues returns this ref's fields as logr key/value pairs so every warm log
+// line carries the same scope context (Invariant 4).
+func (r scopeRef) logValues() []any {
+	return []any{"sink", r.sink, "group", r.scope.Group, "kind", r.scope.Kind, "namespace", r.scope.Namespace}
+}
+
+// key builds the pipeline work key for one object in this scope. The namespace
+// comes from the object, not from the scope: an all-namespaces scope has an empty
+// Namespace while every object under it carries a concrete one.
+func (r scopeRef) key(namespace, name string) Key {
+	return Key{
+		Sink:      r.sink,
+		Group:     r.scope.Group,
+		Kind:      r.scope.Kind,
+		Namespace: namespace,
+		Name:      name,
+	}
+}
+
+// filter renders this ref as the sink-side scope filter for clusterID.
+func (r scopeRef) filter(clusterID string) sink.ScopeFilter {
+	return sink.ScopeFilter{
+		ClusterID: clusterID,
+		APIGroup:  r.scope.Group,
+		Kind:      r.scope.Kind,
+		Namespace: r.scope.Namespace,
+	}
+}
+
+// StateReaderRouter resolves a sink name to the StateReader currently serving it,
+// and enumerates the sinks that are live.
+//
+// Task 1.8's SinkManager is the production implementation; resolution happens per
+// use (rather than being captured at wiring time) so a sink recycled after a
+// credential rotation is picked up without holding a stale reader. The
+// enumeration exists for boot reconciliation, which must consider a sink's whole
+// scope history — including scopes nothing in the desired state mentions any
+// more — and therefore cannot be driven by the scopes this process happens to
+// warm.
+type StateReaderRouter interface {
+	// StateReaderFor returns the StateReader for name. ok=false means either that
+	// no live instance exists (transient) or that this sink cannot read its own
+	// history back at all (permanent); the caller distinguishes the two by asking
+	// SinkRouter whether the sink is live.
+	StateReaderFor(name string) (sink.StateReader, bool)
+
+	// SinkNames returns the names of the sinks currently live, in any order.
+	SinkNames() []string
+}
+
+// ScopeEventRouter resolves a sink name to the live ScopeEventWriter for it, so
+// the coordinator can close a scope epoch some earlier process left open.
+//
+// It is separate from the recorder that writes ordinary transition rows
+// (internal/watch): those follow live rule edges, this one follows history, and
+// the two must not depend on each other — the recorder drives the coordinator, so
+// a dependency back would be a cycle.
+type ScopeEventRouter interface {
+	// ScopeEventWriterFor returns the scope-log writer for name, or ok=false when
+	// no live instance exists (deleted CR, mid-recycle, or a sink that does not
+	// record scope epochs).
+	ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool)
+}
+
+// ScopeStates is what the watch layer tells the warm/GC coordinator about scopes
+// rather than about objects: whether a scope is wanted, whether its informers have
+// caught up, and when the desired state as a whole can be trusted. Task 1.4's
+// WatchManager is the production implementation — it is the only component that
+// knows both what the rules want and what the informers are actually doing.
+//
+// It is deliberately separate from ListerRegistry, which is the *object* lookup
+// the pipeline's hot path uses: these two are consulted once per warm, off the hot
+// path entirely, and keeping them apart means a fake for one is not forced to
+// implement the other.
+type ScopeStates interface {
+	// ScopeSynced reports whether every informer serving (sinkName, scope) has
+	// completed its initial List. It gates the GC pass: before the sync, the watch
+	// cache legitimately holds nothing, so every seeded object would look like a
+	// zombie and the pass would emit a Deleted row for the entire scope.
+	ScopeSynced(sinkName string, scope ScopeKey) bool
+
+	// ScopeDesired reports whether any rule currently wants (sinkName, scope).
+	// Boot reconciliation uses it as the authority on "nothing in this process
+	// wants this scope any more", which is what turns a scope left open in the
+	// sink's history into an orphan to close.
+	ScopeDesired(sinkName string, scope ScopeKey) bool
+
+	// Settled is closed once the desired state this process starts from is in
+	// place. It gates the first boot-reconciliation pass, which must not run
+	// before then: a rule that simply had not been reconciled yet would look like
+	// a deleted one, and its still-live scope would be closed and immediately
+	// reopened. Task 1.4's WatchManager.Settled is the production signal.
+	//
+	// A nil channel means no gating is needed and the pass may run immediately —
+	// which is what a unit test wants, and why this is read at Start rather than
+	// captured at construction: the watch layer that provides it is bound after
+	// the coordinator exists (the two halves of the data plane point at each
+	// other).
+	Settled() <-chan struct{}
+}
+
+// WarmOptions configures a WarmCoordinator. Only the first four fields are
+// mandatory; the rest have documented defaults.
+type WarmOptions struct {
+	// Pipeline is the data plane whose dedup caches this coordinator seeds and
+	// whose delete path it drives. Required.
+	Pipeline *Pipeline
+
+	// Scopes answers the scope-level questions (sync, desire). Required.
+	Scopes ScopeStates
+
+	// Readers resolves a sink to its history reader and enumerates live sinks.
+	// Required.
+	Readers StateReaderRouter
+
+	// ScopeEvents resolves a sink to its scope-log writer, for the Stopped rows
+	// boot reconciliation writes. Required.
+	ScopeEvents ScopeEventRouter
+
+	// RetryMaxInterval caps the warm retry backoff. Zero or negative means
+	// defaultWarmRetryMaxInterval.
+	RetryMaxInterval time.Duration
+
+	// SyncPollInterval is how often a warm re-checks its informer's sync state.
+	// Zero or negative means defaultSyncPollInterval.
+	SyncPollInterval time.Duration
+
+	// BootInterval is how often the coordinator looks for sinks still needing a
+	// boot pass. Zero or negative means defaultBootInterval.
+	BootInterval time.Duration
+}
+
+// warmRun is one in-flight (or completed) warm for a scope: the epoch it was
+// started for, and the handle that cancels it.
+type warmRun struct {
+	epoch  time.Time
+	cancel context.CancelFunc
+}
+
+// WarmCoordinator owns per-scope cache warm-up, zombie garbage collection, and
+// boot reconciliation of scope epochs.
+//
+// It is the port of the old per-GVK restoreAndWarm, and every correctness
+// property is preserved: StoreIfAbsent seeding that never clobbers live state,
+// unbounded ctx-cancellable retry while a sink is unreachable, Snapshot-tagging
+// until the seed lands, and a UID-gated GC pass that claims through the same
+// hashCache primitive as the live delete path. Three things changed, all forced
+// by dynamic rules:
+//
+//   - Warm-up is *per (sink, scope)* and can start at any time, not once per GVK
+//     at boot. A rule created hours into the process's life warms only its own
+//     scope.
+//   - The GC pass compares against the informer's indexer instead of issuing
+//     client Gets, so it never touches the API server (Invariant 1), and it waits
+//     for that informer to have synced — an unsynced cache would make every
+//     seeded object look like a zombie.
+//   - A zombie is only a zombie if the sink's own scope log says this scope was
+//     watched in a previous epoch. Without that check, a brand-new rule over a
+//     kind with older history would emit a Deleted row for every object recorded
+//     by whatever scope wrote that history — the audit lie scope epochs exist to
+//     prevent, in its most damaging form.
+type WarmCoordinator struct {
+	p       *Pipeline
+	scopes  ScopeStates
+	readers StateReaderRouter
+	events  ScopeEventRouter
+
+	retryMaxInterval time.Duration
+	syncPollInterval time.Duration
+	bootInterval     time.Duration
+
+	// mu guards everything below. Warm requests arrive on the WatchManager's
+	// reconcile loop, boot passes run on this coordinator's own goroutine, and
+	// each warm runs on its own — so the bookkeeping is shared by construction.
+	mu sync.Mutex
+	// ctx is the coordinator's lifetime, installed by Start. It is nil until
+	// then, which is not a wiring error: the WatchManager and this coordinator
+	// are both manager.Runnables with no ordering guarantee between them, so a
+	// warm request can legitimately arrive first and is held in pending.
+	ctx     context.Context
+	pending []WarmTarget
+	// runs holds one entry per scope that has been warmed or is warming, keyed by
+	// scope so a repeated request for the same epoch is a no-op. Entries are
+	// removed by StopScope, so the map tracks live rules rather than growing with
+	// every rule the process has ever seen.
+	runs map[scopeRef]*warmRun
+	// bootDone records the sinks whose boot pass has completed successfully, so a
+	// pass runs once per sink rather than once per tick. A failed pass is left
+	// unmarked and retried.
+	bootDone map[string]struct{}
+	stopped  bool
+	// wg tracks the warm goroutines, so Start returns only once every one of them
+	// has exited (a goleak-verified property).
+	wg sync.WaitGroup
+}
+
+// NewWarmCoordinator builds a WarmCoordinator. The mandatory dependencies are
+// validated eagerly because each of them would otherwise surface as a nil-pointer
+// panic inside a warm goroutine — long after the wiring mistake, and on a path
+// whose whole job is to be trustworthy about deletions.
+func NewWarmCoordinator(opts WarmOptions) (*WarmCoordinator, error) {
+	if opts.Pipeline == nil {
+		return nil, errors.New("pipeline: WarmOptions.Pipeline is required")
+	}
+	if opts.Scopes == nil {
+		return nil, errors.New("pipeline: WarmOptions.Scopes is required")
+	}
+	if opts.Readers == nil {
+		return nil, errors.New("pipeline: WarmOptions.Readers is required")
+	}
+	if opts.ScopeEvents == nil {
+		return nil, errors.New("pipeline: WarmOptions.ScopeEvents is required")
+	}
+
+	retry := opts.RetryMaxInterval
+	if retry <= 0 {
+		retry = defaultWarmRetryMaxInterval
+	}
+	poll := opts.SyncPollInterval
+	if poll <= 0 {
+		poll = defaultSyncPollInterval
+	}
+	boot := opts.BootInterval
+	if boot <= 0 {
+		boot = defaultBootInterval
+	}
+
+	return &WarmCoordinator{
+		p:                opts.Pipeline,
+		scopes:           opts.Scopes,
+		readers:          opts.Readers,
+		events:           opts.ScopeEvents,
+		retryMaxInterval: retry,
+		syncPollInterval: poll,
+		bootInterval:     boot,
+		runs:             make(map[scopeRef]*warmRun),
+		bootDone:         make(map[string]struct{}),
+	}, nil
+}
+
+// Start runs the boot-reconciliation loop until ctx is cancelled, then cancels
+// every in-flight warm and waits for it. It satisfies manager.Runnable.
+//
+// Warms themselves are goroutines rather than work items on this loop: a warm
+// spends most of its life waiting (on a sink round-trip, on an informer's initial
+// List), and serializing them would let one unreachable sink hold up every other
+// scope's warm-up indefinitely.
+func (c *WarmCoordinator) Start(ctx context.Context) error {
+	log := logf.FromContext(ctx).WithName("warm")
+	ctx = logf.IntoContext(ctx, log)
+	log.Info("Starting warm/GC coordinator")
+
+	c.mu.Lock()
+	c.ctx = ctx
+	pending := c.pending
+	c.pending = nil
+	for _, target := range pending {
+		c.startLocked(target)
+	}
+	c.mu.Unlock()
+
+	c.reconcileEpochsUntilDone(ctx, log)
+
+	// Shutdown. Cancelling explicitly (rather than relying on ctx propagation
+	// alone) keeps the invariant local: after this block no warm can still be
+	// running, whoever cancelled what.
+	c.mu.Lock()
+	c.stopped = true
+	for ref, run := range c.runs {
+		run.cancel()
+		delete(c.runs, ref)
+	}
+	c.mu.Unlock()
+	c.wg.Wait()
+
+	log.Info("Warm/GC coordinator stopped")
+	return nil
+}
+
+// NeedLeaderElection makes the coordinator a manager.LeaderElectionRunnable that
+// runs only on the elected leader, for the same reason the WatchManager does: two
+// pods warming and garbage-collecting the same scopes would each emit their own
+// Deleted rows for the same disappearance, since the claim that makes a deletion
+// exactly-once is per-process (Invariant 6).
+func (c *WarmCoordinator) NeedLeaderElection() bool { return true }
+
+// WarmScope requests a warm for target. It never blocks and never fails: it is
+// called from the scope recorder on the WatchManager's reconcile loop, where a
+// wait on a sink round-trip would stall every other rule's watch lifecycle
+// (Invariant 1).
+//
+// It is idempotent per (sink, scope, epoch): a repeated request for an epoch
+// already warming or warmed is dropped, so the recorder does not have to remember
+// which scopes it has already handed over. A request carrying a *newer* epoch
+// supersedes an older run — that is a scope that stopped and started again, whose
+// previous warm is now answering the wrong question.
+func (c *WarmCoordinator) WarmScope(target WarmTarget) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
+	if c.ctx == nil {
+		// Not started yet; hold the request rather than dropping it, so a rule
+		// that existed before this runnable came up is still warmed.
+		c.pending = append(c.pending, target)
+		return
+	}
+	c.startLocked(target)
+}
+
+// StopScope abandons any warm for a scope that is no longer watched. Like
+// WarmScope it never blocks: it runs between the scope's deregistration and its
+// cache eviction.
+//
+// It emits nothing. A stopped scope's story is told by exactly one Stopped row in
+// the scope log, never by Deleted rows for the objects it covered — and a warm
+// that is still mid-GC when its scope stops must be cancelled precisely so it
+// cannot write those rows.
+func (c *WarmCoordinator) StopScope(sinkName string, scope ScopeKey) {
+	ref := scopeRef{sink: sinkName, scope: scope}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if run, ok := c.runs[ref]; ok {
+		run.cancel()
+		delete(c.runs, ref)
+	}
+	c.pending = slices.DeleteFunc(c.pending, func(t WarmTarget) bool {
+		return t.Sink == ref.sink && t.Scope == ref.scope
+	})
+}
+
+// startLocked launches (or supersedes) the warm for target. The caller holds mu.
+func (c *WarmCoordinator) startLocked(target WarmTarget) {
+	ref := scopeRef{sink: target.Sink, scope: target.Scope}
+	if run, ok := c.runs[ref]; ok {
+		if !target.EpochStart.After(run.epoch) {
+			return
+		}
+		run.cancel()
+	}
+
+	ctx, cancel := context.WithCancel(c.ctx)
+	c.runs[ref] = &warmRun{epoch: target.EpochStart, cancel: cancel}
+	c.wg.Go(func() { c.warm(ctx, ref, target.EpochStart) })
+}
+
+// warm seeds one scope's dedup baselines from the sink's history and then
+// reconciles that history against live reality.
+//
+// The order is load-bearing:
+//
+//  1. Seed first, with unbounded ctx-cancellable retry. Until the seed lands the
+//     scope is *not* marked warm, so cache misses are tagged Snapshot rather than
+//     Added — an unreachable sink degrades to imprecise event types instead of
+//     re-emitting every live object in the scope as a duplicate.
+//  2. Mark warm, which is also what flips this scope's safe_mode gauge to 0.
+//  3. Only then garbage-collect, and only after the informer has synced and the
+//     scope log confirms a previous epoch. Both gates exist to stop the pass from
+//     manufacturing deletions.
+//
+//nolint:logcheck // Uses one logger decorated with this scope's identity throughout.
+func (c *WarmCoordinator) warm(ctx context.Context, ref scopeRef, epochStart time.Time) {
+	log := logf.FromContext(ctx).WithValues(ref.logValues()...)
+	log.Info("🔄 Warming scope from sink history")
+
+	seeded, err := c.seedScope(ctx, log, ref)
+	if err != nil {
+		// Either ctx was cancelled (shutdown, or the scope stopped) or the sink
+		// permanently cannot read its own history. Both leave the scope in
+		// Snapshot mode, which is the safe direction; both are already logged
+		// where they were decided.
+		return
+	}
+
+	c.p.MarkScopeWarm(ref.sink, ref.scope)
+	log.Info("🔓 Scope warm-up complete, leaving Snapshot mode", "objects_loaded", len(seeded))
+
+	if len(seeded) == 0 {
+		// Nothing was seeded, so there is nothing a zombie could be hiding among
+		// — and no reason to pay for the epoch check or the sync wait.
+		return
+	}
+
+	// The GC pass must not run against a cache that has not finished its initial
+	// List: every seeded object would be absent from it.
+	if !c.awaitScopeSync(ctx, log, ref) {
+		return
+	}
+
+	wasActive, err := c.scopeWasActive(ctx, log, ref, epochStart)
+	if err != nil {
+		return
+	}
+	if !wasActive {
+		// The seeded rows predate this scope's first epoch: they were written by
+		// some other scope's watch, or by an epoch that was properly closed with a
+		// Stopped row. Either way this process never observed those objects
+		// disappear, so claiming they were deleted — and dating the deletion to
+		// now — would be a fabrication. The baselines stay seeded, so a genuine
+		// later change is still recorded as a Modified.
+		log.Info("🕰️ Scope has no previous open epoch, skipping zombie GC (seeded history is pre-history)",
+			"seeded", len(seeded))
+		return
+	}
+
+	c.collectZombies(ctx, log, ref, seeded)
+}
+
+// gcTarget is one object the warm seeded, as the GC pass believes it to be: the
+// identity plus the UID that belief is pinned to.
+//
+// The UID is what makes the belief falsifiable. It comes from a point-in-time
+// read of the sink's history, so by the time the pass acts on it the object may
+// have been recreated; carrying the UID lets the claim be refused instead of
+// deleting a live object by name alone.
+type gcTarget struct {
+	namespace string
+	name      string
+	uid       string
+}
+
+// seedScope loads the scope's last-known states and stores them as dedup
+// baselines, retrying until it succeeds or the attempt becomes pointless.
+//
+// The retry is unbounded in time (only ctx cancellation or a permanently
+// reader-less sink stops it) and each attempt starts from scratch: a partial read
+// is reported as an error by StateReader precisely so the whole scan is retried
+// rather than the scope being marked warm from an under-restored cache.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger, ref scopeRef) ([]gcTarget, error) {
+	var seeded []gcTarget
+
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = c.retryMaxInterval
+	eb.MaxElapsedTime = 0 // retry forever — only ctx cancellation gives up
+
+	err := backoff.Retry(func() error {
+		seeded = nil
+
+		reader, err := c.readerFor(ref.sink)
+		if err != nil {
+			if errors.Is(err, errNoStateReader) {
+				log.Info("Sink cannot read its own history; warm-up and zombie GC are disabled for this scope")
+				return backoff.Permanent(err)
+			}
+			log.V(1).Info("Sink is not live yet, retrying warm-up", "reason", err.Error())
+			return err
+		}
+
+		states, err := reader.LastKnownStates(ctx, ref.filter(c.p.clusterID))
+		if err != nil {
+			log.Error(err, "⚠️ Failed to read scope history from the sink, staying in Snapshot mode and retrying")
+			return err
+		}
+
+		st := c.p.sinks.get(ref.sink)
+		for _, state := range states {
+			key := ref.key(state.Namespace, state.Name)
+			// StoreIfAbsent, not Store: a work item for this key may already have
+			// reserved a newer entry while the read was in flight (tagged
+			// Snapshot, since the scope was not warm yet). That live state is
+			// authoritative and must not be clobbered by a historical baseline.
+			st.cache.StoreIfAbsent(key.cacheKey(), CacheEntry{
+				Hash: state.SHA256,
+				// No JSON baseline: history carries the hash, not the object, so
+				// the first genuine change diffs as a full state (Invariant 5).
+				JSON: nil,
+				UID:  state.UID,
+			})
+			seeded = append(seeded, gcTarget{namespace: state.Namespace, name: state.Name, uid: state.UID})
+		}
+		// Seeding may have added keys; refresh the size gauge outside any cache
+		// lock (recordCacheEntries takes and releases it internally).
+		c.p.recordCacheEntries(ref.sink, st)
+		return nil
+	}, backoff.WithContext(eb, ctx))
+	if err != nil {
+		return nil, err
+	}
+	return seeded, nil
+}
+
+// readerFor resolves a sink's StateReader, distinguishing the two reasons it may
+// be absent: the sink is not live yet (retryable) versus the sink is live but
+// cannot read its history back at all (permanent).
+//
+// Conflating them would either spin a goroutine forever on a Writer-only sink or
+// permanently disable warm-up for a sink that was merely a second late to become
+// ready.
+func (c *WarmCoordinator) readerFor(sinkName string) (sink.StateReader, error) {
+	if reader, ok := c.readers.StateReaderFor(sinkName); ok {
+		return reader, nil
+	}
+	if _, live := c.p.router.WriterFor(sinkName); live {
+		return nil, errNoStateReader
+	}
+	return nil, errSinkNotLive
+}
+
+// awaitScopeSync blocks until the informers serving this scope report synced,
+// returning false if ctx ended first.
+//
+// This is the gate the GC pass may never skip. An informer that has not completed
+// its initial List holds an empty (or partial) indexer, so every seeded object
+// would read as absent and the pass would emit a Deleted row for the entire
+// scope — the single most destructive way this component could fail.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) awaitScopeSync(ctx context.Context, log logr.Logger, ref scopeRef) bool {
+	ticker := time.NewTicker(c.syncPollInterval)
+	defer ticker.Stop()
+	for {
+		if c.scopes.ScopeSynced(ref.sink, ref.scope) {
+			return true
+		}
+		if !c.scopes.ScopeDesired(ref.sink, ref.scope) {
+			// The rule went away while we waited. StopScope normally cancels this
+			// warm, but the desire check makes the abort independent of that
+			// call's timing.
+			log.V(1).Info("Scope is no longer desired, abandoning its zombie GC pass")
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			log.V(1).Info("Cancelled while waiting for the scope's informer to sync, skipping zombie GC")
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// scopeWasActive asks the sink's scope log whether this scope was already being
+// watched before the current epoch began, retrying a transient failure.
+//
+// The answer decides whether the GC pass may run at all, so a read failure must
+// never be resolved optimistically: it is retried, and if the retry is cancelled
+// the pass is skipped. Skipping leaves a genuinely dead object recorded as alive
+// until the scope is warmed again — recoverable. Guessing "yes" would fabricate a
+// Deleted row — not.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) scopeWasActive(ctx context.Context, log logr.Logger,
+	ref scopeRef, epochStart time.Time) (bool, error) {
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = c.retryMaxInterval
+	eb.MaxElapsedTime = 0
+
+	var active bool
+	err := backoff.Retry(func() error {
+		reader, err := c.readerFor(ref.sink)
+		if err != nil {
+			if errors.Is(err, errNoStateReader) {
+				return backoff.Permanent(err)
+			}
+			return err
+		}
+		active, err = reader.ScopeWasActive(ctx, ref.filter(c.p.clusterID), epochStart)
+		if err != nil {
+			log.Error(err, "⚠️ Failed to read the scope's epoch history, retrying before deciding on zombie GC")
+			return err
+		}
+		return nil
+	}, backoff.WithContext(eb, ctx))
+	if err != nil {
+		return false, err
+	}
+	return active, nil
+}
+
+// collectZombies reconciles the seeded history against the watch cache and emits
+// one Deleted row per object that is genuinely gone.
+//
+// The whole pass is retried on failure, which is safe precisely because every
+// deletion is claimed through hashCache.ReserveDelete: a key whose Deleted row
+// already landed no longer has an entry to claim, and a key whose claim is still
+// in flight is refused, so a retried pass can never double-emit.
+//
+// It runs outside the workqueue, which does not violate per-key serialization
+// (Invariant 2) — the claim primitive is exactly what makes the GC pass and a
+// concurrent worker for the same key safe against each other, and it is the same
+// primitive the live delete path uses (see emitDelete).
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) collectZombies(ctx context.Context, log logr.Logger, ref scopeRef, seeded []gcTarget) {
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = c.retryMaxInterval
+	eb.MaxElapsedTime = 0
+
+	err := backoff.Retry(func() error {
+		return c.gcPass(ctx, log, ref, seeded)
+	}, backoff.WithContext(eb, ctx))
+	if err != nil && !errors.Is(err, errScopeStopped) {
+		log.V(1).Info("Zombie GC pass did not complete", "reason", err.Error())
+	}
+}
+
+// gcPass is one attempt at the zombie sweep.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger, ref scopeRef, seeded []gcTarget) error {
+	writer, ok := c.p.router.WriterFor(ref.sink)
+	if !ok {
+		// Nothing to write through yet; the whole pass is retried rather than
+		// each object individually, so a sink that comes back mid-sweep does not
+		// leave half the scope reconciled.
+		return errSinkUnavailable
+	}
+	st := c.p.sinks.get(ref.sink)
+
+	zombies := 0
+	for _, target := range seeded {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		key := ref.key(target.namespace, target.name)
+		obj, found, scopeActive, err := c.p.lister.Get(key)
+		if err != nil {
+			log.Error(err, "🧟 Failed to check whether an object still exists, retrying the GC pass",
+				"namespace", target.namespace, "name", target.name)
+			return err
+		}
+		if !scopeActive {
+			// The scope stopped mid-sweep. Every remaining object is now
+			// unobservable and its story is told by the Stopped row, so the pass
+			// stops here instead of recording deletions for the rest.
+			log.V(1).Info("Watch scope stopped during the GC pass, abandoning the rest of it")
+			return backoff.Permanent(errScopeStopped)
+		}
+		// Still alive under the UID history recorded: not a zombie.
+		if found && string(obj.GetUID()) == target.uid {
+			continue
+		}
+
+		// Either the object is gone, or a different incarnation is live now — the
+		// old UID's history has to be closed out either way. The claim is gated on
+		// target.uid so a reincarnation that a worker already reserved is refused
+		// rather than deleting a currently-existing object by name alone.
+		claimed, enqueueErr := c.p.emitDelete(ctx, log, key, st, writer, target.uid)
+		if enqueueErr != nil {
+			log.Error(enqueueErr, "🧟 Failed to queue a zombie's deletion, retrying the GC pass",
+				"namespace", target.namespace, "name", target.name)
+			return enqueueErr
+		}
+		if !claimed {
+			// Somebody else — a worker processing this key's own disappearance, or
+			// an earlier attempt of this pass — already owns this deletion.
+			continue
+		}
+		zombies++
+	}
+
+	if zombies > 0 {
+		log.Info("🧹 Zombie GC finished", "zombies_cleared", zombies, "checked", len(seeded))
+	}
+	return nil
+}
+
+// reconcileEpochsUntilDone runs boot reconciliation for every live sink, waiting
+// for the settle gate first and then re-checking on a ticker until ctx ends.
+//
+// It keeps ticking rather than running once because sinks appear at runtime: a
+// ClickHouseSink created long after boot may carry scopes an earlier process left
+// open, and those are just as much of an audit lie as the ones present at
+// startup.
+//
+//nolint:logcheck // Takes Start's already-named logger; see reconcileScopeEpochs.
+func (c *WarmCoordinator) reconcileEpochsUntilDone(ctx context.Context, log logr.Logger) {
+	if settled := c.scopes.Settled(); settled != nil {
+		log.V(1).Info("Waiting for the desired state to settle before reconciling scope epochs")
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	ticker := time.NewTicker(c.bootInterval)
+	defer ticker.Stop()
+	for {
+		c.reconcileScopeEpochs(ctx, log)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// reconcileScopeEpochs runs the boot pass for each live sink that has not had a
+// successful one. A failure leaves the sink unmarked so the next tick retries it,
+// and never stops the other sinks from being reconciled (Invariant 5).
+//
+//nolint:logcheck // Takes Start's already-named logger.
+func (c *WarmCoordinator) reconcileScopeEpochs(ctx context.Context, log logr.Logger) {
+	for _, name := range c.readers.SinkNames() {
+		if c.bootReconciled(name) {
+			continue
+		}
+		if err := c.closeOrphanedScopes(ctx, log, name); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Error(err, "Failed to reconcile watch-scope epochs for a sink, will retry", "sink", name)
+			continue
+		}
+		c.markBootReconciled(name)
+	}
+}
+
+// closeOrphanedScopes writes one Stopped row for every scope this sink's log
+// still shows as open but that nothing in this process wants any more — the rule
+// was deleted while the operator was down.
+//
+// It emits **no** Deleted rows, ever. The objects those scopes covered were not
+// deleted; the operator simply stopped watching them, possibly a long time ago,
+// and the Stopped row is the whole truth available. This is the audit-integrity
+// keystone of Phase 1: get it wrong and a single rule deletion during a restart
+// looks like a mass deletion event.
+//
+//nolint:logcheck // Takes Start's already-named logger.
+func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logger, sinkName string) error {
+	reader, err := c.readerFor(sinkName)
+	if err != nil {
+		if errors.Is(err, errNoStateReader) {
+			// No history to reconcile against. Marked done by the caller so this
+			// is decided once per sink, not once per tick.
+			log.V(1).Info("Sink cannot read its own history; skipping scope-epoch reconciliation", "sink", sinkName)
+			return nil
+		}
+		return err
+	}
+
+	events, ok := c.events.ScopeEventWriterFor(sinkName)
+	if !ok {
+		return fmt.Errorf("sink %q has no live scope-log writer", sinkName)
+	}
+
+	scopes, err := reader.ActiveScopes(ctx, c.p.clusterID)
+	if err != nil {
+		return err
+	}
+
+	closed := 0
+	for _, filter := range scopes {
+		scope := ScopeKey{Group: filter.APIGroup, Kind: filter.Kind, Namespace: filter.Namespace}
+		if c.scopes.ScopeDesired(sinkName, scope) {
+			// Still wanted: this is an ordinary restart of a scope that was never
+			// stopped, and its epoch legitimately stays open.
+			continue
+		}
+
+		// RuleRef is empty on purpose: the rule that held this scope is gone, and
+		// no rule now alive triggered this transition (see sink.ScopeEvent.RuleRef).
+		if err := events.EnqueueScopeEvent(ctx, sink.ScopeEvent{
+			Action: sink.ScopeActionStopped,
+			Scope:  filter,
+			TS:     time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		closed++
+		log.Info("Closed a watch scope left open by a previous process; no Deleted rows were written for it",
+			"sink", sinkName, "group", filter.APIGroup, "kind", filter.Kind, "namespace", filter.Namespace)
+	}
+
+	log.Info("Reconciled watch-scope epochs for a sink",
+		"sink", sinkName, "open_scopes", len(scopes), "closed", closed)
+	return nil
+}
+
+func (c *WarmCoordinator) bootReconciled(sinkName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, done := c.bootDone[sinkName]
+	return done
+}
+
+func (c *WarmCoordinator) markBootReconciled(sinkName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bootDone[sinkName] = struct{}{}
+}
+
+// compile-time proof that a WarmCoordinator is usable as a leader-election-gated
+// manager.Runnable without importing controller-runtime's manager package here.
+var _ interface {
+	Start(ctx context.Context) error
+	NeedLeaderElection() bool
+} = (*WarmCoordinator)(nil)

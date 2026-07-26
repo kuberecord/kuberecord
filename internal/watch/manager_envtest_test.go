@@ -36,10 +36,17 @@ import (
 	"github.com/yelzhy/kubestream/internal/sink"
 )
 
-// testSinkName is the one sink every record in this file is destined for. The
-// per-sink dedup separation is internal/pipeline's own subject; here one sink keeps
-// the metric lookups unambiguous.
-const testSinkName = "sink-a"
+const (
+	// testSinkName is the one sink every record in this file is destined for. The
+	// per-sink dedup separation is internal/pipeline's own subject; here one sink
+	// keeps the metric lookups unambiguous.
+	testSinkName = "sink-a"
+
+	// eventTypeDeleted is the row type these tests assert on most, in both
+	// directions: it must appear for an object that really was deleted, and must
+	// never appear for one whose scope merely stopped being watched.
+	eventTypeDeleted = "Deleted"
+)
 
 // This file is the whole data plane running against a real API server: registry →
 // WatchManager → informers → workqueue → pipeline → sink. Everything else in the
@@ -56,6 +63,22 @@ type deferredLister struct{ manager *WatchManager }
 func (d *deferredLister) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, bool, error) {
 	return d.manager.Get(ref)
 }
+
+// The scope-level half of the same binding, for the warm/GC coordinator. In
+// production one WatchManager answers both interfaces, so one deferred wrapper
+// stands in for both here too.
+func (d *deferredLister) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
+	return d.manager.ScopeSynced(sinkName, scope)
+}
+
+func (d *deferredLister) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
+	return d.manager.ScopeDesired(sinkName, scope)
+}
+
+// Settled is read only when the coordinator's own Start runs, by which time the
+// binding below has happened — which is exactly why the settle gate is reached
+// through this interface rather than handed over at construction time.
+func (d *deferredLister) Settled() <-chan struct{} { return d.manager.Settled() }
 
 // recordingWriter is a sink.Writer that confirms every job immediately and keeps
 // what it was handed, so a test can assert on the records the pipeline produced
@@ -206,7 +229,7 @@ func TestWatchManagerStreamsAndEvictsThroughTheRealPipeline(t *testing.T) {
 	// so the third record may well be that intermediate Modified.
 	waitFor(t, func() bool {
 		types := eventTypesOf(writer.recordsFor("web"))
-		return len(types) > 0 && types[len(types)-1] == "Deleted"
+		return len(types) > 0 && types[len(types)-1] == eventTypeDeleted
 	}, func() string { return fmt.Sprintf("a Deleted record, have %v", eventTypesOf(writer.recordsFor("web"))) })
 
 	// The sequence must open with Added and close with Deleted, with at least the
@@ -215,7 +238,7 @@ func TestWatchManagerStreamsAndEvictsThroughTheRealPipeline(t *testing.T) {
 	// object, and that intermediate state is a genuine Modified — the object really
 	// did change — not test noise to be filtered out.
 	got := eventTypesOf(writer.recordsFor("web"))
-	if len(got) < 3 || got[0] != "Added" || got[len(got)-1] != "Deleted" {
+	if len(got) < 3 || got[0] != "Added" || got[len(got)-1] != eventTypeDeleted {
 		t.Errorf("records for the ns-a pod = %v, want Added … Deleted", got)
 	}
 	for _, eventType := range got[1 : len(got)-1] {
