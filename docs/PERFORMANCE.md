@@ -1,5 +1,47 @@
 # kubestream — Performance
 
+## Informer memory: the cache transform (Task 1.4)
+
+Every informer the watch pool builds installs a `SetTransform` that runs before
+an object is ever cached:
+
+1. the field-manager names are harvested out of `metadata.managedFields`;
+2. they are written to the operator-internal annotation
+   `internal.kubestream.io/actors` as a sorted, de-duplicated, comma-joined
+   list;
+3. `metadata.managedFields` is deleted from the cached copy.
+
+`managedFields` is routinely the largest single section of a Kubernetes object
+and is pure write-provenance bookkeeping. The operator needs exactly one fact
+out of it — who touched the object — so keeping that fact and dropping the rest
+shrinks every cached object in every informer, permanently. Together with the
+compressed diff baselines below, this is the memory half of D2: one shrunken
+copy in the informer cache, one compressed copy in `hashCache`.
+
+The annotation is transport, not content: the pipeline reads it into the record
+and strips it again *before* hashing (see `normalizeObject`), so it cannot
+perturb an object's hash or appear in a stored diff, and it is never written
+back to the API server.
+
+Two properties are worth knowing:
+
+- **The transform is idempotent.** An object with no `managedFields` is returned
+  untouched, so a re-`Replace` of already-cached objects cannot erase the
+  annotation a previous pass wrote.
+- **It never fails.** A transform error would drop the object from the informer
+  entirely, so a malformed object is cached as-is instead (Invariant 5);
+  `ExtractActors` logs whatever it had to skip.
+
+### No periodic resync
+
+Every informer runs with a resync period of **0**. A resync re-delivers the
+whole cache to the handlers on a timer, and nothing here needs that: the
+pipeline is level-triggered per key (it reads current state, not the event), the
+workqueue owns retries and backoff, and a failed write re-adds its own key. The
+WatchManager's 30-second pool diff is the level-triggering safety net instead,
+and it costs a registry snapshot plus a few map comparisons rather than a full
+cache sweep.
+
 ## `hashCache` memory: compressed diff baselines (Task 0.7)
 
 `hashCache` keeps a full normalized-JSON copy of every watched object — the

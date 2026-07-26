@@ -18,12 +18,26 @@ limitations under the License.
 // desired-state registry's watch targets (internal/plan) into live Kubernetes
 // informers.
 //
-// Its first inhabitant is the resolver below. Everything downstream — the
-// dynamic client, the ListWatch, the informer pool (Task 1.4) — is expressed in
-// terms of *resources* (GVRs) and needs to know whether a resource is
-// namespaced, while rules are authored in terms of *kinds* (GVKs). The resolver
-// is the single place that crosses that gap, and therefore the single place
-// that has to cope with a kind that does not exist yet.
+// It has three parts, each in its own file:
+//
+//   - The WatchManager (manager.go) is a manager.Runnable that level-triggers a
+//     pool of informers towards the registry's snapshot, and is also the
+//     pipeline's ListerRegistry — the only view of cluster state the data plane
+//     has.
+//   - The pool (pool.go) owns one self-managed informer per (GVR, namespace)
+//     target, each with its own context and goroutine, because rules come and go
+//     at runtime and controller-runtime's cache cannot be re-scoped or partially
+//     retired once a manager is running.
+//   - The interest map (interest.go) is what makes those informers shareable: it
+//     records which sinks (and under which selectors) care about each informer's
+//     stream, and it is the authority on whether a scope is still being watched.
+//
+// The resolver below is the seam between the two vocabularies involved.
+// Everything downstream — the dynamic client, the ListWatch, the informer pool —
+// is expressed in terms of *resources* (GVRs) and needs to know whether a
+// resource is namespaced, while rules are authored in terms of *kinds* (GVKs).
+// The resolver is the single place that crosses that gap, and therefore the
+// single place that has to cope with a kind that does not exist yet.
 package watch
 
 import (
