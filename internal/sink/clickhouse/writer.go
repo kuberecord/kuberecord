@@ -81,6 +81,11 @@ const (
 	// converting an indefinite hang into a bounded, retried failure.
 	defaultMaxIsolationPhase = 2 * time.Minute
 
+	// chTimeFormat renders an instant for a *query literal* only — see
+	// scopeWasActiveQuery. Quoted into SQL, it is parsed server-side against a
+	// DateTime64(9, 'UTC') column, so it is exact there. It must never be used to
+	// bind an insert argument: the driver parses such a string client-side and
+	// reinterprets it in time.Local (see insertArgs).
 	chTimeFormat = "2006-01-02 15:04:05.999999999"
 
 	insertResourceStateQuery = `
@@ -148,11 +153,15 @@ type Metrics interface {
 }
 
 // writeJob is a single ClickHouse insert drained by a CHWriter worker. It is the
-// backend-specific rendering of a sink.Job: the query/args are computed once, at
-// Enqueue time, from the job's Record, so a worker never touches sink types. The
+// backend-specific rendering of a sink.Job: the column arguments are computed once,
+// at Enqueue time, from the job's Record, so a worker never touches sink types. The
 // commit callback carries the exactly-once contract documented on sink.Job.
+//
+// It carries no query of its own: every row goes through insertResourceStateQuery,
+// and both the batch attempt and the per-row isolation attempt prepare that one
+// statement (see flushBatch), so there is exactly one encoding of a row in this
+// package.
 type writeJob struct {
-	query  string
 	args   []any
 	commit func(ok bool)
 }
@@ -362,7 +371,6 @@ func (w *CHWriter) RegisterWithManager(mgr manager.Manager) error {
 // retry.
 func (w *CHWriter) Enqueue(ctx context.Context, job sink.Job) error {
 	internal := writeJob{
-		query:  insertResourceStateQuery,
 		args:   insertArgs(job.Record),
 		commit: job.Commit,
 	}
@@ -553,16 +561,17 @@ func (w *CHWriter) worker(ctx context.Context, log logr.Logger) {
 //
 //	Every commit callback fires exactly once per job across all paths.
 //
-// Row insertion itself is at-least-once. driver.Batch.Send() (and a single-row
-// Exec) is a network operation with three outcomes: nothing inserted;
-// everything inserted but the acknowledgement lost (timeout / connection reset
-// mid-response); or a partial insert. In the lost-ack and partial cases the call
-// returns an error while the rows are already durable in ClickHouse, so the
-// isolation path below re-inserts them. Each re-insert is byte-identical to the
-// original — Record.Timestamp is frozen once at reconcile time and rendered into
-// the positional args by insertArgs — so resource_states (ReplacingMergeTree)
-// collapses it to a single row on merge (see docs/SCHEMA.md, "Delivery
-// semantics"). The commit callback still fires exactly once regardless.
+// Row insertion itself is at-least-once. driver.Batch.Send() is a network
+// operation with three outcomes: nothing inserted; everything inserted but the
+// acknowledgement lost (timeout / connection reset mid-response); or a partial
+// insert. In the lost-ack and partial cases the call returns an error while the
+// rows are already durable in ClickHouse, so the isolation path below re-inserts
+// them. Each re-insert is byte-identical to the original — Record.Timestamp is
+// frozen once when the event was processed, bound as an instant by insertArgs, and
+// sent through the same encoder both here and in the isolation phase — so
+// resource_states (ReplacingMergeTree) collapses it to a single row on merge (see
+// docs/SCHEMA.md, "Delivery semantics"). The commit callback still fires exactly
+// once regardless.
 //
 // The happy path prepares one client-side batch and Sends it (row-per-INSERT is
 // ClickHouse's pathological write pattern), retrying the whole batch with the
@@ -619,7 +628,15 @@ func (w *CHWriter) flushBatch(ctx context.Context, log logr.Logger, batch []writ
 	for _, job := range batch {
 		rowStart := time.Now()
 		rowCtx, cancel := context.WithTimeout(isolationCtx, w.insertTimeout)
-		rowErr := w.conn.Exec(rowCtx, job.query, job.args...)
+		// A one-row batch, not conn.Exec: the isolation attempt must go through the
+		// very same encoder as the batch attempt it follows, or the two disagree
+		// about how a value is rendered. Exec interpolates positional arguments
+		// into SQL text, which silently reduces a DateTime64(9) to second
+		// precision; the batch path encodes typed columns directly. A re-insert
+		// that differs from the original in any ORDER BY column — ts included — is
+		// a second row ReplacingMergeTree can never collapse, which is exactly the
+		// at-least-once idempotency property this path exists to preserve.
+		rowErr := w.sendBatchOnce(rowCtx, []writeJob{job})
 		cancel()
 
 		w.metrics.ObserveWriteLatency(time.Since(rowStart).Seconds())
@@ -657,11 +674,16 @@ func (w *CHWriter) sendBatch(ctx context.Context, batch []writeJob) error {
 	}, backoff.WithContext(eb, ctx))
 }
 
-// sendBatchOnce performs a single batch attempt: prepare a batch, append every
+// sendBatchOnce performs a single insert attempt: prepare a batch, append every
 // row, and send. All rows share insertResourceStateQuery (the driver normalizes
 // away the VALUES clause for PrepareBatch), so no per-job query is needed here.
 // On an Append failure the half-built batch is aborted so it is not leaked, and
 // both errors are surfaced (no silent error) so the backoff sees a real failure.
+//
+// It is the *only* way this package inserts a resource_states row: flushBatch's
+// per-row isolation phase calls it with a one-row slice rather than reaching for
+// conn.Exec, so a re-inserted row is byte-identical to the batch attempt that may
+// already have landed.
 func (w *CHWriter) sendBatchOnce(ctx context.Context, batch []writeJob) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, w.insertTimeout)
 	defer cancel()
@@ -678,10 +700,21 @@ func (w *CHWriter) sendBatchOnce(ctx context.Context, batch []writeJob) error {
 	return b.Send()
 }
 
-// insertArgs returns the positional arguments for the resource_states INSERT,
-// in exactly the column order expected by insertResourceStateQuery. nil
-// Labels/Actors are coerced to empty containers so the Map/Array columns always
-// bind a concrete value rather than a NULL the non-nullable schema would reject.
+// insertArgs returns the arguments for the resource_states INSERT, in exactly the
+// column order expected by insertResourceStateQuery. nil Labels/Actors are coerced
+// to empty containers so the Map/Array columns always bind a concrete value rather
+// than a NULL the non-nullable schema would reject.
+//
+// The timestamp is bound as a time.Time — an instant — and never as a formatted
+// datetime string. The pinned driver (clickhouse-go v2.46.0,
+// lib/column/datetime64.go) parses a bare "2006-01-02 15:04:05.999999999" string
+// and then *reinterprets those wall-clock digits in time.Local*, so an operator
+// process running outside UTC wrote every ts into the DateTime64(9, 'UTC') column
+// shifted by its own offset: a 12:00Z event landed as 10:00Z from a CEST pod. An
+// offset-bearing string is not a fix either — the driver accepts it, but ClickHouse
+// rejects "… +00:00" when it parses the same literal server-side. A time.Time
+// carries the instant itself, so no zone is inferred anywhere and the value is
+// identical whatever TZ the operator runs under.
 func insertArgs(rec sink.Record) []any {
 	labels := rec.Labels
 	if labels == nil {
@@ -692,7 +725,7 @@ func insertArgs(rec sink.Record) []any {
 		actors = []string{}
 	}
 	return []any{
-		rec.Timestamp.UTC().Format(chTimeFormat), rec.ClusterID, rec.EventType, rec.APIGroup, rec.APIVersion,
+		rec.Timestamp.UTC(), rec.ClusterID, rec.EventType, rec.APIGroup, rec.APIVersion,
 		rec.Kind, rec.Namespace, rec.Name, rec.UID, rec.ResourceVersion, labels, actors, rec.Data, rec.Diff, rec.SHA256,
 	}
 }

@@ -19,9 +19,10 @@ CREATE TABLE IF NOT EXISTS resource_states
 -- ReplacingMergeTree (not plain MergeTree): the operator's write path is
 -- at-least-once. A lost acknowledgement after a successful server-side insert
 -- makes the poison-isolation path re-insert a byte-identical row (same ts —
--- frozen once at reconcile time — plus identical sha256, uid, event_type, data,
--- and diff). Such a re-insert collides on the full ORDER BY key, so
--- ReplacingMergeTree collapses it to a single row on merge. A genuinely-distinct
+-- frozen once when the event was processed and bound as an instant, so it does
+-- not depend on the operator's local timezone — plus identical sha256, uid,
+-- event_type, data, and diff). Such a re-insert collides on the full ORDER BY
+-- key, so ReplacingMergeTree collapses it to a single row on merge. A genuinely-distinct
 -- event never collides: ts is DateTime64(9) (nanosecond) and frozen per event,
 -- so the ORDER BY tuple alone distinguishes real re-inserts from real events.
 -- Readers needing exact counts before a merge must use FINAL (or an equivalent

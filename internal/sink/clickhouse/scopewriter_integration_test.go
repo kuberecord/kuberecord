@@ -45,6 +45,10 @@ import (
 // Runs only under `make test-integration` (build tag `integration`), which stands up
 // a dockerized ClickHouse and points CH_TEST_ADDR at it.
 func TestScopeEpochRoundTripIntegration(t *testing.T) {
+	// Run as if on a non-UTC host: the epoch cutoff is only exact if neither the
+	// insert nor the query lets the process's local zone in (see pinLocalZone).
+	pinLocalZone(t, 5*time.Hour+30*time.Minute)
+
 	addr := envOrDefault("CH_TEST_ADDR", "127.0.0.1:9000")
 	username := envOrDefault("CH_TEST_USER", "default")
 	password := os.Getenv("CH_TEST_PASSWORD")
@@ -63,9 +67,13 @@ func TestScopeEpochRoundTripIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open connection: %v", err)
 	}
+	// Start from empty tables. The teardown below cannot be relied on for this: the
+	// CHWriter these tests hand `conn` to closes it during its own shutdown, so a
+	// deferred DROP runs against a closed connection and silently does nothing. Both
+	// tests count rows, so a leftover row from an earlier run would make them lie —
+	// against a throwaway container as well as a developer's persistent ClickHouse.
+	dropOperatorTables(ctx, t, conn)
 	defer func() {
-		_ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableResourceStates)
-		_ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableWatchScopes)
 		_ = conn.Close()
 	}()
 
@@ -112,6 +120,18 @@ func TestScopeEpochRoundTripIntegration(t *testing.T) {
 	// The batcher is asynchronous, so wait for the rows to land rather than assuming
 	// they have.
 	waitForScopeRows(t, ctx, conn, clusterID, len(events))
+
+	// Each row carries the instant its transition was observed, unshifted by the
+	// operator's local zone.
+	var earliest time.Time
+	tsRow := conn.QueryRow(ctx, "SELECT min(ts) FROM watch_scopes WHERE cluster_id = ?", clusterID)
+	if err := tsRow.Scan(&earliest); err != nil {
+		t.Fatalf("stored ts scan: %v", err)
+	}
+	if !earliest.Equal(base) {
+		t.Fatalf("earliest recorded transition = %s, want %s (local zone leaked into the binding)",
+			earliest.UTC(), base)
+	}
 
 	// --- The epoch check, as of well after every recorded transition ---
 	asOf := base.Add(24 * time.Hour)
@@ -186,6 +206,18 @@ func TestScopeEpochRoundTripIntegration(t *testing.T) {
 	}
 	if len(other) != 0 {
 		t.Errorf("ActiveScopes leaked %d scopes from another cluster: %+v", len(other), other)
+	}
+}
+
+// dropOperatorTables removes both operator tables so a test starts from a known
+// empty state. It is fatal on failure: silently continuing against leftover rows is
+// how a counting assertion turns into a false pass.
+func dropOperatorTables(ctx context.Context, t *testing.T, conn chdriver.Conn) {
+	t.Helper()
+	for _, table := range []string{tableResourceStates, tableWatchScopes} {
+		if err := conn.Exec(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Fatalf("dropping %s: %v", table, err)
+		}
 	}
 }
 

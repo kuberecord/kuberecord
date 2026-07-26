@@ -77,20 +77,30 @@ partitioning keeps merges and TTL drops cheap at scale.
 ### Delivery semantics
 
 The operator's write path is **at-least-once**, not exactly-once, at the row
-level. `driver.Batch.Send()` (and a single-row fallback `Exec`) is a network
-operation with three outcomes: nothing inserted; everything inserted but the
-acknowledgement lost (timeout or connection reset mid-response); or a partial
-insert. In the lost-ack and partial cases the call returns an error while the
-rows are already durable, so the writer's poison-isolation path re-inserts them.
+level. `driver.Batch.Send()` is a network operation with three outcomes: nothing
+inserted; everything inserted but the acknowledgement lost (timeout or connection
+reset mid-response); or a partial insert. In the lost-ack and partial cases the
+call returns an error while the rows are already durable, so the writer's
+poison-isolation path re-inserts them — as a one-row prepared batch, through the
+same encoder the original batch used.
 
 A re-inserted row is **byte-identical** to the original: `ts` is stamped once
-when the event is processed and frozen into the insert's positional args, so the re-insert
-carries the same `ts`, `sha256`, `uid`, `event_type`, `data`, and `diff`. Every
-column of the `ORDER BY` tuple is therefore identical, and `resource_states`
-(`ReplacingMergeTree`) **collapses the duplicate to a single row on merge**. The
-writer's per-job commit callback remains **exactly-once** regardless — a lost ack
-never causes a job to be counted or committed twice, only a physical row to be
-re-sent.
+when the event is processed and bound unchanged into every attempt, so the
+re-insert carries the same `ts`, `sha256`, `uid`, `event_type`, `data`, and
+`diff`. Every column of the `ORDER BY` tuple is therefore identical, and
+`resource_states` (`ReplacingMergeTree`) **collapses the duplicate to a single row
+on merge**. The writer's per-job commit callback remains **exactly-once**
+regardless — a lost ack never causes a job to be counted or committed twice, only
+a physical row to be re-sent.
+
+> **`ts` is an instant, not a wall-clock string.** Both operator tables bind
+> timestamps as instants (Go `time.Time` in UTC), never as rendered
+> `YYYY-MM-DD hh:mm:ss.fraction` text. The ClickHouse driver parses such text
+> client-side and reinterprets it in the *process's* local zone, which shifted
+> every row by the operator pod's UTC offset and — because the isolation path's
+> re-insert was rendered by a different encoder — broke the byte-identical
+> property above for any operator not running in UTC. Timestamps written by
+> kubestream are now independent of `TZ`.
 
 Because `ReplacingMergeTree` de-duplicates only on background merge, a naive
 `SELECT *` can transiently observe a duplicate before the merge runs. **Any read
