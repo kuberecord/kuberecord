@@ -1,0 +1,35 @@
+# A throwaway CRD installed part-way through TestResolveSelfHealsWhenCRDIsInstalled.
+#
+# It exists only to give the resolver a kind that provably does not exist when
+# the REST mapper first sees it: the whole point of the test is that the mapper
+# caches a "no such group" answer and must still pick the kind up once the CRD
+# appears, with no operator restart. Its group is deliberately *not*
+# kubestream.io — a group the operator's own CRDs may occupy — so installing and
+# uninstalling it can never perturb another test's discovery data.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.test.kubestream.io
+spec:
+  group: test.kubestream.io
+  names:
+    kind: Widget
+    listKind: WidgetList
+    plural: widgets
+    singular: widget
+  # Namespaced so the test also pins down the scope the resolver reports for a
+  # CRD-backed kind, not just that it resolves at all.
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                size:
+                  type: integer
