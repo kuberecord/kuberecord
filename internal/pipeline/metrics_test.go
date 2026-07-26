@@ -17,6 +17,8 @@ limitations under the License.
 package pipeline
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -31,9 +33,12 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPipelineMetrics(reg)
 
-	// The labelled gauges only materialize a series once a label value is used;
-	// touch one apiece so they appear in Gather like the others. The writes_total
-	// and pipeline_dropped_total series are already seeded by the constructor.
+	// The labelled collectors only materialize a series once a label value is
+	// used; touch one apiece so they appear in Gather like the others. ForSink does
+	// that for the whole write path in one call (which is also how production
+	// reaches them), leaving only the two pipeline-owned label sets. The
+	// pipeline_dropped_total series is already seeded by the constructor.
+	m.ForSink("default")
 	m.hashcacheEntries.WithLabelValues("default")
 	m.safeMode.WithLabelValues("default", "apps", "Deployment", "demo")
 
@@ -48,6 +53,7 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	}
 
 	want := map[string]dto.MetricType{
+		"kubestream_write_batch_rows":           dto.MetricType_HISTOGRAM,
 		"kubestream_write_queue_depth":          dto.MetricType_GAUGE,
 		"kubestream_write_queue_capacity":       dto.MetricType_GAUGE,
 		"kubestream_writes_total":               dto.MetricType_COUNTER,
@@ -79,4 +85,149 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	if _, stale := got["kubestream_requeue_drops_total"]; stale {
 		t.Error("kubestream_requeue_drops_total is still registered; the requeue channel it measured no longer exists")
 	}
+}
+
+// seriesLabels gathers reg and returns, per metric family, the label sets of
+// every series in it as sorted "name=value" pairs.
+func seriesLabels(t *testing.T, reg prometheus.Gatherer) map[string][]string {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	out := make(map[string][]string, len(families))
+	for _, mf := range families {
+		for _, mtc := range mf.GetMetric() {
+			pairs := make([]string, 0, len(mtc.GetLabel()))
+			for _, lp := range mtc.GetLabel() {
+				pairs = append(pairs, lp.GetName()+"="+lp.GetValue())
+			}
+			slices.Sort(pairs)
+			out[mf.GetName()] = append(out[mf.GetName()], strings.Join(pairs, ","))
+		}
+		slices.Sort(out[mf.GetName()])
+	}
+	return out
+}
+
+// TestSinkMetricsAreLabelledPerSink is the Task 1.8 per-sink-label guard: two
+// sinks reporting the same write-path metric must produce two independent series,
+// not one series overwritten by whichever writer reported last. It asserts the
+// label sets directly, and that the pipeline-owned counters deliberately stay
+// unlabelled.
+func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPipelineMetrics(reg)
+
+	primary := m.ForSink("primary")
+	audit := m.ForSink("audit")
+
+	primary.SetWriteQueueDepth(7)
+	primary.SetWriteQueueCapacity(100)
+	primary.IncWrite("success")
+	audit.SetWriteQueueDepth(3)
+	audit.SetWriteQueueCapacity(50)
+	audit.IncWrite("failed")
+	m.dedupSkips.Inc()
+
+	labels := seriesLabels(t, reg)
+
+	tests := []struct {
+		metric string
+		want   []string
+	}{
+		{"kubestream_write_queue_depth", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_write_queue_capacity", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_write_latency_seconds", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_write_retry_attempts_total", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_write_batch_rows", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_enqueue_block_seconds", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_enqueue_timeouts_total", []string{"sink=audit", "sink=primary"}},
+		{"kubestream_writes_total", []string{
+			"outcome=failed,sink=audit", "outcome=failed,sink=primary",
+			"outcome=success,sink=audit", "outcome=success,sink=primary",
+		}},
+		// Pipeline-owned, and deliberately not per-sink: dedup is a property of the
+		// shared workqueue's short-circuit rate, not of a backend.
+		{"kubestream_dedup_skips_total", []string{""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.metric, func(t *testing.T) {
+			if got := labels[tc.metric]; !slices.Equal(got, tc.want) {
+				t.Errorf("series of %s = %v, want %v", tc.metric, got, tc.want)
+			}
+		})
+	}
+
+	// Both sinks' values survive independently — the point of the label.
+	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "primary"); got != 7 {
+		t.Errorf("primary write_queue_depth = %v, want 7", got)
+	}
+	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "audit"); got != 3 {
+		t.Errorf("audit write_queue_depth = %v, want 3", got)
+	}
+}
+
+// TestRemoveSinkDeletesSinkSeries proves a deleted sink leaves no series behind:
+// a lingering queue-depth gauge would read as a live-but-idle backend forever
+// (Task 1.8's SinkManager calls RemoveSink once a deleted sink has drained).
+func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPipelineMetrics(reg)
+
+	p, err := New(Options{Lister: newFakeLister(), Router: newFakeRouter(), Metrics: m})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	gone := m.ForSink("gone")
+	gone.SetWriteQueueDepth(9)
+	gone.IncWrite("success")
+	m.hashcacheEntries.WithLabelValues("gone").Set(4)
+	m.safeMode.WithLabelValues("gone", "apps", "Deployment", "demo").Set(1)
+	// A second sink proves the eviction is scoped to the name, not a wipe.
+	m.ForSink("kept").SetWriteQueueDepth(2)
+
+	p.RemoveSink("gone")
+
+	labels := seriesLabels(t, reg)
+	for _, metric := range []string{
+		"kubestream_write_queue_depth", "kubestream_write_queue_capacity", "kubestream_writes_total",
+		"kubestream_write_latency_seconds", "kubestream_write_retry_attempts_total",
+		"kubestream_write_batch_rows", "kubestream_enqueue_block_seconds",
+		"kubestream_enqueue_timeouts_total", "kubestream_hashcache_entries", "kubestream_safe_mode",
+	} {
+		for _, series := range labels[metric] {
+			if strings.Contains(series, "sink=gone") {
+				t.Errorf("%s still has a series for the removed sink: %q", metric, series)
+			}
+		}
+	}
+	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "kept"); got != 2 {
+		t.Errorf("the surviving sink's write_queue_depth = %v, want 2", got)
+	}
+}
+
+// gaugeValue returns the value of metric{sink=sinkName}, failing the test if the
+// series is absent.
+func gaugeValue(t *testing.T, reg prometheus.Gatherer, metric, sinkName string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != metric {
+			continue
+		}
+		for _, mtc := range mf.GetMetric() {
+			for _, lp := range mtc.GetLabel() {
+				if lp.GetName() == sinkLabel && lp.GetValue() == sinkName {
+					return mtc.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf("gauge %s{sink=%q} not found", metric, sinkName)
+	return 0
 }

@@ -81,7 +81,7 @@ func TestScopeEpochRoundTripIntegration(t *testing.T) {
 		t.Fatalf("autoCreateSchema: %v", err)
 	}
 
-	metrics := pipeline.NewPipelineMetrics(prometheus.NewRegistry())
+	metrics := pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkName)
 	w := NewCHWriter(conn, 10, 1, 10, 10*time.Second, 0, 5*time.Second, 50*time.Millisecond, time.Second, metrics)
 
 	wctx, wcancel := context.WithCancel(context.Background())

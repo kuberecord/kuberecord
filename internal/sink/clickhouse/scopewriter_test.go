@@ -76,7 +76,7 @@ func (r *scopeRowRecorder) batchCount() int {
 // newScopeTestWriter builds a CHWriter over conn with a scope-retry window short
 // enough that a failed flush is re-attempted inside the test.
 func newScopeTestWriter(conn *fakeConn) *CHWriter {
-	m := pipeline.NewPipelineMetrics(prometheus.NewRegistry())
+	m := pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkName)
 	w := NewCHWriter(conn, 16, 1, 8, 50*time.Millisecond, time.Second, time.Second,
 		10*time.Millisecond, time.Second, m)
 	w.scopeMaxRetryBackoff = 20 * time.Millisecond
@@ -212,7 +212,7 @@ func TestScopeEventsDrainedBeforeTheConnectionCloses(t *testing.T) {
 	rec := &scopeRowRecorder{}
 	conn := &fakeConn{sendErr: rec.hook()}
 	// A long batch wait, so only the drain can flush this event.
-	m := pipeline.NewPipelineMetrics(prometheus.NewRegistry())
+	m := pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkName)
 	w := NewCHWriter(conn, 16, 1, 8, 50*time.Millisecond, time.Second, time.Second, time.Hour, time.Second, m)
 
 	ctx, cancel := context.WithCancel(context.Background())

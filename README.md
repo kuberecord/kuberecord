@@ -174,15 +174,24 @@ Standard `controller-runtime`/Zap logging flags (`--zap-devel`, `--zap-encoder`,
 
 kubestream registers the following pipeline metrics on controller-runtime's global Prometheus registry, so they are served by the existing metrics endpoint (`--metrics-bind-address`). All names are prefixed `kubestream_`.
 
+Every metric a single sink instance reports carries a `sink=<name>` label naming
+the `ClickHouseSink` it belongs to: one operator can run several sinks at once
+(Task 1.8), and without the label two writers would overwrite each other's
+series. Metrics the shared pipeline owns (`dedup_skips_total`,
+`pipeline_dropped_total`) carry no `sink` label, because they describe the
+workqueue rather than any one backend. A sink's series are deleted when the sink
+is deleted, so an absent backend does not linger as a live-but-idle one.
+
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `kubestream_write_queue_depth` | Gauge | — | Jobs currently buffered in the `CHWriter` hand-off queue. |
-| `kubestream_write_queue_capacity` | Gauge | — | Maximum jobs the hand-off queue can buffer. |
-| `kubestream_writes_total` | Counter | `outcome="success"\|"failed"` | Settled ClickHouse write jobs, by outcome. |
-| `kubestream_write_latency_seconds` | Histogram | — | Time from a job's first write attempt to its final settle (incl. retries). |
-| `kubestream_write_retry_attempts_total` | Counter | — | Write attempts beyond the first (i.e. retries), across all jobs. |
-| `kubestream_enqueue_block_seconds` | Histogram | — | Time `Enqueue` spent blocked waiting for queue room. |
-| `kubestream_enqueue_timeouts_total` | Counter | — | `Enqueue` calls that gave up because the queue stayed full past the timeout. |
+| `kubestream_write_queue_depth` | Gauge | `sink` | Jobs currently buffered in the sink's hand-off queue. |
+| `kubestream_write_queue_capacity` | Gauge | `sink` | Maximum jobs the sink's hand-off queue can buffer. |
+| `kubestream_writes_total` | Counter | `sink`, `outcome="success"\|"failed"` | Settled write jobs, by sink and outcome. |
+| `kubestream_write_latency_seconds` | Histogram | `sink` | Time from a job's first write attempt to its final settle (incl. retries). |
+| `kubestream_write_retry_attempts_total` | Counter | `sink` | Write attempts beyond the first (i.e. retries), across all jobs. |
+| `kubestream_write_batch_rows` | Histogram | `sink` | Rows in each flushed insert batch — the direct signal of how well the batcher is coalescing. |
+| `kubestream_enqueue_block_seconds` | Histogram | `sink` | Time `Enqueue` spent blocked waiting for queue room. |
+| `kubestream_enqueue_timeouts_total` | Counter | `sink` | `Enqueue` calls that gave up because the queue stayed full past the timeout. |
 | `kubestream_dedup_skips_total` | Counter | — | Pipeline work items short-circuited because the object's hash was unchanged. |
 | `kubestream_hashcache_entries` | Gauge | `sink` | Live `hashCache` entries, per sink (one cache per sink, spanning all kinds). |
 | `kubestream_safe_mode` | Gauge (0/1) | `sink`, `group`, `kind`, `namespace` | `1` while a `(sink, scope)` pair's cache is still warming (Snapshot mode), `0` once warm. |

@@ -28,6 +28,20 @@ import (
 // controller-runtime already serves via --metrics-bind-address.
 const metricsNamespace = "kubestream"
 
+// sinkLabel is the label every collector a single sink instance reports through
+// carries, so a cluster streaming to two sinks can tell their queues, latencies
+// and failures apart.
+//
+// It is not cosmetic. Before Task 1.8 there was exactly one writer in the
+// process, so an unlabelled write_queue_depth gauge described it unambiguously;
+// with one instance per ClickHouseSink CR, two writers publishing to one gauge
+// would simply overwrite each other and the resulting series would describe
+// whichever happened to report last. Where the label stops is equally
+// deliberate: metrics the *pipeline* owns (dedup skips, dropped items) stay
+// unlabelled, because they are properties of the shared workqueue rather than of
+// any one backend.
+const sinkLabel = "sink"
+
 // PipelineMetrics is the full set of Prometheus collectors describing the
 // write pipeline's health: queue saturation, write outcomes and latency,
 // retry storms, dedup short-circuits, cache size, per-scope Snapshot (safe)
@@ -37,9 +51,9 @@ const metricsNamespace = "kubestream"
 //
 // It is exported because the ClickHouse writer (internal/sink/clickhouse)
 // records the write-path metrics through the narrow clickhouse.Metrics
-// interface, which *PipelineMetrics satisfies (see the setter methods below).
-// The collector fields stay unexported: callers mutate them only through those
-// methods or through this package's own reconciler code.
+// interface, which the per-sink view returned by ForSink satisfies. The
+// collector fields stay unexported: callers mutate them only through that view
+// or through this package's own code.
 //
 // Collectors are grouped in a struct (rather than package-level vars) so tests
 // can build an isolated instance against a fresh registry — Prometheus panics
@@ -48,34 +62,35 @@ const metricsNamespace = "kubestream"
 // registered once on controller-runtime's global registry (see
 // PipelineMetricsInstance).
 type PipelineMetrics struct {
-	// writeQueueDepth / writeQueueCapacity together show how close the
-	// CHWriter's bounded hand-off queue is to saturation — the earliest
-	// warning that ClickHouse can't keep up with the reconcile rate.
-	writeQueueDepth    prometheus.Gauge
-	writeQueueCapacity prometheus.Gauge
+	// writeQueueDepth / writeQueueCapacity together show how close a sink's
+	// bounded hand-off queue is to saturation — the earliest warning that the
+	// backend can't keep up with the observed change rate.
+	writeQueueDepth    *prometheus.GaugeVec
+	writeQueueCapacity *prometheus.GaugeVec
 
 	// writesTotal counts settled write outcomes, labelled success|failed, so a
 	// rising failed rate is distinguishable from a healthy throughput dip.
 	writesTotal *prometheus.CounterVec
 	// writeLatency measures a single job's time from first attempt to final
 	// settle (including retries), the direct signal of sink responsiveness.
-	writeLatency prometheus.Histogram
+	writeLatency *prometheus.HistogramVec
 	// writeRetryAttempts counts every attempt beyond the first, surfacing
 	// retry storms that writesTotal alone hides (a write can succeed after
 	// many retries and still count only once as a success).
-	writeRetryAttempts prometheus.Counter
+	writeRetryAttempts *prometheus.CounterVec
 	// writeBatchRows records the number of rows in each flushed ClickHouse
 	// batch, observed once per flush. It is the direct signal of how well the
 	// batcher is coalescing: a distribution clustered near batchMaxRows means
 	// full, efficient batches, while a mass near 1 means trickle traffic is
 	// flushing on the batchMaxWait timer instead of filling batches.
-	writeBatchRows prometheus.Histogram
+	writeBatchRows *prometheus.HistogramVec
 
 	// enqueueBlock measures how long Enqueue blocks waiting for queue room —
-	// the hot-path backpressure the reconciler actually feels. enqueueTimeouts
-	// counts the cases where that wait gave up, i.e. the queue stayed full.
-	enqueueBlock    prometheus.Histogram
-	enqueueTimeouts prometheus.Counter
+	// the hot-path backpressure the pipeline's workers actually feel.
+	// enqueueTimeouts counts the cases where that wait gave up, i.e. the queue
+	// stayed full.
+	enqueueBlock    *prometheus.HistogramVec
+	enqueueTimeouts *prometheus.CounterVec
 
 	// dedupSkips counts Process calls that short-circuited because the object's
 	// hash was unchanged — the proportion of work the hashCache saves.
@@ -115,51 +130,51 @@ const DropReasonScopeStopped = "scope_stopped"
 // and each test passes its own fresh registry.
 func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 	m := &PipelineMetrics{
-		writeQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+		writeQueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "write_queue_depth",
-			Help:      "Current number of jobs buffered in the CHWriter hand-off queue.",
-		}),
-		writeQueueCapacity: prometheus.NewGauge(prometheus.GaugeOpts{
+			Help:      "Current number of jobs buffered in a sink's hand-off queue.",
+		}, []string{sinkLabel}),
+		writeQueueCapacity: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "write_queue_capacity",
-			Help:      "Maximum number of jobs the CHWriter hand-off queue can buffer.",
-		}),
+			Help:      "Maximum number of jobs a sink's hand-off queue can buffer.",
+		}, []string{sinkLabel}),
 		writesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "writes_total",
-			Help:      "Count of settled ClickHouse write jobs by outcome.",
-		}, []string{"outcome"}),
-		writeLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Help:      "Count of settled sink write jobs by sink and outcome.",
+		}, []string{sinkLabel, "outcome"}),
+		writeLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Name:      "write_latency_seconds",
 			Help:      "Time from a write job's first attempt to its final settle, including retries.",
 			Buckets:   prometheus.DefBuckets,
-		}),
-		writeRetryAttempts: prometheus.NewCounter(prometheus.CounterOpts{
+		}, []string{sinkLabel}),
+		writeRetryAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "write_retry_attempts_total",
-			Help:      "Count of write attempts beyond the first (i.e. retries) across all jobs.",
-		}),
-		writeBatchRows: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Help:      "Count of write attempts beyond the first (i.e. retries) across all jobs, by sink.",
+		}, []string{sinkLabel}),
+		writeBatchRows: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Name:      "write_batch_rows",
-			Help:      "Number of rows in each flushed ClickHouse insert batch.",
+			Help:      "Number of rows in each flushed insert batch, by sink.",
 			// Exponential buckets 1..2048 span a single trickle row through a
 			// full batch at any realistic batchMaxRows setting.
 			Buckets: prometheus.ExponentialBuckets(1, 2, 12),
-		}),
-		enqueueBlock: prometheus.NewHistogram(prometheus.HistogramOpts{
+		}, []string{sinkLabel}),
+		enqueueBlock: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Name:      "enqueue_block_seconds",
-			Help:      "Time Enqueue spent blocked waiting for room in the write queue.",
+			Help:      "Time Enqueue spent blocked waiting for room in a sink's write queue.",
 			Buckets:   prometheus.DefBuckets,
-		}),
-		enqueueTimeouts: prometheus.NewCounter(prometheus.CounterOpts{
+		}, []string{sinkLabel}),
+		enqueueTimeouts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "enqueue_timeouts_total",
-			Help:      "Count of Enqueue calls that gave up because the queue stayed full past the timeout.",
-		}),
+			Help:      "Count of Enqueue calls that gave up because a sink's queue stayed full past the timeout.",
+		}, []string{sinkLabel}),
 		dedupSkips: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "dedup_skips_total",
@@ -183,13 +198,13 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		}, []string{"reason"}),
 	}
 
-	// Materialize both outcome series at 0 up front: the label set is a fixed
-	// enum, so exposing success and failed from the start makes dashboards and
-	// rate() queries well-defined before the first write ever settles.
-	m.writesTotal.WithLabelValues("success")
-	m.writesTotal.WithLabelValues("failed")
-	// Same reasoning for the drop reasons: the set is a fixed enum, so the
-	// series exists (at 0) before the first drop ever happens.
+	// The write-outcome series are materialized per sink instead, by ForSink: the
+	// outcome half of the label set is a fixed enum, but the sink half is not
+	// known until a sink exists, and seeding a placeholder here would publish a
+	// series for a sink nobody configured.
+	//
+	// The drop reasons still seed here: that set is a fixed enum with no sink
+	// dimension, so the series exists (at 0) before the first drop ever happens.
 	m.dropped.WithLabelValues(DropReasonScopeStopped)
 
 	reg.MustRegister(
@@ -226,30 +241,107 @@ func PipelineMetricsInstance() *PipelineMetrics {
 	return pipelineMetricsSingleton
 }
 
-// The methods below implement the clickhouse.Metrics interface: the write-path
-// slice of these collectors, exposed as behavior rather than raw fields so the
-// clickhouse package depends on a narrow contract and never imports this one.
+// SinkMetrics is one sink's view of the write-path collectors: every series it
+// touches is pinned to sink=<name>.
+//
+// It implements the clickhouse.Metrics interface — the write-path slice of
+// PipelineMetrics, exposed as behavior rather than raw fields so the clickhouse
+// package depends on a narrow contract and never imports this one. Each sink
+// instance is built with its own view (see ForSink), which is what makes
+// "which backend is falling behind?" answerable from metrics alone once more than
+// one sink is live.
+//
+// The child collectors are resolved once, here, rather than per observation: the
+// write path calls SetWriteQueueDepth on every enqueue and every flush, and a
+// WithLabelValues lookup per call would put a map hash and a mutex on that path
+// for a label value that never changes.
+type SinkMetrics struct {
+	queueDepth    prometheus.Gauge
+	queueCapacity prometheus.Gauge
+	writeSuccess  prometheus.Counter
+	writeFailed   prometheus.Counter
+	latency       prometheus.Observer
+	retries       prometheus.Counter
+	batchRows     prometheus.Observer
+	enqueueBlock  prometheus.Observer
+	enqueueGaveUp prometheus.Counter
+}
 
-// SetWriteQueueDepth publishes the current CHWriter hand-off queue depth.
-func (m *PipelineMetrics) SetWriteQueueDepth(n float64) { m.writeQueueDepth.Set(n) }
+// ForSink returns the write-path metrics view for the sink named name, seeding
+// both of its outcome counters at 0 so dashboards and rate() queries over them
+// are well-defined from the moment the sink exists rather than from its first
+// settled write.
+//
+// It is called once per sink instance, by whoever builds that instance (Task
+// 1.8's sink factory), because internal/sink cannot import this package: the
+// factory receives the sink's name and is the only place where a name and a
+// backend meet.
+func (m *PipelineMetrics) ForSink(name string) *SinkMetrics {
+	return &SinkMetrics{
+		queueDepth:    m.writeQueueDepth.WithLabelValues(name),
+		queueCapacity: m.writeQueueCapacity.WithLabelValues(name),
+		writeSuccess:  m.writesTotal.WithLabelValues(name, "success"),
+		writeFailed:   m.writesTotal.WithLabelValues(name, "failed"),
+		latency:       m.writeLatency.WithLabelValues(name),
+		retries:       m.writeRetryAttempts.WithLabelValues(name),
+		batchRows:     m.writeBatchRows.WithLabelValues(name),
+		enqueueBlock:  m.enqueueBlock.WithLabelValues(name),
+		enqueueGaveUp: m.enqueueTimeouts.WithLabelValues(name),
+	}
+}
 
-// SetWriteQueueCapacity publishes the fixed CHWriter hand-off queue capacity.
-func (m *PipelineMetrics) SetWriteQueueCapacity(n float64) { m.writeQueueCapacity.Set(n) }
+// deleteSinkSeries drops every per-sink series for name.
+//
+// It runs when a sink's pipeline state is discarded (see RemoveSink), for the
+// same reason the hashcache_entries series is dropped there: a gauge left behind
+// keeps reporting a queue depth and capacity for a backend the operator no longer
+// writes to, which reads as a live-but-idle sink rather than an absent one.
+func (m *PipelineMetrics) deleteSinkSeries(name string) {
+	m.writeQueueDepth.DeleteLabelValues(name)
+	m.writeQueueCapacity.DeleteLabelValues(name)
+	m.writesTotal.DeleteLabelValues(name, "success")
+	m.writesTotal.DeleteLabelValues(name, "failed")
+	m.writeLatency.DeleteLabelValues(name)
+	m.writeRetryAttempts.DeleteLabelValues(name)
+	m.writeBatchRows.DeleteLabelValues(name)
+	m.enqueueBlock.DeleteLabelValues(name)
+	m.enqueueTimeouts.DeleteLabelValues(name)
+	// safe_mode carries the scope dimension as well, and a deleted sink may still
+	// have had warming scopes when it went away (its rules are parked *after* the
+	// sink is gone), so its series are matched on the sink label alone rather than
+	// re-derived from a scope list this call does not have.
+	m.safeMode.DeletePartialMatch(prometheus.Labels{sinkLabel: name})
+}
+
+// SetWriteQueueDepth publishes this sink's current hand-off queue depth.
+func (s *SinkMetrics) SetWriteQueueDepth(n float64) { s.queueDepth.Set(n) }
+
+// SetWriteQueueCapacity publishes this sink's fixed hand-off queue capacity.
+func (s *SinkMetrics) SetWriteQueueCapacity(n float64) { s.queueCapacity.Set(n) }
 
 // ObserveEnqueueBlock records how long an Enqueue blocked waiting for room.
-func (m *PipelineMetrics) ObserveEnqueueBlock(seconds float64) { m.enqueueBlock.Observe(seconds) }
+func (s *SinkMetrics) ObserveEnqueueBlock(seconds float64) { s.enqueueBlock.Observe(seconds) }
 
 // IncEnqueueTimeout counts an Enqueue that gave up because the queue stayed full.
-func (m *PipelineMetrics) IncEnqueueTimeout() { m.enqueueTimeouts.Inc() }
+func (s *SinkMetrics) IncEnqueueTimeout() { s.enqueueGaveUp.Inc() }
 
 // ObserveWriteLatency records a job's first-attempt-to-final-settle latency.
-func (m *PipelineMetrics) ObserveWriteLatency(seconds float64) { m.writeLatency.Observe(seconds) }
+func (s *SinkMetrics) ObserveWriteLatency(seconds float64) { s.latency.Observe(seconds) }
 
 // IncWriteRetryAttempt counts one write attempt beyond the first.
-func (m *PipelineMetrics) IncWriteRetryAttempt() { m.writeRetryAttempts.Inc() }
+func (s *SinkMetrics) IncWriteRetryAttempt() { s.retries.Inc() }
 
 // ObserveWriteBatchRows records the row count of one flushed insert batch.
-func (m *PipelineMetrics) ObserveWriteBatchRows(rows float64) { m.writeBatchRows.Observe(rows) }
+func (s *SinkMetrics) ObserveWriteBatchRows(rows float64) { s.batchRows.Observe(rows) }
 
-// IncWrite counts one settled write by outcome ("success" | "failed").
-func (m *PipelineMetrics) IncWrite(outcome string) { m.writesTotal.WithLabelValues(outcome).Inc() }
+// IncWrite counts one settled write by outcome ("success" | "failed"). An
+// unrecognized outcome is counted as a failure rather than dropped: the caller's
+// contract is a two-value enum, so a third value is a bug whose writes must not
+// silently vanish from the accounting (Invariant 4).
+func (s *SinkMetrics) IncWrite(outcome string) {
+	if outcome == "success" {
+		s.writeSuccess.Inc()
+		return
+	}
+	s.writeFailed.Inc()
+}
