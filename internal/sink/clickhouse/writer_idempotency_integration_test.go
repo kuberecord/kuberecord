@@ -42,9 +42,16 @@ import (
 // path after a lost ack), and asserts that both a FINAL query and
 // LastKnownStates report exactly one row for the identity.
 //
+// It runs as if on a **non-UTC host** (see pinLocalZone): the convergence property
+// used to hold only under TZ=UTC, because a re-insert rendered the timestamp through
+// a different encoder than the batch attempt and the two disagreed about the zone.
+// Pinning a half-hour offset keeps that regression caught wherever the suite runs.
+//
 // Runs only under `make test-integration` (build tag `integration`), which
 // stands up a dockerized ClickHouse and points CH_TEST_ADDR at it.
 func TestLostAckReInsertConvergesIntegration(t *testing.T) {
+	pinLocalZone(t, 5*time.Hour+30*time.Minute)
+
 	addr := envOrDefault("CH_TEST_ADDR", "127.0.0.1:9000")
 	username := envOrDefault("CH_TEST_USER", "default")
 	password := os.Getenv("CH_TEST_PASSWORD")
@@ -63,9 +70,13 @@ func TestLostAckReInsertConvergesIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open connection: %v", err)
 	}
+	// Start from empty tables. The teardown below cannot be relied on for this: the
+	// CHWriter these tests hand `conn` to closes it during its own shutdown, so a
+	// deferred DROP runs against a closed connection and silently does nothing. Both
+	// tests count rows, so a leftover row from an earlier run would make them lie —
+	// against a throwaway container as well as a developer's persistent ClickHouse.
+	dropOperatorTables(ctx, t, conn)
 	defer func() {
-		_ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableResourceStates)
-		_ = conn.Exec(context.Background(), "DROP TABLE IF EXISTS "+tableWatchScopes)
 		_ = conn.Close()
 	}()
 
@@ -122,11 +133,29 @@ func TestLostAckReInsertConvergesIntegration(t *testing.T) {
 		t.Fatalf("timed out waiting for the writer to settle the insert")
 	}
 
-	// 3. Re-insert the byte-identical row directly, simulating the isolation
-	// path re-sending after a lost acknowledgement (same ts, sha256, uid,
-	// event_type, and payload — every ORDER BY column identical).
-	if err := conn.Exec(ctx, insertResourceStateQuery, insertArgs(rec)...); err != nil {
-		t.Fatalf("direct re-insert: %v", err)
+	// 3. Re-insert the byte-identical row, simulating the isolation path re-sending
+	// after a lost acknowledgement (same ts, sha256, uid, event_type, and payload —
+	// every ORDER BY column identical). It goes through a one-row prepared batch
+	// because that is what the isolation path itself now does: sharing the batch
+	// encoder is what makes the re-insert byte-identical rather than merely intended
+	// to be (see flushBatch).
+	if err := w.sendBatchOnce(ctx, []writeJob{{args: insertArgs(rec)}}); err != nil {
+		t.Fatalf("isolation-path re-insert: %v", err)
+	}
+
+	// 3b. The stored timestamp is the instant the record carries — not that
+	// wall-clock reading shifted into the process's local zone, which is what a
+	// string-rendered argument produced.
+	var storedTS time.Time
+	tsRow := conn.QueryRow(ctx, `
+        SELECT max(ts) FROM resource_states
+        WHERE cluster_id = ? AND kind = ? AND name = ?`, rec.ClusterID, rec.Kind, rec.Name)
+	if err := tsRow.Scan(&storedTS); err != nil {
+		t.Fatalf("stored ts scan: %v", err)
+	}
+	if !storedTS.Equal(rec.Timestamp) {
+		t.Fatalf("stored ts = %s, want the record's instant %s (local zone leaked into the binding)",
+			storedTS.UTC(), rec.Timestamp)
 	}
 
 	// 4a. A FINAL query must report exactly one logical row for the identity,

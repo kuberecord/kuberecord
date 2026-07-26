@@ -58,10 +58,16 @@ func (erroringConn) Exec(context.Context, string, ...any) error {
 
 func (erroringConn) Close() error { return nil }
 
-// fakeConn is a controllable driver.Conn for the batching tests. Its batch Send
-// and single-row Exec behaviors are injected via sendErr/execErr (nil hook =
-// success), and it records Send/Exec counts plus a monotonic sequence so tests
-// can assert ordering (e.g. the drain flush's Send happening before Close).
+// fakeConn is a controllable driver.Conn for the batching tests. Send outcomes are
+// injected via sendErr / rowErr (nil hook = success), and it records Send/Exec
+// counts plus a monotonic sequence so tests can assert ordering (e.g. the drain
+// flush's Send happening before Close).
+//
+// Both the batch attempt and the per-row isolation attempt reach the backend the
+// same way — a prepared batch — because that is the only encoder the writer uses
+// (see insertArgs). rowErr therefore exists purely to keep each test's intent
+// legible: it is consulted for a one-row send, sendErr for a multi-row one. Inserts
+// must never arrive through Exec, and execCount is what proves it.
 type fakeConn struct {
 	driver.Conn
 
@@ -72,10 +78,11 @@ type fakeConn struct {
 	lastSend atomic.Int64 // seq of the most recent Send
 	closeSeq atomic.Int64 // seq at which Close ran
 
-	// sendErr, if set, decides the outcome of a batch Send given its context
-	// and the appended rows. execErr does the same for a single-row Exec.
+	// sendErr, if set, decides the outcome of a multi-row Send given its context
+	// and the appended rows. rowErr does the same for a one-row Send, given that
+	// row's arguments.
 	sendErr func(ctx context.Context, rows [][]any) error
-	execErr func(ctx context.Context, args []any) error
+	rowErr  func(ctx context.Context, args []any) error
 
 	// queryMu guards batchQueries, which records the statement each PrepareBatch
 	// was called with. The scope-event tests use it to prove their rows target
@@ -98,11 +105,10 @@ func (c *fakeConn) preparedQueries() []string {
 	return slices.Clone(c.batchQueries)
 }
 
-func (c *fakeConn) Exec(ctx context.Context, _ string, args ...any) error {
+// Exec is only reachable through the DDL path (autoCreateSchema); the insert paths
+// never use it. The counter lets a test assert that.
+func (c *fakeConn) Exec(context.Context, string, ...any) error {
 	c.execCount.Add(1)
-	if c.execErr != nil {
-		return c.execErr(ctx, args)
-	}
 	return nil
 }
 
@@ -131,6 +137,9 @@ func (b *fakeBatch) Append(v ...any) error {
 func (b *fakeBatch) Send() error {
 	b.conn.sendCount.Add(1)
 	b.conn.lastSend.Store(b.conn.seq.Add(1))
+	if len(b.rows) == 1 && b.conn.rowErr != nil {
+		return b.conn.rowErr(b.ctx, b.rows[0])
+	}
 	if b.conn.sendErr != nil {
 		return b.conn.sendErr(b.ctx, b.rows)
 	}
@@ -267,7 +276,7 @@ func TestPoisonRowIsolation(t *testing.T) {
 		// The batch never succeeds, forcing the isolation path.
 		sendErr: func(context.Context, [][]any) error { return errors.New("batch rejected") },
 		// Only the poison row fails its individual attempt.
-		execErr: func(_ context.Context, args []any) error {
+		rowErr: func(_ context.Context, args []any) error {
 			if len(args) > nameArgIndex && args[nameArgIndex] == "poison" {
 				return errors.New("bad row")
 			}
@@ -305,6 +314,13 @@ func TestPoisonRowIsolation(t *testing.T) {
 	}
 	if v := writesTotalValue(t, reg, "success"); v != 9 {
 		t.Fatalf("writes_total{success} = %v, want 9", v)
+	}
+	// The isolation attempts went through a prepared batch, not Exec. That is not a
+	// stylistic preference: Exec interpolates arguments into SQL text, which reduces
+	// a DateTime64(9) to second precision, so a re-inserted row would differ from the
+	// batch attempt it follows and ReplacingMergeTree could never collapse it.
+	if n := conn.execCount.Load(); n != 0 {
+		t.Errorf("isolation issued %d Exec calls, want 0: inserts must use the batch encoder", n)
 	}
 
 	cancel()
@@ -449,8 +465,8 @@ func TestCancelMidBatchCommitsOnce(t *testing.T) {
 			<-ctx.Done()
 			return ctx.Err()
 		},
-		// The isolation Exec that follows also fails under the cancelled context.
-		execErr: func(ctx context.Context, _ []any) error { return ctx.Err() },
+		// The isolation attempt that follows also fails under the cancelled context.
+		rowErr: func(ctx context.Context, _ []any) error { return ctx.Err() },
 	}
 
 	reg := prometheus.NewRegistry()
@@ -568,12 +584,68 @@ func TestInsertArgsTimestampFrozen(t *testing.T) {
 		t.Fatalf("insertArgs is not deterministic:\n first  = %v\n second = %v", first, second)
 	}
 
-	// The timestamp is positional arg 0; assert it round-trips to the exact
-	// frozen value both times (a re-stamp would change it between calls).
-	wantTS := rec.Timestamp.UTC().Format(chTimeFormat)
-	if first[0] != wantTS || second[0] != wantTS {
-		t.Fatalf("timestamp arg = (%v, %v), want %q both times", first[0], second[0], wantTS)
+	// The timestamp is arg 0, bound as the instant itself. Assert it round-trips to
+	// the exact frozen value both times (a re-stamp would change it between calls),
+	// and that it is an instant rather than a rendered string — a string would be
+	// reinterpreted in time.Local by the driver's column binder.
+	wantTS := rec.Timestamp.UTC()
+	gotFirst, ok := first[0].(time.Time)
+	if !ok {
+		t.Fatalf("timestamp arg is a %T, want a time.Time: a formatted string is parsed in time.Local by the driver", first[0])
 	}
+	gotSecond, _ := second[0].(time.Time)
+	if !gotFirst.Equal(wantTS) || !gotSecond.Equal(wantTS) {
+		t.Fatalf("timestamp arg = (%v, %v), want %v both times", first[0], second[0], wantTS)
+	}
+	if loc := gotFirst.Location(); loc != time.UTC {
+		t.Errorf("timestamp arg location = %v, want UTC", loc)
+	}
+}
+
+// TestInsertArgsIsZoneIndependent is the regression guard for the timezone bug: the
+// bound arguments must not depend on the operator process's local zone.
+//
+// The pinned driver parses a bare datetime string and then reinterprets those
+// wall-clock digits in time.Local, so while insertArgs rendered a string, an
+// operator running in (say) CEST wrote every ts two hours earlier than the event
+// actually happened — silently, in the column the whole audit trail is ordered by.
+// Pinning time.Local to a half-hour-offset zone would expose any rendering that
+// still consults it (and catches an hour-granular "fix" too).
+func TestInsertArgsIsZoneIndependent(t *testing.T) {
+	rec := sink.Record{
+		Timestamp: time.Date(2026, 7, 23, 12, 0, 0, 987654321, time.UTC),
+		ClusterID: "c1",
+		Name:      "zoned",
+	}
+
+	inUTC := insertArgs(rec)
+
+	restore := pinLocalZone(t, 5*time.Hour+30*time.Minute)
+	shifted := insertArgs(rec)
+	restore()
+
+	if !reflect.DeepEqual(inUTC, shifted) {
+		t.Fatalf("insertArgs depends on the local zone:\n UTC host     = %v\n non-UTC host = %v",
+			inUTC, shifted)
+	}
+	if got := shifted[0].(time.Time); !got.Equal(rec.Timestamp) {
+		t.Errorf("timestamp arg on a non-UTC host = %v, want the record's instant %v", got, rec.Timestamp)
+	}
+}
+
+// pinLocalZone makes the process look like it runs at the given UTC offset, for as
+// long as the returned function has not been called (it is also registered as a
+// cleanup). It mutates time.Local, which is process-wide — safe here only because no
+// test in this package runs in parallel, and it is the one honest way to reproduce a
+// non-UTC host: time.Local is exactly what the driver consults.
+func pinLocalZone(t *testing.T, offset time.Duration) (restore func()) {
+	t.Helper()
+	previous := time.Local
+	time.Local = time.FixedZone("kubestream-test", int(offset/time.Second))
+	var once sync.Once
+	restore = func() { once.Do(func() { time.Local = previous }) }
+	t.Cleanup(restore)
+	return restore
 }
 
 // TestIsolationPhaseBoundedOnHungBackend is the Fix 3 (M3) guard against a
@@ -593,7 +665,7 @@ func TestIsolationPhaseBoundedOnHungBackend(t *testing.T) {
 		// Batch always fails → forces the isolation path.
 		sendErr: func(context.Context, [][]any) error { return errors.New("batch rejected") },
 		// Hung backend: block until the row context is cancelled, then surface it.
-		execErr: func(ctx context.Context, _ []any) error {
+		rowErr: func(ctx context.Context, _ []any) error {
 			<-ctx.Done()
 			return ctx.Err()
 		},
@@ -663,7 +735,7 @@ func TestIsolationPhaseDoesNotTruncateSlowBackend(t *testing.T) {
 	conn := &fakeConn{
 		sendErr: func(context.Context, [][]any) error { return errors.New("batch rejected") },
 		// Slow but alive: each row returns success after rowDelay.
-		execErr: func(context.Context, []any) error {
+		rowErr: func(context.Context, []any) error {
 			time.Sleep(rowDelay)
 			return nil
 		},
