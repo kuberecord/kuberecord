@@ -12,7 +12,7 @@ The watched set is never a compiled-in list: it is declarative runtime configura
 
 ### Status
 
-The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`), replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The dynamic watch manager, multi-sink runtime, and control-plane reconcilers that drive the pipeline from those CRDs are the remaining Phase 1 work; until they land, the operator starts healthy, serves metrics and probes, and streams nothing.
+The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry, replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The scope-epoch recorder, multi-sink runtime, and control-plane reconcilers that translate those CRDs into registry entries are the remaining Phase 1 work; until they land, nothing writes to the registry, so the operator starts healthy, serves metrics and probes, and streams nothing.
 
 One consequence worth calling out for anyone deploying from this tree: the operator's base `ClusterRole` (`config/rbac/role.yaml`) is now **empty**. It was generated from the deleted reconcilers' `+kubebuilder:rbac` markers, and standing read access to Pods, Services and Deployments would outlive the code that used it. Leader election and metrics authz are unaffected; the base role and the aggregated `kubestream-watcher` role are rebuilt later in Phase 1.
 
@@ -27,6 +27,7 @@ One consequence worth calling out for anyone deploying from this tree: the opera
 
 - **Workqueue data plane with per-key serialization** — object changes are drained from a client-go rate-limiting workqueue by a shared pool of workers (default 8). The workqueue contract — an item is never handed to two workers at once, and re-adds for a pending item coalesce — is what makes the version-gated dedup cache correct at any worker count (Invariant 2), and what lets an update storm on one object cost one write instead of one per event.
 - **Asynchronous, non-blocking ClickHouse writes** — every insert is handed off to `CHWriter`, a bounded-queue worker pool with exponential-backoff retries (`backoff/v4`). The pipeline never calls ClickHouse synchronously and returns as soon as a job is enqueued, so a slow or unavailable database never stalls a worker or the informers.
+- **Watches that start and stop at runtime** — a pool of self-managed dynamic informers is level-triggered towards the desired-state registry: change notifications are debounced (500ms) and reconciled against the running pool, with a 30s safety tick so a failed start or a kind whose CRD arrives later self-heals. Informers are shared per `(resource, namespace)` across every rule and sink that wants them, and each cached object is stripped of `metadata.managedFields` on the way in (its field managers are preserved as the record's `actors`), which is the informer-memory half of running on massive clusters.
 - **Hash-based deduplication** — every object's normalized JSON (with `managedFields`, `resourceVersion`, and `generation` stripped) is SHA-256 hashed; an unchanged hash short-circuits as a no-op, so only genuine state changes reach ClickHouse.
 - **Graceful JSON diffing** — `Modified` events store a computed JSON patch (`wI2L/jsondiff`) instead of the full object where possible, falling back to the full state whenever a prior baseline is missing or the diff/marshal step itself fails, rather than dropping the row.
 - **Version-gated cache, not a naive map** — the in-memory dedup cache (`hashCache`) assigns a monotonic version per key on every write attempt; a commit or delete only applies if its version is still current, so an out-of-order async write can never clobber a newer one.
@@ -39,8 +40,14 @@ One consequence worth calling out for anyone deploying from this tree: the opera
 ## Architecture Overview
 
 ```
-Informer caches (one per watched (resource, namespace))
-        │  (Added/Modified/Deleted events)
+desired-state registry (watch targets, written by the control plane)
+        │  (level-triggered: debounced diff, plus a 30s safety tick)
+        ▼
+  WatchManager: one self-managed informer per watched (resource, namespace)
+    ├─ transform: harvest actors from managedFields, then drop managedFields
+    ├─ interest map: (resource, namespace) → interested sinks + their selectors
+    └─ selector filtering handler-side, so a selector edit restarts nothing
+        │  (Added/Modified/Deleted events → one key per interested sink)
         ▼
   workqueue of identity keys {sink, group, kind, namespace, name}
         │  (rate-limiting; same key never on two workers at once)
@@ -67,10 +74,12 @@ Informer caches (one per watched (resource, namespace))
    (settle the version)   (UnclaimDelete/AddRateLimited)
 ```
 
+- **Self-managed informers, one per `(resource, namespace)`**: controller-runtime's cache is scoped once at manager construction and a controller cannot be removed from a running manager, so the watch pool is hand-built: each target gets its own informer, context and goroutine, and the `WatchManager` starts and stops them as rules appear and disappear — no operator restart. Informers are shared across sinks and rules; who wants an event, and under which label selectors, is answered from an in-memory interest map at event time. That is why editing a rule's selector re-filters the stream without re-Listing it, and why two rules on one scope cost one watch.
+- **Stopping a watch is not a deletion**: when the last rule wanting a scope goes away, the scope is deregistered first (so in-flight work items for it drop instead of being recorded), then its dedup baselines are evicted, then the informer is stopped and awaited. No `Deleted` rows are written for the objects that were in scope — that distinction is the whole point of scope epochs.
 - **Informer caches, not live API calls**: the pipeline has no Kubernetes client at all — it reads object state through a lister interface backed by the watch caches, so nothing in the hot path can issue a direct, uncached API request (Invariant 1, enforced by construction).
 - **One dedup cache per sink**: `hashCache` is per-sink and spans every kind that sink receives, because dedup and version state must be independent when one object streams to two sinks — a write confirmed on one says nothing about the other.
 - **One `CHWriter` per sink, shared across every watched resource type**: registered as a `manager.Runnable`, its own lifecycle (start workers → drain the queue on shutdown → close the ClickHouse connection) is tied to the manager's. `CHWriter` lives in [`internal/sink/clickhouse`](internal/sink/clickhouse) and implements the backend-agnostic `sink.Writer` and `sink.StateReader` contracts ([`internal/sink`](internal/sink)); the pipeline depends only on those interfaces, so a future backend is a new implementation rather than a change to the hot path.
-- **One `hashCache` per GVK**: a mutex-protected map from `"<Kind>/<namespace>/<name>"` to a versioned `CacheEntry` (hash, normalized JSON, UID, version, pending-delete flag). All commits/deletes are gated on the version issued when the corresponding write was reserved.
+- **`hashCache` internals**: a mutex-protected map from the canonical identity key `"<group>|<Kind>|<namespace>/<name>"` — version-agnostic, per Invariant 7 — to a versioned `CacheEntry` (hash, compressed normalized JSON, UID, version, pending-delete flag). All commits/deletes are gated on the version issued when the corresponding write was reserved, and the key's shape is what lets a stopped watch scope be evicted by prefix.
 - **Warm-up + GC**: cache warm-up queries ClickHouse for the latest known state of every object in a watch scope, seeds the dedup cache (without clobbering anything a live work item already wrote), then diffs that snapshot against the live cluster to detect and close out "zombie" objects that disappeared while the operator was offline. Until a scope has been warmed, a cache-miss in it is recorded as `Snapshot` rather than `Added`. Re-warming per scope — so a rule created hours after boot warms only what it added — is the next Phase 1 task; the boot-time pass it replaces was removed with the reconcilers it belonged to.
 - **ClickHouse schema v1 is shipped in this repository** — the DDL lives under [`deploy/clickhouse/schema/`](deploy/clickhouse/schema/) and every column is documented in [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
