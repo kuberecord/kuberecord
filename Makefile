@@ -96,7 +96,7 @@ test-integration: ## Run integration tests against a dockerized ClickHouse.
 		sleep 1; \
 	done; \
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
-		go test -tags=integration ./internal/controller/... -run Integration -v
+		go test -tags=integration ./internal/sink/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
 # against a throwaway dockerized ClickHouse plus an in-process envtest apiserver.

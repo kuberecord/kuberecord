@@ -27,7 +27,7 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kubestream/internal/controller"
+	"github.com/yelzhy/kubestream/internal/pipeline"
 	"github.com/yelzhy/kubestream/internal/sink"
 )
 
@@ -96,7 +96,7 @@ func TestLostAckReInsertConvergesIntegration(t *testing.T) {
 	// shared connection on shutdown, so LastKnownStates (step 4b) and the direct
 	// re-insert (step 3) run while it is still alive, and shutdown happens last.
 	reg := prometheus.NewRegistry()
-	metrics := controller.NewPipelineMetrics(reg)
+	metrics := pipeline.NewPipelineMetrics(reg)
 	w := NewCHWriter(conn, 10, 1, 10, 10*time.Second, 0, 5*time.Second, 50*time.Millisecond, time.Second, metrics)
 
 	wctx, wcancel := context.WithCancel(context.Background())

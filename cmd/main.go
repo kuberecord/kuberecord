@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -30,7 +29,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,7 +38,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/yelzhy/kubestream/internal/controller"
+	"github.com/yelzhy/kubestream/internal/pipeline"
 	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
 	// +kubebuilder:scaffold:imports
 )
@@ -49,10 +47,6 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
-
-// defaultWatchedGVKs is used when WATCHED_GVKS/--watched-gvks is unset or
-// empty, so the operator watches something sensible out of the box.
-const defaultWatchedGVKs = "v1/Pod,apps/v1/Deployment,v1/Service"
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -180,91 +174,6 @@ func registerWriterFlags(fs *flag.FlagSet) *writerTuning {
 	return t
 }
 
-// defaultMaxConcurrentReconciles is the shipped RECONCILER_MAX_CONCURRENT
-// default. It is 1 because the current controller-runtime-driven Reconcile
-// performs a read-decide-write (Load the diff baseline → compute diff → Reserve
-// → enqueue) that is not atomic with its asynchronous write commit. Any value
-// above 1 breaks Invariant 2 (per-key serialization): two concurrent same-key
-// Reconciles can both Load the same committed baseline and each emit a diff
-// against it, corrupting the recorded ClickHouse history. The version gate keeps
-// the in-memory cache correct but cannot un-emit those rows. Real per-key
-// concurrency arrives with the Phase 1 workqueue pipeline, which owns that
-// guarantee — see controller.ReconcilerConfig.MaxConcurrentReconciles.
-const defaultMaxConcurrentReconciles = 1
-
-// registerReconcilerConcurrencyFlag registers --reconciler-max-concurrent (env
-// twin RECONCILER_MAX_CONCURRENT) on fs and returns the bound value. Split out
-// of main() so cmd/main_test.go can assert the shipped default and the env/flag
-// override in isolation, mirroring registerWriterFlags. The flag/env plumbing is
-// unchanged — the value stays operator-configurable; only its default is 1.
-func registerReconcilerConcurrencyFlag(fs *flag.FlagSet) *int {
-	v := new(int)
-	fs.IntVar(v, "reconciler-max-concurrent",
-		getEnvIntOrDefault("RECONCILER_MAX_CONCURRENT", defaultMaxConcurrentReconciles),
-		"Maximum concurrent Reconciles per watched resource type. Values above 1 are UNSAFE under the current "+
-			"controller-runtime-driven architecture: a Reconcile's diff-baseline read is not atomic with its "+
-			"asynchronous write commit, so two concurrent same-key Reconciles can emit diff rows computed against "+
-			"the same baseline and corrupt the recorded history (Invariant 2). Safe per-key concurrency arrives "+
-			"with the Phase 1 workqueue pipeline. Can also be set via the RECONCILER_MAX_CONCURRENT env var.")
-	return v
-}
-
-// parseGVKList parses a comma-separated list of GroupVersionKinds, each
-// given as "version/kind" (core group, e.g. "v1/Pod") or
-// "group/version/kind" (e.g. "apps/v1/Deployment",
-// "networking.k8s.io/v1/Ingress"), into the GVKs the operator should watch.
-// Externalizing this list — rather than a hardcoded Go slice in
-// resourcestream_controller.go — is what lets the operator watch a
-// different set of resource types, including CRDs, purely through
-// configuration; see ReconcilerConfig.WatchedGVKs.
-//
-// Returns an error naming the malformed entry on invalid input, rather than
-// silently skipping it — a typo here should fail startup loudly, not
-// quietly watch fewer resource types than intended.
-//
-// It also rejects two entries with the same (group, kind) but different
-// versions: the operator's identity key is version-agnostic (Invariant 7, see
-// ResourceStreamReconciler.cacheKey), so watching e.g. both apps/v1/Deployment
-// and apps/v2/Deployment would spin up two reconcilers writing to a single
-// shared cache entry per object — an out-of-order-commit and duplicate-write
-// hazard. Naming both offending entries makes the misconfiguration obvious.
-func parseGVKList(raw string) ([]schema.GroupVersionKind, error) {
-	var gvks []schema.GroupVersionKind
-	// seenGroupKind maps a (group, kind) pair to the raw entry that first
-	// claimed it, so a later collision can name both entries in its error.
-	seenGroupKind := make(map[schema.GroupKind]string)
-	for entry := range strings.SplitSeq(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-
-		var gvk schema.GroupVersionKind
-		switch parts := strings.Split(entry, "/"); len(parts) {
-		case 2:
-			gvk = schema.GroupVersionKind{Version: parts[0], Kind: parts[1]}
-		case 3:
-			gvk = schema.GroupVersionKind{Group: parts[0], Version: parts[1], Kind: parts[2]}
-		default:
-			return nil, fmt.Errorf(`invalid GVK %q: expected "version/kind" or "group/version/kind"`, entry)
-		}
-		if gvk.Version == "" || gvk.Kind == "" {
-			return nil, fmt.Errorf("invalid GVK %q: version and kind must not be empty", entry)
-		}
-
-		gk := gvk.GroupKind()
-		if prior, dup := seenGroupKind[gk]; dup {
-			return nil, fmt.Errorf(
-				"duplicate (group, kind) in WATCHED_GVKS: %q and %q watch the same resource (identity is version-agnostic)",
-				prior, entry)
-		}
-		seenGroupKind[gk] = entry
-
-		gvks = append(gvks, gvk)
-	}
-	return gvks, nil
-}
-
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -295,16 +204,9 @@ func main() {
 	// visible in `ps`/process listings, which a Secret-projected env var
 	// avoids.
 	var clusterID string
-	var watchedGVKsRaw string
 	flag.StringVar(&clusterID, "cluster-id", getEnvOrDefault("CLUSTER_ID", "local-kind-cluster"),
 		"Identifier for this cluster, recorded on every row written to ClickHouse. "+
 			"Can also be set via the CLUSTER_ID env var.")
-	maxConcurrentReconciles := registerReconcilerConcurrencyFlag(flag.CommandLine)
-	flag.StringVar(&watchedGVKsRaw, "watched-gvks", getEnvOrDefault("WATCHED_GVKS", defaultWatchedGVKs),
-		"Comma-separated list of resource types to watch, each as \"version/kind\" or \"group/version/kind\" "+
-			"(e.g. \"v1/Pod,apps/v1/Deployment,networking.k8s.io/v1/Ingress\"). Adding a type outside the "+
-			"operator's default RBAC grant also requires extending config/rbac/role.yaml. Can also be set via "+
-			"the WATCHED_GVKS env var.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -438,30 +340,13 @@ func main() {
 		setupLog.Info("CH_PASSWORD is not set; connecting to ClickHouse without a password")
 	}
 
-	watchedGVKs, err := parseGVKList(watchedGVKsRaw)
-	if err != nil {
-		setupLog.Error(err, "Invalid --watched-gvks/WATCHED_GVKS configuration")
-		os.Exit(1)
-	}
-	if len(watchedGVKs) == 0 {
-		setupLog.Error(fmt.Errorf("--watched-gvks/WATCHED_GVKS resolved to an empty list"),
-			"The operator must watch at least one resource type")
-		os.Exit(1)
-	}
-
-	reconcilerConfig := controller.ReconcilerConfig{
-		ClusterID:               clusterID,
-		MaxConcurrentReconciles: *maxConcurrentReconciles,
-		WatchedGVKs:             watchedGVKs,
-	}
-
 	// The ClickHouse backend owns the shared connection and implements both the
-	// sink.Writer (batched inserts off the Reconcile hot path) and
+	// sink.Writer (batched inserts off the pipeline's hot path) and
 	// sink.StateReader (cache warm-up) contracts; RegisterWithManager wires its
 	// writer runnable, the connect-time schema-validation runnable, and the
-	// schema readyz check into the manager. The reconciler then depends only on
+	// schema readyz check into the manager. The data plane then depends only on
 	// the sink interfaces, never on ClickHouse directly.
-	chWriter, err := clickhouse.Open(chConfig, controller.PipelineMetricsInstance())
+	chWriter, err := clickhouse.Open(chConfig, pipeline.PipelineMetricsInstance())
 	if err != nil {
 		setupLog.Error(err, "Failed to open ClickHouse connection")
 		os.Exit(1)
@@ -471,13 +356,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.ResourceStreamReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr, chWriter, chWriter, reconcilerConfig); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "resourcestream")
-		os.Exit(1)
-	}
+	// The data plane is not wired yet. The per-GVK stream reconcilers were
+	// replaced by internal/pipeline, whose two dependencies —
+	// the WatchManager that answers pipeline.ListerRegistry (Task 1.4) and the
+	// SinkManager that answers pipeline.SinkRouter (Task 1.8) — do not exist
+	// yet, and neither does the CRD-driven configuration that tells them what to
+	// watch. Until Task 1.10 assembles them here, the operator starts healthy
+	// and streams nothing, which is exactly the Phase 1 end state for a cluster
+	// with no ClickHouseSink and no rules.
+	//
+	// clusterID is threaded into pipeline.Options at that point; it stays a flag
+	// because it labels every row this operator writes, independent of any CR.
+	setupLog.Info("Operator cluster identity", "cluster_id", clusterID)
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

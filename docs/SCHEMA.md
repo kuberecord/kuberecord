@@ -56,7 +56,8 @@ One row per observed state transition of a watched object.
 -- ReplacingMergeTree (not plain MergeTree): the operator's write path is
 -- at-least-once. A lost acknowledgement after a successful server-side insert
 -- makes the poison-isolation path re-insert a byte-identical row (same ts —
--- frozen once at reconcile time — plus identical sha256, uid, event_type, data,
+-- frozen once when the event was processed — plus identical sha256, uid,
+-- event_type, data,
 -- and diff). Such a re-insert collides on the full ORDER BY key, so
 -- ReplacingMergeTree collapses it to a single row on merge. A genuinely-distinct
 -- event never collides: ts is DateTime64(9) (nanosecond) and frozen per event,
@@ -82,8 +83,8 @@ acknowledgement lost (timeout or connection reset mid-response); or a partial
 insert. In the lost-ack and partial cases the call returns an error while the
 rows are already durable, so the writer's poison-isolation path re-inserts them.
 
-A re-inserted row is **byte-identical** to the original: `ts` is stamped once at
-reconcile time and frozen into the insert's positional args, so the re-insert
+A re-inserted row is **byte-identical** to the original: `ts` is stamped once
+when the event is processed and frozen into the insert's positional args, so the re-insert
 carries the same `ts`, `sha256`, `uid`, `event_type`, `data`, and `diff`. Every
 column of the `ORDER BY` tuple is therefore identical, and `resource_states`
 (`ReplacingMergeTree`) **collapses the duplicate to a single row on merge**. The

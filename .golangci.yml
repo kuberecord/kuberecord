@@ -27,16 +27,22 @@ linters:
   settings:
     depguard:
       rules:
-        # Task 0.5 acceptance criterion: internal/controller must depend on the
-        # generic sink contract (internal/sink), never on the ClickHouse driver
-        # directly. This rule fails the build if that dependency ever creeps
-        # back in — in source or test files under internal/controller.
-        controller-no-clickhouse:
+        # Task 0.5 acceptance criterion: the code that hands records to a sink
+        # must depend on the generic sink contract (internal/sink), never on the
+        # ClickHouse driver directly. Task 1.5 moved that code out of
+        # internal/controller (per-GVK reconcilers) and into internal/pipeline
+        # (workqueue + workers), so the guarantee is enforced on both paths: the
+        # pipeline today, and the control-plane reconcilers that Task 1.7 puts
+        # back under internal/controller — which per Invariant 1 must never dial
+        # ClickHouse at all. Source and test files alike.
+        data-plane-no-clickhouse:
           files:
+            - "**/internal/pipeline/**"
             - "**/internal/controller/**"
+            - "**/internal/watch/**"
           deny:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
-              desc: "internal/controller must depend on internal/sink, not the ClickHouse driver (Task 0.5)"
+              desc: "the data plane and control plane must depend on internal/sink, not the ClickHouse driver (Task 0.5)"
     custom:
       logcheck:
         type: "module"

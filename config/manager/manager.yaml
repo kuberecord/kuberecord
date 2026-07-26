@@ -83,8 +83,6 @@ spec:
               key: password
         - name: CLUSTER_ID
           value: "local-kind-cluster"
-        - name: RECONCILER_MAX_CONCURRENT
-          value: "5"
         ports:
         - containerPort: 8081
           name: health

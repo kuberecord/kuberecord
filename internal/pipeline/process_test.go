@@ -1,0 +1,412 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package pipeline
+
+import (
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+// The specs in this file are the re-hosted versions of the controller-era
+// Reconcile tests: same scenarios, same guarantees, driven through Process
+// instead. They call Process directly (rather than via the queue) wherever the
+// property under test is about the decision logic, so each assertion observes
+// exactly one settled work item.
+
+// TestProcessReincarnationClosesOutOldHistory covers the anti-zombie path: an
+// object that died and came back under a new UID while unobserved must produce a
+// Deleted row for the old incarnation *and* an Added for the new one — never a
+// Modified diffing one object's state against a different object's.
+func TestProcessReincarnationClosesOutOldHistory(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("reincarnated")
+	h.warm(key)
+
+	h.lister.set(key, newPod(key.Name, "uid-old", "1", "busybox:1"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(first incarnation): %v", err)
+	}
+
+	// Same name, different UID: the object was deleted and recreated while the
+	// pipeline wasn't looking.
+	h.lister.set(key, newPod(key.Name, "uid-new", "9", "busybox:2"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(reincarnation): %v", err)
+	}
+
+	records := h.writer.recorded()
+	if got, want := h.writer.eventTypes(), []string{"Added", "Deleted", "Added"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	if records[1].UID != "uid-old" {
+		t.Errorf("close-out row must carry the OLD uid, got %q", records[1].UID)
+	}
+	if records[2].UID != "uid-new" {
+		t.Errorf("post-reincarnation row must carry the NEW uid, got %q", records[2].UID)
+	}
+	// The new incarnation is a real, proven state transition — never downgraded
+	// to Snapshot and never a diff against the dead object's baseline.
+	if records[2].Diff != "" || records[2].Data == "" {
+		t.Errorf("reincarnation must be recorded as full state, got diff=%q data-empty=%v", records[2].Diff, records[2].Data == "")
+	}
+}
+
+// TestProcessReincarnationIsAddedEvenWhenScopeIsCold asserts the deliberate
+// exception to Snapshot-tagging: a reincarnation is unambiguous (we hold the old
+// UID and can see the new one), so it is recorded as Added even in a scope whose
+// history has never been warmed.
+func TestProcessReincarnationIsAddedEvenWhenScopeIsCold(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("cold-reincarnation")
+	// Deliberately NOT warmed.
+
+	h.lister.set(key, newPod(key.Name, "uid-old", "1", "busybox:1"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(first): %v", err)
+	}
+	h.lister.set(key, newPod(key.Name, "uid-new", "2", "busybox:2"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(reincarnation): %v", err)
+	}
+
+	if got, want := h.writer.eventTypes(), []string{"Snapshot", "Deleted", "Added"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v (the first miss is ambiguous, the reincarnation is not)", got, want)
+	}
+}
+
+// TestProcessFailedCloseOutIsRetriedOnNextEvent asserts the close-out retry
+// queue: unlike an ordinary write, a close-out has no cache entry left to gate
+// its retry (Reserve has already overwritten the key with the new incarnation),
+// so a failure must be remembered explicitly and re-attempted on the next event
+// for that name — otherwise the old incarnation's history vanishes silently.
+func TestProcessFailedCloseOutIsRetriedOnNextEvent(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("failed-closeout")
+	h.warm(key)
+
+	h.lister.set(key, newPod(key.Name, "uid-old", "1", "busybox:1"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(first): %v", err)
+	}
+
+	// The reincarnation's close-out write is abandoned after retries.
+	h.writer.failNextCommit()
+	h.lister.set(key, newPod(key.Name, "uid-new", "2", "busybox:2"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(reincarnation): %v", err)
+	}
+	if got, want := h.writer.eventTypes(), []string{"Added", "Deleted", "Added"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	if n := h.logs.countOf(errAsyncWriteFailed); n != 1 {
+		t.Errorf("failed close-out logged %d times, want 1", n)
+	}
+
+	// Any later event for this name re-attempts the pending close-out.
+	h.lister.set(key, newPod(key.Name, "uid-new", "3", "busybox:3"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(next event): %v", err)
+	}
+
+	records := h.writer.recorded()
+	if got, want := h.writer.eventTypes(), []string{"Added", "Deleted", "Added", "Deleted", "Modified"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v (the pending close-out must be retried before the new event)", got, want)
+	}
+	if records[3].UID != "uid-old" {
+		t.Errorf("retried close-out must still carry the old uid, got %q", records[3].UID)
+	}
+}
+
+// TestProcessDeleteClaimedOnlyOnce is the duplicate-delete guard: two work items
+// noticing the same disappearance (a redelivery, or the per-scope GC pass racing
+// the live path) must yield exactly one Deleted row, because both claim through
+// the same ReserveDelete primitive.
+func TestProcessDeleteClaimedOnlyOnce(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("claimed-once")
+	h.warm(key)
+
+	h.lister.set(key, newPod(key.Name, "uid-1", "1", "busybox:1"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(add): %v", err)
+	}
+
+	// A failing delete write leaves the claim released but the entry present —
+	// the state in which a duplicate could slip through if the claim were not
+	// re-checked.
+	h.lister.remove(key)
+	h.writer.failNextCommit()
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(delete): %v", err)
+	}
+	// Retry, then a third attempt that must find nothing left to claim.
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(delete retry): %v", err)
+	}
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(delete redelivery): %v", err)
+	}
+
+	if got, want := h.writer.eventTypes(), []string{"Added", "Deleted", "Deleted"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v — one failed delete, one successful retry, then nothing left to claim", got, want)
+	}
+
+	// After the successful delete committed, the entry is gone, so a further
+	// redelivery has nothing to claim and stays silent.
+	st, _ := h.pipeline.sinks.lookup(testSink)
+	if _, exists := st.cache.Load(key.cacheKey()); exists {
+		t.Error("cache entry survived a confirmed deletion")
+	}
+}
+
+// TestProcessDeleteOfUnknownObjectIsSilent asserts the ordinary case behind that
+// claim: a deletion event for an object the pipeline never recorded (e.g. it was
+// created and deleted before this sink ever saw it) writes nothing rather than a
+// Deleted row for an object with no history.
+func TestProcessDeleteOfUnknownObjectIsSilent(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("never-seen")
+	h.warm(key)
+
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if got := h.writer.recorded(); len(got) != 0 {
+		t.Fatalf("expected no records for an unknown object's deletion, got %+v", got)
+	}
+}
+
+// TestProcessEnqueueFailureRevertsOptimisticEntry covers the synchronous
+// hand-off failure: the job never entered the write pipeline, so no commit will
+// ever fire for it and Process must undo its own optimistic cache entry. The
+// proof is that the retry re-emits the same content instead of deduplicating it
+// away.
+func TestProcessEnqueueFailureRevertsOptimisticEntry(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("enqueue-failure")
+	h.warm(key)
+	h.lister.set(key, newPod(key.Name, "uid-1", "1", "busybox:1"))
+
+	queueFull := errors.New("write queue full")
+	h.writer.failNextEnqueue(queueFull)
+
+	err := h.pipeline.Process(h.ctx, key)
+	if !errors.Is(err, queueFull) {
+		t.Fatalf("Process error = %v, want the enqueue error so the item is retried", err)
+	}
+	st, _ := h.pipeline.sinks.lookup(testSink)
+	if _, exists := st.cache.Load(key.cacheKey()); exists {
+		t.Fatal("optimistic cache entry survived an enqueue failure; a lost write must never look persisted")
+	}
+
+	// The retry writes the full Added, proving nothing was deduplicated away.
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(retry): %v", err)
+	}
+	if got, want := h.writer.eventTypes(), []string{"Added"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+}
+
+// TestProcessEnqueueFailureOnDeleteReleasesClaim is the delete-path counterpart:
+// a failed hand-off must release the ReserveDelete claim, or the deletion would
+// be permanently unclaimable and the row lost forever.
+func TestProcessEnqueueFailureOnDeleteReleasesClaim(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("delete-enqueue-failure")
+	h.warm(key)
+	h.lister.set(key, newPod(key.Name, "uid-1", "1", "busybox:1"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(add): %v", err)
+	}
+
+	h.lister.remove(key)
+	queueFull := errors.New("write queue full")
+	h.writer.failNextEnqueue(queueFull)
+	if err := h.pipeline.Process(h.ctx, key); !errors.Is(err, queueFull) {
+		t.Fatalf("Process error = %v, want the enqueue error", err)
+	}
+
+	st, _ := h.pipeline.sinks.lookup(testSink)
+	entry, exists := st.cache.Load(key.cacheKey())
+	if !exists {
+		t.Fatal("the entry must survive a failed deletion write so the row can still be written later")
+	}
+	if entry.PendingDelete {
+		t.Fatal("claim was not released after a failed hand-off; the deletion could never be retried")
+	}
+
+	// The retry lands the row.
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(retry): %v", err)
+	}
+	if got, want := h.writer.eventTypes(), []string{"Added", "Deleted"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+}
+
+// TestProcessCorruptBaselineFallsBackToFullState ports the compressed-baseline
+// corruption specs: a baseline that cannot be decompressed must degrade to a
+// full-state write (Invariant 5) with the failure logged, never a dropped or
+// mis-recorded event. The unchanged-object case must not even touch the
+// baseline, since the dedup short-circuit compares hashes only.
+func TestProcessCorruptBaselineFallsBackToFullState(t *testing.T) {
+	t.Run("unchanged object short-circuits without decoding", func(t *testing.T) {
+		h := newHarness(t)
+		key := podKey("shortcircuit")
+		h.warm(key)
+		h.lister.set(key, newPod(key.Name, "uid-1", "1", "busybox:1"))
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+
+		st, _ := h.pipeline.sinks.lookup(testSink)
+		corruptBaseline(&st.cache, key.cacheKey())
+
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process(unchanged): %v", err)
+		}
+		if got, want := h.writer.eventTypes(), []string{"Added"}; !slices.Equal(got, want) {
+			t.Fatalf("event types = %v, want %v", got, want)
+		}
+		if errs := h.logs.loggedErrors(); len(errs) != 0 {
+			t.Errorf("the corrupt baseline was decoded on the dedup hot path: %v", errs)
+		}
+	})
+
+	t.Run("changed object writes full state and logs", func(t *testing.T) {
+		h := newHarness(t)
+		key := podKey("corrupt")
+		h.warm(key)
+		h.lister.set(key, newPod(key.Name, "uid-1", "1", "busybox:1"))
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+
+		st, _ := h.pipeline.sinks.lookup(testSink)
+		corruptBaseline(&st.cache, key.cacheKey())
+
+		h.lister.set(key, newPod(key.Name, "uid-1", "2", "busybox:2"))
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process(changed): %v", err)
+		}
+
+		records := h.writer.recorded()
+		if len(records) != 2 || records[1].EventType != "Modified" {
+			t.Fatalf("expected a Modified record, got %v", h.writer.eventTypes())
+		}
+		if records[1].Data == "" || records[1].Diff != "" {
+			t.Errorf("expected a full-state fallback, got data-empty=%v diff=%q", records[1].Data == "", records[1].Diff)
+		}
+		if errs := h.logs.loggedErrors(); len(errs) == 0 {
+			t.Error("the decode failure must be logged at Error level, never swallowed")
+		}
+	})
+}
+
+// corruptBaseline truncates the compressed diff baseline stored for key so a
+// later decodeBaseline fails, simulating an in-memory corruption. It leaves Hash
+// untouched so callers can independently control whether the dedup
+// short-circuit or the diff-decode path is exercised.
+func corruptBaseline(hc *hashCache, key string) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	entry := hc.data[key]
+	if len(entry.JSON) > 1 {
+		entry.JSON = entry.JSON[:len(entry.JSON)/2]
+	}
+	hc.data[key] = entry
+}
+
+// TestProcessDoesNotMutateTheListersObject is the watch-cache safety guard:
+// ListerRegistry may hand back the informer's own shared instance, so Process
+// must normalize a copy. Mutating the original would corrupt the cache for every
+// other reader — including this pipeline's own next diff.
+func TestProcessDoesNotMutateTheListersObject(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("shared-instance")
+	h.warm(key)
+
+	pod := newPod(key.Name, "uid-1", "7", "busybox:1")
+	meta := pod.Object["metadata"].(map[string]any)
+	meta["managedFields"] = []any{map[string]any{"manager": "kubectl", "operation": "Update"}}
+	meta["generation"] = int64(3)
+	meta["annotations"] = map[string]any{ActorsAnnotation: "argocd-controller"}
+	h.lister.set(key, pod)
+
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	for _, field := range []string{"managedFields", "resourceVersion", "generation", "annotations"} {
+		if _, found, _ := unstructured.NestedFieldNoCopy(pod.Object, "metadata", field); !found {
+			t.Errorf("Process stripped metadata.%s from the lister's own object", field)
+		}
+	}
+}
+
+// TestProcessRecordCarriesProvenance asserts the Record fields that come from the
+// object rather than from the key: labels, actors, resourceVersion and the
+// content hash all have to survive normalization even though most of what they
+// are read from is stripped before hashing.
+func TestProcessRecordCarriesProvenance(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("provenance")
+	h.warm(key)
+
+	pod := newPod(key.Name, "uid-1", "42", "busybox:1")
+	meta := pod.Object["metadata"].(map[string]any)
+	meta["labels"] = map[string]any{"app": "demo"}
+	meta["annotations"] = map[string]any{ActorsAnnotation: "argocd-controller,kubectl"}
+	h.lister.set(key, pod)
+
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	record := h.writer.awaitRecords(t, 1)[0]
+	if record.ClusterID != "test-cluster" {
+		t.Errorf("cluster_id = %q, want the pipeline's configured cluster", record.ClusterID)
+	}
+	if record.ResourceVersion != "42" {
+		t.Errorf("resource_version = %q, want 42", record.ResourceVersion)
+	}
+	if got := record.Labels["app"]; got != "demo" {
+		t.Errorf("labels[app] = %q, want demo", got)
+	}
+	if want := []string{"argocd-controller", "kubectl"}; !slices.Equal(record.Actors, want) {
+		t.Errorf("actors = %v, want %v (read from the transform's annotation)", record.Actors, want)
+	}
+	if record.SHA256 == "" || record.Data == "" {
+		t.Errorf("an Added row must carry both the hash and the full state, got sha256=%q data-empty=%v",
+			record.SHA256, record.Data == "")
+	}
+	// The operator-internal annotation is transport, not content: it must not
+	// appear in the persisted state.
+	if strings.Contains(record.Data, ActorsAnnotation) {
+		t.Errorf("the actors annotation leaked into the stored object state: %s", record.Data)
+	}
+	// resourceVersion is stripped before hashing (it changes on every write), so
+	// it must not appear in the stored state either.
+	if strings.Contains(record.Data, `"resourceVersion"`) {
+		t.Errorf("resourceVersion leaked into the stored object state: %s", record.Data)
+	}
+}
