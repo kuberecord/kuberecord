@@ -329,6 +329,58 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 	return out
 }
 
+// RulesForSink returns the keys of the rules currently contributing at least one
+// target that streams to sinkName, sorted and deduplicated.
+//
+// It is the registry's answer to "who depends on this sink?", which is what the
+// sink runtime needs when a sink goes away for good so the rules that streamed to
+// it can be parked with a condition naming the sink rather than left claiming
+// Ready (Task 1.8's sink.Dependents, consumed by Task 1.7's rule reconciler). The
+// registry is the right authority for it: it is the only component that knows the
+// current rule→sink fan-out, and answering from here needs no Kubernetes client on
+// the sink runtime's goroutines.
+//
+// A rule that is parked (and therefore contributes no targets) is deliberately not
+// reported: its own reconcile already wrote the condition explaining why it is
+// inert, and re-parking it would only overwrite a more specific verdict with a
+// less specific one.
+func (r *Registry) RulesForSink(sinkName string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rules := make(map[string]struct{})
+	for key, entry := range r.targets {
+		if key.Sink != sinkName {
+			continue
+		}
+		for ruleKey := range entry.rules {
+			rules[ruleKey] = struct{}{}
+		}
+	}
+	return slices.Sorted(maps.Keys(rules))
+}
+
+// TargetCountForRule returns how many distinct (sink, GVK, namespace) watch
+// targets ruleKey currently contributes.
+//
+// It counts TargetKeys rather than WatchTargets, because that is what
+// StreamRuleStatus.ActiveWatches promises to report: one rule naming the same Kind
+// in the same namespace under two label selectors contributes *one* scope to the
+// data plane, not two. Reading the count back out of the registry — rather than
+// letting a reconciler publish the length of the slice it just passed to Upsert —
+// is what makes the status field a statement about the desired state that is
+// actually installed.
+func (r *Registry) TargetCountForRule(ruleKey string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	keys := make(map[TargetKey]struct{}, len(r.rules[ruleKey]))
+	for t := range r.rules[ruleKey] {
+		keys[t.Key()] = struct{}{}
+	}
+	return len(keys)
+}
+
 // addRefLocked records one contribution of t by ruleKey. The caller must hold
 // the write lock.
 func (r *Registry) addRefLocked(ruleKey string, t WatchTarget) {
