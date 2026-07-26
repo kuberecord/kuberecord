@@ -563,3 +563,135 @@ func isAllowedImport(path string) bool {
 	}
 	return path == "k8s.io/apimachinery" || strings.HasPrefix(path, "k8s.io/apimachinery/")
 }
+
+// TestRulesForSink covers the accessor the sink runtime uses to name a vanished
+// sink's dependents, including the two properties that make the answer usable: it
+// unions across a rule's several targets, and it reports nothing for a rule that
+// currently contributes nothing (that rule's own reconcile already wrote a more
+// specific condition than "your sink is gone").
+func TestRulesForSink(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Registry)
+		sink  string
+		want  []string
+	}{
+		{
+			name:  "an unknown sink has no dependents",
+			setup: func(*Registry) {},
+			sink:  sinkDefault,
+			want:  nil,
+		},
+		{
+			name: "one rule, several targets, reported once",
+			setup: func(reg *Registry) {
+				mustUpsert(t, reg, ruleA, []WatchTarget{
+					target(sinkDefault, gvkPod, nsProd, selEverything),
+					target(sinkDefault, gvkDeployment, nsProd, selEverything),
+					target(sinkDefault, gvkPod, nsStaging, selEverything),
+				})
+			},
+			sink: sinkDefault,
+			want: []string{ruleA},
+		},
+		{
+			name: "several rules on one sink are sorted",
+			setup: func(reg *Registry) {
+				mustUpsert(t, reg, ruleB, []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)})
+				mustUpsert(t, reg, ruleA, []WatchTarget{target(sinkDefault, gvkPod, nsStaging, selEverything)})
+			},
+			sink: sinkDefault,
+			want: []string{ruleA, ruleB},
+		},
+		{
+			name: "only the named sink's dependents are reported",
+			setup: func(reg *Registry) {
+				mustUpsert(t, reg, ruleA, []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)})
+				mustUpsert(t, reg, ruleB, []WatchTarget{target(sinkAudit, gvkPod, nsProd, selEverything)})
+			},
+			sink: sinkAudit,
+			want: []string{ruleB},
+		},
+		{
+			name: "a rule that contributes nothing is not a dependent",
+			setup: func(reg *Registry) {
+				mustUpsert(t, reg, ruleA, []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)})
+				mustUpsert(t, reg, ruleA, nil)
+			},
+			sink: sinkDefault,
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := New()
+			tc.setup(reg)
+			if got := reg.RulesForSink(tc.sink); !slices.Equal(got, tc.want) {
+				t.Errorf("RulesForSink(%q) = %v, want %v", tc.sink, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTargetCountForRule covers the accessor status.activeWatches is read from. The
+// load-bearing case is the last one: two selectors on one (sink, GVK, namespace)
+// contribute one *scope* to the data plane, so counting WatchTargets instead of
+// TargetKeys would make a rule claim twice the watches it has.
+func TestTargetCountForRule(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets []WatchTarget
+		want    int
+	}{
+		{
+			name: "no targets",
+			want: 0,
+		},
+		{
+			name:    "one target",
+			targets: []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)},
+			want:    1,
+		},
+		{
+			name: "distinct namespaces count separately",
+			targets: []WatchTarget{
+				target(sinkDefault, gvkPod, nsProd, selEverything),
+				target(sinkDefault, gvkPod, nsStaging, selEverything),
+			},
+			want: 2,
+		},
+		{
+			name: "distinct sinks count separately",
+			targets: []WatchTarget{
+				target(sinkDefault, gvkPod, nsProd, selEverything),
+				target(sinkAudit, gvkPod, nsProd, selEverything),
+			},
+			want: 2,
+		},
+		{
+			name: "two selectors on one scope are one watch",
+			targets: []WatchTarget{
+				target(sinkDefault, gvkPod, nsProd, selAppWeb),
+				target(sinkDefault, gvkPod, nsProd, selAppAPI),
+			},
+			want: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := New()
+			mustUpsert(t, reg, ruleA, tc.targets)
+			if got := reg.TargetCountForRule(ruleA); got != tc.want {
+				t.Errorf("TargetCountForRule(%q) = %d, want %d", ruleA, got, tc.want)
+			}
+			// A rule the registry never knew is zero, not a panic: a reconciler
+			// reads the count on every pass, including the one where its Upsert
+			// was refused.
+			if got := reg.TargetCountForRule(ruleC); got != 0 {
+				t.Errorf("TargetCountForRule(unknown) = %d, want 0", got)
+			}
+		})
+	}
+}

@@ -12,9 +12,11 @@ The watched set is never a compiled-in list: it is declarative runtime configura
 
 ### Status
 
-The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry, replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The scope-epoch recorder, multi-sink runtime, and control-plane reconcilers that translate those CRDs into registry entries are the remaining Phase 1 work; until they land, nothing writes to the registry, so the operator starts healthy, serves metrics and probes, and streams nothing.
+The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry, replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The scope-epoch recorder, the multi-sink runtime, and now the control-plane reconcilers that translate the CRDs into registry entries and sink configurations (`internal/controller`) all exist.
 
-One consequence worth calling out for anyone deploying from this tree: the operator's base `ClusterRole` (`config/rbac/role.yaml`) is now **empty**. It was generated from the deleted reconcilers' `+kubebuilder:rbac` markers, and standing read access to Pods, Services and Deployments would outlive the code that used it. Leader election and metrics authz are unaffected; the base role and the aggregated `kubestream-watcher` role are rebuilt later in Phase 1.
+What is left in Phase 1 is the wiring: `cmd/main.go` still opens a single ClickHouse connection from `CH_*` environment variables and constructs none of the reconcilers, so applying a rule still has no runtime effect and the `CH_*` configuration below is still what the binary reads. Assembling the registry, the watch manager, the sink runtime and the reconcilers in `main` — and deleting the `CH_*` flags — is the remaining task, along with the aggregated `kubestream-watcher` ClusterRole that grants the watch rights rules ask for.
+
+The base `ClusterRole` (`config/rbac/role.yaml`) is generated from the control-plane reconcilers' `+kubebuilder:rbac` markers and now grants what they actually need: read access to the three kubestream CRDs and their status subresources, `namespaces` get/list/watch (for `ClusterStreamRule`'s namespace selector), `selfsubjectaccessreviews` create (for the per-target RBAC checks), and event creation. Standing read access to Pods, Services and Deployments is gone for good — the deleted per-GVK reconcilers carried it, and rules now request watch rights explicitly. Secret reads are a **namespaced** `Role` rather than part of the ClusterRole, which is what makes `credentialsSecretRef.namespace`'s default a real boundary; its `RoleBinding` and the aggregated `kubestream-watcher` role arrive with the RBAC task.
 
 ## Use Cases
 
@@ -104,7 +106,7 @@ crash-loop).
 
 Three CRDs express the two-tier model: a **sink** says *where* state goes, a **rule** says *what* to stream there. They are validated entirely by CRD structural schemas and CEL (`x-kubernetes-validations`) — kubestream registers no admission webhooks and needs no cert-manager.
 
-> **Status:** the types, CRDs and samples ship now; the reconcilers and the dynamic watch pool that consume them land later in Phase 1. Until then, applying a rule has no runtime effect — see [Status](#status).
+> **Status:** the types, CRDs, samples, and the reconcilers that consume them all ship now, but nothing constructs the reconcilers yet — `cmd/main.go` is wired last in Phase 1. Until then, applying a rule has no runtime effect — see [Status](#status).
 
 | Kind | Scope | Purpose |
 |---|---|---|
@@ -132,11 +134,40 @@ spec:
 
 - `kind` must be the Kind (`Deployment`), not the plural resource (`deployments`); `version` must look like `v1` / `v2beta1`; `group` must be empty (core) or a DNS-1123 subdomain. `resources` must be non-empty.
 - `spec.sinkRef` defaults to `default` and is **immutable**. Moving a rule to another sink is delete + recreate: re-pointing a live rule would strand the dedup/diff baseline the pipeline built for every object in scope, so records would either re-emit as duplicates or be written as diffs against a baseline the new sink never received. Recreating re-warms the cache from the new sink's own history instead.
-- `spec.connection.credentialsSecretRef.namespace` defaults to the **operator's own namespace**, and that default is a security boundary rather than a convenience: the operator's ClusterRole grants Secret reads only there, so a cluster-scoped sink cannot be used to make it read a Secret its RBAC never intended to expose.
+- `spec.connection.credentialsSecretRef.namespace` defaults to the **operator's own namespace**, and that default is a security boundary rather than a convenience: the operator's Secret read grant is a namespaced `Role` in that namespace only, so a cluster-scoped sink cannot be used to make it read a Secret its RBAC never intended to expose. The Secret must carry the password under the key `password`; one that exists without a non-empty `password` reports `CredentialsResolved=False/SecretKeyMissing` rather than silently authenticating as nobody.
 - `spec.policy.allowedGVKs` restricts what a sink accepts; `kinds: ["*"]` means every kind in the group and the list rejects duplicates server-side. Omitting `allowedGVKs` allows everything **except** the hard deny-list — `v1/Secret` is never watchable in `v1alpha1`, and no policy can re-enable it.
 - Writer knobs are bounded: `workers` in `[1, 64]`, `batchMaxRows` in `[1, 100000]`. Omitted fields default to the same values as the `--writer-*` flags below.
 
 `kubectl get` renders `READY`, `SINK`, `WATCHES`, `AGE` for both rule kinds, and `READY`, `ADDR`, `AGE` for sinks. `ADDR` shows the full `host:port`: CRD printer columns are plain JSONPath with no string functions, so the host cannot be split out declaratively.
+
+### Status conditions
+
+Every CR reports why it is or is not working through `metav1.Condition`s carrying `observedGeneration`, so `kubectl describe` is the primary debugging surface — a rule that cannot run degrades **only itself**, and the process never exits over one bad rule. `Ready` is a roll-up: it is non-`True` whenever any specific condition below is, and it carries that condition's own reason forward. Every *transition* of `Ready` also emits an event (`Warning` on a degrade, `Normal` on recovery) — transitions only, so a permanently degraded rule does not flood the namespace's event log on every resync.
+
+**`ClickHouseSink`**
+
+| Condition | Why it is not `True` |
+|---|---|
+| `CredentialsResolved` | `SecretNotFound` (missing, or outside the namespace the operator may read) or `SecretKeyMissing` (present, but no non-empty `password`). A sink that cannot authenticate is never handed to the sink runtime at all. |
+| `SchemaValid` | `SchemaInvalid` — the backend answered and its columns are not the ones this build writes, so it needs a migration. `Unreachable` and `ProbePending` are reported as **`Unknown`**: a host that did not answer has told us nothing about its schema. |
+| `Ready` | Rolls the two up. `Unreachable` rolls up to `False` (the sink certainly cannot be written to) while `ProbePending` stays `Unknown`. |
+
+All three come from probes the sink runtime runs on **its own** goroutines; no reconciler ever dials ClickHouse (Invariant 1), so an unreachable sink costs a condition and nothing else.
+
+**`StreamRule` / `ClusterStreamRule`**
+
+| Condition | Why it is not `True` |
+|---|---|
+| `PolicyAllowed` | `SecretsDenied` (the rule names `v1/Secret`, denied in code — no sink policy can admit it) or `NotInAllowList` (outside a non-empty `spec.policy.allowedGVKs`). A refused rule contributes **nothing** to the watch plan: the refusal is enforced, not merely reported. |
+| `ResourceResolved` | `KindsUnresolved`, with a per-kind message: a kind whose CRD is not installed **yet** (self-heals, no restart), or a cluster-scoped kind named by a namespaced `StreamRule` (permanent until the rule is edited — use a `ClusterStreamRule`). |
+| `RBACGranted` | `MissingPermissions`, naming the resource, which of `get`/`list`/`watch` are missing, and the scope. The operator can never self-escalate: an administrator adds the grant and the rule activates on its own within one resync (~2m), no restart. `AccessReviewFailed` is `Unknown` — the review itself did not complete, which is not a verdict about the rule. |
+| `Ready` | Rolls the three up, and additionally reports `SinkMissing` (its `sinkRef` names no sink — targets are withdrawn) or `SinkNotReady` (the sink exists but is unhealthy — targets are **kept**, see below). |
+
+Failures are per-target wherever they can be: a rule naming five kinds, one of which is not installed, streams the other four and says so in `ResourceResolved`. Only the sink-level and policy-level verdicts are all-or-nothing, because they are statements about the rule as a whole. `status.activeWatches` is read back out of the desired-state registry, so it counts the `(sink, kind, namespace)` scopes the rule actually contributes — a rule can be `Ready` with `activeWatches: 0` when its `namespaceSelector` currently matches no namespace.
+
+A degraded rule normally withdraws its watch targets; **`SinkNotReady` deliberately does not**. An unreachable database is the failure the pipeline's requeue path exists to absorb, and tearing down every watch over a probe blip would evict every dedup baseline the sink serves (forcing a full re-emission on recovery) and write a pair of false scope epochs per scope — which the sink could not even accept, being the thing that is down. The rule reports `Ready=False/SinkNotReady` and keeps streaming into the retrying pipeline.
+
+Neither CRD uses **finalizers**. There is nothing outside the process to clean up (the registry is in-memory state that dies with it), a rule deleted while the operator was down is reconciled by the level-triggered boot pass, and a finalizer would add a failure mode worth more than it buys: a rule stuck `Terminating` because the operator that must release it is not running.
 
 ## Configuration
 
