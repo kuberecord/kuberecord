@@ -125,8 +125,8 @@ type Config struct {
 
 // Metrics is the narrow slice of pipeline metrics CHWriter records. It is an
 // interface (rather than a concrete dependency on the pipeline metrics struct)
-// so this package never imports internal/controller: the caller injects an
-// implementation — see internal/controller.PipelineMetrics.
+// so this package never imports internal/pipeline: the caller injects an
+// implementation — see internal/pipeline.PipelineMetrics.
 type Metrics interface {
 	// SetWriteQueueDepth publishes the current hand-off queue depth.
 	SetWriteQueueDepth(n float64)

@@ -12,16 +12,16 @@ hash-comparison-only and never decompresses.
 
 ### Baseline measurement
 
-`BenchmarkHashCacheMemory` (in `internal/controller`) compresses a corpus of
+`BenchmarkHashCacheMemory` (in `internal/pipeline`) compresses a corpus of
 realistic normalized Pod / Deployment / Service objects
-(`internal/controller/testdata/`) and reports the aggregate reduction in
+(`internal/pipeline/testdata/`) and reports the aggregate reduction in
 `CacheEntry` payload bytes. `TestCacheEntryCompressionReducesMemory` asserts
 the reduction stays at or above the 60% target.
 
 Reproduce:
 
 ```sh
-go test ./internal/controller/ -run '^$' -bench BenchmarkHashCacheMemory -benchmem
+go test ./internal/pipeline/ -run '^$' -bench BenchmarkHashCacheMemory -benchmem
 ```
 
 Recorded result (corpus of 3 objects, `SpeedDefault`):
@@ -44,7 +44,7 @@ already clears the 60% bar without exploiting any cross-object redundancy.
 unchanged-hash path decompresses nothing and does not regress allocations.
 
 ```sh
-go test ./internal/controller/ -run '^$' -bench BenchmarkHashCacheShortCircuit -benchmem
+go test ./internal/pipeline/ -run '^$' -bench BenchmarkHashCacheShortCircuit -benchmem
 ```
 
 ### Failure behavior
@@ -52,22 +52,25 @@ go test ./internal/controller/ -run '^$' -bench BenchmarkHashCacheShortCircuit -
 - **Compression failure** (encoder unavailable): the raw bytes are stored with
   the `encodingRaw` marker and the anomaly is logged at `Error` level
   (Invariant 5). Diffing still works — it just costs more memory.
-- **Decompression failure on diff** (corrupt/truncated entry): the reconciler
+- **Decompression failure on diff** (corrupt/truncated entry): the pipeline
   logs at `Error` level and falls back to a **full-state write**, identical to
   the missing-baseline path. The event is never dropped or mis-recorded.
 
 ## Load harness + write-path baseline (Task 0.8)
 
 `test/loadgen` is a synthetic-churn harness that drives realistic object churn
-through the **real** pipeline — an in-process envtest apiserver →
-`ResourceStreamReconciler` → `CHWriter` → a dockerized ClickHouse — and reports
-the figures Phase 0's throughput claims rest on. It watches `v1/ConfigMap`
+through the **real** pipeline — an in-process envtest apiserver → an informer →
+the `internal/pipeline` workqueue → `CHWriter` → a dockerized ClickHouse — and
+reports the figures Phase 0's throughput claims rest on. It supplies its own
+minimal `ListerRegistry`/`SinkRouter` (one informer, one sink, everything in
+scope) because the production implementations arrive with the watch manager and
+sink manager later in Phase 1. It watches `v1/ConfigMap`
 (a built-in kind whose arbitrary string `Data` lets the harness dial payload
 size precisely) and reports, to stdout:
 
 - **sustained records/sec** — settled writes over the churn window;
 - **p50 / p99 enqueue-block** — how long `Enqueue` blocked for queue room (the
-  hot-path backpressure a reconcile actually feels);
+  hot-path backpressure a pipeline worker actually feels);
 - **peak `write_queue_depth`** — how close the hand-off queue came to saturation;
 - **process RSS** — peak resident set (`getrusage`, unit-normalized per OS).
 

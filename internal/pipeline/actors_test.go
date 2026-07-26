@@ -14,11 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package pipeline
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -27,7 +25,7 @@ import (
 
 // managedField builds a single managedFields entry with the given manager name,
 // mirroring the shape the API server produces (only the manager key matters to
-// extractActors, but the surrounding keys keep the fixtures realistic).
+// ExtractActors, but the surrounding keys keep the fixtures realistic).
 func managedField(manager string) map[string]any {
 	return map[string]any{
 		"manager":    manager,
@@ -143,19 +141,19 @@ func TestExtractActors(t *testing.T) {
 				meta["managedFields"] = tt.managedFields
 			}
 
-			got := extractActors(obj)
+			got := ExtractActors(obj)
 			if got == nil {
-				t.Fatalf("extractActors returned nil, want non-nil slice")
+				t.Fatalf("ExtractActors returned nil, want non-nil slice")
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("extractActors() = %v, want %v", got, tt.want)
+				t.Errorf("ExtractActors() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestExtractActorsDoesNotMutate proves extractActors only reads the object:
-// managedFields must still be present afterwards, so Reconcile — which relies
+// TestExtractActorsDoesNotMutate proves ExtractActors only reads the object:
+// managedFields must still be present afterwards, so the caller — which relies
 // on stripping it itself, immediately after — sees an unperturbed object.
 func TestExtractActorsDoesNotMutate(t *testing.T) {
 	obj := &unstructured.Unstructured{Object: map[string]any{
@@ -169,26 +167,23 @@ func TestExtractActorsDoesNotMutate(t *testing.T) {
 		},
 	}}
 
-	_ = extractActors(obj)
+	_ = ExtractActors(obj)
 
 	if _, found, _ := unstructured.NestedSlice(obj.Object, "metadata", "managedFields"); !found {
-		t.Fatalf("extractActors removed managedFields; it must only read the object")
+		t.Fatalf("ExtractActors removed managedFields; it must only read the object")
 	}
 }
 
-// normalizedHash reproduces Reconcile's normalization + hashing so the
-// regression test below asserts on exactly the bytes Reconcile would hash.
+// normalizedHash runs the production normalization + hashing, so the regression
+// tests below assert on exactly the bytes the pipeline hashes rather than on a
+// test-local re-implementation that could drift away from it.
 func normalizedHash(t *testing.T, obj *unstructured.Unstructured) string {
 	t.Helper()
-	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "resourceVersion")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
-	objJSON, err := json.Marshal(obj.Object)
+	norm, err := normalizeObject(obj)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("normalizeObject: %v", err)
 	}
-	sum := sha256.Sum256(objJSON)
-	return string(sum[:])
+	return norm.Hash
 }
 
 // TestManagedFieldsDoNotPerturbHash is the regression guard for the core
@@ -219,9 +214,9 @@ func TestManagedFieldsDoNotPerturbHash(t *testing.T) {
 		"spec": map[string]any{"nodeName": "node-1"},
 	}}
 
-	// Extraction runs first on the managedFields variant, exactly as Reconcile
+	// Extraction runs first on the managedFields variant, exactly as the pipeline
 	// orders it — proving the extraction step itself introduces no perturbation.
-	if actors := extractActors(withManagedFields); len(actors) != 2 {
+	if actors := ExtractActors(withManagedFields); len(actors) != 2 {
 		t.Fatalf("expected 2 actors from fixture, got %v", actors)
 	}
 
@@ -230,4 +225,106 @@ func TestManagedFieldsDoNotPerturbHash(t *testing.T) {
 	if hashWith != hashWithout {
 		t.Errorf("hash differs with vs. without managedFields: extraction perturbed normalization")
 	}
+}
+
+// TestActorsAnnotationDoesNotPerturbHash is the Task 1.5 regression guard for the
+// informer transform's side effect: because the transform stashes actors in an
+// annotation on the *cached copy*, an object's hash would otherwise change the
+// moment a transform started running — turning a cosmetic pipeline change into a
+// cluster-wide flood of spurious Modified rows. The annotation must therefore be
+// read into the record and stripped before hashing, and the annotations map
+// itself removed when that leaves it empty.
+func TestActorsAnnotationDoesNotPerturbHash(t *testing.T) {
+	tests := []struct {
+		name string
+		// annotated is the object as the informer transform leaves it; bare is the
+		// same object as it would look with no transform in the picture.
+		annotated, bare map[string]any
+	}{
+		{
+			name:      "annotation is the only annotation",
+			annotated: map[string]any{ActorsAnnotation: "argocd-controller"},
+			bare:      nil,
+		},
+		{
+			name:      "annotation alongside a user annotation",
+			annotated: map[string]any{ActorsAnnotation: "argocd-controller", "team": "platform"},
+			bare:      map[string]any{"team": "platform"},
+		},
+		{
+			name:      "multiple actors",
+			annotated: map[string]any{ActorsAnnotation: "argocd-controller,kube-controller-manager"},
+			bare:      nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			annotated := newHashFixture(tt.annotated)
+			bare := newHashFixture(tt.bare)
+
+			if got, want := normalizedHash(t, annotated), normalizedHash(t, bare); got != want {
+				t.Errorf("hash differs with vs. without the actors annotation:\n with: %s\n without: %s", got, want)
+			}
+		})
+	}
+}
+
+// TestNormalizeReadsActorsFromAnnotationOrManagedFields asserts both sources of
+// the actors column: the transform's annotation is authoritative when present,
+// and managedFields is the fallback for an object that reached the pipeline
+// untransformed (so the column is never silently empty).
+func TestNormalizeReadsActorsFromAnnotationOrManagedFields(t *testing.T) {
+	fromAnnotation := newHashFixture(map[string]any{ActorsAnnotation: "argocd-controller,kubectl"})
+	norm, err := normalizeObject(fromAnnotation)
+	if err != nil {
+		t.Fatalf("normalizeObject: %v", err)
+	}
+	if want := []string{"argocd-controller", "kubectl"}; !reflect.DeepEqual(norm.Actors, want) {
+		t.Errorf("actors from annotation = %v, want %v", norm.Actors, want)
+	}
+
+	fromManagedFields := newHashFixture(nil)
+	meta := fromManagedFields.Object["metadata"].(map[string]any)
+	meta["managedFields"] = []any{managedField("kube-controller-manager"), managedField("kubectl")}
+	norm, err = normalizeObject(fromManagedFields)
+	if err != nil {
+		t.Fatalf("normalizeObject: %v", err)
+	}
+	if want := []string{"kube-controller-manager", "kubectl"}; !reflect.DeepEqual(norm.Actors, want) {
+		t.Errorf("actors from managedFields fallback = %v, want %v", norm.Actors, want)
+	}
+
+	// The annotation wins when both are present: it is what the transform
+	// harvested *before* managedFields was dropped, so it is at least as complete.
+	both := newHashFixture(map[string]any{ActorsAnnotation: "argocd-controller"})
+	meta = both.Object["metadata"].(map[string]any)
+	meta["managedFields"] = []any{managedField("kubectl")}
+	norm, err = normalizeObject(both)
+	if err != nil {
+		t.Fatalf("normalizeObject: %v", err)
+	}
+	if want := []string{"argocd-controller"}; !reflect.DeepEqual(norm.Actors, want) {
+		t.Errorf("actors = %v, want the annotation's value %v", norm.Actors, want)
+	}
+}
+
+// newHashFixture builds an otherwise-identical Pod carrying the given
+// annotations (nil for none), so two fixtures differ in exactly one dimension.
+func newHashFixture(annotations map[string]any) *unstructured.Unstructured {
+	meta := map[string]any{
+		"name":            "example",
+		"namespace":       "default",
+		"uid":             "uid-1",
+		"resourceVersion": "7",
+	}
+	if annotations != nil {
+		meta["annotations"] = annotations
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata":   meta,
+		"spec":       map[string]any{"nodeName": "node-1"},
+	}}
 }

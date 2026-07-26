@@ -30,7 +30,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kubestream/internal/controller"
+	"github.com/yelzhy/kubestream/internal/pipeline"
 	"github.com/yelzhy/kubestream/internal/sink"
 )
 
@@ -210,7 +210,7 @@ func TestBatchFlushBoundsSendCalls(t *testing.T) {
 	conn := &fakeConn{} // healthy: nil hooks
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	// Large batchMaxWait so only row-count and drain drive flushes, never the timer.
 	w := NewCHWriter(conn, jobs, workers, batchMaxRows, 5*time.Millisecond, time.Second, time.Second, 30*time.Second, time.Second, m)
 
@@ -259,7 +259,7 @@ func TestPoisonRowIsolation(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	// One worker so all ten jobs land in one batch; tiny retry cap so the batch
 	// exhausts quickly; large batchMaxWait so row-count (not the timer) flushes.
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, 5*time.Millisecond, 20*time.Millisecond, time.Second, 30*time.Second, time.Second, m)
@@ -305,7 +305,7 @@ func TestLoneJobFlushesOnWait(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	// batchMaxRows well above 1 so only the wait timer can flush the lone job.
 	w := NewCHWriter(conn, 100, 1, 100, 5*time.Millisecond, time.Second, time.Second, batchMaxWait, time.Second, m)
 
@@ -344,7 +344,7 @@ func TestShutdownFlushesPartialBatch(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	// One worker, batchMaxRows=10, large batchMaxWait: the 5 jobs never reach a
 	// row-count or timer flush, so only the drain can flush them.
 	w := NewCHWriter(conn, 100, 1, 10, 5*time.Millisecond, time.Second, time.Second, 30*time.Second, time.Second, m)
@@ -389,7 +389,7 @@ func TestConcurrentEnqueueStorm(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	w := NewCHWriter(conn, jobs, 4, 10, 5*time.Millisecond, time.Second, time.Second, 20*time.Millisecond, time.Second, m)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -437,7 +437,7 @@ func TestCancelMidBatchCommitsOnce(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, time.Second, time.Second, time.Second, 30*time.Second, time.Second, m)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,7 +477,7 @@ func TestCancelMidBatchCommitsOnce(t *testing.T) {
 // writes_total{outcome="failed"}.
 func TestWritesTotalFailedIncrements(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 
 	// Tiny per-attempt timeout and retry cap so the job exhausts retries and
 	// settles quickly; small batchMaxWait so the lone job flushes on the timer.
@@ -583,7 +583,7 @@ func TestIsolationPhaseBoundedOnHungBackend(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	// One worker so all rows land in one batch; tiny retry cap so the batch phase
 	// exhausts fast and the isolation phase dominates; large batchMaxWait so only
 	// the row-count flush fires.
@@ -653,7 +653,7 @@ func TestIsolationPhaseDoesNotTruncateSlowBackend(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := controller.NewPipelineMetrics(reg)
+	m := pipeline.NewPipelineMetrics(reg)
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, insertTimeout, 20*time.Millisecond, time.Second, 30*time.Second, time.Second, m)
 	w.maxIsolationPhase = maxIsolationPhase
 

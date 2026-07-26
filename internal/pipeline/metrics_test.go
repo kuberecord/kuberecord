@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package pipeline
 
 import (
 	"testing"
@@ -31,11 +31,11 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPipelineMetrics(reg)
 
-	// The kind-labelled gauges only materialize a series once a label value is
-	// used; touch one apiece so they appear in Gather like the others. The
-	// writes_total series are already seeded by the constructor.
-	m.hashcacheEntries.WithLabelValues("Pod")
-	m.safeMode.WithLabelValues("Pod")
+	// The labelled gauges only materialize a series once a label value is used;
+	// touch one apiece so they appear in Gather like the others. The writes_total
+	// and pipeline_dropped_total series are already seeded by the constructor.
+	m.hashcacheEntries.WithLabelValues("default")
+	m.safeMode.WithLabelValues("default", "apps", "Deployment", "demo")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -58,7 +58,7 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 		"kubestream_dedup_skips_total":          dto.MetricType_COUNTER,
 		"kubestream_hashcache_entries":          dto.MetricType_GAUGE,
 		"kubestream_safe_mode":                  dto.MetricType_GAUGE,
-		"kubestream_requeue_drops_total":        dto.MetricType_COUNTER,
+		"kubestream_pipeline_dropped_total":     dto.MetricType_COUNTER,
 	}
 
 	for name, wantType := range want {
@@ -70,5 +70,13 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 		if gotType != wantType {
 			t.Errorf("metric %q has type %s, want %s", name, gotType, wantType)
 		}
+	}
+
+	// The requeue-channel gauge died with the channel it described: the workqueue
+	// owns retries now, so a "dropped requeue trigger" is not a state the operator
+	// can be in. Asserting its absence keeps a stale dashboard panel from being
+	// mistaken for a live signal.
+	if _, stale := got["kubestream_requeue_drops_total"]; stale {
+		t.Error("kubestream_requeue_drops_total is still registered; the requeue channel it measured no longer exists")
 	}
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package pipeline
 
 import (
 	"sync"
@@ -30,10 +30,10 @@ const metricsNamespace = "kubestream"
 
 // PipelineMetrics is the full set of Prometheus collectors describing the
 // write pipeline's health: queue saturation, write outcomes and latency,
-// retry storms, dedup short-circuits, cache size, per-kind Snapshot (safe)
-// mode, and dropped requeue triggers. Before this, all of those were only
-// visible in logs; every later performance task (0.6, 0.8, 2.3) needs them to
-// prove it actually helped.
+// retry storms, dedup short-circuits, cache size, per-scope Snapshot (safe)
+// mode, and dropped work items. Before this, all of those were only visible in
+// logs; every later performance task (0.6, 0.8, 2.3) needs them to prove it
+// actually helped.
 //
 // It is exported because the ClickHouse writer (internal/sink/clickhouse)
 // records the write-path metrics through the narrow clickhouse.Metrics
@@ -77,22 +77,36 @@ type PipelineMetrics struct {
 	enqueueBlock    prometheus.Histogram
 	enqueueTimeouts prometheus.Counter
 
-	// dedupSkips counts Reconciles that short-circuited because the object's
+	// dedupSkips counts Process calls that short-circuited because the object's
 	// hash was unchanged — the proportion of work the hashCache saves.
 	dedupSkips prometheus.Counter
 
-	// hashcacheEntries reports the live entry count per kind, the in-memory
-	// baseline footprint that Task 0.7 later works to shrink.
+	// hashcacheEntries reports the live entry count per sink, the in-memory
+	// baseline footprint that Task 0.7 works to shrink. It is labelled by sink
+	// rather than by kind because there is exactly one hashCache per sink,
+	// spanning every kind that sink receives (the version-agnostic identity key
+	// makes a single map correct and a per-kind breakdown unavailable without a
+	// second index the hot path would have to maintain).
 	hashcacheEntries *prometheus.GaugeVec
-	// safeMode is 1 while a kind's cache is still warming from ClickHouse
-	// history (cache-misses tagged Snapshot, not Added) and 0 once warm.
+	// safeMode is 1 while a (sink, scope) pair's cache is still warming from
+	// sink history (cache-misses tagged Snapshot, not Added) and 0 once warm.
+	// Warm-up is per-scope now: a rule created hours after boot warms only its
+	// own scope, so readiness cannot be a single per-kind flag.
 	safeMode *prometheus.GaugeVec
 
-	// requeueDrops counts re-reconcile triggers dropped because the requeue
-	// channel was full — a dropped trigger only delays a retry (the cache was
-	// already reverted), but a nonzero rate means the channel is undersized.
-	requeueDrops prometheus.Counter
+	// dropped counts work items the pipeline deliberately discarded, by reason.
+	// A drop is not an error — the only reason today is scope_stopped, i.e. the
+	// item's watch target was deactivated while the item sat in the queue, so
+	// there is nothing meaningful left to record for it (and emitting a Deleted
+	// row would be an outright lie; see the scope-epoch design). It is a counter
+	// rather than a log-only event because a persistently nonzero rate means
+	// rules are churning faster than the pipeline drains.
+	dropped *prometheus.CounterVec
 }
+
+// DropReasonScopeStopped labels a work item discarded because its watch scope
+// was no longer active by the time a worker picked the item up.
+const DropReasonScopeStopped = "scope_stopped"
 
 // NewPipelineMetrics constructs every collector and registers it on reg.
 // Registration uses MustRegister, so passing a registry that already holds
@@ -149,23 +163,24 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		dedupSkips: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "dedup_skips_total",
-			Help:      "Count of Reconciles short-circuited because the object's hash was unchanged.",
+			Help:      "Count of pipeline work items short-circuited because the object's hash was unchanged.",
 		}),
 		hashcacheEntries: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "hashcache_entries",
-			Help:      "Current number of live hashCache entries, by kind.",
-		}, []string{"kind"}),
+			Help:      "Current number of live hashCache entries, by sink.",
+		}, []string{"sink"}),
 		safeMode: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "safe_mode",
-			Help:      "1 while a kind's cache is still warming (Snapshot mode), 0 once warm.",
-		}, []string{"kind"}),
-		requeueDrops: prometheus.NewCounter(prometheus.CounterOpts{
+			Help:      "1 while a (sink, scope) pair's cache is still warming (Snapshot mode), 0 once warm.",
+		}, []string{"sink", "group", "kind", "namespace"}),
+		dropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
-			Name:      "requeue_drops_total",
-			Help:      "Count of re-reconcile triggers dropped because the requeue channel was full.",
-		}),
+			Subsystem: "pipeline",
+			Name:      "dropped_total",
+			Help:      "Count of pipeline work items deliberately discarded, by reason.",
+		}, []string{"reason"}),
 	}
 
 	// Materialize both outcome series at 0 up front: the label set is a fixed
@@ -173,6 +188,9 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 	// rate() queries well-defined before the first write ever settles.
 	m.writesTotal.WithLabelValues("success")
 	m.writesTotal.WithLabelValues("failed")
+	// Same reasoning for the drop reasons: the set is a fixed enum, so the
+	// series exists (at 0) before the first drop ever happens.
+	m.dropped.WithLabelValues(DropReasonScopeStopped)
 
 	reg.MustRegister(
 		m.writeQueueDepth,
@@ -186,7 +204,7 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		m.dedupSkips,
 		m.hashcacheEntries,
 		m.safeMode,
-		m.requeueDrops,
+		m.dropped,
 	)
 	return m
 }
@@ -199,7 +217,7 @@ var (
 // PipelineMetricsInstance returns the process-wide PipelineMetrics, registered
 // exactly once on controller-runtime's global registry so the existing
 // --metrics-bind-address server exposes them. The sync.Once guard makes
-// repeated calls (e.g. the ClickHouse writer plus several reconcilers all
+// repeated calls (e.g. the ClickHouse writer plus the pipeline itself both
 // fetching it) safe and non-duplicating.
 func PipelineMetricsInstance() *PipelineMetrics {
 	pipelineMetricsOnce.Do(func() {

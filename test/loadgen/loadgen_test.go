@@ -19,10 +19,17 @@ limitations under the License.
 // Package loadgen is kubestream's synthetic-churn load harness (Task 0.8). It
 // drives realistic object churn (create N objects, then sustain M updates/sec
 // with a configurable payload size and delete ratio) through the *real*
-// pipeline — envtest apiserver -> ResourceStreamReconciler -> CHWriter -> a
-// dockerized ClickHouse — and reports the four figures Phase 0's throughput
-// claims rest on: sustained records/sec, p50/p99 enqueue-block, peak
+// pipeline — envtest apiserver -> informer -> internal/pipeline workqueue ->
+// CHWriter -> a dockerized ClickHouse — and reports the four figures Phase 0's
+// throughput claims rest on: sustained records/sec, p50/p99 enqueue-block, peak
 // write_queue_depth, and process RSS.
+//
+// The harness supplies its own minimal ListerRegistry and SinkRouter (see
+// harnessLister / harnessRouter) because the production implementations arrive
+// with the WatchManager (Task 1.4) and SinkManager (Task 1.8). They are
+// deliberately trivial — one informer, one sink, everything in scope — since the
+// figures this harness reports are about the *write* path, not about watch
+// lifecycle management.
 //
 // It is guarded by the `integration` build tag and run via `make bench-load`,
 // which stands up the ClickHouse container and points CH_TEST_ADDR at it,
@@ -45,9 +52,12 @@ import (
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -55,9 +65,53 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kubestream/internal/controller"
+	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kubestream/internal/sink"
 	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
 )
+
+// churnGVK is the resource the harness churns. ConfigMaps are the vehicle: a
+// built-in kind present in envtest whose arbitrary string Data lets the harness
+// dial payload size precisely.
+var churnGVK = schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+// loadgenSink is the single sink name every work item routes to.
+const loadgenSink = "loadgen"
+
+// harnessLister is a minimal pipeline.ListerRegistry over the manager's cache.
+// Every scope is active for the whole run (the harness never stops watching), so
+// the interesting half of the interface is the object lookup, which reads from
+// the informer cache exactly as the production WatchManager does — no apiserver
+// round-trip on the hot path.
+type harnessLister struct {
+	reader client.Reader
+}
+
+func (l harnessLister) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, bool, error) {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(churnGVK)
+	err := l.reader.Get(context.Background(), client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, obj)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, true, nil
+		}
+		return nil, false, true, err
+	}
+	return obj, true, true, nil
+}
+
+// harnessRouter is a pipeline.SinkRouter over the one CHWriter this harness
+// opens.
+type harnessRouter struct {
+	writer sink.Writer
+}
+
+func (r harnessRouter) WriterFor(name string) (sink.Writer, bool) {
+	if name != loadgenSink {
+		return nil, false
+	}
+	return r.writer, true
+}
 
 // Harness parameters are flags on the harness itself (Task 0.8 AC). The
 // defaults describe the small profile `make bench-load` runs; a larger profile
@@ -171,6 +225,8 @@ func TestLoadGenChurn(t *testing.T) {
 
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
+	const namespace = "default"
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -205,9 +261,7 @@ func TestLoadGenChurn(t *testing.T) {
 	// ClickHouse starts fresh; the dockerized default target is discarded anyway.
 	defer cleanupClickHouse(chCfg)
 
-	// --- manager + real reconciler over v1/ConfigMap ---
-	// ConfigMaps are the churn vehicle: a built-in kind present in envtest whose
-	// arbitrary string Data lets the harness dial payload size precisely.
+	// --- manager + real pipeline over v1/ConfigMap ---
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme.Scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
@@ -219,15 +273,50 @@ func TestLoadGenChurn(t *testing.T) {
 	if err := chWriter.RegisterWithManager(mgr); err != nil {
 		t.Fatalf("register ClickHouse writer: %v", err)
 	}
-	if err := (&controller.ResourceStreamReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr, chWriter, chWriter, controller.ReconcilerConfig{
-		ClusterID:               "loadgen",
-		MaxConcurrentReconciles: 8,
-		WatchedGVKs:             []schema.GroupVersionKind{{Version: "v1", Kind: "ConfigMap"}},
+	pipe, err := pipeline.New(pipeline.Options{
+		ClusterID: loadgenSink,
+		Workers:   pipeline.DefaultWorkers,
+		Lister:    harnessLister{reader: mgr.GetCache()},
+		Router:    harnessRouter{writer: chWriter},
+	})
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	// The scope is warm from the start: this harness measures throughput, and
+	// leaving it cold would tag every create as Snapshot instead of Added. That
+	// is a labelling difference only — the write path does identical work — but
+	// the reported figures should describe the steady state, not a boot state.
+	pipe.MarkScopeWarm(loadgenSink, pipeline.ScopeKey{Kind: churnGVK.Kind, Namespace: namespace})
+	if err := mgr.Add(pipe); err != nil {
+		t.Fatalf("add pipeline to manager: %v", err)
+	}
+
+	// Feed the pipeline from a raw informer on the manager's cache. This is the
+	// harness's stand-in for the WatchManager's handlers (Task 1.4): same
+	// event-to-key translation, without the dynamic lifecycle machinery.
+	informer, err := mgr.GetCache().GetInformer(ctx, &corev1.ConfigMap{})
+	if err != nil {
+		t.Fatalf("get ConfigMap informer: %v", err)
+	}
+	enqueue := func(obj any) {
+		key, keyErr := toolscache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+		if keyErr != nil {
+			t.Logf("derive key: %v", keyErr)
+			return
+		}
+		ns, name, splitErr := toolscache.SplitMetaNamespaceKey(key)
+		if splitErr != nil {
+			t.Logf("split key %q: %v", key, splitErr)
+			return
+		}
+		pipe.Add(pipeline.Key{Sink: loadgenSink, Kind: churnGVK.Kind, Namespace: ns, Name: name})
+	}
+	if _, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    enqueue,
+		UpdateFunc: func(_, obj any) { enqueue(obj) },
+		DeleteFunc: enqueue,
 	}); err != nil {
-		t.Fatalf("set up reconciler: %v", err)
+		t.Fatalf("add event handler: %v", err)
 	}
 
 	mgrDone := make(chan error, 1)
@@ -243,7 +332,6 @@ func TestLoadGenChurn(t *testing.T) {
 		t.Fatalf("create write client: %v", err)
 	}
 
-	const namespace = "default"
 	t.Logf("load profile: objects=%d rate=%d/s payload=%dB duration=%s delete-ratio=%.2f concurrency=%d",
 		*flagObjects, *flagRate, *flagPayload, *flagDuration, *flagDeleteRatio, *flagConcurrency)
 
