@@ -393,7 +393,7 @@ func TestWatchManagerStopsStaleTargets(t *testing.T) {
 	if len(stops) != 1 {
 		t.Fatalf("recorded %d scope stops, want 1: %+v", len(stops), stops)
 	}
-	if stops[0].scope != wantScope || !slices.Equal(stops[0].ruleKeys, []string{"rule-a"}) {
+	if stops[0].Scope != wantScope || !slices.Equal(stops[0].RuleKeys, []string{"rule-a"}) {
 		t.Errorf("recorded stop = %+v, want scope %+v attributed to rule-a", stops[0], wantScope)
 	}
 }
@@ -408,7 +408,7 @@ func TestWatchManagerReportsScopeTransitions(t *testing.T) {
 
 	h.upsert(t, "rule-1", podTarget("sink-a", namespace, ""))
 	starts := transitionsWithAction(h.recorder.recorded(), "Started")
-	if len(starts) != 1 || starts[0].scope != scope || starts[0].sink != "sink-a" {
+	if len(starts) != 1 || starts[0].Scope != scope || starts[0].Sink != "sink-a" {
 		t.Fatalf("recorded starts = %+v, want exactly one for sink-a %+v", starts, scope)
 	}
 
@@ -574,8 +574,8 @@ func keysNamed(keys []pipeline.Key, name string) []pipeline.Key {
 }
 
 // transitionsWithAction filters recorded scope transitions by action.
-func transitionsWithAction(transitions []scopeTransition, action string) []scopeTransition {
-	var out []scopeTransition
+func transitionsWithAction(transitions []recordedTransition, action string) []recordedTransition {
+	var out []recordedTransition
 	for _, transition := range transitions {
 		if transition.action == action {
 			out = append(out, transition)

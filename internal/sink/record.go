@@ -18,8 +18,8 @@ limitations under the License.
 // backend implements. The pipeline (reconcilers, cache warm-up) depends only on
 // these interfaces and value types, never on a concrete driver, so a future
 // backend (Postgres, Elasticsearch, Kafka) is a new implementation of Writer /
-// StateReader rather than a change to the hot path. ClickHouse is the only
-// implementation today (see internal/sink/clickhouse).
+// ScopeEventWriter / StateReader rather than a change to the hot path.
+// ClickHouse is the only implementation today (see internal/sink/clickhouse).
 package sink
 
 import "time"

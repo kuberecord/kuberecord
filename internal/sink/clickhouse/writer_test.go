@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,10 +76,26 @@ type fakeConn struct {
 	// and the appended rows. execErr does the same for a single-row Exec.
 	sendErr func(ctx context.Context, rows [][]any) error
 	execErr func(ctx context.Context, args []any) error
+
+	// queryMu guards batchQueries, which records the statement each PrepareBatch
+	// was called with. The scope-event tests use it to prove their rows target
+	// watch_scopes rather than the record path's resource_states.
+	queryMu      sync.Mutex
+	batchQueries []string
 }
 
-func (c *fakeConn) PrepareBatch(ctx context.Context, _ string, _ ...driver.PrepareBatchOption) (driver.Batch, error) {
+func (c *fakeConn) PrepareBatch(ctx context.Context, query string, _ ...driver.PrepareBatchOption) (driver.Batch, error) {
+	c.queryMu.Lock()
+	c.batchQueries = append(c.batchQueries, query)
+	c.queryMu.Unlock()
 	return &fakeBatch{conn: c, ctx: ctx}, nil
+}
+
+// preparedQueries returns the statements PrepareBatch has been called with.
+func (c *fakeConn) preparedQueries() []string {
+	c.queryMu.Lock()
+	defer c.queryMu.Unlock()
+	return slices.Clone(c.batchQueries)
 }
 
 func (c *fakeConn) Exec(ctx context.Context, _ string, args ...any) error {

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -169,6 +170,21 @@ func newScopeInterest(key plan.TargetKey, informer informerKey, selectors, ruleK
 // id returns this interest's identity in the table.
 func (i *scopeInterest) id() interestID {
 	return interestID{informer: i.informer, sink: i.sink}
+}
+
+// transition renders this interest as the scope edge the recorder consumes,
+// stamped with the reconcile pass's instant.
+func (i *scopeInterest) transition(at time.Time) ScopeTransition {
+	return ScopeTransition{
+		Sink:  i.sink,
+		Scope: i.scope,
+		// The informer identity is what makes two same-scope interests
+		// distinguishable; it already renders uniquely per (GVR, namespace).
+		Target:     i.informer.String(),
+		APIVersion: i.gvk.Version,
+		RuleKeys:   i.ruleKeys,
+		At:         at,
+	}
 }
 
 // identity returns the index key this interest answers pipeline lookups under.
@@ -353,6 +369,25 @@ func (t *interestTable) lookupIdentity(ref pipeline.Key) []*scopeInterest {
 		return interests
 	}
 	return append(slices.Clone(interests), t.byIdentity[clusterWide]...)
+}
+
+// interestsForScope returns the interests installed for exactly one (sink, scope)
+// triple.
+//
+// Unlike lookupIdentity there is no cluster-wide fallback, and that is the whole
+// point: this answers questions *about a scope* (is it desired, have its informers
+// synced) rather than about an object, and a scope pinned to one namespace is a
+// different scope — with its own epoch — from the cluster-wide scope over the same
+// kind. The slice usually holds one interest; it holds more when two rules name
+// two versions of the same resource, which is two informers but one
+// version-agnostic scope (Invariant 7).
+//
+// The returned slice is the table's own backing array and must not be mutated.
+func (t *interestTable) interestsForScope(sinkName string, scope pipeline.ScopeKey) []*scopeInterest {
+	key := identityKey{Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace, Sink: sinkName}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.byIdentity[key]
 }
 
 // size reports how many interests are installed. It exists for tests and for the

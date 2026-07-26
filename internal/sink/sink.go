@@ -16,7 +16,10 @@ limitations under the License.
 
 package sink
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Job is a single record submitted to a Writer, together with the callback that
 // settles its outcome.
@@ -68,11 +71,25 @@ type Writer interface {
 	Enqueue(ctx context.Context, job Job) error
 }
 
-// ScopeFilter narrows a StateReader query to a single watch scope. Namespace is
-// optional: an empty Namespace matches every namespace (a GVK-wide scope),
-// while a non-empty Namespace restricts the result to that namespace. ClusterID
-// is explicit here because the sink is a multi-cluster store even though a
-// single operator process only ever serves one cluster (Invariant 7).
+// ScopeFilter names a single watch scope. ClusterID is explicit here because the
+// sink is a multi-cluster store even though a single operator process only ever
+// serves one cluster (Invariant 7).
+//
+// Namespace carries two readings, and every consumer documents which one it
+// uses:
+//
+//   - As a *record query* (LastKnownStates), an empty Namespace matches every
+//     namespace: the caller wants the objects a GVK-wide scope covers, which
+//     live under concrete namespaces.
+//   - As a *scope identity* (ScopeEvent.Scope, ScopeWasActive, ActiveScopes), an
+//     empty Namespace is the all-namespaces scope itself and is matched exactly.
+//     A cluster-wide rule and a rule pinned to one namespace are two different
+//     scopes with two independent epochs, so a wildcard reading here would let
+//     one scope's history answer for another's.
+//
+// The two readings coexist on one type because the caller always knows which
+// question it is asking, and splitting them would mean converting between two
+// structurally identical structs at every call site.
 type ScopeFilter struct {
 	ClusterID string
 	APIGroup  string
@@ -96,16 +113,56 @@ type KnownState struct {
 // warm its dedup cache from durable history rather than re-emitting every live
 // object as a duplicate.
 //
+// It also answers the two scope-epoch questions the warm/GC coordinator asks of
+// history rather than of an object: was this scope watched in a previous epoch,
+// and which scopes did a previous process leave open?
+//
 // StateReader is optional for future sinks: a Writer that cannot read its own
-// history back can omit it. Such a Writer-only sink runs with cache warm-up and
-// zombie garbage-collection disabled and tags every record as a permanent
-// Snapshot (it can never prove an object is genuinely new versus merely
-// un-warmed). This is a design note only — no code path exercises a Writer-only
-// sink yet.
+// history back can omit it. Such a Writer-only sink runs with cache warm-up,
+// zombie garbage-collection *and* boot reconciliation of scope epochs disabled,
+// and tags every record as a permanent Snapshot (it can never prove an object is
+// genuinely new versus merely un-warmed). This is a design note only — no code
+// path exercises a Writer-only sink yet.
 type StateReader interface {
 	// LastKnownStates returns the last-known state of every object matching
 	// filter whose most recent event is not a deletion. A transient backend
 	// error is returned as-is so the caller can retry; a partial read must be
 	// reported as an error, never as a short-but-successful result.
+	//
+	// filter.Namespace has the *record query* reading: empty matches every
+	// namespace (see ScopeFilter).
 	LastKnownStates(ctx context.Context, filter ScopeFilter) ([]KnownState, error)
+
+	// ScopeWasActive reports whether filter's most recent recorded scope action
+	// strictly before asOf is Started — i.e. whether a *previous* epoch of this
+	// scope was left open.
+	//
+	// It is the guard that keeps zombie GC honest. An object present in
+	// LastKnownStates but absent from the live watch cache is only a genuine
+	// deletion if this scope was already being watched before the current epoch
+	// began: then the object disappeared while the operator was down, and one
+	// Deleted row is the truth. If the scope's last action was Stopped, the trail
+	// already says "we stopped watching here" and the objects' last-known states
+	// are correctly dated to that Stopped row — re-dating their disappearance to
+	// now would be a lie. If the scope has no history at all, those states came
+	// from some other scope's epoch and are simply pre-history.
+	//
+	// asOf is what makes the answer race-free: the caller passes the instant its
+	// own epoch began, so the current epoch's own Started row (which may land at
+	// any moment, since scope events are written asynchronously) can never be
+	// mistaken for a previous one. A zero asOf means "as of now".
+	//
+	// filter.Namespace has the *scope identity* reading: it is matched exactly,
+	// including the empty (all-namespaces) scope.
+	ScopeWasActive(ctx context.Context, filter ScopeFilter, asOf time.Time) (bool, error)
+
+	// ActiveScopes returns every scope in clusterID whose most recent recorded
+	// action is Started — the scopes some process left open.
+	//
+	// Boot reconciliation needs the enumeration, not a per-scope probe: a rule
+	// deleted while the operator was down leaves an open scope that nothing in
+	// the desired state mentions any more, so there is no list of candidates to
+	// probe. Each returned filter carries the scope-identity reading of
+	// Namespace and is directly usable as a ScopeEvent.Scope.
+	ActiveScopes(ctx context.Context, clusterID string) ([]ScopeFilter, error)
 }
