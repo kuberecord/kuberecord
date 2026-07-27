@@ -270,8 +270,11 @@ func TestLoadGenChurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
 	}
-	if err := chWriter.RegisterWithManager(mgr); err != nil {
-		t.Fatalf("register ClickHouse writer: %v", err)
+	// The writer is a plain manager.Runnable: its Start applies the shipped DDL
+	// (AutoCreateSchema above) before draining, exactly as a sink instance built
+	// by the SinkManager does in production.
+	if err := mgr.Add(chWriter); err != nil {
+		t.Fatalf("add the ClickHouse writer to the manager: %v", err)
 	}
 	pipe, err := pipeline.New(pipeline.Options{
 		ClusterID: loadgenSink,

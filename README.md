@@ -12,9 +12,11 @@ The watched set is never a compiled-in list: it is declarative runtime configura
 
 ### Status
 
-The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry, replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The scope-epoch recorder, the multi-sink runtime, and now the control-plane reconcilers that translate the CRDs into registry entries and sink configurations (`internal/controller`) all exist.
+The two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`) is wired end to end. The data plane is a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry; the control plane is three reconcilers (`internal/controller`) that translate the CRDs into registry entries and sink configurations; and `cmd/main.go` assembles both.
 
-What is left in Phase 1 is the wiring: `cmd/main.go` still opens a single ClickHouse connection from `CH_*` environment variables and constructs none of the reconcilers, so applying a rule still has no runtime effect and the `CH_*` configuration below is still what the binary reads. Assembling the registry, the watch manager, the sink runtime and the reconcilers in `main` — and deleting the `CH_*` flags — is the remaining task. The RBAC model the rules run under is already in place (see [RBAC](#rbac) below).
+**This is a breaking change with no compatibility shim (D5).** The environment-variable GVK list and the `CH_*` connection variables that configured the old global controller are gone: where ClickHouse lives, how it authenticates and how its write path is sized now belong to a `ClickHouseSink` CR and the Secret it references. The operator boots healthy and completely idle with zero custom resources, and starts streaming when a sink and a rule appear — no restart. See [Getting Started](#getting-started) and [`CHANGELOG.md`](CHANGELOG.md).
+
+What remains in Phase 1 is the end-to-end e2e suite (Task 1.11). The RBAC model the rules run under is already in place (see [RBAC](#rbac) below).
 
 RBAC has already moved to the aggregated-ClusterRole model: the base role holds only what the control plane calls, watch rights arrive as labelled presets an administrator applies at runtime, and Secret reads are namespace-scoped. See [RBAC](#rbac) and [`docs/RBAC.md`](docs/RBAC.md).
 
@@ -37,7 +39,7 @@ RBAC has already moved to the aggregated-ClusterRole model: the base role holds 
 - **Robust zombie-resource garbage collection** — on startup, a background pass compares ClickHouse's last-known state per object against the live (cache-backed) cluster and emits a `Deleted` row for anything that vanished (or was recreated under a new UID) while the operator was down.
 - **Crash/restart resilient, non-blocking startup** — cache warm-up and GC run as a `manager.Runnable` in the background; `mgr.Start()` is never gated on ClickHouse being reachable. While the cache is still warming, cache-miss events are tagged `Snapshot` instead of `Added`, so a slow ClickHouse at boot degrades gracefully instead of re-emitting the whole cluster as a flood of duplicate `Added` rows.
 - **Self-healing on write failure** — a terminally-failed async write reverts its optimistic cache entry and re-queues the object's key on the workqueue's rate limiter, rather than silently vanishing until an unrelated future change happens to touch the same object.
-- **No hardcoded configuration** — ClickHouse address/credentials/timeouts and the cluster identifier are sourced from flags/environment variables; `CH_PASSWORD` is environment-only (never a flag) so it never shows up in a process listing. The set of watched resource types is moving to the `kubestream.io/v1alpha1` CRDs (see [Status](#status)).
+- **No hardcoded configuration, and none on the process either** — where state goes (address, credentials, timeouts, write-path sizing) is a `ClickHouseSink` CR plus a Secret, and what is streamed there is a `StreamRule` / `ClusterStreamRule`. The password is never a flag and never an operator environment variable: the operator reads it from a Secret in its own namespace, so it cannot show up in a process listing. The only operator-level settings left are the ones that describe *this instance* — its cluster identifier, its namespace, and fleet-wide fallbacks for anything a sink leaves unset (see [Configuration](#configuration)).
 
 ## Architecture Overview
 
@@ -96,11 +98,12 @@ in-repo and documented column-by-column:
 - **Reference:** [`docs/SCHEMA.md`](docs/SCHEMA.md) — column semantics, the `event_type` state machine, the RFC 6902 diff format, the version-agnostic identity rule, and a suggested (optional) `TTL` clause.
 
 Apply the two `.sql` files yourself, or start the operator with
-`--ch-auto-create-schema=true` to have it execute the shipped DDL idempotently
-at connect time. Either way, on connect the operator introspects
-`system.columns` and validates the live tables against schema v1; a mismatch is
-logged and degrades the `clickhouse-schema` readiness probe (it does not
-crash-loop).
+`--ch-auto-create-schema=true` to have every sink instance execute the shipped
+DDL idempotently before its first write. Either way, each sink's health probe
+introspects `system.columns` and validates the live tables against schema v1; a
+mismatch is reported as `SchemaValid=False` on that `ClickHouseSink` (it does
+not crash-loop, and it does not take the process — or any other sink — out of
+service).
 
 ### RBAC
 
@@ -207,24 +210,22 @@ Neither CRD uses **finalizers**. There is nothing outside the process to clean u
 
 ## Configuration
 
-Every setting is available as both a CLI flag and an environment variable (flag wins if both are set), except `CH_PASSWORD`, which is environment-only.
+**Where ClickHouse lives is not configured here.** It is a `ClickHouseSink` CR plus a Secret (see [Custom Resources](#custom-resources-kubestreamiov1alpha1)); the connection environment variables the pre-Phase-1 operator read no longer exist, and [`CHANGELOG.md`](CHANGELOG.md) maps each of them onto its replacement field. What is left below describes *this operator instance*.
+
+Every setting is available as both a CLI flag and an environment variable (flag wins if both are set).
 
 | Flag | Env Var | Default | Description |
 |---|---|---|---|
-| `--ch-addr` | `CH_ADDR` | `127.0.0.1:9000` | ClickHouse server address (`host:port`, native protocol). |
-| `--ch-database` | `CH_DATABASE` | `kubestream` | ClickHouse database name. |
-| `--ch-username` | `CH_USERNAME` | `default` | ClickHouse username. |
-| — | `CH_PASSWORD` | *(empty)* | ClickHouse password. Env-only by design — flag values are visible in `ps`; connects passwordless if unset (logged as a warning). |
-| `--ch-dial-timeout` | `CH_DIAL_TIMEOUT` | `5s` | Timeout for establishing the ClickHouse connection. |
-| `--ch-read-timeout` | `CH_READ_TIMEOUT` | `10s` | Timeout for a single ClickHouse query/insert round-trip; also governs the async writer's per-attempt insert timeout. |
-| `--ch-auto-create-schema` | `CH_AUTO_CREATE_SCHEMA` | `false` | Execute the shipped DDL (`deploy/clickhouse/schema`) idempotently at connect time. Off by default — the operator never mutates ClickHouse DDL unless asked. |
-| `--cluster-id` | `CLUSTER_ID` | `local-kind-cluster` | Identifier for this cluster, recorded on every row. |
-| `--writer-queue-size` | `WRITER_QUEUE_SIZE` | `5000` | Capacity (jobs) of the async write hand-off queue. |
-| `--writer-workers` | `WRITER_WORKERS` | `4` | Number of workers draining the write queue into ClickHouse. |
-| `--writer-batch-max-rows` | `WRITER_BATCH_MAX_ROWS` | `1000` | Row count at which a worker flushes its accumulated insert batch. |
-| `--writer-batch-max-wait` | `WRITER_BATCH_MAX_WAIT` | `1s` | Max time a batch's first job waits for the batch to fill before flushing regardless. |
-| `--writer-enqueue-timeout` | `WRITER_ENQUEUE_TIMEOUT` | `2s` | How long `Enqueue` waits for queue room before returning an error (the job is never dropped silently). |
-| `--writer-drain-timeout` | `WRITER_DRAIN_TIMEOUT` | `15s` | Time budget for draining queued writes to ClickHouse during graceful shutdown. |
+| `--cluster-id` | `CLUSTER_ID` | `local-kind-cluster` | Identifier for this cluster, stamped on every row and scope event this operator writes. |
+| `--operator-namespace` | `POD_NAMESPACE` | *(none — required)* | The namespace a sink's `credentialsSecretRef` defaults to, and the only namespace the operator reads Secrets in. The shipped Deployment sets it from the downward API. Startup fails if it is unset: guessing it would move a security boundary. |
+| `--pipeline-workers` | `PIPELINE_WORKERS` | `8` | Goroutines draining the shared data-plane workqueue. Safe to raise at any value — per-key serialization comes from the workqueue contract, not the worker count. |
+| `--ch-auto-create-schema` | `CH_AUTO_CREATE_SCHEMA` | `false` | Make every sink instance execute the shipped DDL (`deploy/clickhouse/schema`) idempotently before its first write. Off by default — the operator never mutates ClickHouse DDL unless asked. Operator-level rather than per-sink on purpose: "may this operator run DDL?" is a deployment-time decision, not one the author of a sink CR grants themselves. |
+| `--writer-queue-size` | `WRITER_QUEUE_SIZE` | `5000` | Fallback for `spec.writer.queueSize`: capacity (jobs) of a sink's async write hand-off queue. |
+| `--writer-workers` | `WRITER_WORKERS` | `4` | Fallback for `spec.writer.workers`: workers draining a sink's write queue into ClickHouse. |
+| `--writer-batch-max-rows` | `WRITER_BATCH_MAX_ROWS` | `1000` | Fallback for `spec.writer.batchMaxRows`: row count at which a worker flushes its accumulated insert batch. |
+| `--writer-batch-max-wait` | `WRITER_BATCH_MAX_WAIT` | `1s` | Fallback for `spec.writer.batchMaxWait`: max time a batch's first job waits for the batch to fill before flushing regardless. |
+| `--writer-enqueue-timeout` | `WRITER_ENQUEUE_TIMEOUT` | `2s` | Fallback for `spec.writer.enqueueTimeout`: how long `Enqueue` waits for queue room before returning an error (the job is never dropped silently). |
+| `--writer-drain-timeout` | `WRITER_DRAIN_TIMEOUT` | `15s` | Fallback for `spec.writer.drainTimeout`: budget for draining a sink's queued writes during graceful shutdown. |
 | `--metrics-bind-address` | — | `0` (disabled) | Metrics endpoint bind address; `:8443` for HTTPS, `:8080` for HTTP. |
 | `--metrics-secure` | — | `true` | Serve the metrics endpoint over HTTPS. |
 | `--health-probe-bind-address` | — | `:8081` | Health/readiness probe bind address. |
@@ -233,7 +234,9 @@ Every setting is available as both a CLI flag and an environment variable (flag 
 | `--metrics-cert-path` / `--metrics-cert-name` / `--metrics-cert-key` | — | *(empty)* / `tls.crt` / `tls.key` | Metrics server TLS certificate. |
 | `--enable-http2` | — | `false` | Enable HTTP/2 on the metrics/webhook servers (disabled by default due to known CVEs). |
 
-`CHWriter`'s queue size, worker count, batching knobs, enqueue timeout, and shutdown drain timeout are configurable via the `--writer-*` flags above (D2: operators must be able to size the write path per environment). The per-attempt retry backoff cap (60s) remains an internal default. Use `make bench-load` to measure the effect of a given tuning against a dockerized ClickHouse (see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)).
+The six `--writer-*` flags are **fallbacks**, applied per field: a `ClickHouseSink` that states `spec.writer.workers` uses its own value, one that omits it uses the flag (D2: operators must be able to size the write path per environment, and a fleet-wide default should not have to be repeated on every sink). The per-attempt retry backoff cap (60s) remains an internal default. Use `make bench-load` to measure the effect of a given tuning against a dockerized ClickHouse (see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)).
+
+Both probes are plain pings. A cluster with no sinks is a valid, healthy state, and a sink that is unreachable is reported as a condition on its own CR — not as process unreadiness, which would take the pod out of service and stop every *other* sink with it.
 
 Standard `controller-runtime`/Zap logging flags (`--zap-devel`, `--zap-encoder`, `--zap-log-level`, `--zap-stacktrace-level`, `--zap-time-encoding`) are also available; run the binary with `--help` for the full, exact list.
 
@@ -271,36 +274,113 @@ is deleted, so an absent backend does not linger as a live-but-idle one.
 - Go v1.25+ (see `go.mod`)
 - Docker (or another `CONTAINER_TOOL`) for building the operator image
 - `kubectl`, and access to a Kubernetes cluster
-- A reachable ClickHouse instance, with the schema v1 tables created — either apply [`deploy/clickhouse/schema/*.sql`](deploy/clickhouse/schema/) yourself or start the operator with `--ch-auto-create-schema=true` (see [ClickHouse schema](#clickhouse-schema))
+- A reachable ClickHouse instance, with the schema v1 tables created — either apply [`deploy/clickhouse/schema/*.sql`](deploy/clickhouse/schema/) yourself or run the operator with `--ch-auto-create-schema=true` (see [ClickHouse schema](#clickhouse-schema))
 
-`make deploy` installs the [`kubestream.io/v1alpha1` CRDs](#custom-resources-kubestreamiov1alpha1) alongside the operator; `make install` installs the CRDs alone. Which resource types are actually watched is governed by those CRDs once the Phase 1 reconcilers land — see [Status](#status).
+The operator is configured entirely through custom resources: it boots healthy and idle with none of them, and starts streaming the moment a sink and a rule appear. The five steps below are that sequence.
 
-### Deploying to a cluster
+### 1. Install the CRDs and the operator
 
-1. **Build and push the operator image:**
+```sh
+make docker-build docker-push IMG=<some-registry>/kubestream:tag
+make deploy IMG=<some-registry>/kubestream:tag       # CRDs + operator
+```
 
-   ```sh
-   make docker-build docker-push IMG=<some-registry>/kubestream:tag
-   ```
+`make install` installs the [CRDs](#custom-resources-kubestreamiov1alpha1) alone, which is enough to run the operator locally with `make run`. Set `CLUSTER_ID` on the Deployment (`config/manager/manager.yaml`) to something that identifies this cluster — it is stamped on every row. At this point:
 
-2. **Set the real ClickHouse password.** `config/manager/clickhouse-secret.yaml` ships with a `changeme` placeholder — replace it before applying, e.g.:
+```sh
+kubectl -n kubestream-system get deploy kubestream-controller-manager   # Running, ready, streaming nothing
+```
 
-   ```sh
-   kubectl create secret generic clickhouse-credentials \
-     --namespace kubestream-system \
-     --from-literal=password='<your-password>' \
-     --dry-run=client -o yaml | kubectl apply -f -
-   ```
+### 2. Create the credentials Secret
 
-   (For a real deployment, prefer a Kustomize `SecretGenerator` overlay or a secret-management tool — Sealed Secrets, External Secrets, SOPS — over committing a plaintext value.)
+The operator reads sink passwords from Secrets **in its own namespace only** — that is the whole of its Secret grant (see [RBAC](#rbac)).
 
-3. **Point the deployment at your ClickHouse instance and cluster identifier.** Edit the `env` block in `config/manager/manager.yaml` (`CH_ADDR`, `CH_DATABASE`, `CH_USERNAME`, `CLUSTER_ID`, etc.) — the checked-in values are local/dev placeholders.
+```sh
+kubectl create secret generic clickhouse-credentials \
+  --namespace kubestream-system \
+  --from-literal=password='<your-password>'
+```
 
-4. **Deploy:**
+`config/manager/clickhouse-secret.yaml` ships the same Secret with a `changeme` placeholder for local use. For a real deployment prefer a Kustomize `SecretGenerator` overlay or a secret-management tool (Sealed Secrets, External Secrets, SOPS) over committing a plaintext value.
 
-   ```sh
-   make deploy IMG=<some-registry>/kubestream:tag
-   ```
+### 3. Create a `ClickHouseSink` named `default`
+
+The name is a convention, not a requirement: every rule names its sink through `spec.sinkRef`, and `default` is what the shipped samples point at, so a single-backend install needs no edits. Nothing stops you from running several sinks under other names — each gets its own connection, its own dedup state and its own `sink=<name>` metric series.
+
+```yaml
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+spec:
+  connection:
+    addr: clickhouse.kubestream-system.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      name: clickhouse-credentials      # namespace defaults to the operator's own
+  policy:
+    allowedGVKs:
+      - group: apps
+        version: v1
+        kinds: ["*"]
+      - group: ""
+        version: v1
+        kinds: ["ConfigMap", "Service"]
+```
+
+```sh
+kubectl apply -f config/samples/kubestream.io_v1alpha1_clickhousesink.yaml
+kubectl get clickhousesink default -o jsonpath='{.status.conditions}' | jq
+```
+
+Wait for `Ready=True`. `CredentialsResolved=False` means the Secret is missing or has no `password` key; `SchemaValid=False` names the columns that do not match schema v1; `Ready=False/Unreachable` means the address or credentials are wrong. The operator keeps running either way — an unhealthy sink degrades itself, never the process.
+
+### 4. Grant watch rights, then create a rule
+
+A rule can only stream what the operator is allowed to read, and the operator can never grant itself more (D7). Apply the preset covering the kinds you want — or your own labelled `ClusterRole` — and then the rule:
+
+```sh
+kubectl apply -f config/rbac/presets/core-workloads.yaml
+kubectl apply -f config/samples/kubestream.io_v1alpha1_streamrule.yaml
+kubectl get streamrule -A
+```
+
+```yaml
+apiVersion: kubestream.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: team-payments-workloads
+  namespace: default
+spec:
+  sinkRef: default
+  resources:
+    - group: apps
+      version: v1
+      kind: Deployment
+```
+
+`status.activeWatches` counts the scopes the rule actually contributes; `RBACGranted=False` names the exact grant that is missing. Only that rule degrades — the others keep streaming. Watches start and stop as rules are applied and deleted, with no operator restart.
+
+### 5. Query the rows
+
+```sql
+-- The latest recorded state of every Deployment in the payments namespace.
+SELECT name, event_type, ts
+FROM kubestream.resource_states
+WHERE cluster_id = 'local-kind-cluster' AND kind = 'Deployment' AND namespace = 'payments'
+ORDER BY ts DESC
+LIMIT 20;
+
+-- When was this scope watched? (Deleting a rule writes a Stopped row here,
+-- never Deleted rows for the objects it covered.)
+SELECT kind, namespace, action, rule_ref, ts
+FROM kubestream.watch_scopes
+ORDER BY ts DESC
+LIMIT 20;
+```
+
+More query recipes, and the meaning of every column, are in [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ### Uninstalling
 
@@ -316,6 +396,7 @@ This project is scaffolded with [Kubebuilder](https://book.kubebuilder.io/) and 
 ```sh
 make build          # go build the manager binary
 make run            # run the controller locally against your current kubeconfig context
+                    #   (OPERATOR_NAMESPACE=<ns> selects where it reads sink credentials Secrets)
 make test           # run the unit/envtest suite (requires the envtest/etcd binaries; make setup-envtest fetches them)
 make lint           # run golangci-lint (see .golangci.yml for the enabled linters)
 make lint-fix       # run golangci-lint with --fix

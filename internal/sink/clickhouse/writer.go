@@ -19,7 +19,8 @@ limitations under the License.
 // resource_states inserts off the caller's hot path), sink.ScopeEventWriter (a
 // separate small batcher for watch_scopes epoch rows) and sink.StateReader (cache
 // warm-up history plus the scope-epoch reads), and owns the single shared
-// ClickHouse connection for all of them, plus connect-time schema validation.
+// ClickHouse connection for all of them, plus the schema introspection its
+// sink.Prober half answers health probes with.
 package clickhouse
 
 import (
@@ -34,7 +35,6 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-logr/logr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/yelzhy/kubestream/internal/sink"
 )
@@ -105,10 +105,12 @@ type Config struct {
 	Password    string
 	DialTimeout time.Duration
 	ReadTimeout time.Duration
-	// AutoCreateSchema, when true, makes the operator execute the shipped DDL
-	// (deploy/clickhouse/schema) idempotently at connect time before validating
-	// the live schema. Sourced from --ch-auto-create-schema / CH_AUTO_CREATE_SCHEMA;
-	// defaults to false so the operator never mutates ClickHouse DDL unless asked.
+	// AutoCreateSchema, when true, makes this instance execute the shipped DDL
+	// (deploy/clickhouse/schema) idempotently in the background when it starts,
+	// before its first write lands. Sourced from --ch-auto-create-schema /
+	// CH_AUTO_CREATE_SCHEMA — an operator-level setting, not a per-sink CR field,
+	// because whether the operator may run DDL at all is a deployment-time
+	// decision. Defaults to false so it never mutates ClickHouse DDL unless asked.
 	AutoCreateSchema bool
 	// BatchMaxRows is the row count at which a worker flushes its accumulated
 	// batch to ClickHouse; BatchMaxWait is the maximum time a batch's first job
@@ -174,10 +176,11 @@ type writeJob struct {
 // statereader.go), sharing one connection for all three.
 type CHWriter struct {
 	conn driver.Conn
-	// database is the schema-introspection target for connect-time validation;
-	// set by Open, empty for test-constructed writers that never validate.
+	// database is the schema-introspection target Probe validates against; set
+	// by Open, empty for test-constructed writers that never validate.
 	database string
-	// autoCreate mirrors Config.AutoCreateSchema; consulted by RegisterWithManager.
+	// autoCreate mirrors Config.AutoCreateSchema; consulted by Start, which
+	// applies the shipped DDL in the background before the first insert lands.
 	autoCreate bool
 
 	jobs    chan writeJob
@@ -302,7 +305,8 @@ func NewCHWriter(conn driver.Conn, queueSize, workers, batchMaxRows int, insertT
 // reporting to metrics. insertTimeout is cfg.ReadTimeout, so the
 // operator-configured value governs the async write path (not just the
 // connection's own driver-level timeout). The returned CHWriter owns conn and
-// closes it on shutdown (see Start); register it with RegisterWithManager.
+// closes it on shutdown (see Start); it is a manager.Runnable, and the sink
+// runtime is what starts and drains it (internal/sink.SinkManager).
 func Open(cfg Config, metrics Metrics) (*CHWriter, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.Addr},
@@ -325,39 +329,38 @@ func Open(cfg Config, metrics Metrics) (*CHWriter, error) {
 	return w, nil
 }
 
-// RegisterWithManager wires this CHWriter's lifecycle into mgr: the writer's
-// own Start runnable, the connect-time schema-validation runnable (which shares
-// conn and is therefore tracked in otherUsers so Start never closes conn while
-// it is mid-introspection), and the "clickhouse-schema" readyz check that
-// degrades readiness on a confirmed schema mismatch. The schema work runs as a
-// background runnable so mgr.Start is never gated on ClickHouse being reachable
-// at boot.
-func (w *CHWriter) RegisterWithManager(mgr manager.Manager) error {
-	if err := mgr.Add(w); err != nil {
-		return err
+// startAutoCreate applies the shipped DDL in the background, when this writer
+// was opened with AutoCreateSchema.
+//
+// It shares conn, so it registers in otherUsers exactly like a LastKnownStates
+// call — under the closing check, so the Add can never race Start's
+// otherUsers.Wait, and released when the DDL work returns. That is what lets
+// Start's step 5 guarantee nothing is still using conn when it closes it.
+//
+// It is a goroutine rather than an inline call because the DDL retries an
+// unreachable ClickHouse indefinitely: blocking Start on it would mean a backend
+// that is down at boot never starts draining its queue, so the enqueue path would
+// report backpressure instead of buffering (Invariant 1).
+//
+// The logger is taken from the package's own delegating sink rather than from
+// ctx: the DDL work outlives this call, and the rest of this file logs the same
+// way (see Start).
+func (w *CHWriter) startAutoCreate(ctx context.Context) {
+	if !w.autoCreate {
+		return
 	}
-
-	gate := newSchemaGate()
-	if err := mgr.AddReadyzCheck("clickhouse-schema", gate.readyCheck); err != nil {
-		return err
-	}
-
-	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		// Track this conn user exactly like a LastKnownStates call: register
-		// only while not closing (under mu) so the Add can never race Start's
-		// otherUsers.Wait, and release when validation returns.
-		w.mu.Lock()
-		if w.closing {
-			w.mu.Unlock()
-			return nil
-		}
-		w.otherUsers.Add(1)
+	w.mu.Lock()
+	if w.closing {
 		w.mu.Unlock()
-		defer w.otherUsers.Done()
+		return
+	}
+	w.otherUsers.Add(1)
+	w.mu.Unlock()
 
-		validateSchemaWithRetry(ctx, w.conn, w.database, w.autoCreate, gate, logf.Log.WithName("schema"))
-		return nil
-	}))
+	go func() {
+		defer w.otherUsers.Done()
+		autoCreateSchemaWithRetry(ctx, w.conn, logf.Log.WithName("chwriter").WithName("schema"))
+	}()
 }
 
 // Enqueue submits a write job without blocking the caller on the actual
@@ -430,6 +433,10 @@ func (w *CHWriter) Start(ctx context.Context) error {
 	// Capacity is fixed for this CHWriter's lifetime; publishing it here (once
 	// the queue exists) lets dashboards express depth as a fraction of it.
 	w.metrics.SetWriteQueueCapacity(float64(cap(w.jobs)))
+
+	// Off the critical path: the workers below start draining immediately, and
+	// their inserts retry until the tables exist.
+	w.startAutoCreate(ctx)
 
 	var wg sync.WaitGroup
 	for i := 0; i < w.workers; i++ {

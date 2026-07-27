@@ -93,7 +93,8 @@ func (c Config) Fingerprint() string {
 // The probe never writes DDL, even when this writer was opened with
 // AutoCreateSchema: a health check that mutated the backend's schema as a side
 // effect of being asked "are you healthy?" would be a surprise no operator asked
-// for. Auto-creation stays where it was, in the connect-time path.
+// for. Auto-creation stays where it belongs, in the instance's own startup path
+// (see CHWriter.Start).
 //
 // Like every other reader on this shared connection, the call registers in
 // otherUsers under the closing check, so shutdown can never close conn while a

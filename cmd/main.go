@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,18 +29,28 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kubestream/internal/controller"
 	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kubestream/internal/plan"
+	"github.com/yelzhy/kubestream/internal/sink"
 	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
+	"github.com/yelzhy/kubestream/internal/watch"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -50,9 +61,22 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
 }
+
+// Connection-timeout fallbacks for a ClickHouseSink whose spec omits them.
+//
+// The CRD carries the same values as field defaults, so these are only reached
+// for an object that predates the defaults or was written by a client that
+// stripped them. They are spelled here rather than left as Go zero values
+// because a zero dial timeout means "wait forever", which is the one behavior a
+// sink pointed at an unreachable address must not have.
+const (
+	defaultSinkDialTimeout = 5 * time.Second
+	defaultSinkReadTimeout = 10 * time.Second
+)
 
 // getEnvOrDefault returns the value of the named environment variable, or
 // def if it is unset. Used to let flags fall back to env vars (e.g. for
@@ -119,9 +143,14 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 
 // writerTuning holds the async-write-path knobs D2 requires operators to size
 // per environment: queue capacity, worker count, the two client-side batching
-// knobs, the enqueue backpressure timeout, and the shutdown drain budget. It is
-// a distinct struct (rather than fields sprinkled through main) so
-// registerWriterFlags can be exercised in isolation by cmd/main_test.go.
+// knobs, the enqueue backpressure timeout, and the shutdown drain budget.
+//
+// Since Task 1.10 these are *fallbacks*, not the configuration itself: every
+// knob is a per-sink field on `ClickHouseSink.spec.writer`, and these values
+// apply only where a sink leaves one unset. That keeps a fleet-wide default
+// expressible on the Deployment while a single busy sink can still be tuned on
+// its own CR. It is a distinct struct (rather than fields sprinkled through
+// main) so registerWriterFlags can be exercised in isolation by cmd/main_test.go.
 type writerTuning struct {
 	queueSize      int
 	workers        int
@@ -156,77 +185,465 @@ func registerWriterFlags(fs *flag.FlagSet) *writerTuning {
 	)
 	t := &writerTuning{}
 	fs.IntVar(&t.queueSize, "writer-queue-size", queueSizeDef,
-		"Capacity of the async write hand-off queue (jobs). Can also be set via the WRITER_QUEUE_SIZE env var.")
+		"Fallback capacity of a sink's async write hand-off queue (jobs), used when the ClickHouseSink omits "+
+			"spec.writer.queueSize. Can also be set via the WRITER_QUEUE_SIZE env var.")
 	fs.IntVar(&t.workers, "writer-workers", workersDef,
-		"Number of workers draining the write queue into ClickHouse. Can also be set via the WRITER_WORKERS env var.")
+		"Fallback number of workers draining a sink's write queue, used when the ClickHouseSink omits "+
+			"spec.writer.workers. Can also be set via the WRITER_WORKERS env var.")
 	fs.IntVar(&t.batchMaxRows, "writer-batch-max-rows", batchMaxRowsDef,
-		"Row count at which a worker flushes its accumulated insert batch. "+
-			"Can also be set via the WRITER_BATCH_MAX_ROWS env var.")
+		"Fallback row count at which a worker flushes its accumulated insert batch, used when the ClickHouseSink "+
+			"omits spec.writer.batchMaxRows. Can also be set via the WRITER_BATCH_MAX_ROWS env var.")
 	fs.DurationVar(&t.batchMaxWait, "writer-batch-max-wait", batchMaxWaitDef,
-		"Maximum time a batch's first job waits for the batch to fill before flushing regardless. "+
-			"Can also be set via the WRITER_BATCH_MAX_WAIT env var.")
+		"Fallback maximum time a batch's first job waits for the batch to fill, used when the ClickHouseSink omits "+
+			"spec.writer.batchMaxWait. Can also be set via the WRITER_BATCH_MAX_WAIT env var.")
 	fs.DurationVar(&t.enqueueTimeout, "writer-enqueue-timeout", enqueueTimeoutDef,
-		"How long Enqueue waits for queue room before returning an error (the job is never dropped silently). "+
-			"Can also be set via the WRITER_ENQUEUE_TIMEOUT env var.")
+		"Fallback time Enqueue waits for queue room before returning an error, used when the ClickHouseSink omits "+
+			"spec.writer.enqueueTimeout. Can also be set via the WRITER_ENQUEUE_TIMEOUT env var.")
 	fs.DurationVar(&t.drainTimeout, "writer-drain-timeout", drainTimeoutDef,
-		"Time budget for draining queued writes to ClickHouse during graceful shutdown. "+
-			"Can also be set via the WRITER_DRAIN_TIMEOUT env var.")
+		"Fallback budget for draining a sink's queued writes during shutdown, used when the ClickHouseSink omits "+
+			"spec.writer.drainTimeout. Can also be set via the WRITER_DRAIN_TIMEOUT env var.")
 	return t
 }
 
-// nolint:gocyclo
-func main() {
-	var metricsAddr string
-	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
-	var enableLeaderElection bool
-	var probeAddr string
-	var secureMetrics bool
-	var enableHTTP2 bool
-	var tlsOpts []func(*tls.Config)
-	var chAddr, chDatabase, chUsername string
-	var chDialTimeout, chReadTimeout time.Duration
-	var chAutoCreateSchema bool
-	flag.StringVar(&chAddr, "ch-addr", getEnvOrDefault("CH_ADDR", "127.0.0.1:9000"),
-		"The ClickHouse server address (host:port). Can also be set via the CH_ADDR env var.")
-	flag.StringVar(&chDatabase, "ch-database", getEnvOrDefault("CH_DATABASE", "kubestream"),
-		"The ClickHouse database name. Can also be set via the CH_DATABASE env var.")
-	flag.StringVar(&chUsername, "ch-username", getEnvOrDefault("CH_USERNAME", "default"),
-		"The ClickHouse username. Can also be set via the CH_USERNAME env var.")
-	flag.DurationVar(&chDialTimeout, "ch-dial-timeout", getEnvDurationOrDefault("CH_DIAL_TIMEOUT", 5*time.Second),
-		"Timeout for establishing the ClickHouse connection. Can also be set via the CH_DIAL_TIMEOUT env var.")
-	flag.DurationVar(&chReadTimeout, "ch-read-timeout", getEnvDurationOrDefault("CH_READ_TIMEOUT", 10*time.Second),
-		"Timeout for a single ClickHouse query/insert round-trip. Can also be set via the CH_READ_TIMEOUT env var.")
-	flag.BoolVar(&chAutoCreateSchema, "ch-auto-create-schema", getEnvBoolOrDefault("CH_AUTO_CREATE_SCHEMA", false),
-		"If set, execute the shipped ClickHouse DDL (deploy/clickhouse/schema) idempotently at connect time. "+
-			"Defaults to false. Can also be set via the CH_AUTO_CREATE_SCHEMA env var.")
-	// CH_PASSWORD is intentionally env-only (no flag): flag values are
-	// visible in `ps`/process listings, which a Secret-projected env var
-	// avoids.
-	var clusterID string
-	flag.StringVar(&clusterID, "cluster-id", getEnvOrDefault("CLUSTER_ID", "local-kind-cluster"),
-		"Identifier for this cluster, recorded on every row written to ClickHouse. "+
+// operatorConfig is everything the composition root needs that is not derivable
+// from the manager itself: the operator-level identity and tuning the flags
+// resolved.
+//
+// It exists so setupOperator takes no dependency on the global flag set, which
+// is what lets cmd's envtest boot the real graph — every runnable, every
+// reconciler — without a process to configure.
+type operatorConfig struct {
+	// clusterID stamps every row and every scope-epoch event this operator
+	// writes. It is a property of the operator instance rather than of a sink
+	// (one operator serves one cluster; a cluster may have several sinks), which
+	// is why it survives as a flag while the ClickHouse connection settings did
+	// not.
+	clusterID string
+
+	// operatorNamespace is where a ClickHouseSink's credentialsSecretRef is
+	// looked up when it omits a namespace. It is explicit configuration because
+	// that default is a security boundary: the operator holds Secret read rights
+	// in this namespace and nowhere else (Task 1.9).
+	operatorNamespace string
+
+	// pipelineWorkers is the number of goroutines draining the shared work
+	// queue. Zero means pipeline.DefaultWorkers.
+	pipelineWorkers int
+
+	// autoCreateSchema makes every sink instance apply the shipped DDL
+	// idempotently before it starts writing. It is operator-level rather than
+	// per-sink on purpose: "may this operator run DDL?" is a deployment-time
+	// privilege decision, not something the author of a sink CR should grant
+	// themselves.
+	autoCreateSchema bool
+
+	// writer holds the per-sink write-path fallbacks (see writerTuning).
+	writer writerTuning
+}
+
+// dataPlane is the composition root's answer to the one genuine cycle in the
+// object graph.
+//
+// The pipeline needs the WatchManager (as its ListerRegistry) and the
+// WatchManager needs the pipeline (as its work-key sink); the sink runtime needs
+// the pipeline (to evict a deleted sink's dedup state) but the pipeline needs the
+// sink runtime (to route writes). No construction order satisfies all four, so
+// exactly one indirection is unavoidable — and it lives here, in the wiring,
+// rather than as a nil-tolerating field inside a package that would then have to
+// defend against it on every call.
+//
+// Binding happens before mgr.Start, on this goroutine, and every reader runs on a
+// goroutine the manager creates afterwards — so the writes are visible without
+// synchronization. The nil guards below are therefore not a race defense but an
+// Invariant-5 one: a future wiring mistake degrades to a retry instead of a
+// nil-pointer panic inside a worker.
+type dataPlane struct {
+	pipe    *pipeline.Pipeline
+	watches *watch.WatchManager
+}
+
+// errDataPlaneUnbound reports a lookup that arrived before the wiring completed.
+// It is retryable by construction — the pipeline re-queues the key — so it costs
+// a delay rather than a lost record.
+var errDataPlaneUnbound = errors.New("data plane is not wired up yet")
+
+// unsettled is what Settled reports before binding: a channel that is never
+// closed, so boot reconciliation waits rather than running against a desired
+// state nothing has populated. Closing early would let it read "no rule wants
+// this scope" and write a Stopped row for every live scope — the exact audit lie
+// scope epochs exist to prevent.
+var unsettled = make(chan struct{})
+
+// bind completes the graph. It is called once, after every component exists and
+// before the manager starts any of them.
+func (d *dataPlane) bind(pipe *pipeline.Pipeline, watches *watch.WatchManager) {
+	d.pipe = pipe
+	d.watches = watches
+}
+
+// RemoveSink implements sink.Pipeline.
+func (d *dataPlane) RemoveSink(name string) {
+	if d.pipe == nil {
+		setupLog.Error(errDataPlaneUnbound, "Cannot evict a deleted sink's pipeline state", "sink", name)
+		return
+	}
+	d.pipe.RemoveSink(name)
+}
+
+// Get implements pipeline.ListerRegistry.
+func (d *dataPlane) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, bool, error) {
+	if d.watches == nil {
+		return nil, false, false, errDataPlaneUnbound
+	}
+	return d.watches.Get(ref)
+}
+
+// ScopeSynced implements pipeline.ScopeStates.
+func (d *dataPlane) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
+	if d.watches == nil {
+		return false
+	}
+	return d.watches.ScopeSynced(sinkName, scope)
+}
+
+// ScopeDesired implements pipeline.ScopeStates.
+func (d *dataPlane) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
+	if d.watches == nil {
+		return false
+	}
+	return d.watches.ScopeDesired(sinkName, scope)
+}
+
+// Settled implements pipeline.ScopeStates.
+func (d *dataPlane) Settled() <-chan struct{} {
+	if d.watches == nil {
+		return unsettled
+	}
+	return d.watches.Settled()
+}
+
+// operator is the assembled process: the components the two setup halves share,
+// plus the parking bridge the sink runtime calls back into.
+type operator struct {
+	registry *plan.Registry
+	sinks    *sink.SinkManager
+	plane    *dataPlane
+
+	// parker is created last, because a rule reconciler's park channel only
+	// exists once it has been registered with the manager. Until then parkRules
+	// has nothing to deliver to — a state that cannot outlive setupOperator,
+	// since a failed registration aborts the process.
+	parker *controller.Parker
+}
+
+// setupOperator is kubestream's composition root: it builds the data plane, the
+// control plane and the health probes on mgr, and adds every runnable to it.
+//
+// It deliberately starts nothing. The manager owns every lifecycle, which is
+// what gives shutdown its ordering (workqueue drains, then sinks flush) and what
+// lets this whole graph be constructed in a test against envtest with no CRs at
+// all — the state the operator ships in and must be healthy in.
+func setupOperator(mgr ctrl.Manager, cfg operatorConfig) error {
+	op := &operator{plane: &dataPlane{}}
+	if err := op.setupDataPlane(mgr, cfg); err != nil {
+		return err
+	}
+	if err := op.setupControlPlane(mgr, cfg); err != nil {
+		return err
+	}
+
+	// Both probes are plain pings, and readyz deliberately so: an operator with
+	// no ClickHouseSink at all is a valid, healthy state (it is the state a fresh
+	// install boots into), and a sink that is unreachable is reported as a
+	// condition on its own CR — not as process unreadiness that would take the
+	// pod out of service and stop every other sink with it.
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("set up the health check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("set up the ready check: %w", err)
+	}
+	return nil
+}
+
+// setupDataPlane builds the desired-state registry, the sink runtime, the
+// pipeline, the warm/GC coordinator, the scope-epoch recorder and the watch
+// manager, and registers all five runnables with mgr.
+//
+// The order is forced by the dependencies, with one indirection (see dataPlane):
+// the registry answers "which rules use this sink?", so it precedes the sink
+// runtime; the sink runtime is the pipeline's router, so it precedes the
+// pipeline; the recorder drives the coordinator, so the coordinator precedes it;
+// and the watch manager, which everything else is level-triggered from, comes
+// last because it is the one component the others can only be handed through the
+// binding.
+func (op *operator) setupDataPlane(mgr ctrl.Manager, cfg operatorConfig) error {
+	metrics := pipeline.PipelineMetricsInstance()
+	op.registry = plan.New()
+
+	sinks, err := sink.NewSinkManager(sink.ManagerOptions{
+		Factory:    newSinkFactory(metrics),
+		Pipeline:   op.plane,
+		Dependents: op.registry,
+		OnSinkGone: op.parkRules,
+	})
+	if err != nil {
+		return fmt.Errorf("build the sink runtime: %w", err)
+	}
+	op.sinks = sinks
+
+	pipe, err := pipeline.New(pipeline.Options{
+		ClusterID: cfg.clusterID,
+		Workers:   cfg.pipelineWorkers,
+		Lister:    op.plane,
+		Router:    sinks,
+		Metrics:   metrics,
+	})
+	if err != nil {
+		return fmt.Errorf("build the pipeline: %w", err)
+	}
+
+	warm, err := pipeline.NewWarmCoordinator(pipeline.WarmOptions{
+		Pipeline:    pipe,
+		Scopes:      op.plane,
+		Readers:     sinks,
+		ScopeEvents: sinks,
+	})
+	if err != nil {
+		return fmt.Errorf("build the warm/GC coordinator: %w", err)
+	}
+
+	recorder, err := watch.NewScopeEpochRecorder(watch.ScopeRecorderOptions{
+		ClusterID: cfg.clusterID,
+		Events:    sinks,
+		Warmer:    warm,
+	})
+	if err != nil {
+		return fmt.Errorf("build the scope-epoch recorder: %w", err)
+	}
+
+	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("build the dynamic client: %w", err)
+	}
+	watches, err := watch.New(watch.Options{
+		Registry: op.registry,
+		// The resolver is shared with the rule reconcilers so a kind that is not
+		// installed yet is retried on one backoff gate rather than two.
+		Resolver: watch.NewResolver(mgr.GetRESTMapper()),
+		Dynamic:  dyn,
+		Pipeline: pipe,
+		Recorder: recorder,
+	})
+	if err != nil {
+		return fmt.Errorf("build the watch manager: %w", err)
+	}
+
+	op.plane.bind(pipe, watches)
+
+	// Every one of these is leader-gated (the pipeline through controller-runtime's
+	// default for a runnable that does not opt out, the rest explicitly), so a
+	// standby replica holds no ClickHouse connection and runs no informers.
+	runnables := []struct {
+		name string
+		r    manager.Runnable
+	}{
+		{"sink runtime", sinks},
+		{"pipeline", pipe},
+		{"warm/GC coordinator", warm},
+		{"scope-epoch recorder", recorder},
+		{"watch manager", watches},
+	}
+	for _, runnable := range runnables {
+		if err := mgr.Add(runnable.r); err != nil {
+			return fmt.Errorf("add the %s to the manager: %w", runnable.name, err)
+		}
+	}
+	return nil
+}
+
+// setupControlPlane registers the three reconcilers and the parking bridge.
+//
+// The Parker can only be built once both rule reconcilers are registered, since
+// registration is what creates the channels it delivers on — which is why the
+// sink runtime is handed op.parkRules (a method) rather than the Parker itself.
+func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) error {
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("build the authorization client: %w", err)
+	}
+
+	sinkReconciler := &controller.SinkReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("kubestream-clickhousesink"),
+		Sinks:    op.sinks,
+		// The ClickHouse mapping lives here, in the wiring, so internal/controller
+		// depends on no driver and cannot dial a backend even by accident
+		// (Invariant 1).
+		BuildConfig:       newSinkConfigBuilder(cfg.writer, cfg.autoCreateSchema),
+		OperatorNamespace: cfg.operatorNamespace,
+	}
+	if err := sinkReconciler.SetupWithManager(mgr, op.sinks.ProbeResults()); err != nil {
+		return fmt.Errorf("set up the ClickHouseSink reconciler: %w", err)
+	}
+
+	base := controller.RuleReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorderFor("kubestream-streamrule"),
+		Registry: op.registry,
+		Resolver: watch.NewResolver(mgr.GetRESTMapper()),
+		Access:   clientset.AuthorizationV1().SelfSubjectAccessReviews(),
+	}
+	namespaced := controller.NewStreamRuleReconciler(base)
+	if err := namespaced.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the StreamRule reconciler: %w", err)
+	}
+	clusterWide := controller.NewClusterStreamRuleReconciler(base)
+	if err := clusterWide.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the ClusterStreamRule reconciler: %w", err)
+	}
+	op.parker = controller.NewParker(namespaced, clusterWide)
+	return nil
+}
+
+// parkRules implements sink.ParkFunc: it re-reconciles the rules that streamed to
+// a sink that has gone for good, so each reports Ready=False/SinkMissing.
+func (op *operator) parkRules(sinkName string, ruleKeys []string) {
+	if op.parker == nil {
+		setupLog.Error(errDataPlaneUnbound, "Cannot park the rules of a sink that is gone", "sink", sinkName)
+		return
+	}
+	op.parker.SinkGone(sinkName, ruleKeys)
+}
+
+// newSinkFactory returns the sink.Factory that turns a resolved configuration
+// into a running ClickHouse backend.
+//
+// This is the single place in the process that knows ClickHouse exists at all.
+// D6's future backends (PostgresSink, …) add a branch here — one more typed
+// configuration, one more driver — and nothing else in the graph changes, because
+// everything upstream speaks only the sink interfaces.
+//
+// The per-sink metrics view is resolved here because the factory is where a sink's
+// name and its backend meet; internal/sink cannot import internal/pipeline, so it
+// could not label its own series.
+func newSinkFactory(metrics *pipeline.PipelineMetrics) sink.Factory {
+	return func(name string, cfg sink.InstanceConfig) (sink.Writer, error) {
+		chConfig, ok := cfg.(clickhouse.Config)
+		if !ok {
+			return nil, fmt.Errorf("sink %q: %T is not a ClickHouse configuration", name, cfg)
+		}
+		return clickhouse.Open(chConfig, metrics.ForSink(name))
+	}
+}
+
+// newSinkConfigBuilder returns the controller.SinkConfigBuilder that maps a
+// ClickHouseSink spec plus its resolved password onto a ClickHouse configuration.
+//
+// Every spec.writer field is optional, and an omitted one falls back to the
+// operator-level --writer-* value rather than to the package default: an
+// administrator who sized the write path for their cluster on the Deployment
+// should not have to repeat it on every sink, while a sink that does state a value
+// always wins. It performs no I/O — it translates a struct, and is called inline
+// from a reconcile (Invariant 1).
+func newSinkConfigBuilder(defaults writerTuning, autoCreateSchema bool) controller.SinkConfigBuilder {
+	return func(_ string, spec v1alpha1.ClickHouseSinkSpec, password string) (sink.InstanceConfig, error) {
+		return clickhouse.Config{
+			Addr:                 spec.Connection.Addr,
+			Database:             spec.Connection.Database,
+			Username:             spec.Connection.Username,
+			Password:             password,
+			DialTimeout:          durationOrDefault(spec.Connection.DialTimeout, defaultSinkDialTimeout),
+			ReadTimeout:          durationOrDefault(spec.Connection.ReadTimeout, defaultSinkReadTimeout),
+			AutoCreateSchema:     autoCreateSchema,
+			WriteQueueSize:       intOrDefault(spec.Writer.QueueSize, defaults.queueSize),
+			WriteWorkers:         intOrDefault(spec.Writer.Workers, defaults.workers),
+			BatchMaxRows:         intOrDefault(spec.Writer.BatchMaxRows, defaults.batchMaxRows),
+			BatchMaxWait:         durationOrDefault(spec.Writer.BatchMaxWait, defaults.batchMaxWait),
+			EnqueueTimeout:       durationOrDefault(spec.Writer.EnqueueTimeout, defaults.enqueueTimeout),
+			ShutdownDrainTimeout: durationOrDefault(spec.Writer.DrainTimeout, defaults.drainTimeout),
+		}, nil
+	}
+}
+
+// durationOrDefault resolves an optional CRD duration field.
+func durationOrDefault(d *metav1.Duration, def time.Duration) time.Duration {
+	if d == nil {
+		return def
+	}
+	return d.Duration
+}
+
+// intOrDefault resolves an optional CRD int32 field. The CRD bounds every one of
+// these well inside int range, so the conversion cannot truncate.
+func intOrDefault(n *int32, def int) int {
+	if n == nil {
+		return def
+	}
+	return int(*n)
+}
+
+// registerFlags registers every operator flag on fs and returns the config they
+// bind into, along with the manager-level settings main() needs.
+//
+// Split out of main() for the same reason registerWriterFlags is: a test can
+// drive the exact registration path against a throwaway FlagSet.
+func registerFlags(fs *flag.FlagSet) (*operatorConfig, *managerFlags) {
+	cfg := &operatorConfig{}
+	mf := &managerFlags{}
+
+	fs.StringVar(&cfg.clusterID, "cluster-id", getEnvOrDefault("CLUSTER_ID", "local-kind-cluster"),
+		"Identifier for this cluster, recorded on every row and scope event this operator writes. "+
 			"Can also be set via the CLUSTER_ID env var.")
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
+	fs.StringVar(&cfg.operatorNamespace, "operator-namespace", getEnvOrDefault("POD_NAMESPACE", ""),
+		"Namespace a ClickHouseSink's credentialsSecretRef defaults to, and the only namespace the operator "+
+			"reads Secrets in. Can also be set via the POD_NAMESPACE env var (downward API in the shipped manifest).")
+	fs.IntVar(&cfg.pipelineWorkers, "pipeline-workers",
+		getEnvIntOrDefault("PIPELINE_WORKERS", pipeline.DefaultWorkers),
+		"Number of workers draining the shared data-plane workqueue. Can also be set via the PIPELINE_WORKERS "+
+			"env var.")
+	fs.BoolVar(&cfg.autoCreateSchema, "ch-auto-create-schema", getEnvBoolOrDefault("CH_AUTO_CREATE_SCHEMA", false),
+		"If set, every sink instance executes the shipped ClickHouse DDL (deploy/clickhouse/schema) idempotently "+
+			"before it starts writing. Defaults to false. Can also be set via the CH_AUTO_CREATE_SCHEMA env var.")
+
+	fs.StringVar(&mf.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	fs.StringVar(&mf.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	fs.BoolVar(&mf.enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", true,
+	fs.BoolVar(&mf.secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
+	fs.StringVar(&mf.webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	fs.StringVar(&mf.webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
+	fs.StringVar(&mf.webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	fs.StringVar(&mf.metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
-	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
-	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+	fs.StringVar(&mf.metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
+	fs.StringVar(&mf.metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
+	fs.BoolVar(&mf.enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	// The six async-write-path knobs (D2): registered on the shared
-	// flag.CommandLine so they are parsed by the flag.Parse() below.
-	writer := registerWriterFlags(flag.CommandLine)
+
+	cfg.writer = *registerWriterFlags(fs)
+	return cfg, mf
+}
+
+// managerFlags are the controller-runtime manager's own settings: serving
+// addresses, leader election and the two TLS bundles. They configure the harness
+// rather than kubestream itself, which is why they are separate from
+// operatorConfig — setupOperator has no use for any of them.
+type managerFlags struct {
+	metricsAddr                                      string
+	probeAddr                                        string
+	enableLeaderElection                             bool
+	secureMetrics                                    bool
+	enableHTTP2                                      bool
+	metricsCertPath, metricsCertName, metricsCertKey string
+	webhookCertPath, webhookCertName, webhookCertKey string
+}
+
+func main() {
+	cfg, mf := registerFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
 	}
@@ -235,74 +652,17 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("Disabling HTTP/2")
-		c.NextProtos = []string{"http/1.1"}
-	}
-
-	if !enableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
-	}
-
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
-	}
-
-	if len(webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
-	}
-
-	webhookServer := webhook.NewServer(webhookServerOptions)
-
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
-	metricsServerOptions := metricsserver.Options{
-		BindAddress:   metricsAddr,
-		SecureServing: secureMetrics,
-		TLSOpts:       tlsOpts,
-	}
-
-	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/filters#WithAuthenticationAndAuthorization
-		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
-	}
-
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	if len(metricsCertPath) > 0 {
-		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
-			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
-
-		metricsServerOptions.CertDir = metricsCertPath
-		metricsServerOptions.CertName = metricsCertName
-		metricsServerOptions.KeyName = metricsCertKey
+	if cfg.operatorNamespace == "" {
+		setupLog.Error(errNoOperatorNamespace, "Cannot start")
+		os.Exit(1)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
+		Metrics:                metricsServerOptions(mf),
+		WebhookServer:          webhook.NewServer(webhookServerOptions(mf)),
+		HealthProbeBindAddress: mf.probeAddr,
+		LeaderElection:         mf.enableLeaderElection,
 		LeaderElectionID:       "885d930f.kubestream.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
@@ -321,74 +681,95 @@ func main() {
 		os.Exit(1)
 	}
 
-	chConfig := clickhouse.Config{
-		Addr:                 chAddr,
-		Database:             chDatabase,
-		Username:             chUsername,
-		Password:             os.Getenv("CH_PASSWORD"),
-		DialTimeout:          chDialTimeout,
-		ReadTimeout:          chReadTimeout,
-		AutoCreateSchema:     chAutoCreateSchema,
-		WriteQueueSize:       writer.queueSize,
-		WriteWorkers:         writer.workers,
-		BatchMaxRows:         writer.batchMaxRows,
-		BatchMaxWait:         writer.batchMaxWait,
-		EnqueueTimeout:       writer.enqueueTimeout,
-		ShutdownDrainTimeout: writer.drainTimeout,
-	}
-	if chConfig.Password == "" {
-		setupLog.Info("CH_PASSWORD is not set; connecting to ClickHouse without a password")
-	}
-
-	// The ClickHouse backend owns the shared connection and implements both the
-	// sink.Writer (batched inserts off the pipeline's hot path) and
-	// sink.StateReader (cache warm-up) contracts; RegisterWithManager wires its
-	// writer runnable, the connect-time schema-validation runnable, and the
-	// schema readyz check into the manager. The data plane then depends only on
-	// the sink interfaces, never on ClickHouse directly.
-	// Write-path metrics are per sink (sink=<name>), and this env-var-configured
-	// writer has no ClickHouseSink CR to take a name from — Task 1.10 replaces this
-	// whole block with the SinkManager, which labels each instance with its CR's
-	// name. Until then its series are labelled "default".
-	chWriter, err := clickhouse.Open(chConfig, pipeline.PipelineMetricsInstance().ForSink("default"))
-	if err != nil {
-		setupLog.Error(err, "Failed to open ClickHouse connection")
+	if err := setupOperator(mgr, *cfg); err != nil {
+		setupLog.Error(err, "Failed to wire up the operator")
 		os.Exit(1)
 	}
-	if err := chWriter.RegisterWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to register ClickHouse backend with manager")
-		os.Exit(1)
-	}
-
-	// The data plane is not wired yet. The per-GVK stream reconcilers were
-	// replaced by internal/pipeline, and every component that feeds it now exists
-	// — the WatchManager (Task 1.4, answering pipeline.ListerRegistry and
-	// pipeline.ScopeStates), the scope-epoch recorder and warm/GC coordinator
-	// (Task 1.6), and the SinkManager that answers pipeline.SinkRouter,
-	// pipeline.StateReaderRouter and pipeline.ScopeEventRouter (Task 1.8) — but the
-	// reconcilers that translate CRs into watch targets and into sink
-	// configurations (Task 1.7) do not, so nothing yet calls SinkManager.Ensure or
-	// consumes its probe results. Until Task 1.10 assembles them here, the operator
-	// starts healthy and streams nothing, which is exactly the Phase 1 end state
-	// for a cluster with no ClickHouseSink and no rules.
-	//
-	// clusterID is threaded into pipeline.Options at that point; it stays a flag
-	// because it labels every row this operator writes, independent of any CR.
-	setupLog.Info("Operator cluster identity", "cluster_id", clusterID)
 	// +kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up ready check")
-		os.Exit(1)
-	}
-
-	setupLog.Info("Starting manager")
+	// The operator boots idle: with no ClickHouseSink and no rules it watches
+	// nothing, writes nothing and reports healthy. Streaming starts when a
+	// ClickHouseSink (conventionally named "default", which is what the shipped
+	// samples' spec.sinkRef points at) and a StreamRule or ClusterStreamRule
+	// appear — no restart, and no configuration on this process.
+	setupLog.Info("Starting manager",
+		"cluster_id", cfg.clusterID, "operator_namespace", cfg.operatorNamespace,
+		"pipeline_workers", cfg.pipelineWorkers, "auto_create_schema", cfg.autoCreateSchema)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// errNoOperatorNamespace reports the one setting the operator cannot guess. It is
+// fatal rather than defaulted because the value is a security boundary: guessing
+// it wrong would either break every sink's credential lookup or, worse, point it
+// at a namespace the deployment did not intend.
+var errNoOperatorNamespace = errors.New(
+	"--operator-namespace (or the POD_NAMESPACE env var) must be set; it is the only namespace the operator " +
+		"reads sink credentials Secrets in")
+
+// webhookServerOptions builds the webhook server's options. No webhooks are
+// registered today (D4: validation is CEL-only, with no cert-manager dependency);
+// the server and its certificate flags are kept because the manager always
+// constructs one.
+func webhookServerOptions(mf *managerFlags) webhook.Options {
+	opts := webhook.Options{TLSOpts: tlsOptions(mf)}
+	if len(mf.webhookCertPath) > 0 {
+		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
+			"webhook-cert-path", mf.webhookCertPath, "webhook-cert-name", mf.webhookCertName,
+			"webhook-cert-key", mf.webhookCertKey)
+		opts.CertDir = mf.webhookCertPath
+		opts.CertName = mf.webhookCertName
+		opts.KeyName = mf.webhookCertKey
+	}
+	return opts
+}
+
+// metricsServerOptions builds the metrics server's options.
+//
+// More info:
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/server
+// - https://book.kubebuilder.io/reference/metrics.html
+func metricsServerOptions(mf *managerFlags) metricsserver.Options {
+	opts := metricsserver.Options{
+		BindAddress:   mf.metricsAddr,
+		SecureServing: mf.secureMetrics,
+		TLSOpts:       tlsOptions(mf),
+	}
+	if mf.secureMetrics {
+		// FilterProvider is used to protect the metrics endpoint with authn/authz.
+		// These configurations ensure that only authorized users and service accounts
+		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
+		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.23.3/pkg/metrics/filters#WithAuthenticationAndAuthorization
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+	// If the certificate is not specified, controller-runtime will automatically
+	// generate self-signed certificates for the metrics server. While convenient for development and testing,
+	// this setup is not recommended for production.
+	if len(mf.metricsCertPath) > 0 {
+		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
+			"metrics-cert-path", mf.metricsCertPath, "metrics-cert-name", mf.metricsCertName,
+			"metrics-cert-key", mf.metricsCertKey)
+		opts.CertDir = mf.metricsCertPath
+		opts.CertName = mf.metricsCertName
+		opts.KeyName = mf.metricsCertKey
+	}
+	return opts
+}
+
+// tlsOptions disables HTTP/2 unless it was explicitly enabled.
+//
+// Disabling http/2 prevents being vulnerable to the HTTP/2 Stream Cancellation
+// and Rapid Reset CVEs. For more information see:
+// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+// - https://github.com/advisories/GHSA-4374-p667-p6c8
+func tlsOptions(mf *managerFlags) []func(*tls.Config) {
+	if mf.enableHTTP2 {
+		return nil
+	}
+	return []func(*tls.Config){func(c *tls.Config) {
+		setupLog.Info("Disabling HTTP/2")
+		c.NextProtos = []string{"http/1.1"}
+	}}
 }

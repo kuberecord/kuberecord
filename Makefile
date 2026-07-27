@@ -184,9 +184,14 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+# OPERATOR_NAMESPACE is where `make run` looks up sink credentials Secrets. In
+# cluster the Deployment supplies it from the downward API; running from a host
+# there is no pod to read it from, and the operator refuses to guess.
+OPERATOR_NAMESPACE ?= kubestream-system
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd/main.go --operator-namespace=$(OPERATOR_NAMESPACE)
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

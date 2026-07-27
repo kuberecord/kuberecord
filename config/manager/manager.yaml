@@ -65,24 +65,24 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
-        # TODO(user): CH_ADDR/CH_DATABASE/CH_USERNAME/CLUSTER_ID below are
-        # local/dev placeholders (matching a ClickHouse reachable from this
-        # pod, e.g. via a sidecar or port-forward). Point them at your real
-        # ClickHouse service and cluster identifier before deploying.
+        # Where ClickHouse lives is no longer configured here: it belongs to the
+        # ClickHouseSink CR and the Secret it references (see
+        # config/samples/kubestream.io_v1alpha1_clickhousesink.yaml). What is left
+        # is the identity of *this operator instance*.
         env:
-        - name: CH_ADDR
-          value: "127.0.0.1:9000"
-        - name: CH_DATABASE
-          value: "kubestream"
-        - name: CH_USERNAME
-          value: "default"
-        - name: CH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: clickhouse-credentials
-              key: password
+        # TODO(user): CLUSTER_ID is a local/dev placeholder. It is stamped on
+        # every row this operator writes, so set it to something that identifies
+        # the cluster before deploying.
         - name: CLUSTER_ID
           value: "local-kind-cluster"
+        # The namespace a ClickHouseSink's credentialsSecretRef defaults to, and
+        # the only namespace the operator is granted Secret reads in (Task 1.9).
+        # Taken from the downward API so it always matches where this Deployment
+        # actually runs.
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         ports:
         - containerPort: 8081
           name: health

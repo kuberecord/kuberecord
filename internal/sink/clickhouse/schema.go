@@ -18,12 +18,9 @@ package clickhouse
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -38,11 +35,6 @@ const (
 	tableWatchScopes    = "watch_scopes"
 )
 
-// errSchemaMismatch gives the schema-mismatch log lines a non-nil error value
-// to log against (mirroring errAsyncWriteFailed); the specific discrepancies
-// are carried as structured key/value context, not in this sentinel.
-var errSchemaMismatch = errors.New("clickhouse schema does not match the expected schema v1")
-
 // schemaColumn is one required column and the exact type system.columns must
 // report for it. The type strings deliberately omit the CODEC clauses present
 // in the DDL — codecs are a storage-level detail ClickHouse does not surface in
@@ -52,11 +44,12 @@ type schemaColumn struct {
 	chType string
 }
 
-// requiredColumns is the connect-time contract: every column the operator
+// requiredColumns is the sink's schema contract: every column the operator
 // depends on, per table, with the type system.columns is expected to report.
 // It is kept in lockstep with the shipped DDL (deploy/clickhouse/schema); a
-// live table that drifts from this degrades readiness rather than letting the
-// operator write rows that would silently mismatch the frozen public schema.
+// live table that drifts from this degrades its own ClickHouseSink (via the
+// health probe's SchemaValid condition) rather than letting the operator write
+// rows that would silently mismatch the frozen public schema.
 var requiredColumns = map[string][]schemaColumn{
 	tableResourceStates: {
 		{"ts", "DateTime64(9, 'UTC')"},
@@ -205,96 +198,35 @@ func autoCreateSchema(ctx context.Context, conn driver.Conn) error {
 	return nil
 }
 
-// Schema-gate states. Readiness degrades only on a confirmed mismatch; while
-// the schema is still being probed (or ClickHouse is briefly unreachable at
-// boot) the gate stays "unknown" and does not hold readiness down — mirroring
-// restoreAndWarm's tolerance of a slow ClickHouse at startup.
-const (
-	schemaUnknown int32 = iota
-	schemaValid
-	schemaInvalid
-)
-
-// schemaGate is the connect-time schema-validation result consulted by the
-// "clickhouse-schema" readyz check. It is written once by the validation
-// runnable and read by the probe endpoint, so an atomic is sufficient — no
-// lock, no blocking on the hot path.
-type schemaGate struct {
-	state atomic.Int32
-}
-
-func newSchemaGate() *schemaGate { return &schemaGate{} }
-
-func (g *schemaGate) setValid()   { g.state.Store(schemaValid) }
-func (g *schemaGate) setInvalid() { g.state.Store(schemaInvalid) }
-
-// readyCheck degrades readiness when, and only when, the live schema has been
-// confirmed to mismatch schema v1. Returning an error here flips the
-// "clickhouse-schema" readyz probe to not-ready so the mismatch is visible to
-// Kubernetes and operators, without crash-looping the process.
-func (g *schemaGate) readyCheck(*http.Request) error {
-	if g.state.Load() == schemaInvalid {
-		return errors.New("clickhouse schema validation failed; see operator logs for the offending columns")
-	}
-	return nil
-}
-
-// validateSchemaWithRetry optionally auto-creates the schema, then validates it,
-// updating gate with the outcome. It runs as a background manager.Runnable so
-// mgr.Start is never gated on ClickHouse being reachable at boot (like
-// restoreAndWarm). Transient errors (ClickHouse unreachable) are retried with
-// bounded backoff until ctx is cancelled; a definitive result — valid schema or
-// a confirmed mismatch — ends the loop, since neither will change without
-// operator action.
+// autoCreateSchemaWithRetry applies the shipped DDL, retrying a ClickHouse that
+// is not reachable yet until ctx is cancelled.
+//
+// It runs from the instance's own Start goroutine (see CHWriter.Start), so a
+// backend that is down at boot delays only that sink's first write, never the
+// manager's startup and never any other sink.
+//
+// Validation is deliberately *not* done here. Since Task 1.10 each sink is a CR
+// with its own health, and the schema verdict belongs on that CR: the sink
+// runtime's probe loop calls Probe (which validates) and reports the result as
+// the ClickHouseSink's SchemaValid condition. A second, process-wide validation
+// pass would only be able to report itself through a log line and a readiness
+// flag that would take every *other* sink down with it.
 //
 //nolint:logcheck
-func validateSchemaWithRetry(ctx context.Context, conn driver.Conn, database string, autoCreate bool, gate *schemaGate, log logr.Logger) {
-	newBackoff := func() *backoff.ExponentialBackOff {
-		eb := backoff.NewExponentialBackOff()
-		eb.MaxInterval = 30 * time.Second
-		eb.MaxElapsedTime = 0 // retry forever — only ctx cancellation gives up
-		return eb
-	}
+func autoCreateSchemaWithRetry(ctx context.Context, conn driver.Conn, log logr.Logger) {
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = 30 * time.Second
+	eb.MaxElapsedTime = 0 // retry forever — only ctx cancellation gives up
 
-	if autoCreate {
-		err := backoff.Retry(func() error {
-			if err := autoCreateSchema(ctx, conn); err != nil {
-				log.Error(err, "⚠️ Failed to auto-create ClickHouse schema, retrying")
-				return err
-			}
-			return nil
-		}, backoff.WithContext(newBackoff(), ctx))
-		if err != nil {
-			return // ctx cancelled before the DDL could be applied
-		}
-		log.Info("🗄️ ClickHouse schema auto-create applied (idempotent)")
-	}
-
-	var mismatch *schemaMismatchError
 	err := backoff.Retry(func() error {
-		verr := validateSchema(ctx, conn, database)
-		if verr == nil {
-			return nil
+		if err := autoCreateSchema(ctx, conn); err != nil {
+			log.Error(err, "⚠️ Failed to auto-create ClickHouse schema, retrying")
+			return err
 		}
-		// A mismatch will not resolve on its own — stop retrying and report it.
-		if errors.As(verr, &mismatch) {
-			return backoff.Permanent(verr)
-		}
-		log.Error(verr, "⚠️ Failed to introspect ClickHouse schema, retrying")
-		return verr
-	}, backoff.WithContext(newBackoff(), ctx))
-
+		return nil
+	}, backoff.WithContext(eb, ctx))
 	if err != nil {
-		if errors.As(err, &mismatch) {
-			for _, d := range mismatch.discrepancies {
-				log.Error(errSchemaMismatch, "❌ ClickHouse schema mismatch", "detail", d)
-			}
-			gate.setInvalid()
-			return
-		}
-		return // ctx cancelled before validation completed
+		return // ctx cancelled before the DDL could be applied
 	}
-
-	gate.setValid()
-	log.Info("✅ ClickHouse schema validated against schema v1")
+	log.Info("🗄️ ClickHouse schema auto-create applied (idempotent)")
 }
