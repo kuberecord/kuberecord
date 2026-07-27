@@ -135,12 +135,21 @@ bench-load: setup-envtest ## Run the load benchmark harness (small default profi
 			-objects=$(LOADGEN_OBJECTS) -rate=$(LOADGEN_RATE) -payload-bytes=$(LOADGEN_PAYLOAD_BYTES) \
 			-duration=$(LOADGEN_DURATION) -delete-ratio=$(LOADGEN_DELETE_RATIO)
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
+# The e2e suite (Task 1.11) is the Phase 1 gate: a real Kind cluster, a real
+# in-cluster ClickHouse (test/e2e/manifests/), real CRs, and every assertion made
+# by querying ClickHouse directly. It assumes Kind and Docker are installed;
+# everything else — the manager image, the ClickHouse image, the operator install
+# and the backend — the suite brings up itself.
+#
+# Runtime target: under 15 minutes end to end on a developer machine with the
+# ClickHouse image already pulled. The bulk of that is the manager image build,
+# the two `kind load`s and the RBAC-recovery scenario, which waits out the rule
+# reconciler's two-minute resync on purpose (an RBAC grant applied after the fact
+# must self-heal without a restart). Go's default 10-minute test timeout would
+# kill the suite mid-run, hence the explicit -timeout below.
+#
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= kubestream-test-e2e
 
 .PHONY: setup-test-e2e
@@ -157,10 +166,25 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+E2E_TIMEOUT ?= 30m
+# Teardown is unconditional: the suite reuses an existing cluster, so a failed run
+# that left one behind would poison the next run with its own leftovers rather
+# than fail on its own merits. Failures are still debuggable — the suite dumps the
+# operator's log into the test output — and E2E_KEEP_CLUSTER=true keeps the
+# cluster up when that is not enough.
+E2E_KEEP_CLUSTER ?= false
+
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+	@set +e; \
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT); \
+	status=$$?; \
+	if [ "$(E2E_KEEP_CLUSTER)" = "true" ]; then \
+		echo "E2E_KEEP_CLUSTER=true: leaving Kind cluster '$(KIND_CLUSTER)' up for inspection."; \
+	else \
+		$(MAKE) cleanup-test-e2e; \
+	fi; \
+	exit $$status
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -251,6 +275,19 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
+# The e2e overlay is config/default plus a pinned image and
+# --ch-auto-create-schema (see test/e2e/manifests/operator/kustomization.yaml).
+# These two targets exist so the suite installs through the same tool bootstrap
+# every other deployment target uses, rather than reaching for a kustomize binary
+# that may not have been downloaded yet.
+.PHONY: deploy-e2e
+deploy-e2e: manifests kustomize ## Deploy the controller with the e2e overlay. Used by test-e2e.
+	"$(KUSTOMIZE)" build test/e2e/manifests/operator | "$(KUBECTL)" apply -f -
+
+.PHONY: undeploy-e2e
+undeploy-e2e: kustomize ## Remove the controller installed by deploy-e2e. Used by test-e2e.
+	"$(KUSTOMIZE)" build test/e2e/manifests/operator | "$(KUBECTL)" delete --ignore-not-found=true -f -
 
 ##@ Dependencies
 

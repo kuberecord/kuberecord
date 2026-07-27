@@ -69,12 +69,17 @@ type ScopeEvent struct {
 	// not treat it as part of the scope's key.
 	APIVersion string
 
-	// RuleRef is the rule that triggered this transition: "<namespace>/<name>"
-	// for a StreamRule, "<name>" for a ClusterStreamRule. It is empty for a
-	// Stopped event written by boot reconciliation, where the scope's last
-	// epoch was left open by a previous process and the rule that had held it
-	// is gone — there is genuinely no rule left to name, and inventing one
-	// would be worse than an empty column.
+	// RuleRef is the rule that triggered this transition, as the desired-state
+	// registry's rule key: "<kind>/<namespace>/<name>", where kind is
+	// "streamrule" or "clusterstreamrule" and a cluster-scoped rule renders an
+	// empty namespace segment ("clusterstreamrule//platform-baseline"). The kind
+	// is part of it because a StreamRule and a ClusterStreamRule may legitimately
+	// share a name; see controller.RuleKey, the only function that builds one.
+	//
+	// It is empty for a Stopped event written by boot reconciliation, where the
+	// scope's last epoch was left open by a previous process and the rule that
+	// had held it is gone — there is genuinely no rule left to name, and
+	// inventing one would be worse than an empty column.
 	RuleRef string
 
 	// TS is when the transition was observed, stamped once at that moment and

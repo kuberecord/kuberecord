@@ -1,6 +1,12 @@
 version: "2"
 run:
   allow-parallel-runners: true
+  # Without this the `//go:build e2e` suite is invisible to the linter — and to
+  # `go vet`, which `make build`/`make test` run over the default build only. The
+  # e2e suite is the Phase 1 gate (Task 1.11); "make lint passes" has to mean
+  # something for it too.
+  build-tags:
+    - e2e
 linters:
   default: none
   enable:

@@ -283,6 +283,15 @@ The same invariants are asserted at build time against the manifests in
 `internal/controller/rbacmanifests_test.go`, so a weakening edit fails `make
 test` before it reaches a cluster.
 
+The end of this model — a gap that degrades one rule and heals itself when the
+grant arrives — is asserted against a live cluster by the e2e suite (`make
+test-e2e`, `test/e2e/scenarios_test.go`): it creates a rule for
+`networking.k8s.io/v1/Ingress` with no preset installed, watches it report
+`RBACGranted=False/MissingPermissions` while a second rule keeps streaming
+throughout, applies `config/rbac/presets/networking.yaml`, and then requires the
+condition to flip and Ingress rows to reach ClickHouse with the operator pod
+neither replaced nor restarted.
+
 [D1]: ../kubestream-backlog.md
 [D7]: ../kubestream-backlog.md
 [D8]: ../kubestream-backlog.md

@@ -1,0 +1,29 @@
+# Watch grant for v1/Node, used by the cluster-scoped-kind scenario.
+#
+# No shipped preset covers Nodes (see config/rbac/presets/), and adding one
+# would be a change to the operator's installed RBAC surface rather than to its
+# tests. So this role stays here, in the suite — which also makes it a live
+# exercise of the workflow docs/RBAC.md documents for a kind no preset covers:
+# write a small ClusterRole, keep the aggregation label, apply it. No operator
+# redeploy, and Kubernetes' own escalation check still applies to whoever
+# applies it.
+#
+# get,list,watch only, matching every shipped preset: the data plane never
+# writes to a watched resource.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubestream-e2e-watcher-nodes
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: e2e-fixture
+    kubestream.io/aggregate-to-watcher: "true"
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch

@@ -1,0 +1,52 @@
+# The operator install the e2e suite deploys.
+#
+# It is `config/default` plus exactly three deltas, so the suite tests the
+# shipped install rather than a parallel one that could drift from it:
+#
+#   1. the image is pinned to the tag the suite builds and side-loads;
+#   2. --ch-auto-create-schema is appended, which is how the acceptance criteria
+#      allow the schema to reach a freshly-started ClickHouse. That flag is off
+#      by default (the operator does not run DDL uninvited), and turning it on
+#      here means the suite also proves the auto-create path itself works
+#      against a real server;
+#   3. the operator's namespace is labelled for the `restricted` Pod Security
+#      Standard. Labelling it here rather than after the apply is what makes it
+#      an actual test: the namespace exists as restricted before the manager pod
+#      is ever admitted, so a manifest that violated the standard would fail the
+#      deploy instead of slipping in ahead of the label.
+#
+# An overlay rather than a `kubectl patch` after `make deploy`: the install stays
+# one declarative apply with no rollout to wait on in between, and the delta is
+# reviewable in one place.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../../config/default
+
+images:
+- name: controller
+  newName: example.com/kubestream
+  newTag: v0.0.1
+
+patches:
+# The base applies a `kubestream-` name prefix, so the target is matched by
+# regex: the patch must keep working whether or not that prefix changes.
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: .*controller-manager
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --ch-auto-create-schema
+# `/` inside a JSON Pointer segment is escaped as `~1`.
+- target:
+    version: v1
+    kind: Namespace
+    name: kubestream-system
+  patch: |
+    - op: add
+      path: /metadata/labels/pod-security.kubernetes.io~1enforce
+      value: restricted

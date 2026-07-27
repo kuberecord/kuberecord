@@ -244,7 +244,8 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		buildConfig = fakeConfigBuilder
 	}
 	sinkReconciler := &SinkReconciler{
-		Client:            mgr.GetClient(),
+		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: matches the composition root; see cmd/main.go.
 		Recorder:          mgr.GetEventRecorderFor("kubestream-test"),
 		Sinks:             h.Runtime,
 		BuildConfig:       buildConfig,
@@ -257,7 +258,8 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	}
 
 	base := RuleReconciler{
-		Client:       mgr.GetClient(),
+		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: matches the composition root; see cmd/main.go.
 		Recorder:     mgr.GetEventRecorderFor("kubestream-test"),
 		Registry:     h.Registry,
 		Resolver:     watch.NewResolver(mgr.GetRESTMapper()),
