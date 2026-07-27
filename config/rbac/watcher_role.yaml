@@ -1,0 +1,35 @@
+# The aggregated watch role (D7).
+#
+# This ClusterRole holds no rules of its own: `aggregationRule` tells the
+# controller-manager to keep `rules` equal to the union of every ClusterRole
+# labelled `kubestream.io/aggregate-to-watcher: "true"`. Watch rights therefore
+# arrive by *applying a small labelled role* (see presets/), never by editing
+# and redeploying the operator's own base role.
+#
+# Two properties fall out of this, and both are load-bearing:
+#
+#   - The operator cannot self-escalate. It has no write access to
+#     `clusterroles`/`clusterrolebindings`, so it can neither create a preset
+#     nor label an existing role; and even an administrator applying a preset
+#     is bound by Kubernetes' own escalation check, which forbids granting a
+#     permission you do not hold yourself.
+#   - A missing grant is data, not an outage. The rule that wanted it reports
+#     `RBACGranted=False/MissingPermissions` and every other rule keeps
+#     streaming (Invariant 5); the grant appearing later flips the condition
+#     within one resync, with no restart.
+#
+# `rules` is written as an empty list rather than omitted so that `kubectl diff`
+# against a live, populated object is readable: the field exists and is server-
+# owned. Never add rules here by hand — the controller-manager overwrites them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/managed-by: kustomize
+  name: watcher
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      kubestream.io/aggregate-to-watcher: "true"
+rules: []
