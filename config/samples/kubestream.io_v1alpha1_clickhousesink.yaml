@@ -13,8 +13,9 @@ spec:
     credentialsSecretRef:
       # namespace is omitted on purpose: it defaults to the operator's own
       # namespace, which is the only place the operator holds Secret read
-      # rights (Task 1.9).
-      name: kubestream-clickhouse
+      # rights (Task 1.9). The name matches the Secret the deployment ships
+      # (config/manager/clickhouse-secret.yaml).
+      name: clickhouse-credentials
     dialTimeout: 5s
     readTimeout: 10s
   writer:

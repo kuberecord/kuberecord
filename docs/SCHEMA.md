@@ -15,16 +15,24 @@ schema. The DDL is shipped in-repo under
 ## Applying the schema
 
 Either apply the two `.sql` files yourself (e.g. `clickhouse-client --multiquery
-< 001_resource_states.sql`), or let the operator create them idempotently at
-connect time by starting it with `--ch-auto-create-schema=true` (env twin
+< 001_resource_states.sql`), or let the operator create them idempotently by
+starting it with `--ch-auto-create-schema=true` (env twin
 `CH_AUTO_CREATE_SCHEMA`). Auto-create is **off by default** — the operator never
-mutates ClickHouse DDL unless explicitly asked.
+mutates ClickHouse DDL unless explicitly asked — and it is an operator-level
+setting rather than a per-sink field: whether this operator may run DDL at all is
+a deployment-time decision, not one the author of a `ClickHouseSink` grants
+themselves. When it is on, each sink instance applies the DDL in the background
+before its first write, retrying an unreachable ClickHouse rather than blocking
+startup.
 
-Regardless of how the tables are created, on connect the operator introspects
+Regardless of how the tables are created, every sink's health probe introspects
 `system.columns` for both tables and verifies every required column name and
-type. A mismatch is logged at `Error` level naming each offending
-table/column, and the dedicated `clickhouse-schema` readiness probe degrades to
-not-ready — the process does not crash-loop.
+type. A mismatch is reported as `SchemaValid=False` on that `ClickHouseSink`,
+with the offending table/column in the condition message. It degrades that sink
+alone: the process does not crash-loop, its readiness probe stays healthy (a
+readiness flip would take every *other* sink out of service too), and the rules
+streaming to the sink report `Ready=False/SinkNotReady` while keeping their
+watches — see the README's [status conditions](../README.md#status-conditions).
 
 ---
 
@@ -284,7 +292,7 @@ TTL toDateTime(ts) + INTERVAL 1 YEAR;
 ```
 
 This is a suggestion only; the operator neither sets nor requires a TTL, and
-connect-time validation ignores TTL clauses (it checks column names/types
+schema validation ignores TTL clauses (it checks column names/types
 only).
 
 [D5]: ../kubestream-backlog.md

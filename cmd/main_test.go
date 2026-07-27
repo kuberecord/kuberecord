@@ -22,6 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kubestream/internal/pipeline"
 	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
 )
 
@@ -185,3 +190,294 @@ func TestRegisterWriterFlagsInvalidEnvFallsBack(t *testing.T) {
 			tuning.drainTimeout, clickhouse.DefaultShutdownDrainTimeout)
 	}
 }
+
+// parseOperatorFlags registers the full operator flag set on a throwaway
+// FlagSet, so the operator-level settings are asserted through the same
+// registration main() uses.
+func parseOperatorFlags(t *testing.T, args []string) (*operatorConfig, *managerFlags, error) {
+	t.Helper()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cfg, mf := registerFlags(fs)
+	return cfg, mf, fs.Parse(args)
+}
+
+// TestRegisterFlagsOperatorSettings covers the surviving operator-level
+// settings after the CH_* connection flags were retired (D5): the identity and
+// tuning that belong to *this operator instance* rather than to any sink.
+//
+// --operator-namespace has no default on purpose — main() refuses to start
+// without it, because guessing the namespace the operator reads Secrets in
+// would silently move a security boundary (Task 1.9).
+func TestRegisterFlagsOperatorSettings(t *testing.T) {
+	tests := []struct {
+		name            string
+		env             map[string]string
+		args            []string
+		wantClusterID   string
+		wantNamespace   string
+		wantWorkers     int
+		wantAutoCreate  bool
+		wantLeaderElect bool
+	}{
+		{
+			name:          "defaults",
+			wantClusterID: "local-kind-cluster",
+			wantNamespace: "",
+			wantWorkers:   pipeline.DefaultWorkers,
+		},
+		{
+			name: "env fallback",
+			env: map[string]string{
+				"CLUSTER_ID":            "prod-eu-1",
+				"POD_NAMESPACE":         "kubestream-system",
+				"PIPELINE_WORKERS":      "24",
+				"CH_AUTO_CREATE_SCHEMA": "true",
+			},
+			wantClusterID:  "prod-eu-1",
+			wantNamespace:  "kubestream-system",
+			wantWorkers:    24,
+			wantAutoCreate: true,
+		},
+		{
+			name: "flag beats env",
+			env: map[string]string{
+				"CLUSTER_ID":       "from-env",
+				"POD_NAMESPACE":    "from-env-ns",
+				"PIPELINE_WORKERS": "24",
+			},
+			args: []string{
+				"--cluster-id=from-flag", "--operator-namespace=from-flag-ns",
+				"--pipeline-workers=3", "--leader-elect",
+			},
+			wantClusterID:   "from-flag",
+			wantNamespace:   "from-flag-ns",
+			wantWorkers:     3,
+			wantLeaderElect: true,
+		},
+		{
+			name:          "invalid worker count degrades to the default",
+			env:           map[string]string{"PIPELINE_WORKERS": "lots"},
+			wantClusterID: "local-kind-cluster",
+			wantWorkers:   pipeline.DefaultWorkers,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, mf, err := parseOperatorFlags(t, tc.args)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if cfg.clusterID != tc.wantClusterID {
+				t.Errorf("clusterID = %q, want %q", cfg.clusterID, tc.wantClusterID)
+			}
+			if cfg.operatorNamespace != tc.wantNamespace {
+				t.Errorf("operatorNamespace = %q, want %q", cfg.operatorNamespace, tc.wantNamespace)
+			}
+			if cfg.pipelineWorkers != tc.wantWorkers {
+				t.Errorf("pipelineWorkers = %d, want %d", cfg.pipelineWorkers, tc.wantWorkers)
+			}
+			if cfg.autoCreateSchema != tc.wantAutoCreate {
+				t.Errorf("autoCreateSchema = %t, want %t", cfg.autoCreateSchema, tc.wantAutoCreate)
+			}
+			if mf.enableLeaderElection != tc.wantLeaderElect {
+				t.Errorf("enableLeaderElection = %t, want %t", mf.enableLeaderElection, tc.wantLeaderElect)
+			}
+		})
+	}
+}
+
+// TestRegisterFlagsRetiredClickHouseFlags is the executable half of D5: the
+// connection settings moved to the ClickHouseSink CR + Secret, so the binary
+// must not accept them any more. A flag that lingered would silently do nothing
+// while looking like configuration.
+func TestRegisterFlagsRetiredClickHouseFlags(t *testing.T) {
+	for _, name := range []string{
+		"ch-addr", "ch-database", "ch-username", "ch-dial-timeout", "ch-read-timeout",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			registerFlags(fs)
+			if f := fs.Lookup(name); f != nil {
+				t.Errorf("--%s is still registered; ClickHouse connection settings live on the CR (D5)", name)
+			}
+		})
+	}
+}
+
+// duration is a shorthand for the optional metav1.Duration fields the sink
+// spec uses.
+func duration(d time.Duration) *metav1.Duration { return &metav1.Duration{Duration: d} }
+
+// int32Ptr is a shorthand for the optional int32 fields the writer spec uses.
+func int32Ptr(n int32) *int32 { return &n }
+
+// TestBuildSinkConfig covers the one mapping cmd/main.go owns: a ClickHouseSink
+// spec plus its resolved password onto the backend configuration the sink
+// runtime builds an instance from.
+//
+// The two directions that matter are the fallback contract (a field the CR omits
+// takes the operator's --writer-* value, not the package default) and its
+// converse (a field the CR states always wins). Both are asserted per field,
+// because a mapping this wide is exactly where a copy-paste error hides.
+func TestBuildSinkConfig(t *testing.T) {
+	defaults := writerTuning{
+		queueSize:      111,
+		workers:        2,
+		batchMaxRows:   333,
+		batchMaxWait:   3 * time.Second,
+		enqueueTimeout: 4 * time.Second,
+		drainTimeout:   5 * time.Second,
+	}
+	connection := v1alpha1.ConnectionSpec{
+		Addr:        "clickhouse.example.svc:9000",
+		Database:    "kubestream",
+		Username:    "writer",
+		DialTimeout: duration(7 * time.Second),
+		ReadTimeout: duration(11 * time.Second),
+	}
+
+	tests := []struct {
+		name         string
+		spec         v1alpha1.ClickHouseSinkSpec
+		autoCreate   bool
+		wantConfig   clickhouse.Config
+		wantPassword string
+	}{
+		{
+			name: "an omitted writer block falls back to the operator defaults",
+			spec: v1alpha1.ClickHouseSinkSpec{Connection: connection},
+			wantConfig: clickhouse.Config{
+				Addr:                 connection.Addr,
+				Database:             connection.Database,
+				Username:             connection.Username,
+				Password:             "s3cret",
+				DialTimeout:          7 * time.Second,
+				ReadTimeout:          11 * time.Second,
+				WriteQueueSize:       defaults.queueSize,
+				WriteWorkers:         defaults.workers,
+				BatchMaxRows:         defaults.batchMaxRows,
+				BatchMaxWait:         defaults.batchMaxWait,
+				EnqueueTimeout:       defaults.enqueueTimeout,
+				ShutdownDrainTimeout: defaults.drainTimeout,
+			},
+		},
+		{
+			name: "a writer block on the CR wins over the operator defaults",
+			spec: v1alpha1.ClickHouseSinkSpec{
+				Connection: connection,
+				Writer: v1alpha1.WriterSpec{
+					QueueSize:      int32Ptr(9000),
+					Workers:        int32Ptr(16),
+					BatchMaxRows:   int32Ptr(2500),
+					BatchMaxWait:   duration(250 * time.Millisecond),
+					EnqueueTimeout: duration(time.Second),
+					DrainTimeout:   duration(30 * time.Second),
+				},
+			},
+			autoCreate: true,
+			wantConfig: clickhouse.Config{
+				Addr:                 connection.Addr,
+				Database:             connection.Database,
+				Username:             connection.Username,
+				Password:             "s3cret",
+				DialTimeout:          7 * time.Second,
+				ReadTimeout:          11 * time.Second,
+				AutoCreateSchema:     true,
+				WriteQueueSize:       9000,
+				WriteWorkers:         16,
+				BatchMaxRows:         2500,
+				BatchMaxWait:         250 * time.Millisecond,
+				EnqueueTimeout:       time.Second,
+				ShutdownDrainTimeout: 30 * time.Second,
+			},
+		},
+		{
+			name: "omitted connection timeouts fall back to the CRD's own defaults",
+			spec: v1alpha1.ClickHouseSinkSpec{
+				Connection: v1alpha1.ConnectionSpec{
+					Addr:     connection.Addr,
+					Database: connection.Database,
+					Username: connection.Username,
+				},
+			},
+			wantConfig: clickhouse.Config{
+				Addr:                 connection.Addr,
+				Database:             connection.Database,
+				Username:             connection.Username,
+				Password:             "s3cret",
+				DialTimeout:          defaultSinkDialTimeout,
+				ReadTimeout:          defaultSinkReadTimeout,
+				WriteQueueSize:       defaults.queueSize,
+				WriteWorkers:         defaults.workers,
+				BatchMaxRows:         defaults.batchMaxRows,
+				BatchMaxWait:         defaults.batchMaxWait,
+				EnqueueTimeout:       defaults.enqueueTimeout,
+				ShutdownDrainTimeout: defaults.drainTimeout,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			build := newSinkConfigBuilder(defaults, tc.autoCreate)
+			got, err := build("default", tc.spec, "s3cret")
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			chConfig, ok := got.(clickhouse.Config)
+			if !ok {
+				t.Fatalf("build returned %T, want clickhouse.Config", got)
+			}
+			if chConfig != tc.wantConfig {
+				t.Errorf("config =\n\t%+v\nwant\n\t%+v", chConfig, tc.wantConfig)
+			}
+		})
+	}
+}
+
+// TestBuildSinkConfigFingerprintsThePassword guards the credential-rotation
+// path end to end from this side: the builder must carry the password into the
+// configuration, because the fingerprint the sink runtime recycles on is
+// computed from it. A builder that dropped the password would leave a rotated
+// Secret producing an identical fingerprint — and a sink still authenticating
+// with the old credential until the process restarted.
+func TestBuildSinkConfigFingerprintsThePassword(t *testing.T) {
+	build := newSinkConfigBuilder(writerTuning{}, false)
+	spec := v1alpha1.ClickHouseSinkSpec{
+		Connection: v1alpha1.ConnectionSpec{Addr: "ch:9000", Database: "kubestream", Username: "writer"},
+	}
+
+	before, err := build("default", spec, "old-password")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	after, err := build("default", spec, "new-password")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if before.Fingerprint() == after.Fingerprint() {
+		t.Error("fingerprint is unchanged after a password rotation; the sink would never be recycled")
+	}
+}
+
+// TestSinkFactoryRejectsAForeignConfig covers the D6 seam: the factory is the
+// only place that knows ClickHouse exists, and a configuration built for some
+// future backend must be refused with a legible error rather than panic in a
+// type assertion on a lifecycle goroutine.
+func TestSinkFactoryRejectsAForeignConfig(t *testing.T) {
+	factory := newSinkFactory(pipeline.NewPipelineMetrics(prometheus.NewRegistry()))
+	if _, err := factory("default", foreignConfig{}); err == nil {
+		t.Fatal("factory accepted a non-ClickHouse configuration, want an error")
+	}
+}
+
+// foreignConfig stands in for a future backend's InstanceConfig (D6).
+type foreignConfig struct{}
+
+func (foreignConfig) Fingerprint() string { return "foreign" }
