@@ -1,0 +1,20 @@
+# Binds the aggregated watch role to the operator's ServiceAccount.
+#
+# This binding is applied once, at install time, and never changes again: the
+# whole point of the aggregation model is that extending coverage mutates the
+# *aggregated role's* contents (by applying a labelled preset), not the binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/managed-by: kustomize
+  name: watcher-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: watcher
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

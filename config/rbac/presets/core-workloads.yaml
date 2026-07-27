@@ -1,0 +1,40 @@
+# Watch preset: core workloads. The one preset installed by default.
+#
+# `get,list,watch` only — the data plane never writes to a watched resource, and
+# a preset that granted more would hand the operator rights no code path uses.
+#
+# Do NOT add `secrets` to this or any other preset. `v1/Secret` is hard-denied as
+# a watchable kind in code (D8, enforced in the rule reconciler's policy gate),
+# so a grant here would be dead privilege: the rule naming it is refused before
+# any RBAC check happens. See docs/RBAC.md.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/managed-by: kustomize
+    kubestream.io/aggregate-to-watcher: "true"
+  name: watcher-core-workloads
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  - configmaps
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - daemonsets
+  - statefulsets
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch

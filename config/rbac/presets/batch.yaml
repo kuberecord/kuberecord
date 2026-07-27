@@ -1,0 +1,23 @@
+# Watch preset: batch. Not installed by default — apply it to stream Jobs and
+# CronJobs.
+#
+# `get,list,watch` only, and never `secrets` (D8) — see presets/core-workloads.yaml
+# and docs/RBAC.md for why.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/managed-by: kustomize
+    kubestream.io/aggregate-to-watcher: "true"
+  name: watcher-batch
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - cronjobs
+  verbs:
+  - get
+  - list
+  - watch

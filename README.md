@@ -14,9 +14,9 @@ The watched set is never a compiled-in list: it is declarative runtime configura
 
 The operator is mid-migration to a two-tier, CRD-driven architecture (`ClickHouseSink`, `StreamRule`, `ClusterStreamRule`). The data plane has already been rebuilt as a workqueue pipeline (`internal/pipeline`) fed by a dynamic watch manager (`internal/watch`) that starts and stops informers at runtime from the desired-state registry, replacing the per-GVK controller-runtime reconcilers and the environment-variable GVK list that configured them (both deleted — there is no compatibility shim). The scope-epoch recorder, the multi-sink runtime, and now the control-plane reconcilers that translate the CRDs into registry entries and sink configurations (`internal/controller`) all exist.
 
-What is left in Phase 1 is the wiring: `cmd/main.go` still opens a single ClickHouse connection from `CH_*` environment variables and constructs none of the reconcilers, so applying a rule still has no runtime effect and the `CH_*` configuration below is still what the binary reads. Assembling the registry, the watch manager, the sink runtime and the reconcilers in `main` — and deleting the `CH_*` flags — is the remaining task, along with the aggregated `kubestream-watcher` ClusterRole that grants the watch rights rules ask for.
+What is left in Phase 1 is the wiring: `cmd/main.go` still opens a single ClickHouse connection from `CH_*` environment variables and constructs none of the reconcilers, so applying a rule still has no runtime effect and the `CH_*` configuration below is still what the binary reads. Assembling the registry, the watch manager, the sink runtime and the reconcilers in `main` — and deleting the `CH_*` flags — is the remaining task. The RBAC model the rules run under is already in place (see [RBAC](#rbac) below).
 
-The base `ClusterRole` (`config/rbac/role.yaml`) is generated from the control-plane reconcilers' `+kubebuilder:rbac` markers and now grants what they actually need: read access to the three kubestream CRDs and their status subresources, `namespaces` get/list/watch (for `ClusterStreamRule`'s namespace selector), `selfsubjectaccessreviews` create (for the per-target RBAC checks), and event creation. Standing read access to Pods, Services and Deployments is gone for good — the deleted per-GVK reconcilers carried it, and rules now request watch rights explicitly. Secret reads are a **namespaced** `Role` rather than part of the ClusterRole, which is what makes `credentialsSecretRef.namespace`'s default a real boundary; its `RoleBinding` and the aggregated `kubestream-watcher` role arrive with the RBAC task.
+RBAC has already moved to the aggregated-ClusterRole model: the base role holds only what the control plane calls, watch rights arrive as labelled presets an administrator applies at runtime, and Secret reads are namespace-scoped. See [RBAC](#rbac) and [`docs/RBAC.md`](docs/RBAC.md).
 
 ## Use Cases
 
@@ -101,6 +101,42 @@ at connect time. Either way, on connect the operator introspects
 `system.columns` and validates the live tables against schema v1; a mismatch is
 logged and degrades the `clickhouse-schema` readiness probe (it does not
 crash-loop).
+
+### RBAC
+
+kubestream's permissions come in three separable pieces, and only one of them
+changes after install:
+
+- **Base rights** — `ClusterRole kubestream-manager-role`, generated from the
+  control-plane reconcilers' `+kubebuilder:rbac` markers, so it cannot drift from
+  what the code calls: read access to the three kubestream CRDs and their status
+  subresources, `namespaces` get/list/watch (for `ClusterStreamRule`'s namespace
+  selector), `selfsubjectaccessreviews` create (for the per-target RBAC checks),
+  and event creation. Standing read access to Pods, Services and Deployments is
+  gone for good — the deleted per-GVK reconcilers carried it, and there is a test
+  that fails if a workload grant ever reappears here.
+- **Credential rights** — Secret `get,list,watch` as a **namespaced** `Role` in
+  the operator's namespace, never in the ClusterRole. That is what makes
+  `credentialsSecretRef.namespace`'s default a real boundary rather than a
+  convenience.
+- **Watch rights** — the aggregated `ClusterRole kubestream-watcher`, which
+  declares no rules of its own and is filled by the controller-manager from every
+  ClusterRole labelled `kubestream.io/aggregate-to-watcher: "true"`. Platform
+  admins extend coverage by applying a small labelled role from
+  [`config/rbac/presets/`](config/rbac/presets/) — `core-workloads` (on by
+  default), `networking`, `batch`, `storage`, `rbac-read` — or a copy of one. **No
+  operator redeploy and no restart:** a rule parked on
+  `RBACGranted=False/MissingPermissions` flips to `True` on its own within one
+  resync once the grant appears, and the operator can never grant it to itself
+  (it holds no write access to RBAC objects, and Kubernetes forbids granting what
+  you do not hold).
+
+- **Reference:** [`docs/RBAC.md`](docs/RBAC.md) — the full model, the
+  no-self-escalation argument, a "grant a new GVK in 30 seconds" walkthrough, how
+  gaps surface as conditions, and the honest **read-flattening caveat** (anyone
+  who can query ClickHouse reads every namespace's recorded state regardless of
+  their cluster RBAC; per-namespace views are a documented future item, not
+  shipped).
 
 ## Custom Resources (`kubestream.io/v1alpha1`)
 

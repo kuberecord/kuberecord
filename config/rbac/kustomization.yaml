@@ -7,8 +7,34 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+# The namespaced half of role.yaml (Secret reads for sink credentials) needs its
+# own RoleBinding, in the operator's namespace only. Removing this line disables
+# every ClickHouseSink: credentials become unreadable.
+- manager_secret_role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+# The aggregated watch role and its binding. This role starts empty and is
+# populated by the controller-manager from the labelled ClusterRoles below, so
+# extending kubestream's coverage never means editing or redeploying the
+# operator. See docs/RBAC.md.
+- watcher_role.yaml
+- watcher_role_binding.yaml
+# Watch presets. Only core-workloads (pods, services, configmaps,
+# serviceaccounts, and the apps/v1 workload kinds) ships enabled, because it is
+# what the default sample rules watch.
+#
+#   - To ship with *no* standing watch rights at all, comment the next line out.
+#     The operator still boots healthy; rules naming a kind nobody granted report
+#     RBACGranted=False/MissingPermissions instead, and flip to True on their own
+#     once a preset is applied.
+#   - To enable another family, add it here — or, with no redeploy at all, just
+#     `kubectl apply -f config/rbac/presets/<family>.yaml` against a live cluster.
+#   - To grant a kind no preset covers (a CRD, typically), copy any preset,
+#     change the rules, and keep the kubestream.io/aggregate-to-watcher label.
+#     Presets applied through this kustomization pick up the `kubestream-` name
+#     prefix; applied directly with `kubectl -f` they keep the name in the file.
+#     Aggregation is by label, so both are equivalent.
+- presets/core-workloads.yaml
 # The following RBAC configurations are used to protect
 # the metrics endpoint with authn/authz. These configurations
 # ensure that only authorized users and service accounts
