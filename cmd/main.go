@@ -29,6 +29,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +38,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -474,7 +477,14 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 	}
 
 	sinkReconciler := &controller.SinkReconciler{
-		Client:   mgr.GetClient(),
+		Client: mgr.GetClient(),
+		// GetEventRecorderFor is deprecated in favour of the events/v1 recorder,
+		// but the two are not interchangeable: the new EventRecorder's Eventf
+		// takes a `related` object and an `action` verb the reconcilers do not
+		// have, so switching is an API change to internal/controller (Task 1.7)
+		// and to the events kubestream emits, not a rename. Deferred deliberately
+		// rather than smuggled into the e2e task.
+		//nolint:staticcheck // SA1019: events/v1 migration is its own change.
 		Recorder: mgr.GetEventRecorderFor("kubestream-clickhousesink"),
 		Sinks:    op.sinks,
 		// The ClickHouse mapping lives here, in the wiring, so internal/controller
@@ -488,7 +498,8 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 	}
 
 	base := controller.RuleReconciler{
-		Client:   mgr.GetClient(),
+		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: see the ClickHouseSink recorder above.
 		Recorder: mgr.GetEventRecorderFor("kubestream-streamrule"),
 		Registry: op.registry,
 		Resolver: watch.NewResolver(mgr.GetRESTMapper()),
@@ -628,6 +639,39 @@ func registerFlags(fs *flag.FlagSet) (*operatorConfig, *managerFlags) {
 	return cfg, mf
 }
 
+// managerCacheOptions confines the manager's Secret informer to the operator's
+// own namespace.
+//
+// Without it the operator cannot run at all under its shipped RBAC. The
+// SinkReconciler watches Secrets to close the credential-rotation loop, and a
+// watch through the manager's cache is a *cluster-scoped* list-and-watch by
+// default — but the operator's Secret grant is a namespaced Role, on purpose
+// (Task 1.9, D7: a cluster-scoped ClickHouseSink must never become a way to read
+// any Secret in the cluster). The list is refused, the cache never syncs, and
+// every ClickHouseSink hangs unreconciled with an empty status. It is invisible
+// to envtest, whose client is effectively an administrator, and shows up the
+// moment the operator runs on a real cluster.
+//
+// Scoping the informer — rather than widening the grant — is what keeps the
+// security boundary intact: the list the operator issues is now exactly the one
+// its Role permits. A sink whose credentialsSecretRef names some other namespace
+// gets a cache error rather than a credential, which is the truthful outcome
+// (the operator has no rights there either way) and degrades that one sink
+// through CredentialsResolved=False instead of stalling the process.
+//
+// Only Secrets are constrained. The CRDs are cluster-scoped or watched across all
+// namespaces by design, and Namespaces are listed cluster-wide for
+// ClusterStreamRule selector expansion — both of which the base ClusterRole grants.
+func managerCacheOptions(operatorNamespace string) cache.Options {
+	return cache.Options{
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Namespaces: map[string]cache.Config{operatorNamespace: {}},
+			},
+		},
+	}
+}
+
 // managerFlags are the controller-runtime manager's own settings: serving
 // addresses, leader election and the two TLS bundles. They configure the harness
 // rather than kubestream itself, which is why they are separate from
@@ -659,6 +703,7 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
+		Cache:                  managerCacheOptions(cfg.operatorNamespace),
 		Metrics:                metricsServerOptions(mf),
 		WebhookServer:          webhook.NewServer(webhookServerOptions(mf)),
 		HealthProbeBindAddress: mf.probeAddr,

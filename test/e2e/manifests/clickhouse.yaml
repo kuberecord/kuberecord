@@ -1,0 +1,134 @@
+# Single-node ClickHouse for the e2e suite (Task 1.11).
+#
+# This is a test fixture, not a deployment recipe: it exists so the suite can
+# assert against a *real* backend by querying it directly, and nothing here is
+# meant to be copied into a production install.
+#
+# Two choices are worth explaining:
+#
+#   - It lives in its own namespace rather than beside the operator, so the
+#     suite tears the whole backend down with one `delete namespace`, and so the
+#     `pod-security.kubernetes.io/enforce=restricted` label the operator's
+#     namespace carries does not have to be relaxed for a third-party image.
+#   - Storage is an emptyDir. Every assertion in the suite is about rows written
+#     during the run, so durability buys nothing while a PVC would add a
+#     StorageClass dependency and a slower teardown.
+#
+# The database and the user are created by the image's own entrypoint from the
+# CLICKHOUSE_* env vars below; the password is projected from a Secret the suite
+# creates with the same value the operator's shipped credentials Secret holds,
+# so the two sides of the connection cannot drift apart.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubestream-e2e-clickhouse
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: e2e-fixture
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: kubestream-e2e-clickhouse
+  labels:
+    app: clickhouse
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two servers must never share the emptyDir, and
+  # there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 101 is the `clickhouse` user baked into the official image. fsGroup
+        # makes the emptyDir volumes writable for it without a root init
+        # container.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:24.8
+        # The suite side-loads this image into the kind node, so it must never
+        # be re-pulled from a registry mid-run.
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLICKHOUSE_DB
+          value: kubestream
+        - name: CLICKHOUSE_USER
+          value: kubestream
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: password
+        ports:
+        - name: native
+          containerPort: 9000
+        - name: http
+          containerPort: 8123
+        # /ping over the HTTP port is the only endpoint that answers before the
+        # server is fully open for queries, which is exactly the edge the suite
+        # must not race against.
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: logs
+          mountPath: /var/log/clickhouse-server
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: kubestream-e2e-clickhouse
+  labels:
+    app: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+  - name: native
+    port: 9000
+    targetPort: native
+  - name: http
+    port: 8123
+    targetPort: http

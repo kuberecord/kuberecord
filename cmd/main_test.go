@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/yelzhy/kubestream/api/v1alpha1"
@@ -481,3 +482,36 @@ func TestSinkFactoryRejectsAForeignConfig(t *testing.T) {
 type foreignConfig struct{}
 
 func (foreignConfig) Fingerprint() string { return "foreign" }
+
+// TestManagerCacheOptionsConfineSecretsToTheOperatorNamespace guards the one
+// wiring detail that decides whether the operator can run under its own RBAC.
+//
+// The Secret grant is a namespaced Role (Task 1.9, D7), so the manager's Secret
+// informer has to issue a namespaced list. Left at the default it lists
+// cluster-wide, the API server refuses it, the cache never syncs and every
+// ClickHouseSink hangs with an empty status — a failure envtest cannot reproduce,
+// because its client is effectively an administrator. Hence a unit test on the
+// options themselves.
+func TestManagerCacheOptionsConfineSecretsToTheOperatorNamespace(t *testing.T) {
+	const namespace = "kubestream-system"
+
+	opts := managerCacheOptions(namespace)
+
+	var found bool
+	for object, byObject := range opts.ByObject {
+		if _, ok := object.(*corev1.Secret); !ok {
+			continue
+		}
+		found = true
+		if _, ok := byObject.Namespaces[namespace]; !ok {
+			t.Errorf("Secret cache is not scoped to %q; namespaces = %v", namespace, byObject.Namespaces)
+		}
+		if len(byObject.Namespaces) != 1 {
+			t.Errorf("Secret cache covers %d namespaces, want exactly the operator's one",
+				len(byObject.Namespaces))
+		}
+	}
+	if !found {
+		t.Fatal("no per-object cache configuration for Secrets; the informer would list cluster-wide")
+	}
+}

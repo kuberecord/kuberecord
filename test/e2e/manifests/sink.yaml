@@ -1,0 +1,52 @@
+# The ClickHouseSink every e2e scenario streams to.
+#
+# It is named "default" because that is the name a rule's spec.sinkRef defaults
+# to, so the suite's rules carry no sinkRef boilerplate — the same shape a real
+# single-sink install has.
+#
+# credentialsSecretRef omits a namespace on purpose: it resolves to the
+# operator's own namespace, the only place the operator holds Secret read rights
+# (Task 1.9). The Secret it names is the one `config/manager` ships, so the
+# suite proves the shipped credential path works rather than inventing one.
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: e2e-fixture
+spec:
+  connection:
+    addr: clickhouse.kubestream-e2e-clickhouse.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      name: kubestream-clickhouse-credentials
+  writer:
+    # Deliberately small and eager compared with the shipped defaults: the
+    # suite's assertions are per-row, so a batch that waits a second for a
+    # thousand more rows only adds latency to every Eventually. The write path
+    # under test is unchanged — only how quickly a partial batch flushes.
+    queueSize: 1000
+    workers: 2
+    batchMaxRows: 100
+    batchMaxWait: 200ms
+    enqueueTimeout: 2s
+    drainTimeout: 15s
+  policy:
+    # Exactly the kinds the scenarios stream, spelled out rather than left
+    # empty: an accidental extra watch would then fail loudly as
+    # PolicyAllowed=False instead of quietly writing rows nobody asserted on.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment
+    - group: ""
+      version: v1
+      kinds:
+      - Node
+    - group: networking.k8s.io
+      version: v1
+      kinds:
+      - Ingress

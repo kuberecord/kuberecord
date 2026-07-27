@@ -394,16 +394,42 @@ make uninstall  # CRDs only
 This project is scaffolded with [Kubebuilder](https://book.kubebuilder.io/) and uses its standard Makefile targets:
 
 ```sh
-make build          # go build the manager binary
-make run            # run the controller locally against your current kubeconfig context
-                    #   (OPERATOR_NAMESPACE=<ns> selects where it reads sink credentials Secrets)
-make test           # run the unit/envtest suite (requires the envtest/etcd binaries; make setup-envtest fetches them)
-make lint           # run golangci-lint (see .golangci.yml for the enabled linters)
-make lint-fix       # run golangci-lint with --fix
-make fmt vet        # gofmt + go vet
+make build            # go build the manager binary
+make run              # run the controller locally against your current kubeconfig context
+                      #   (OPERATOR_NAMESPACE=<ns> selects where it reads sink credentials Secrets)
+make test             # run the unit/envtest suite (requires the envtest/etcd binaries; make setup-envtest fetches them)
+make test-integration # run the ClickHouse integration tests against a throwaway container (needs Docker)
+make test-e2e         # run the end-to-end acceptance suite on a Kind cluster (needs Docker + Kind)
+make bench-load       # run the synthetic-churn load harness (Task 0.8)
+make lint             # run golangci-lint (see .golangci.yml for the enabled linters)
+make lint-fix         # run golangci-lint with --fix
+make fmt vet          # gofmt + go vet
 ```
 
 `make test` runs both the pure-Go unit tests (e.g. `internal/pipeline/`, `internal/plan/`, `cmd/main_test.go`) and the Ginkgo/envtest-based CRD validation suite in `api/v1alpha1/`, which spins up a real (test-only) API server via `envtest` — no live cluster is required for it, but the envtest binaries must be present locally (`make setup-envtest`). The pipeline's own suite deliberately needs neither an API server nor a database: it drives the workqueue through in-package fakes for the watch cache and the sink.
+
+### End-to-end tests
+
+`make test-e2e` is the acceptance suite: it creates a Kind cluster, builds and
+side-loads the manager image, deploys a single-node ClickHouse
+(`test/e2e/manifests/clickhouse.yaml`) and the operator, and then drives real
+custom resources while **asserting by querying ClickHouse directly** — not by
+reading the operator's own status. It covers:
+
+| Scenario | What it proves |
+|---|---|
+| Lifecycle | create / scale / delete a Deployment yields `Added` (full payload, hash, actors), `Modified` (a diff of the change, no payload) and exactly one `Deleted` (no payload at all), plus a `watch_scopes` `Started` row |
+| Dynamic churn | deleting a rule writes a `Stopped` row and **zero** `Deleted` rows for objects that are still alive; re-creating it reopens the scope without re-announcing them |
+| RBAC | a rule for an ungranted kind reports `RBACGranted=False` while every other rule keeps streaming; applying the preset heals it within one resync, with no restart |
+| Restart | an object deleted while the operator is down yields exactly one `Deleted`; one deleted and re-created yields the reincarnation close-out |
+| Cluster scope | a `ClusterStreamRule` streams `v1/Node`; a namespaced `StreamRule` naming it reports `ResourceResolved=False` |
+
+It needs Docker and [Kind](https://kind.sigs.k8s.io/) and nothing else — the
+suite installs everything it depends on and tears the cluster down afterwards.
+Budget under 15 minutes; the RBAC scenario alone waits out the rule reconciler's
+two-minute resync on purpose, because self-healing without a restart is the
+property being tested. Override the Go test timeout with `E2E_TIMEOUT` and the
+cluster name with `KIND_CLUSTER`.
 
 Run `make help` for the full list of available targets (image building, Kustomize install/deploy, dependency downloads, etc.).
 

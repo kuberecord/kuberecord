@@ -40,6 +40,13 @@ unreadiness that would have taken every other sink out of service with it.
   Secrets in, so the operator refuses to guess it.
 - `--pipeline-workers` (env `PIPELINE_WORKERS`, default 8) — goroutines draining
   the shared data-plane workqueue.
+- An end-to-end acceptance suite (`make test-e2e`) that runs the operator on a
+  real Kind cluster against a real in-cluster ClickHouse and asserts by querying
+  the sink directly: the full create/scale/delete lifecycle of a watched object,
+  scope epochs across a rule being deleted and re-created, RBAC degrade and
+  self-heal, offline deletions and reincarnations across an operator restart, and
+  cluster-scoped kinds. `make deploy-e2e` / `make undeploy-e2e` install the
+  operator with the suite's overlay.
 
 ### Changed
 
@@ -52,6 +59,45 @@ unreadiness that would have taken every other sink out of service with it.
 - `--ch-auto-create-schema` (env `CH_AUTO_CREATE_SCHEMA`) survives as an
   operator-level setting and now applies to every sink instance, which executes
   the shipped DDL in the background before its first write.
+- The e2e suite no longer installs cert-manager. Validation is CEL-only and there
+  are no webhooks (D4), so nothing in the suite ever needed it.
+
+### Fixed
+
+- The operator could not reconcile any `ClickHouseSink` under its own shipped
+  RBAC. The `SinkReconciler` watches Secrets to close the credential-rotation
+  loop, and a watch through the manager's cache lists **cluster-wide** by
+  default — but the operator's Secret grant is a namespaced `Role`, deliberately
+  (D7). The API server refused the list, the cache never synced, and every sink
+  sat unreconciled with an empty status. The manager's cache now confines its
+  Secret informer to `--operator-namespace`, so the list it issues is exactly the
+  one the Role permits; the grant is unchanged. Found by the new e2e suite —
+  envtest cannot reproduce it, because its client is effectively an
+  administrator.
+
+### Known gap
+
+- **A delete-and-recreate that happens while the operator is down records no
+  `Deleted` row for the old UID.** The successor is recorded under its own UID,
+  and a plain offline deletion still yields exactly one `Deleted` — but the
+  reincarnation close-out is lost, so the old incarnation's death never reaches
+  the audit trail.
+
+  Neither half of the mechanism is individually wrong. The close-out comes from
+  the pipeline's reincarnation branch, which needs the dedup cache to already
+  hold the old UID — that is, it needs the scope's warm-up from the sink's
+  history to finish before the informer's initial list is processed. After a
+  restart it never does: warm waits for the sink to dial ClickHouse while the
+  informer only has to reach the API server. The new object is seen first and
+  tagged `Snapshot`, and the zombie GC then *refuses* to claim the old UID
+  because the key is already reserved by the live successor — a refusal that is
+  itself a deliberate safeguard against deleting a live object by name alone.
+
+  Fixing it means revising the warm/GC ordering, or letting a refused claim still
+  record the old UID's death. Both are changes to that component's design under
+  Invariant 3, so this is reported rather than patched from the e2e suite; the
+  scenario asserts what the operator actually does and the omission is documented
+  inline in `test/e2e/scenarios_test.go`.
 
 ### Migration
 

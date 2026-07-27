@@ -144,7 +144,7 @@ statement that the objects in that scope were deleted.
 | `kind` | `LowCardinality(String)` | Kind of the watched scope. |
 | `namespace` | `String` | Watched namespace; `""` means cluster-scoped or all-namespaces. It is part of the scope's **identity**: a rule pinned to one namespace and a cluster-wide rule over the same kind are two scopes with two independent epochs, so `namespace = ''` must be matched exactly rather than treated as a wildcard. |
 | `action` | `LowCardinality(String)` | `Started` when a `(sink, scope)` gains its first interested rule; `Stopped` when it loses its last. |
-| `rule_ref` | `String` | The rule that triggered the transition: `"<namespace>/<name>"` for a `StreamRule`, `"<name>"` for a `ClusterStreamRule`. Empty for a `Stopped` row written by boot reconciliation (below), where the rule that had held the scope no longer exists. |
+| `rule_ref` | `String` | The rule that triggered the transition, as `"<kind>/<namespace>/<name>"` — `"streamrule/demo/audit"`, or `"clusterstreamrule//platform-baseline"` for a cluster-scoped rule, which renders an empty namespace segment. The kind is part of the reference because a `StreamRule` and a `ClusterStreamRule` may share a name. Empty for a `Stopped` row written by boot reconciliation (below), where the rule that had held the scope no longer exists. |
 
 ```sql
 ENGINE = MergeTree

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS watch_scopes
     kind       LowCardinality(String),
     namespace  String,                     -- '' = cluster-scoped or all-namespaces
     action     LowCardinality(String),     -- Started|Stopped
-    rule_ref   String                      -- "<namespace>/<name>" of StreamRule, or "<name>" of ClusterStreamRule
+    rule_ref   String                      -- "<kind>/<namespace>/<name>", e.g. "streamrule/demo/audit" or "clusterstreamrule//platform"
 )
 ENGINE = MergeTree
 ORDER BY (cluster_id, api_group, kind, namespace, ts);
