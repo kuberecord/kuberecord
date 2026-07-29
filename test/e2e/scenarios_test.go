@@ -370,30 +370,31 @@ var _ = Describe("Phase 1 acceptance scenarios", Ordered, Serial, func() {
 		// history is not rewritten by the object that took its name.
 		consistentlyRowCount(withEvent(oldReborn, creationEvents...), 1)
 
-		// KNOWN GAP — the acceptance criteria also ask for a Deleted row against
-		// the *old* UID here, and the operator does not write one. It is asserted
-		// nowhere below on purpose: the suite reports what the operator does, and a
-		// permanently red gate would only obscure the other four scenarios.
+		By("asserting the old incarnation's death was recorded exactly once")
+		// The reincarnation close-out. Nothing in the live pipeline can produce it
+		// here: the successor is listed by the informer before the warm-up finishes
+		// (warm has to dial ClickHouse, the informer only has to reach the API
+		// server), so the dedup cache never holds the old UID and the zombie GC's
+		// UID-gated claim is correctly refused — that refusal is what stops a live
+		// object being deleted by name alone. The evidence survives only in the
+		// sink's own history, and the warm-up recovers it from there (Task 1.12):
+		// either as two incarnations of one name where the older has no Deleted
+		// row, or — the ordering this scenario usually produces, where the warm's
+		// history read beats the successor's own first row to ClickHouse — from the
+		// refused claim, once history has caught up enough to date the row from.
 		//
-		// Why it is missing. The close-out is emitted by the pipeline's
-		// reincarnation branch, which fires only when the dedup cache already holds
-		// the *old* UID for the key — i.e. only when the scope's warm-up from the
-		// sink's history finishes before the informer's initial list is processed.
-		// On a restart it never does: warm has to wait for the sink instance to
-		// dial ClickHouse, while the informer only has to reach the API server. The
-		// new object is therefore seen first and tagged Snapshot, and the zombie GC
-		// then correctly *refuses* to claim the old UID, because the key is already
-		// reserved by the live successor (see WarmCoordinator.gcPass — that refusal
-		// is itself a Task 1.6 acceptance criterion, and it is what stops a live
-		// object being deleted by name alone).
-		//
-		// So neither component is individually wrong, and the two criteria are in
-		// tension: nobody is left to record that the old incarnation died. The
-		// operator's own log states it plainly — "zombies_cleared: 1, checked: 2".
-		//
-		// Closing it means changing the warm/GC ordering or letting a refused claim
-		// still record the old UID's death, which is Task 1.6's design to revise
-		// under Invariant 3, not something to settle inside the e2e task.
+		// The row is dated from history, not from the recovery, so a reconstruction
+		// reads the old incarnation's death *before* the successor's first row — and
+		// so a re-emitted close-out is byte-identical and collapses on merge, which
+		// is what the duplicate check below is really testing.
+		eventuallyExactlyOneRow(withEvent(oldReborn, eventDeleted), restartTimeout)
+		consistentlyRowCount(withEvent(oldReborn, eventDeleted), 1)
+
+		By("asserting the successor is still recorded as live after the close-out")
+		// The close-out must not bury its successor: dated from history it sorts
+		// before the successor's rows, so the identity's most recent event is still
+		// the successor's own — which is what keeps a later warm-up seeding it.
+		consistentlyRowCount(withEvent(newReborn, eventDeleted), 0)
 	})
 
 	It("streams a cluster-scoped kind only for the rule type allowed to name it", func() {

@@ -42,18 +42,31 @@ var _ sink.StateReader = (*CHWriter)(nil)
 // every namespace (the GVK-wide scope today's warm-up uses), so the emitted SQL
 // is identical to the original inline query when Namespace is unset.
 //
+// The grouping is per *incarnation* — (namespace, name, uid) — not per identity,
+// and the HAVING therefore scopes per incarnation too: an incarnation whose own
+// latest event is Deleted is closed and excluded, while one whose latest event is
+// anything else is still open. A normal object yields exactly one row. Two or
+// more rows for one (namespace, name) are the signature of a death nobody
+// recorded: a delete-and-recreate that happened while the operator was down, in
+// which the successor was seen first and the predecessor's close-out was never
+// written. Detecting that from history alone — rather than by comparing history
+// against the live cache — is what makes it detectable at all: the successor's
+// own first row may already have landed by the time this query runs, at which
+// point a per-identity argMax(uid, ts) would return the new UID and show nothing
+// wrong. See pipeline's seedScope for what is done with the extra rows.
+//
 // This read is dedup-safe under resource_states' ReplacingMergeTree engine
-// without FINAL: it GROUPs BY (namespace, name), so it emits exactly one row per
-// identity by construction regardless of how many unmerged duplicate rows the
-// table still holds. A ReplacingMergeTree duplicate is byte-identical to its
-// original (the at-least-once write path re-inserts the same frozen ts and
-// values — see 001_resource_states.sql), so argMax(uid, ts) / argMax(sha256, ts)
-// / argMax(event_type, ts) return the same value whether the table has collapsed
-// the duplicates yet or not. The warm-up therefore never double-counts or
-// mis-reads an identity from a pre-merge duplicate.
+// without FINAL: the GROUP BY emits exactly one row per (identity, uid) by
+// construction, regardless of how many unmerged duplicate rows the table still
+// holds. A ReplacingMergeTree duplicate is byte-identical to its original (the
+// at-least-once write path re-inserts the same frozen ts and values — see
+// 001_resource_states.sql), so neither the row count nor any of the aggregates —
+// argMax(sha256, ts), argMax(api_version, ts), max(ts), argMax(event_type, ts) —
+// can change between the pre- and post-merge states. The warm-up therefore never
+// double-counts or mis-reads an incarnation from a pre-merge duplicate.
 func lastKnownStatesQuery(filter sink.ScopeFilter) (string, []any) {
 	query := `
-        SELECT namespace, name, argMax(uid, ts), argMax(sha256, ts)
+        SELECT namespace, name, uid, argMax(sha256, ts), argMax(api_version, ts), max(ts)
         FROM resource_states
         WHERE api_group = ? AND kind = ? AND cluster_id = ?`
 	args := []any{filter.APIGroup, filter.Kind, filter.ClusterID}
@@ -63,7 +76,7 @@ func lastKnownStatesQuery(filter sink.ScopeFilter) (string, []any) {
 		args = append(args, filter.Namespace)
 	}
 	query += `
-        GROUP BY namespace, name
+        GROUP BY namespace, name, uid
         HAVING argMax(event_type, ts) != 'Deleted'`
 	return query, args
 }
@@ -206,10 +219,11 @@ func (w *CHWriter) ActiveScopes(ctx context.Context, clusterID string) ([]sink.S
 }
 
 // LastKnownStates implements sink.StateReader against the shared ClickHouse
-// connection. It reports, per scope, the last-known (uid, sha256) of every
-// object whose most recent event is not a deletion — exactly what a cache
-// warm-up needs to reconstruct its dedup baseline without re-emitting live
-// objects.
+// connection. It reports, per scope, the last-known (sha256, api_version, ts) of
+// every *incarnation* whose own most recent event is not a deletion — exactly
+// what a cache warm-up needs to reconstruct its dedup baseline without
+// re-emitting live objects, plus the evidence it needs to close out an
+// incarnation whose death was never recorded (see lastKnownStatesQuery).
 //
 // The call is registered in otherUsers under the closing check so Start never
 // closes conn while a query is in flight (see CHWriter.otherUsers). A
@@ -237,7 +251,7 @@ func (w *CHWriter) LastKnownStates(ctx context.Context, filter sink.ScopeFilter)
 	var states []sink.KnownState
 	for rows.Next() {
 		var st sink.KnownState
-		if err := rows.Scan(&st.Namespace, &st.Name, &st.UID, &st.SHA256); err != nil {
+		if err := rows.Scan(&st.Namespace, &st.Name, &st.UID, &st.SHA256, &st.APIVersion, &st.TS); err != nil {
 			return nil, err
 		}
 		states = append(states, st)

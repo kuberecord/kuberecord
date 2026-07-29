@@ -808,8 +808,40 @@ func writesTotalValue(t *testing.T, reg prometheus.Gatherer, outcome string) flo
 
 // TestLastKnownStatesQueryScoping proves the warm-up query is GVK-scoped by
 // default and namespace-scoped only when ScopeFilter.Namespace is set — the
-// behavior-preserving extraction of restoreAndWarm's original inline query.
+// behavior-preserving extraction of restoreAndWarm's original inline query — and
+// that it answers per *incarnation* rather than per identity (Task 1.12).
 func TestLastKnownStatesQueryScoping(t *testing.T) {
+	t.Run("grouping is per incarnation, not per identity", func(t *testing.T) {
+		q, _ := lastKnownStatesQuery(sink.ScopeFilter{
+			ClusterID: "c1", APIGroup: "apps", Kind: "Deployment",
+		})
+		// Per-UID grouping is what makes an unrecorded death detectable at all: a
+		// per-identity argMax(uid, ts) would simply return the successor's UID once
+		// its first row landed, and the prior incarnation would vanish from the
+		// answer with nothing amiss.
+		if !strings.Contains(q, "GROUP BY namespace, name, uid") {
+			t.Errorf("expected a per-incarnation GROUP BY, got query:\n%s", q)
+		}
+		// The HAVING keeps its "most recent event decides" shape, now scoped to one
+		// incarnation: a UID whose own latest event is Deleted is closed out.
+		if !strings.Contains(q, "HAVING argMax(event_type, ts) != 'Deleted'") {
+			t.Errorf("expected the per-incarnation HAVING clause, got query:\n%s", q)
+		}
+		// uid is a grouping column now, so it is selected directly rather than
+		// aggregated; api_version and ts are what make a close-out derivable from
+		// history alone.
+		for _, column := range []string{
+			"argMax(sha256, ts)", "argMax(api_version, ts)", "max(ts)",
+		} {
+			if !strings.Contains(q, column) {
+				t.Errorf("expected %s in the projection, got query:\n%s", column, q)
+			}
+		}
+		if strings.Contains(q, "argMax(uid, ts)") {
+			t.Errorf("uid is a grouping column and must not be aggregated, got query:\n%s", q)
+		}
+	})
+
 	t.Run("no namespace matches every namespace", func(t *testing.T) {
 		q, args := lastKnownStatesQuery(sink.ScopeFilter{
 			ClusterID: "c1", APIGroup: "apps", Kind: "Deployment",

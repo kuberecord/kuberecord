@@ -366,6 +366,55 @@ func TestDeleteDrainsThenEvictsThenParks(t *testing.T) {
 	}
 }
 
+// TestDeleteClearsTheWarmCoordinatorsBookkeeping covers the optional WarmHooks
+// half of the teardown (Task 1.12). The coordinator's per-sink state — most of all
+// its "already boot-reconciled" mark — has to go the moment the pipeline's caches
+// do, or a sink re-created under the same name inherits a stale mark and its boot
+// pass never runs again, leaving scopes orphaned during the absence open forever.
+func TestDeleteClearsTheWarmCoordinatorsBookkeeping(t *testing.T) {
+	var warm *fakeWarmHooks
+	h := newManagerHarness(t, func(opts *ManagerOptions) {
+		warm = newFakeWarmHooks(opts.Pipeline.(*fakePipeline).clock)
+		opts.Warm = warm
+	})
+	h.start()
+
+	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	h.mgr.Delete("primary")
+
+	waitFor(t, "the deleted sink to be forgotten by the warm coordinator", func() bool {
+		forgotten, _ := warm.forgets()
+		return slices.Contains(forgotten, "primary")
+	})
+
+	// Ordering: the coordinator is cleared immediately after the pipeline
+	// eviction, so no window exists in which one half of the teardown has happened
+	// and the other has not been scheduled.
+	_, removeAt := h.pipe.removals()
+	_, forgetAt := warm.forgets()
+	if forgetAt["primary"] <= removeAt["primary"] {
+		t.Errorf("the warm coordinator was cleared at %d, before the pipeline eviction at %d",
+			forgetAt["primary"], removeAt["primary"])
+	}
+}
+
+// TestDeleteWithoutWarmHooksStillEvicts proves the hook is genuinely optional: a
+// deployment (or a test) that runs no warm coordinator must not need the wiring,
+// and must not panic for the want of it.
+func TestDeleteWithoutWarmHooksStillEvicts(t *testing.T) {
+	h := newManagerHarness(t, nil) // ManagerOptions.Warm left nil
+	h.start()
+
+	h.mgr.Delete("primary")
+
+	waitFor(t, "the deleted sink to be evicted with no warm hooks wired", func() bool {
+		removed, _ := h.pipe.removals()
+		return slices.Contains(removed, "primary")
+	})
+}
+
 // TestDeleteOfAnUnknownSinkStillEvictsAndParks covers the rule that references a
 // sink whose CR never existed (or was deleted before this process started): it
 // needs the same SinkMissing parking as one whose instance was running, and the

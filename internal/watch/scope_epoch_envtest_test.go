@@ -42,7 +42,10 @@ import (
 // scopeHistory is a sink.StateReader over hand-written history, so a test can state
 // exactly what a previous epoch of the operator had recorded.
 type scopeHistory struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// states is read per *incarnation* (see sink.KnownState): several entries
+	// sharing a Namespace/Name but differing in UID describe an identity whose
+	// older incarnation died without a Deleted row ever being written for it.
 	states    map[sink.ScopeFilter][]sink.KnownState
 	wasActive map[sink.ScopeFilter]bool
 	active    []sink.ScopeFilter

@@ -50,9 +50,12 @@ var (
 	_ pipeline.StateReaderRouter = (*sink.SinkManager)(nil)
 	_ pipeline.ScopeEventRouter  = (*sink.SinkManager)(nil)
 
-	// And the one contract that runs the other way: the pipeline is what the
-	// manager evicts per-sink state through when a sink is deleted.
-	_ sink.Pipeline = (*pipeline.Pipeline)(nil)
+	// And the two contracts that run the other way: the pipeline is what the
+	// manager evicts per-sink state through when a sink is deleted, and the
+	// warm/GC coordinator is what it clears the sink's boot-reconciliation mark
+	// and in-flight warms through, immediately afterwards.
+	_ sink.Pipeline  = (*pipeline.Pipeline)(nil)
+	_ sink.WarmHooks = (*pipeline.WarmCoordinator)(nil)
 )
 
 // recordingWriter is a sink.Writer that settles every job immediately and keeps

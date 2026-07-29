@@ -263,6 +263,7 @@ type operatorConfig struct {
 type dataPlane struct {
 	pipe    *pipeline.Pipeline
 	watches *watch.WatchManager
+	warm    *pipeline.WarmCoordinator
 }
 
 // errDataPlaneUnbound reports a lookup that arrived before the wiring completed.
@@ -279,9 +280,10 @@ var unsettled = make(chan struct{})
 
 // bind completes the graph. It is called once, after every component exists and
 // before the manager starts any of them.
-func (d *dataPlane) bind(pipe *pipeline.Pipeline, watches *watch.WatchManager) {
+func (d *dataPlane) bind(pipe *pipeline.Pipeline, watches *watch.WatchManager, warm *pipeline.WarmCoordinator) {
 	d.pipe = pipe
 	d.watches = watches
+	d.warm = warm
 }
 
 // RemoveSink implements sink.Pipeline.
@@ -291,6 +293,18 @@ func (d *dataPlane) RemoveSink(name string) {
 		return
 	}
 	d.pipe.RemoveSink(name)
+}
+
+// ForgetSink implements sink.WarmHooks. The coordinator is reached through this
+// indirection rather than handed to the sink runtime directly because the runtime
+// is constructed first — it is the pipeline's router, and the pipeline is the
+// coordinator's own dependency.
+func (d *dataPlane) ForgetSink(name string) {
+	if d.warm == nil {
+		setupLog.Error(errDataPlaneUnbound, "Cannot clear a deleted sink's warm bookkeeping", "sink", name)
+		return
+	}
+	d.warm.ForgetSink(name)
 }
 
 // Get implements pipeline.ListerRegistry.
@@ -387,6 +401,7 @@ func (op *operator) setupDataPlane(mgr ctrl.Manager, cfg operatorConfig) error {
 	sinks, err := sink.NewSinkManager(sink.ManagerOptions{
 		Factory:    newSinkFactory(metrics),
 		Pipeline:   op.plane,
+		Warm:       op.plane,
 		Dependents: op.registry,
 		OnSinkGone: op.parkRules,
 	})
@@ -442,7 +457,7 @@ func (op *operator) setupDataPlane(mgr ctrl.Manager, cfg operatorConfig) error {
 		return fmt.Errorf("build the watch manager: %w", err)
 	}
 
-	op.plane.bind(pipe, watches)
+	op.plane.bind(pipe, watches, warm)
 
 	// Every one of these is leader-gated (the pipeline through controller-runtime's
 	// default for a runnable that does not opt out, the rest explicitly), so a

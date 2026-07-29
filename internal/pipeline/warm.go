@@ -47,6 +47,14 @@ const (
 	// hundred-millisecond granularity is invisible next to the List itself.
 	defaultSyncPollInterval = 100 * time.Millisecond
 
+	// closeOutEvidenceTimeout bounds the wait for the successor's own first row to
+	// reach the sink, when the GC pass has already proved an incarnation dead but
+	// history has not caught up yet (see recoverRefusedReincarnations). It is
+	// generous — the evidence is one batch flush away — but finite, because the
+	// alternative is a warm goroutine that never retires when the successor's
+	// write is permanently failing.
+	closeOutEvidenceTimeout = 2 * time.Minute
+
 	// defaultBootInterval is how often the coordinator looks for a sink that
 	// still needs its boot reconciliation pass. Sinks appear at runtime (a
 	// ClickHouseSink CR created hours after boot), and a newly-live sink may
@@ -70,6 +78,12 @@ var errSinkNotLive = errors.New("sink has no live instance yet")
 // not a failure: the scope's cache is being evicted and its Stopped row written,
 // so there is nothing left to warm or garbage-collect.
 var errScopeStopped = errors.New("watch scope stopped while warming")
+
+// errCloseOutEvidencePending is the retryable condition behind a reincarnation the
+// GC pass proved dead but history cannot yet confirm: the successor's own first
+// row has not reached the sink, so the identity still reads as a single
+// incarnation. It is a wait, not a fault — see recoverRefusedReincarnations.
+var errCloseOutEvidencePending = errors.New("the successor's first row has not reached the sink yet")
 
 // WarmTarget is one per-scope warm/GC request: seed this (sink, scope) pair's
 // dedup baselines from the sink's own history, then reconcile that history
@@ -438,6 +452,39 @@ func (c *WarmCoordinator) StopScope(sinkName string, scope ScopeKey) {
 	})
 }
 
+// ForgetSink drops every trace of a sink from the coordinator: its
+// boot-reconciliation mark, any warm in flight for it, and any warm still
+// pending. It is the coordinator's half of the teardown Pipeline.RemoveSink
+// performs on the dedup caches, and Task 1.8's SinkManager calls the two together
+// (see sink.WarmHooks).
+//
+// Clearing the boot mark is the point. Without it a sink deleted and re-created
+// under the same name would keep its "already boot-reconciled" flag forever, and
+// the boot pass — the thing that writes Stopped rows for scopes an earlier
+// process left open — would never run for it again. Scopes orphaned during the
+// sink's absence would then stay open in watch_scopes indefinitely: not
+// corruption (a spuriously-open epoch only makes the zombie GC more willing to
+// collect, which is the safe direction), but a self-heal that had silently
+// stopped working.
+//
+// It is safe to call for a name the coordinator never saw, which is what lets the
+// teardown path call it unconditionally.
+func (c *WarmCoordinator) ForgetSink(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.bootDone, name)
+	for ref, run := range c.runs {
+		if ref.sink == name {
+			run.cancel()
+			delete(c.runs, ref)
+		}
+	}
+	c.pending = slices.DeleteFunc(c.pending, func(t WarmTarget) bool {
+		return t.Sink == name
+	})
+}
+
 // startLocked launches (or supersedes) the warm for target. The caller holds mu.
 func (c *WarmCoordinator) startLocked(target WarmTarget) {
 	ref := scopeRef{sink: target.Sink, scope: target.Scope}
@@ -472,7 +519,7 @@ func (c *WarmCoordinator) warm(ctx context.Context, ref scopeRef, epochStart tim
 	log := logf.FromContext(ctx).WithValues(ref.logValues()...)
 	log.Info("🔄 Warming scope from sink history")
 
-	seeded, err := c.seedScope(ctx, log, ref)
+	seeded, priors, err := c.seedScope(ctx, log, ref)
 	if err != nil {
 		// Either ctx was cancelled (shutdown, or the scope stopped) or the sink
 		// permanently cannot read its own history. Both leave the scope in
@@ -484,15 +531,18 @@ func (c *WarmCoordinator) warm(ctx context.Context, ref scopeRef, epochStart tim
 	c.p.MarkScopeWarm(ref.sink, ref.scope)
 	log.Info("🔓 Scope warm-up complete, leaving Snapshot mode", "objects_loaded", len(seeded))
 
-	if len(seeded) == 0 {
-		// Nothing was seeded, so there is nothing a zombie could be hiding among
-		// — and no reason to pay for the epoch check or the sync wait.
+	if len(seeded) == 0 && len(priors) == 0 {
+		// Nothing was seeded and history shows no unclosed incarnation, so there
+		// is nothing a zombie could be hiding among and nothing to close out — no
+		// reason to pay for the epoch check or the sync wait.
 		return
 	}
 
 	// The GC pass must not run against a cache that has not finished its initial
-	// List: every seeded object would be absent from it.
-	if !c.awaitScopeSync(ctx, log, ref) {
+	// List: every seeded object would be absent from it. Close-outs need no such
+	// wait — their evidence is entirely historical, with no live lookup at all —
+	// so a scope that has only priors to recover is not held behind the informer.
+	if len(seeded) > 0 && !c.awaitScopeSync(ctx, log, ref) {
 		return
 	}
 
@@ -507,12 +557,34 @@ func (c *WarmCoordinator) warm(ctx context.Context, ref scopeRef, epochStart tim
 		// disappear, so claiming they were deleted — and dating the deletion to
 		// now — would be a fabrication. The baselines stay seeded, so a genuine
 		// later change is still recorded as a Modified.
-		log.Info("🕰️ Scope has no previous open epoch, skipping zombie GC (seeded history is pre-history)",
-			"seeded", len(seeded))
+		//
+		// The gate covers close-outs for exactly the same reason, and covering
+		// them is not optional: a brand-new rule over a kind that carries old
+		// history from some other scope would otherwise emit a Deleted row for
+		// every unclosed incarnation in that pre-history.
+		log.Info("🕰️ Scope has no previous open epoch, skipping zombie GC and close-out recovery (seeded history is pre-history)",
+			"seeded", len(seeded), "unclosed_priors", len(priors))
 		return
 	}
 
-	c.collectZombies(ctx, log, ref, seeded)
+	recovered := c.emitCloseOuts(ctx, log, ref, priors)
+
+	var zombies int
+	if len(seeded) > 0 {
+		pass := c.collectZombies(ctx, log, ref, seeded)
+		zombies = pass.zombies
+		// The other way an unrecorded death surfaces. History held only the old
+		// incarnation when the seed read ran — the successor's own first row had
+		// not landed yet — so the old UID became an ordinary GC target and its
+		// claim was refused by the live successor. That refusal is the proof;
+		// history just has to catch up before the close-out can be dated from it.
+		recovered += c.recoverRefusedReincarnations(ctx, log, ref, pass.reincarnated)
+	}
+
+	if zombies > 0 || recovered > 0 {
+		log.Info("🧹 Scope history reconciled",
+			"zombies_cleared", zombies, "close_outs_recovered", recovered, "checked", len(seeded))
+	}
 }
 
 // gcTarget is one object the warm seeded, as the GC pass believes it to be: the
@@ -528,17 +600,96 @@ type gcTarget struct {
 	uid       string
 }
 
-// seedScope loads the scope's last-known states and stores them as dedup
-// baselines, retrying until it succeeds or the attempt becomes pointless.
+// reincarnation is one prior incarnation of an identity whose death was never
+// recorded: history holds it under an older UID, with no Deleted row of its own,
+// while a newer incarnation of the same name has since been recorded.
+//
+// It exists because the pipeline's live reincarnation branch cannot see this
+// case. That branch fires only when the dedup cache already holds the old UID,
+// which after a restart it never does — warm has to dial the sink while the
+// informer only has to reach the API server, so the successor is observed (and
+// Reserved under its new UID) first. Both halves that then decline to act are
+// individually correct: StoreIfAbsent must not clobber the live entry, and
+// gcPass's UID-gated ReserveDelete must refuse a claim for a UID the key no
+// longer holds — that refusal is what stops a live object being deleted by name
+// alone. So the evidence is taken from where it actually survives, the sink's own
+// history, which needs no cache claim and changes neither half.
+type reincarnation struct {
+	namespace  string
+	name       string
+	uid        string
+	apiVersion string
+	ts         time.Time
+}
+
+// closeOutRecord renders this prior incarnation as the Deleted row that closes
+// its history. Every field comes from history; nothing is sampled from the
+// current process.
+//
+// Timestamp is the incarnation's own last recorded ts, never time.Now(), and both
+// reasons are load-bearing:
+//
+//   - Ordering. A now-stamp would sort *after* the successor's first row, so
+//     argMax(event_type, ts) for the identity would return Deleted and the live
+//     successor would be excluded from every future LastKnownStates — a later
+//     warm would stop seeding an object that exists. Dating from history places
+//     the close-out before the successor's first row, so a reconstruction reads
+//     Added → Modified → Deleted (old UID) → Snapshot (new UID), in the order the
+//     events actually happened.
+//   - Idempotency. Because every field is derived from history, a re-emitted
+//     close-out (the write failed, the process died mid-retry, the scope was
+//     re-warmed before the row landed) is byte-identical to the first attempt and
+//     is collapsed on merge by resource_states' ReplacingMergeTree (Task 0.9).
+//     Anyone tempted to "fix" this to time.Now() would silently reintroduce
+//     duplicate Deleted rows.
+//
+// Data, Diff and SHA256 are empty: in schema v1 event_type alone marks a deletion
+// (see docs/SCHEMA.md), exactly as for the live delete path.
+func (r reincarnation) closeOutRecord(clusterID string, key Key) sink.Record {
+	return sink.Record{
+		Timestamp:  r.ts,
+		ClusterID:  clusterID,
+		EventType:  "Deleted",
+		APIGroup:   key.Group,
+		APIVersion: r.apiVersion,
+		Kind:       key.Kind,
+		Namespace:  key.Namespace,
+		Name:       key.Name,
+		UID:        r.uid,
+	}
+}
+
+// identity is the (namespace, name) an incarnation belongs to — the grouping key
+// seedScope classifies history under. It is not the cache key: that one carries
+// the group and kind too, which are constant within a scope.
+type identity struct {
+	namespace string
+	name      string
+}
+
+// seedScope loads the scope's last-known states, stores the current incarnation
+// of each identity as a dedup baseline, and collects the priors whose death
+// history never recorded. It retries until it succeeds or the attempt becomes
+// pointless.
 //
 // The retry is unbounded in time (only ctx cancellation or a permanently
-// reader-less sink stops it) and each attempt starts from scratch: a partial read
-// is reported as an error by StateReader precisely so the whole scan is retried
-// rather than the scope being marked warm from an under-restored cache.
+// reader-less sink stops it) and each attempt starts from scratch — both returned
+// slices are rebuilt from nil on every attempt: a partial read is reported as an
+// error by StateReader precisely so the whole scan is retried rather than the
+// scope being marked warm from an under-restored cache.
+//
+// LastKnownStates now answers per incarnation (see sink.KnownState), so one
+// identity may come back as several rows. The one with the greatest ts is the
+// current incarnation and is treated exactly as before; every other is a prior
+// that is deliberately *not* seeded (its key belongs to the current incarnation)
+// and deliberately *not* a GC target (the pass would only have its UID-gated
+// claim refused, wasting an attempt and logging a zombie that is not one).
 //
 //nolint:logcheck // Takes the caller's already-decorated logger; see warm.
-func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger, ref scopeRef) ([]gcTarget, error) {
+func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger,
+	ref scopeRef) ([]gcTarget, []reincarnation, error) {
 	var seeded []gcTarget
+	var priors []reincarnation
 
 	eb := backoff.NewExponentialBackOff()
 	eb.MaxInterval = c.retryMaxInterval
@@ -546,6 +697,7 @@ func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger, ref sc
 
 	err := backoff.Retry(func() error {
 		seeded = nil
+		priors = nil
 
 		reader, err := c.readerFor(ref.sink)
 		if err != nil {
@@ -564,20 +716,35 @@ func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger, ref sc
 		}
 
 		st := c.p.sinks.get(ref.sink)
-		for _, state := range states {
-			key := ref.key(state.Namespace, state.Name)
+		for _, group := range groupByIdentity(states) {
+			current, unclosed := splitIncarnations(group)
+
+			key := ref.key(current.Namespace, current.Name)
 			// StoreIfAbsent, not Store: a work item for this key may already have
 			// reserved a newer entry while the read was in flight (tagged
 			// Snapshot, since the scope was not warm yet). That live state is
 			// authoritative and must not be clobbered by a historical baseline.
 			st.cache.StoreIfAbsent(key.cacheKey(), CacheEntry{
-				Hash: state.SHA256,
+				Hash: current.SHA256,
 				// No JSON baseline: history carries the hash, not the object, so
 				// the first genuine change diffs as a full state (Invariant 5).
 				JSON: nil,
-				UID:  state.UID,
+				UID:  current.UID,
 			})
-			seeded = append(seeded, gcTarget{namespace: state.Namespace, name: state.Name, uid: state.UID})
+			seeded = append(seeded, gcTarget{namespace: current.Namespace, name: current.Name, uid: current.UID})
+
+			for _, prior := range unclosed {
+				log.Info("🧟 History holds an incarnation whose death was never recorded, queueing its close-out",
+					"namespace", prior.Namespace, "name", prior.Name,
+					"old_uid", prior.UID, "current_uid", current.UID)
+				priors = append(priors, reincarnation{
+					namespace:  prior.Namespace,
+					name:       prior.Name,
+					uid:        prior.UID,
+					apiVersion: prior.APIVersion,
+					ts:         prior.TS,
+				})
+			}
 		}
 		// Seeding may have added keys; refresh the size gauge outside any cache
 		// lock (recordCacheEntries takes and releases it internally).
@@ -585,9 +752,57 @@ func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger, ref sc
 		return nil
 	}, backoff.WithContext(eb, ctx))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return seeded, nil
+	return seeded, priors, nil
+}
+
+// groupByIdentity buckets per-incarnation history rows by (namespace, name),
+// preserving the order identities were first seen in.
+//
+// The order matters only for reproducibility — of the seeding sequence, of the GC
+// pass, and of test expectations — but map iteration order would surrender it for
+// nothing, so it is kept.
+func groupByIdentity(states []sink.KnownState) [][]sink.KnownState {
+	groups := make(map[identity]int, len(states))
+	var out [][]sink.KnownState
+	for _, state := range states {
+		id := identity{namespace: state.Namespace, name: state.Name}
+		if idx, seen := groups[id]; seen {
+			out[idx] = append(out[idx], state)
+			continue
+		}
+		groups[id] = len(out)
+		out = append(out, []sink.KnownState{state})
+	}
+	return out
+}
+
+// splitIncarnations separates one identity's history rows into the current
+// incarnation (the greatest ts) and the unclosed priors.
+//
+// Equal timestamps are broken by UID, lexicographically, so the classification is
+// a pure function of the history rather than of the order ClickHouse happened to
+// return them in. A tie is not expected — two incarnations of one name cannot
+// have their last event at the same nanosecond in practice — but an arbitrary
+// winner would make the emitted close-out non-deterministic, and determinism is
+// exactly what lets a re-emitted close-out collapse on merge.
+//
+// group is never empty: groupByIdentity only creates a bucket when it has a row
+// to put in it.
+func splitIncarnations(group []sink.KnownState) (current sink.KnownState, unclosed []sink.KnownState) {
+	current = group[0]
+	for _, state := range group[1:] {
+		if state.TS.After(current.TS) || (state.TS.Equal(current.TS) && state.UID > current.UID) {
+			current = state
+		}
+	}
+	for _, state := range group {
+		if state.UID != current.UID {
+			unclosed = append(unclosed, state)
+		}
+	}
+	return current, unclosed
 }
 
 // readerFor resolves a sink's StateReader, distinguishing the two reasons it may
@@ -677,8 +892,213 @@ func (c *WarmCoordinator) scopeWasActive(ctx context.Context, log logr.Logger,
 	return active, nil
 }
 
+// emitCloseOuts emits one Deleted row per prior incarnation history shows was
+// never closed out, and returns how many it handed over.
+//
+// It is called only after the scopeWasActive gate — the same gate the zombie GC
+// pass sits behind, and mandatory here for the same reason: without it a
+// brand-new rule over a kind carrying older history from some other scope would
+// fabricate deletions for pre-history.
+//
+// Unlike the GC pass this claims nothing in hashCache, and must not: the key
+// belongs to the current incarnation, whose entry a claim would either be refused
+// against (correctly) or corrupt. That is precisely why the retry for these
+// writes lives in closeOutRetryQueue, outside hashCache — enqueueCloseOut records
+// a failure there and re-queues the key, so the next work item for that name
+// tries again (Invariant 3 is untouched: no version-gated commit is involved).
+//
+// Only resolving the writer can fail, so that is what the retry wraps. The pass
+// is self-limiting: once a close-out lands, that UID's own latest event is
+// Deleted and LastKnownStates' HAVING clause excludes it forever after, so no
+// separate bookkeeping is needed to stop it being re-emitted. The one case that
+// does not settle on the first read is a close-out sharing its ts with the event
+// it closes (it is dated *from* that event), which leaves argMax(event_type, ts)
+// free to answer with either — so a later warm may emit the row again. That is
+// harmless by construction rather than by luck: the re-emission is byte-identical
+// and resource_states collapses it, which is the whole reason the record is built
+// from history.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) emitCloseOuts(ctx context.Context, log logr.Logger,
+	ref scopeRef, priors []reincarnation) int {
+	if len(priors) == 0 {
+		return 0
+	}
+
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = c.retryMaxInterval
+	eb.MaxElapsedTime = 0
+
+	var recovered int
+	err := backoff.Retry(func() error {
+		recovered = 0
+
+		writer, ok := c.p.router.WriterFor(ref.sink)
+		if !ok {
+			// Nothing to write through yet. Retried as a whole rather than per
+			// record, exactly like the GC pass, so a sink that comes back
+			// mid-recovery does not leave half the priors closed.
+			return errSinkUnavailable
+		}
+		st := c.p.sinks.get(ref.sink)
+
+		for _, prior := range priors {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			key := ref.key(prior.namespace, prior.name)
+			c.p.enqueueCloseOut(ctx, log, key, st, writer, key.cacheKey(),
+				prior.closeOutRecord(c.p.clusterID, key))
+			recovered++
+		}
+		return nil
+	}, backoff.WithContext(eb, ctx))
+	if err != nil {
+		log.V(1).Info("Close-out recovery did not complete", "reason", err.Error())
+		return 0
+	}
+	return recovered
+}
+
+// recoverRefusedReincarnations closes out the incarnations the GC pass proved
+// dead but could not claim, returning how many it handed over.
+//
+// It is the second face of the same bug emitCloseOuts covers, and which of the
+// two fires is decided by a race the operator does not control: whether the
+// successor's own first row reached the sink before the warm read history.
+//
+//   - It did. History returns two incarnations, seedScope classifies the older as
+//     an unclosed prior, and it never becomes a GC target at all (emitCloseOuts).
+//   - It did not. History returns only the old incarnation, so it is seeded and
+//     swept like any other object — and the sweep finds a *different* UID live
+//     under that name. Its UID-gated claim is then refused, correctly: the cache
+//     entry belongs to the successor and deleting it would remove a live object
+//     by name alone. Nobody is left to record that the old incarnation died.
+//
+// The refusal is what this pass acts on, and it is stronger evidence than the
+// history-only inference: two independent sources — the sink's history and the
+// live indexer — agree the seeded UID is gone and a successor holds its name. The
+// close-out is still built from history rather than from that observation, for
+// the same two reasons emitCloseOuts is (ordering and idempotency), which is why
+// this waits for the successor's row to land before emitting. Until it does, the
+// identity still reads as a single incarnation and there is no prior row to date
+// a close-out from.
+//
+// The wait is bounded (closeOutEvidenceTimeout) and re-reads history rather than
+// trusting a snapshot, which is also what makes it duplicate-safe: if the worker
+// that observed the reincarnation live already wrote its own close-out, that UID's
+// latest event is Deleted, the warm-up query excludes it, and this pass finds
+// nothing to do.
+//
+// It changes no GC decision: the refusal stands, the live entry is untouched, and
+// no cache claim is taken (Invariant 3).
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) recoverRefusedReincarnations(ctx context.Context, log logr.Logger,
+	ref scopeRef, refused []gcTarget) int {
+	if len(refused) == 0 {
+		return 0
+	}
+
+	pending := make(map[gcTarget]struct{}, len(refused))
+	for _, target := range refused {
+		pending[target] = struct{}{}
+	}
+
+	eb := backoff.NewExponentialBackOff()
+	eb.MaxInterval = c.retryMaxInterval
+	eb.MaxElapsedTime = closeOutEvidenceTimeout
+
+	var recovered int
+	err := backoff.Retry(func() error {
+		reader, err := c.readerFor(ref.sink)
+		if err != nil {
+			if errors.Is(err, errNoStateReader) {
+				return backoff.Permanent(err)
+			}
+			return err
+		}
+		states, err := reader.LastKnownStates(ctx, ref.filter(c.p.clusterID))
+		if err != nil {
+			log.Error(err, "⚠️ Failed to re-read scope history while closing out a refused reincarnation, retrying")
+			return err
+		}
+
+		rows, current := indexIncarnations(states)
+
+		var found []reincarnation
+		for target := range pending {
+			row, stillOpen := rows[target]
+			if !stillOpen {
+				// The UID is no longer an open incarnation: somebody — the worker
+				// that saw the reincarnation live, or an earlier attempt of this
+				// pass — already closed it out.
+				delete(pending, target)
+				continue
+			}
+			if current[identity{namespace: target.namespace, name: target.name}] == target.uid {
+				// The successor's first row has not reached the sink yet, so this
+				// UID still reads as the identity's newest incarnation and there is
+				// no prior row to date a close-out from. Wait for it.
+				continue
+			}
+			delete(pending, target)
+			found = append(found, reincarnation{
+				namespace:  row.Namespace,
+				name:       row.Name,
+				uid:        row.UID,
+				apiVersion: row.APIVersion,
+				ts:         row.TS,
+			})
+		}
+
+		if len(found) > 0 {
+			log.Info("🧟 Closing out an incarnation the GC pass proved dead but could not claim",
+				"incarnations", len(found))
+			recovered += c.emitCloseOuts(ctx, log, ref, found)
+		}
+		if len(pending) > 0 {
+			return errCloseOutEvidencePending
+		}
+		return nil
+	}, backoff.WithContext(eb, ctx))
+	if err != nil {
+		log.V(1).Info("Some refused reincarnations were left unclosed", "reason", err.Error(), "pending", len(pending))
+	}
+	return recovered
+}
+
+// indexIncarnations renders history as the two lookups recoverRefusedReincarnations
+// needs: every open incarnation by its identity-and-UID, and which UID is the
+// current incarnation of each identity.
+func indexIncarnations(states []sink.KnownState) (map[gcTarget]sink.KnownState, map[identity]string) {
+	rows := make(map[gcTarget]sink.KnownState, len(states))
+	current := make(map[identity]string)
+	for _, group := range groupByIdentity(states) {
+		newest, _ := splitIncarnations(group)
+		current[identity{namespace: newest.Namespace, name: newest.Name}] = newest.UID
+		for _, state := range group {
+			rows[gcTarget{namespace: state.Namespace, name: state.Name, uid: state.UID}] = state
+		}
+	}
+	return rows, current
+}
+
+// gcResult is what one zombie sweep observed.
+type gcResult struct {
+	// zombies is how many deletions this pass claimed and enqueued.
+	zombies int
+
+	// reincarnated are the targets this pass proved dead — the live indexer holds
+	// a different incarnation under the same name — but whose deletion it could
+	// not claim, because the successor already owns the cache entry. The refusal
+	// is correct and stands; these are handed to recoverRefusedReincarnations so
+	// the old UID's death still reaches the audit trail.
+	reincarnated []gcTarget
+}
+
 // collectZombies reconciles the seeded history against the watch cache and emits
-// one Deleted row per object that is genuinely gone.
+// one Deleted row per object that is genuinely gone, returning what it saw.
 //
 // The whole pass is retried on failure, which is safe precisely because every
 // deletion is claimed through hashCache.ReserveDelete: a key whose Deleted row
@@ -691,36 +1111,46 @@ func (c *WarmCoordinator) scopeWasActive(ctx context.Context, log logr.Logger,
 // primitive the live delete path uses (see emitDelete).
 //
 //nolint:logcheck // Takes the caller's already-decorated logger; see warm.
-func (c *WarmCoordinator) collectZombies(ctx context.Context, log logr.Logger, ref scopeRef, seeded []gcTarget) {
+func (c *WarmCoordinator) collectZombies(ctx context.Context, log logr.Logger,
+	ref scopeRef, seeded []gcTarget) gcResult {
 	eb := backoff.NewExponentialBackOff()
 	eb.MaxInterval = c.retryMaxInterval
 	eb.MaxElapsedTime = 0
 
+	var result gcResult
 	err := backoff.Retry(func() error {
-		return c.gcPass(ctx, log, ref, seeded)
+		var passErr error
+		result, passErr = c.gcPass(ctx, log, ref, seeded)
+		return passErr
 	}, backoff.WithContext(eb, ctx))
 	if err != nil && !errors.Is(err, errScopeStopped) {
 		log.V(1).Info("Zombie GC pass did not complete", "reason", err.Error())
 	}
+	return result
 }
 
-// gcPass is one attempt at the zombie sweep.
+// gcPass is one attempt at the zombie sweep. It reports what *this* attempt saw:
+// a retry re-walks the whole scope, and the keys an earlier attempt already
+// claimed are refused this time round, so the count is a lower bound after a
+// partial failure rather than a running total.
 //
 //nolint:logcheck // Takes the caller's already-decorated logger; see warm.
-func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger, ref scopeRef, seeded []gcTarget) error {
+func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger,
+	ref scopeRef, seeded []gcTarget) (gcResult, error) {
+	var result gcResult
+
 	writer, ok := c.p.router.WriterFor(ref.sink)
 	if !ok {
 		// Nothing to write through yet; the whole pass is retried rather than
 		// each object individually, so a sink that comes back mid-sweep does not
 		// leave half the scope reconciled.
-		return errSinkUnavailable
+		return result, errSinkUnavailable
 	}
 	st := c.p.sinks.get(ref.sink)
 
-	zombies := 0
 	for _, target := range seeded {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return result, ctx.Err()
 		}
 
 		key := ref.key(target.namespace, target.name)
@@ -728,14 +1158,14 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger, ref scope
 		if err != nil {
 			log.Error(err, "🧟 Failed to check whether an object still exists, retrying the GC pass",
 				"namespace", target.namespace, "name", target.name)
-			return err
+			return result, err
 		}
 		if !scopeActive {
 			// The scope stopped mid-sweep. Every remaining object is now
 			// unobservable and its story is told by the Stopped row, so the pass
 			// stops here instead of recording deletions for the rest.
 			log.V(1).Info("Watch scope stopped during the GC pass, abandoning the rest of it")
-			return backoff.Permanent(errScopeStopped)
+			return result, backoff.Permanent(errScopeStopped)
 		}
 		// Still alive under the UID history recorded: not a zombie.
 		if found && string(obj.GetUID()) == target.uid {
@@ -750,20 +1180,23 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger, ref scope
 		if enqueueErr != nil {
 			log.Error(enqueueErr, "🧟 Failed to queue a zombie's deletion, retrying the GC pass",
 				"namespace", target.namespace, "name", target.name)
-			return enqueueErr
+			return result, enqueueErr
 		}
 		if !claimed {
-			// Somebody else — a worker processing this key's own disappearance, or
-			// an earlier attempt of this pass — already owns this deletion.
+			// Somebody else already owns this deletion: a worker processing this
+			// key's own disappearance, or an earlier attempt of this pass. A live
+			// successor under a different UID is the third case, and the only one
+			// that leaves something unrecorded — the refusal protects the
+			// successor's entry, but the old UID's death still has to be told.
+			if found && string(obj.GetUID()) != target.uid {
+				result.reincarnated = append(result.reincarnated, target)
+			}
 			continue
 		}
-		zombies++
+		result.zombies++
 	}
 
-	if zombies > 0 {
-		log.Info("🧹 Zombie GC finished", "zombies_cleared", zombies, "checked", len(seeded))
-	}
-	return nil
+	return result, nil
 }
 
 // reconcileEpochsUntilDone runs boot reconciliation for every live sink, waiting

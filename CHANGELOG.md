@@ -74,30 +74,50 @@ unreadiness that would have taken every other sink out of service with it.
   one the Role permits; the grant is unchanged. Found by the new e2e suite —
   envtest cannot reproduce it, because its client is effectively an
   administrator.
+- **A delete-and-recreate that happened while the operator was down recorded no
+  `Deleted` row for the old UID.** The successor was recorded correctly and a
+  plain offline deletion still yielded exactly one `Deleted`, but the old
+  incarnation's death never reached the audit trail. Neither half of the
+  mechanism was wrong: the live reincarnation branch needs the dedup cache to
+  already hold the old UID (after a restart it never does — warm-up waits on
+  ClickHouse while the informer only has to reach the API server), and the zombie
+  GC's UID-gated claim is *supposed* to be refused for a key the live successor
+  already holds.
 
-### Known gap
+  The evidence is now taken from where it actually survives — the sink's own
+  history. `LastKnownStates` groups per `(namespace, name, uid)` instead of per
+  identity, so an identity whose history holds an incarnation that is not the
+  newest and has no `Deleted` row of its own is, by definition, a death nobody
+  recorded. The warm-up seeds the newest incarnation exactly as before and emits
+  one `Deleted` row for each unclosed prior, behind the same scope-epoch gate the
+  zombie GC sits behind (pre-history is never fabricated into a deletion).
 
-- **A delete-and-recreate that happens while the operator is down records no
-  `Deleted` row for the old UID.** The successor is recorded under its own UID,
-  and a plain offline deletion still yields exactly one `Deleted` — but the
-  reincarnation close-out is lost, so the old incarnation's death never reaches
-  the audit trail.
+  Which incarnation history holds when the warm reads it depends on a race the
+  operator does not control — whether the successor's own first row reached the
+  sink before that read — so both outcomes are handled. If the successor's row
+  had not landed, the old incarnation is seeded and swept like any other object,
+  the sweep finds a different UID live under its name, and its UID-gated claim is
+  refused (correctly: the cache entry belongs to the successor). That refusal is
+  now recorded rather than dropped: the pass waits, bounded, for history to catch
+  up and then closes the old UID out from it. No GC decision changed — the
+  refusal still stands and the live entry is never claimed.
 
-  Neither half of the mechanism is individually wrong. The close-out comes from
-  the pipeline's reincarnation branch, which needs the dedup cache to already
-  hold the old UID — that is, it needs the scope's warm-up from the sink's
-  history to finish before the informer's initial list is processed. After a
-  restart it never does: warm waits for the sink to dial ClickHouse while the
-  informer only has to reach the API server. The new object is seen first and
-  tagged `Snapshot`, and the zombie GC then *refuses* to claim the old UID
-  because the key is already reserved by the live successor — a refusal that is
-  itself a deliberate safeguard against deleting a live object by name alone.
-
-  Fixing it means revising the warm/GC ordering, or letting a refused claim still
-  record the old UID's death. Both are changes to that component's design under
-  Invariant 3, so this is reported rather than patched from the e2e suite; the
-  scenario asserts what the operator actually does and the omission is documented
-  inline in `test/e2e/scenarios_test.go`.
+  The recovered row is **dated from history**, never from the recovery. That
+  keeps reconstruction in the order events actually happened (`Added` → `Deleted`
+  for the old UID → the successor's first row, rather than a close-out that sorts
+  after the successor and buries it), and it makes every field of the row a
+  function of history — so a re-emitted close-out is byte-identical and is
+  collapsed on merge by `resource_states`' `ReplacingMergeTree`. Once the row
+  lands, that UID's own latest event is `Deleted` and it is excluded from every
+  later warm-up, so the recovery is self-limiting.
+- **A deleted-and-re-created `ClickHouseSink` was never boot-reconciled again.**
+  `Pipeline.RemoveSink` discarded the sink's dedup caches, but the warm/GC
+  coordinator kept it marked as boot-reconciled forever, so the pass that writes
+  `Stopped` rows for scopes an earlier process left open never ran for that name
+  again and scopes orphaned during the sink's absence stayed open in
+  `watch_scopes` indefinitely. The sink runtime now clears that bookkeeping
+  (`WarmCoordinator.ForgetSink`) immediately alongside the pipeline eviction,
+  cancelling any warm still in flight for the sink at the same time.
 
 ### Migration
 

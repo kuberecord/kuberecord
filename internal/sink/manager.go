@@ -206,6 +206,23 @@ type Pipeline interface {
 	RemoveSink(name string)
 }
 
+// WarmHooks is the warm/GC coordinator's half of a vanished sink's teardown, as
+// the sink runtime needs it.
+//
+// It is a second, separate interface rather than a method on Pipeline for the
+// same dependency reason (internal/pipeline imports internal/sink, so the arrow
+// can only point one way) and because the two are genuinely different components:
+// the pipeline drops the sink's dedup caches, the coordinator drops its
+// boot-reconciliation mark and any warm still running for it.
+// pipeline.WarmCoordinator is the production implementation.
+type WarmHooks interface {
+	// ForgetSink discards the coordinator's per-sink bookkeeping. It must be safe
+	// to call for a name the coordinator never saw, and is called immediately
+	// after RemoveSink so a sink deleted and re-created under the same name is
+	// boot-reconciled again instead of inheriting a stale "already done" mark.
+	ForgetSink(name string)
+}
+
 // Dependents reports which rules currently stream to a sink, so the parking
 // callback can name them.
 //
@@ -240,6 +257,12 @@ type ManagerOptions struct {
 	// Pipeline is the data plane whose per-sink state a deleted sink's removal
 	// evicts. Required.
 	Pipeline Pipeline
+
+	// Warm is the warm/GC coordinator whose per-sink bookkeeping a deleted sink's
+	// removal clears. Optional: nil means only the pipeline's state is evicted,
+	// which is the correct behaviour for a deployment (or a test) that runs no
+	// coordinator.
+	Warm WarmHooks
 
 	// Dependents resolves a sink's dependent rules for the parking callback. Nil
 	// means the callback fires with an empty rule list.
@@ -340,6 +363,7 @@ func newLiveSink(name, fingerprint string, writer Writer) *liveSink {
 type SinkManager struct {
 	factory    Factory
 	pipeline   Pipeline
+	warm       WarmHooks
 	dependents Dependents
 	park       ParkFunc
 
@@ -426,6 +450,7 @@ func NewSinkManager(opts ManagerOptions) (*SinkManager, error) {
 	m := &SinkManager{
 		factory:         opts.Factory,
 		pipeline:        opts.Pipeline,
+		warm:            opts.Warm,
 		dependents:      opts.Dependents,
 		park:            opts.OnSinkGone,
 		probeInterval:   probeInterval,
@@ -642,6 +667,13 @@ func (m *SinkManager) finishDelete(name string, inst *liveSink) {
 	}
 
 	m.pipeline.RemoveSink(name)
+	if m.warm != nil {
+		// Paired with RemoveSink, and for the same reason: the coordinator's
+		// per-sink bookkeeping outlives the caches it describes otherwise, and a
+		// sink re-created under this name would never be boot-reconciled again
+		// (see WarmHooks).
+		m.warm.ForgetSink(name)
+	}
 	m.parkDependents(name)
 }
 
