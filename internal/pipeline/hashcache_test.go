@@ -123,15 +123,15 @@ func TestHashCacheReserveDeleteClaimsOnce(t *testing.T) {
 	var c hashCache
 	c.Reserve("k", CacheEntry{UID: "uid-1"})
 
-	entry, version, claimed := c.ReserveDelete("k", "")
-	if !claimed {
-		t.Fatalf("expected the first ReserveDelete to claim the key")
+	entry, version, outcome := c.ReserveDelete("k", "")
+	if outcome != deleteClaimed {
+		t.Fatalf("expected the first ReserveDelete to claim the key, got %s", outcome)
 	}
 	if entry.UID != "uid-1" {
 		t.Fatalf("expected the claimed entry to carry the pre-claim UID, got %+v", entry)
 	}
 
-	if _, _, claimedAgain := c.ReserveDelete("k", ""); claimedAgain {
+	if _, _, again := c.ReserveDelete("k", ""); again == deleteClaimed {
 		t.Fatalf("a second ReserveDelete must not claim a key that's already pending delete")
 	}
 
@@ -147,7 +147,7 @@ func TestHashCacheReserveDeleteClaimsOnce(t *testing.T) {
 // key was never known (or was already removed), so there's nothing to claim.
 func TestHashCacheReserveDeleteNothingToDelete(t *testing.T) {
 	var c hashCache
-	if _, _, claimed := c.ReserveDelete("missing", ""); claimed {
+	if _, _, outcome := c.ReserveDelete("missing", ""); outcome == deleteClaimed {
 		t.Fatalf("ReserveDelete must not claim a key with no entry")
 	}
 }
@@ -158,9 +158,9 @@ func TestHashCacheUnclaimDeleteAllowsRetry(t *testing.T) {
 	var c hashCache
 	c.Reserve("k", CacheEntry{UID: "uid-1"})
 
-	_, version, claimed := c.ReserveDelete("k", "")
-	if !claimed {
-		t.Fatalf("expected the claim to succeed")
+	_, version, outcome := c.ReserveDelete("k", "")
+	if outcome != deleteClaimed {
+		t.Fatalf("expected the claim to succeed, got %s", outcome)
 	}
 
 	c.UnclaimDelete("k", version)
@@ -170,8 +170,8 @@ func TestHashCacheUnclaimDeleteAllowsRetry(t *testing.T) {
 		t.Fatalf("expected the claim to be released and the entry to remain, got %+v (exists=%v)", entry, exists)
 	}
 
-	if _, _, claimedAgain := c.ReserveDelete("k", ""); !claimedAgain {
-		t.Fatalf("expected a fresh ReserveDelete to succeed once the prior claim was released")
+	if _, _, again := c.ReserveDelete("k", ""); again != deleteClaimed {
+		t.Fatalf("expected a fresh ReserveDelete to succeed once the prior claim was released, got %s", again)
 	}
 }
 
@@ -189,7 +189,7 @@ func TestHashCacheReserveDeleteRefusesUIDMismatch(t *testing.T) {
 	// A live reincarnation happens before the GC pass gets to this key.
 	c.Reserve("k", CacheEntry{UID: newUID})
 
-	if _, _, claimed := c.ReserveDelete("k", "old-uid"); claimed {
+	if _, _, outcome := c.ReserveDelete("k", "old-uid"); outcome == deleteClaimed {
 		t.Fatalf("ReserveDelete must refuse a claim when expectedUID no longer matches the live entry")
 	}
 
@@ -199,8 +199,142 @@ func TestHashCacheReserveDeleteRefusesUIDMismatch(t *testing.T) {
 	}
 
 	// The GC pass's own UID does still match when no reincarnation occurred.
-	if _, _, claimed := c.ReserveDelete("k", newUID); !claimed {
-		t.Fatalf("ReserveDelete should claim when expectedUID matches the current entry")
+	if _, _, outcome := c.ReserveDelete("k", newUID); outcome != deleteClaimed {
+		t.Fatalf("ReserveDelete should claim when expectedUID matches the current entry, got %s", outcome)
+	}
+}
+
+// TestHashCacheReserveDeleteOutcomes pins the refusal *reason* each branch
+// reports, not just the fact of a refusal. The three reasons are materially
+// different to the per-scope GC pass — only deleteClaimUIDMismatch means "the
+// successor owns this key, so nobody is left to record the old incarnation's
+// death," while deleteClaimInFlight means the exact opposite (that row is already
+// on its way) — and the reason must come from inside the cache's own lock,
+// because reconstructing it afterwards races the very transitions it tries to
+// distinguish.
+func TestHashCacheReserveDeleteOutcomes(t *testing.T) {
+	const liveUID = "uid-live"
+
+	cases := []struct {
+		name string
+		// seed puts the cache into the state under test.
+		seed        func(t *testing.T, c *hashCache)
+		expectedUID string
+		wantOutcome deleteClaimOutcome
+		// wantVersion is the version the call must return; 0 for every refusal,
+		// since a refusal has nothing to settle.
+		wantVersion uint64
+		wantUID     string
+	}{
+		{
+			name:        "no entry at all",
+			seed:        func(*testing.T, *hashCache) {},
+			expectedUID: liveUID,
+			wantOutcome: deleteClaimAbsent,
+		},
+		{
+			name: "another claim already owns this deletion",
+			seed: func(t *testing.T, c *hashCache) {
+				c.Reserve("k", CacheEntry{UID: liveUID})
+				if _, _, outcome := c.ReserveDelete("k", liveUID); outcome != deleteClaimed {
+					t.Fatalf("seeding the in-flight claim: got %s, want claimed", outcome)
+				}
+			},
+			expectedUID: liveUID,
+			wantOutcome: deleteClaimInFlight,
+		},
+		{
+			name: "the key now holds a different incarnation",
+			seed: func(_ *testing.T, c *hashCache) {
+				c.Reserve("k", CacheEntry{UID: newUID})
+			},
+			expectedUID: oldUID,
+			wantOutcome: deleteClaimUIDMismatch,
+		},
+		{
+			name: "present, unclaimed, expectedUID matches",
+			seed: func(_ *testing.T, c *hashCache) {
+				c.Reserve("k", CacheEntry{UID: liveUID}) // version 1
+			},
+			expectedUID: liveUID,
+			wantOutcome: deleteClaimed,
+			wantVersion: 2, // exactly one bump, as Reserve does
+			wantUID:     liveUID,
+		},
+		{
+			// The live delete path: it has no independent belief about which UID
+			// it expects, so the mismatch check is skipped entirely and a UID
+			// difference cannot produce deleteClaimUIDMismatch. This path's
+			// behaviour is unchanged by reporting outcomes.
+			name: "empty expectedUID ignores a UID difference",
+			seed: func(_ *testing.T, c *hashCache) {
+				c.Reserve("k", CacheEntry{UID: oldUID})
+				c.Reserve("k", CacheEntry{UID: newUID}) // version 2
+			},
+			expectedUID: "",
+			wantOutcome: deleteClaimed,
+			wantVersion: 3,
+			wantUID:     newUID,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c hashCache
+			tc.seed(t, &c)
+
+			entry, version, outcome := c.ReserveDelete("k", tc.expectedUID)
+			if outcome != tc.wantOutcome {
+				t.Errorf("outcome = %s, want %s", outcome, tc.wantOutcome)
+			}
+			if version != tc.wantVersion {
+				t.Errorf("version = %d, want %d", version, tc.wantVersion)
+			}
+			if entry.UID != tc.wantUID {
+				t.Errorf("returned entry uid = %q, want %q", entry.UID, tc.wantUID)
+			}
+
+			// A refusal must leave the cache exactly as it found it; a claim must
+			// mark the entry pending at the version it returned.
+			cur, present := c.Load("k")
+			switch tc.wantOutcome {
+			case deleteClaimed:
+				if !present || !cur.PendingDelete || cur.Version != tc.wantVersion {
+					t.Errorf("after a claim the entry = %+v (present %v), want pending at version %d",
+						cur, present, tc.wantVersion)
+				}
+			case deleteClaimAbsent:
+				if present {
+					t.Errorf("a refused claim created an entry: %+v", cur)
+				}
+			case deleteClaimInFlight:
+				if !present || !cur.PendingDelete {
+					t.Errorf("the in-flight claim was disturbed by the refusal: %+v (present %v)", cur, present)
+				}
+			case deleteClaimUIDMismatch:
+				if !present || cur.UID != newUID || cur.PendingDelete {
+					t.Errorf("the live successor's entry was disturbed by the refusal: %+v (present %v)", cur, present)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteClaimOutcomeString covers the loggable rendering: a refusal names its
+// own reason where it is acted on, so an operator reading the log can tell a
+// protected live successor from a deletion that is already in flight.
+func TestDeleteClaimOutcomeString(t *testing.T) {
+	cases := map[deleteClaimOutcome]string{
+		deleteClaimed:          "claimed",
+		deleteClaimAbsent:      "absent",
+		deleteClaimInFlight:    "in-flight",
+		deleteClaimUIDMismatch: "uid-mismatch",
+		deleteClaimOutcome(42): "deleteClaimOutcome(42)",
+	}
+	for outcome, want := range cases {
+		if got := outcome.String(); got != want {
+			t.Errorf("deleteClaimOutcome(%d).String() = %q, want %q", int(outcome), got, want)
+		}
 	}
 }
 
@@ -211,9 +345,9 @@ func TestHashCacheReserveDeleteRefusesUIDMismatch(t *testing.T) {
 func TestHashCacheUnclaimDeleteStaleNoop(t *testing.T) {
 	var c hashCache
 	c.Reserve("k", CacheEntry{UID: "old-uid"})
-	_, deleteVersion, claimed := c.ReserveDelete("k", "")
-	if !claimed {
-		t.Fatalf("expected the claim to succeed")
+	_, deleteVersion, outcome := c.ReserveDelete("k", "")
+	if outcome != deleteClaimed {
+		t.Fatalf("expected the claim to succeed, got %s", outcome)
 	}
 
 	c.Reserve("k", CacheEntry{UID: newUID}) // reincarnation supersedes the claim

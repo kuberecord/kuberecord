@@ -253,7 +253,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 			// and a concurrent emitDelete call could each observe "not yet
 			// claimed" and independently enqueue their own "Deleted" row for the
 			// same old UID.
-			if claimedEntry, _, claimed := st.cache.ReserveDelete(objectKey, cachedEntry.UID); claimed {
+			if claimedEntry, _, outcome := st.cache.ReserveDelete(objectKey, cachedEntry.UID); outcome == deleteClaimed {
 				// Deleted rows carry empty data/diff/sha256 in schema v1 —
 				// event_type alone marks the deletion (see docs/SCHEMA.md).
 				closeRecord := sink.Record{
@@ -281,7 +281,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				p.enqueueCloseOut(ctx, log, key, st, writer, objectKey, closeRecord)
 			} else {
 				log.Info("🧟 Old incarnation's deletion already claimed elsewhere, skipping close-out write",
-					"old_uid", cachedEntry.UID)
+					"old_uid", cachedEntry.UID, "reason", outcome.String())
 			}
 
 			// 2. The current object is treated as a plain Added (leave eventType = "Added").
@@ -460,7 +460,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 // was touched again while the current one was processing, and since Process
 // returns as soon as the write is enqueued (long before the sink confirms it), a
 // redelivered delete can easily run before the first one's commit fires. A
-// second call for the same key returns claimed=false and does nothing.
+// second call for the same key returns deleteClaimInFlight and does nothing.
 //
 // expectedUID lets a caller whose belief that the object is gone comes from a
 // stale, point-in-time snapshot (the GC pass) assert it still matches the cache's
@@ -470,14 +470,19 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 // which has no independent belief to check and simply trusts whatever the cache
 // currently holds.
 //
+// The returned outcome is the cache's own reason (see deleteClaimOutcome), passed
+// through unchanged so a caller that has to act differently per reason — the GC
+// pass, which recovers only a UID mismatch — reads it from where it was decided
+// atomically instead of re-deriving it afterwards.
+//
 //nolint:logcheck
 func (p *Pipeline) emitDelete(ctx context.Context, log logr.Logger, key Key, st *sinkState,
-	writer sink.Writer, expectedUID string) (claimed bool, err error) {
+	writer sink.Writer, expectedUID string) (outcome deleteClaimOutcome, err error) {
 	objectKey := key.cacheKey()
 
-	entry, version, claimed := st.cache.ReserveDelete(objectKey, expectedUID)
-	if !claimed {
-		return false, nil
+	entry, version, outcome := st.cache.ReserveDelete(objectKey, expectedUID)
+	if outcome != deleteClaimed {
+		return outcome, nil
 	}
 
 	log.Info("🗑️ Object gone, queuing Deleted event for the sink", "uid", entry.UID)
@@ -522,9 +527,9 @@ func (p *Pipeline) emitDelete(ctx context.Context, log logr.Logger, key Key, st 
 	if enqueueErr != nil {
 		log.Error(enqueueErr, "🗑️ Failed to queue deletion event, releasing claim")
 		st.cache.UnclaimDelete(objectKey, version)
-		return true, enqueueErr
+		return deleteClaimed, enqueueErr
 	}
-	return true, nil
+	return deleteClaimed, nil
 }
 
 // enqueueCloseOut submits a reincarnation close-out write (a "Deleted" row for a

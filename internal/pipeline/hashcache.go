@@ -126,6 +126,43 @@ func (c *hashCache) DeleteIfCurrent(key string, expectedVersion uint64) bool {
 	return true
 }
 
+// deleteClaimOutcome is why a ReserveDelete succeeded or was refused. It is
+// decided under the cache's own lock, so it is a fact about the moment of the
+// decision — not something a caller can re-derive afterwards without racing.
+//
+// The distinction matters to exactly one caller today: the per-scope GC pass,
+// which has to know whether a refusal left the old incarnation's death
+// unrecorded (deleteClaimUIDMismatch — the successor owns the key) or already
+// recorded by somebody else (deleteClaimInFlight — that very deletion's row is
+// on its way to the sink). Collapsing the two makes the pass recover a close-out
+// that is already in flight, producing a second, differently-timestamped Deleted
+// row for one UID.
+type deleteClaimOutcome int
+
+const (
+	deleteClaimed          deleteClaimOutcome = iota // the caller now owns this deletion
+	deleteClaimAbsent                                // the key has no entry
+	deleteClaimInFlight                              // another claim already owns this deletion
+	deleteClaimUIDMismatch                           // the key now holds a different incarnation
+)
+
+// String makes the outcome loggable, so a refusal can name its own reason in the
+// place it is acted on rather than being reported as an opaque integer.
+func (o deleteClaimOutcome) String() string {
+	switch o {
+	case deleteClaimed:
+		return "claimed"
+	case deleteClaimAbsent:
+		return "absent"
+	case deleteClaimInFlight:
+		return "in-flight"
+	case deleteClaimUIDMismatch:
+		return "uid-mismatch"
+	default:
+		return fmt.Sprintf("deleteClaimOutcome(%d)", int(o))
+	}
+}
+
 // ReserveDelete claims key for a pending delete, the delete-path counterpart
 // to Reserve: it lets a "Deleted" write be claimed synchronously, in-cache,
 // before it's enqueued, so a redelivered Process call (or the per-scope GC
@@ -137,14 +174,20 @@ func (c *hashCache) DeleteIfCurrent(key string, expectedVersion uint64) bool {
 // check on commit kept the *cache* consistent, but by then every duplicate
 // INSERT had already reached ClickHouse.
 //
-// It refuses (claimed=false) if key has no entry (nothing to delete), the
-// entry is already claimed (someone else's delete is in flight), or
-// expectedUID is non-empty and doesn't match the entry's current UID —
-// either way the caller has nothing new to do. Otherwise it bumps the
-// version, exactly like Reserve, so any other write already in flight for
-// this key is superseded and its eventual commit becomes a safe no-op; it
-// returns the pre-claim entry (for its UID/content) and the new version to
-// thread into the eventual DeleteIfCurrent/UnclaimDelete call.
+// It refuses, and says why (see deleteClaimOutcome), if key has no entry
+// (deleteClaimAbsent — nothing to delete), the entry is already claimed
+// (deleteClaimInFlight — someone else's delete is on its way to the sink), or
+// expectedUID is non-empty and doesn't match the entry's current UID
+// (deleteClaimUIDMismatch — the key now belongs to a different incarnation). A
+// refusal returns a zero entry and version: there is nothing to settle. The
+// reason is reported rather than left for the caller to reconstruct because the
+// three are materially different — only a UID mismatch leaves the refused UID's
+// death unrecorded — and reconstructing one after the fact races the very
+// transitions it is trying to distinguish. Otherwise it bumps the version,
+// exactly like Reserve, so any other write already in flight for this key is
+// superseded and its eventual commit becomes a safe no-op; it returns
+// deleteClaimed, the pre-claim entry (for its UID/content), and the new version
+// to thread into the eventual DeleteIfCurrent/UnclaimDelete call.
 //
 // expectedUID matters for a caller (the per-scope GC pass) whose belief that
 // "this object is gone" comes from a point-in-time snapshot rather than a live
@@ -155,22 +198,27 @@ func (c *hashCache) DeleteIfCurrent(key string, expectedVersion uint64) bool {
 // existing object by name alone. Passing "" skips the check entirely, for
 // callers (the live absent-from-lister path) that have no independent, possibly-
 // stale belief about which UID they expect and simply trust whatever the
-// cache currently holds.
-func (c *hashCache) ReserveDelete(key string, expectedUID string) (entry CacheEntry, version uint64, claimed bool) {
+// cache currently holds. On that path deleteClaimUIDMismatch is therefore
+// unreachable — the check is skipped entirely — so the live delete path's
+// behaviour is exactly what it was before outcomes were reported.
+func (c *hashCache) ReserveDelete(key string, expectedUID string) (entry CacheEntry, version uint64, outcome deleteClaimOutcome) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cur, present := c.data[key]
-	if !present || cur.PendingDelete {
-		return CacheEntry{}, 0, false
+	if !present {
+		return CacheEntry{}, 0, deleteClaimAbsent
+	}
+	if cur.PendingDelete {
+		return CacheEntry{}, 0, deleteClaimInFlight
 	}
 	if expectedUID != "" && cur.UID != expectedUID {
-		return CacheEntry{}, 0, false
+		return CacheEntry{}, 0, deleteClaimUIDMismatch
 	}
 	claimedEntry := cur
 	cur.Version++
 	cur.PendingDelete = true
 	c.data[key] = cur
-	return claimedEntry, cur.Version, true
+	return claimedEntry, cur.Version, deleteClaimed
 }
 
 // UnclaimDelete releases a ReserveDelete claim after its write ultimately
