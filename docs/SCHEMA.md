@@ -114,9 +114,17 @@ Because `ReplacingMergeTree` de-duplicates only on background merge, a naive
 `SELECT *` can transiently observe a duplicate before the merge runs. **Any read
 that must not double-count must use `FINAL`** (or an explicit `argMax` / `LIMIT 1
 BY` dedup). The operator's own warm-up read (`statereader.go`) is already
-dedup-safe without `FINAL`: it `GROUP BY (namespace, name)` with `argMax(…, ts)`,
-so it emits exactly one row per identity regardless of unmerged duplicates, and
-argMax over byte-identical duplicates returns the same value either way.
+dedup-safe without `FINAL`: it `GROUP BY (namespace, name, uid)` with
+`argMax(…, ts)`, so it emits exactly one row per *incarnation* regardless of
+unmerged duplicates, and argMax over byte-identical duplicates returns the same
+value either way.
+
+The grouping is per incarnation rather than per identity on purpose. An identity
+whose history holds an incarnation that is not the newest **and** has no `Deleted`
+row of its own is a death nobody recorded — a delete-and-recreate that happened
+while the operator was down — and grouping per identity would hide it behind the
+successor's `argMax(uid, ts)`. The warm-up seeds the newest incarnation and closes
+out the others (see "Deletion semantics" below).
 
 ### Deletion semantics — no sentinels
 
@@ -125,6 +133,34 @@ Schema v1 removes the pre-v1 magic-string sentinels that the `sha256` and
 deletion semantics now.** A `Deleted` row has empty `data`, empty `diff`, empty
 `sha256`, and empty `actors`. Consumers must key off `event_type = 'Deleted'`,
 never off sentinel values in the data columns.
+
+**A `Deleted` row may be dated from history.** Most are stamped when the operator
+observes the disappearance, but one case cannot be: an incarnation that died while
+the operator was down and was replaced under the same name before it came back.
+Nothing in the live pipeline ever sees that death — the successor is observed
+first — so it is recovered from the sink's own history at warm-up, and the row it
+writes carries **that incarnation's own last recorded `ts` and `api_version`**,
+not the instant of the recovery.
+
+Two consequences matter to a consumer:
+
+- **Ordering is truthful.** The close-out sorts *before* the successor's first
+  row, so a reconstruction reads `Added` → … → `Deleted` (old uid) → `Added` /
+  `Snapshot` (new uid) in the order the events actually happened. A now-stamp
+  would sort after the successor and make the identity's most recent event a
+  deletion, hiding an object that exists.
+- **The row is deterministic and dedup-safe.** Every field is a function of
+  history, so a re-emitted close-out (a failed write, a re-warmed scope) is
+  byte-identical to the first attempt and collapses on merge like any other
+  `ReplacingMergeTree` duplicate. Once it lands, that uid's own latest event is
+  normally `Deleted`, so the warm-up query excludes it. It shares its `ts` with
+  the event it closes, though, so `argMax(event_type, ts)` may answer with either
+  of the two — a later warm can re-emit the row, and the byte-identical property
+  above is what makes that a no-op rather than a duplicate.
+
+  A consumer reconstructing one incarnation should therefore treat a `Deleted`
+  row as terminal for that `uid` regardless of ties, rather than ordering on `ts`
+  alone.
 
 ---
 
@@ -226,7 +262,9 @@ last-known states as *as-of its `Stopped` row*, not as current.
   last recorded state. Carries a `diff` against the prior state; falls back to
   full `data` when a diff cannot be produced (see below).
 - **`Deleted`** — the object is gone (live delete, reincarnation close-out of
-  the old UID, or startup GC of a "zombie"). Empty `data`/`diff`/`sha256`.
+  the old UID, or startup GC of a "zombie"). Empty `data`/`diff`/`sha256`. A
+  close-out recovered from history is dated from that incarnation's own last
+  event rather than from now — see "Deletion semantics" above.
 - **`Snapshot`** — a cache miss observed *while the cache has not yet been
   warmed from ClickHouse history* (startup "SafeMode"). Tagged `Snapshot`
   rather than `Added` so a slow/unavailable ClickHouse at startup can't

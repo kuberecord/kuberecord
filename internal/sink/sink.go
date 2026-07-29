@@ -97,15 +97,33 @@ type ScopeFilter struct {
 	Namespace string
 }
 
-// KnownState is one object's last-known persisted identity/content, as returned
-// by StateReader. It is the minimum a cache warm-up needs to reconstruct its
-// in-memory baseline: the identity (Namespace, Name, UID) and the content hash
-// (SHA256) used for dedup.
+// KnownState is the last-known persisted state of **one incarnation** — one
+// (identity, UID) pair — as returned by StateReader. It is deliberately not "one
+// object": an identity whose death went unrecorded (a delete-and-recreate that
+// happened while the operator was down) yields one KnownState per incarnation,
+// and that multiplicity is the only evidence that the older one was never closed
+// out. See LastKnownStates.
+//
+// TS and APIVersion exist so a close-out record for an unclosed incarnation is
+// fully derivable from history: dating it from TS rather than from now keeps a
+// reconstruction in the order events actually happened, and makes a re-emitted
+// close-out byte-identical to the first attempt (and therefore collapsible by
+// resource_states' ReplacingMergeTree).
 type KnownState struct {
 	Namespace string
 	Name      string
 	UID       string
 	SHA256    string
+
+	// APIVersion is the api_version last recorded for this incarnation. Identity
+	// is version-agnostic (Invariant 7), so this is provenance carried forward
+	// rather than part of the key.
+	APIVersion string
+
+	// TS is the most recent timestamp recorded for this incarnation. Within one
+	// identity, the incarnation with the greatest TS is the current one; every
+	// other is a prior whose death nobody recorded.
+	TS time.Time
 }
 
 // StateReader is the read half of a sink: it reports, per scope, the last-known
@@ -124,10 +142,15 @@ type KnownState struct {
 // genuinely new versus merely un-warmed). This is a design note only — no code
 // path exercises a Writer-only sink yet.
 type StateReader interface {
-	// LastKnownStates returns the last-known state of every object matching
-	// filter whose most recent event is not a deletion. A transient backend
-	// error is returned as-is so the caller can retry; a partial read must be
-	// reported as an error, never as a short-but-successful result.
+	// LastKnownStates returns the last-known state of every *incarnation*
+	// matching filter whose own most recent event is not a deletion. A transient
+	// backend error is returned as-is so the caller can retry; a partial read
+	// must be reported as an error, never as a short-but-successful result.
+	//
+	// An ordinary object yields exactly one KnownState. Two or more for the same
+	// (Namespace, Name) mean an incarnation died without a Deleted row ever being
+	// written for it — the operator was down across a delete-and-recreate — and
+	// the warm-up closes those priors out from history (see KnownState).
 	//
 	// filter.Namespace has the *record query* reading: empty matches every
 	// namespace (see ScopeFilter).

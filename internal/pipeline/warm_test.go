@@ -19,10 +19,12 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.uber.org/goleak"
 
 	"github.com/yelzhy/kubestream/internal/sink"
@@ -149,10 +151,39 @@ func (h *warmHarness) deletedRecords() []sink.Record {
 	return out
 }
 
-// knownState renders one history row for a named Pod.
+// knownState renders one history row for a named Pod — one incarnation of it, in
+// the per-incarnation reading LastKnownStates now answers in (see
+// sink.KnownState). Its TS is the zero instant, which is all a single-incarnation
+// identity needs: the classification only compares timestamps *within* one
+// identity.
 func knownState(name, uid, hash string) sink.KnownState {
 	return sink.KnownState{Namespace: "default", Name: name, UID: uid, SHA256: hash}
 }
+
+// incarnation renders one history row carrying everything a close-out has to be
+// derivable from: the api_version last recorded for that incarnation and the
+// instant of its last recorded event.
+func incarnation(name, uid, hash, apiVersion string, ts time.Time) sink.KnownState {
+	return sink.KnownState{
+		Namespace:  "default",
+		Name:       name,
+		UID:        uid,
+		SHA256:     hash,
+		APIVersion: apiVersion,
+		TS:         ts,
+	}
+}
+
+// The two instants every reincarnation-recovery test dates its history from: the
+// prior incarnation's last recorded event, and the successor's first. priorAPIVersion
+// is the version recorded against the prior incarnation, deliberately different
+// from the successor's so a close-out that took the wrong one is visible.
+const priorAPIVersion = "v1beta1"
+
+var (
+	priorTS     = time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	successorTS = priorTS.Add(time.Hour)
+)
 
 // TestNewWarmCoordinatorValidatesRequiredOptions covers the eager dependency
 // checks: a missing dependency must fail at construction, not as a nil dereference
@@ -562,6 +593,357 @@ func TestWarmScopeGCRefusesAReincarnatedObject(t *testing.T) {
 			t.Errorf("close-out row uid = %q, want %q", got, oldUID)
 		}
 	})
+}
+
+// TestWarmScopeClassifiesIncarnationsFromHistory covers the close-out recovery a
+// restart across a delete-and-recreate depends on (Task 1.12).
+//
+// The live reincarnation branch cannot fire here: the successor is observed and
+// Reserved before the warm-up finishes, so the dedup cache never holds the old
+// UID, and gcPass's UID-gated claim is then correctly refused. The evidence
+// survives only in history, as two incarnations of one identity where the older
+// has no Deleted row of its own — and that is what the seed-time classification
+// reads it from.
+func TestWarmScopeClassifiesIncarnationsFromHistory(t *testing.T) {
+	t.Run("the newest incarnation is seeded and swept, the prior is neither", func(t *testing.T) {
+		h := newWarmHarness(t)
+		filter := scopeFilterFor(podScope)
+		h.reader.setStates(filter,
+			incarnation("web", oldUID, "hash-old", priorAPIVersion, priorTS),
+			incarnation("web", newUID, "hash-new", "v1", successorTS),
+		)
+
+		seeded, priors, err := h.coord.seedScope(h.ctx, logr.Discard(), scopeRef{sink: testSink, scope: podScope})
+		if err != nil {
+			t.Fatalf("seedScope: %v", err)
+		}
+
+		wantSeeded := []gcTarget{{namespace: "default", name: "web", uid: newUID}}
+		if !reflect.DeepEqual(seeded, wantSeeded) {
+			t.Errorf("GC targets = %+v, want only the current incarnation %+v", seeded, wantSeeded)
+		}
+		wantPriors := []reincarnation{
+			{namespace: "default", name: "web", uid: oldUID, apiVersion: priorAPIVersion, ts: priorTS},
+		}
+		if !reflect.DeepEqual(priors, wantPriors) {
+			t.Errorf("unclosed priors = %+v, want %+v", priors, wantPriors)
+		}
+
+		// The cache holds the current incarnation. The prior is deliberately not
+		// seeded: the key belongs to the successor, and a historical baseline for a
+		// dead UID would suppress the successor's next genuine change.
+		st := h.pipeline.sinks.get(testSink)
+		entry, ok := st.cache.Load(podKey("web").cacheKey())
+		if !ok || entry.UID != newUID || entry.Hash != "hash-new" {
+			t.Errorf("seeded entry = %+v (present %v), want the current incarnation (uid %s, hash-new)",
+				entry, ok, newUID)
+		}
+	})
+
+	t.Run("the prior is closed out from its own history row", func(t *testing.T) {
+		h := newWarmHarness(t)
+		filter := scopeFilterFor(podScope)
+		h.reader.setStates(filter,
+			incarnation("web", oldUID, "hash-old", priorAPIVersion, priorTS),
+			incarnation("web", newUID, "hash-new", "v1", successorTS),
+		)
+		h.reader.setWasActive(filter, true)
+		h.scopes.markSynced(podScope)
+		// The successor is alive, so the GC pass finds nothing to collect and the
+		// only Deleted row that can appear is the recovered close-out.
+		h.lister.set(podKey("web"), newPod("web", newUID, "11", "nginx"))
+
+		h.run(t)
+		h.warmNow(podScope)
+		h.awaitWarm(t, podScope)
+
+		waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
+			func() string { return "one close-out row for the unclosed prior incarnation" })
+
+		got := h.deletedRecords()[0]
+		if got.UID != oldUID {
+			t.Errorf("close-out uid = %q, want the prior incarnation's %q", got.UID, oldUID)
+		}
+		if got.APIVersion != priorAPIVersion {
+			t.Errorf("close-out api_version = %q, want the prior incarnation's own %q", got.APIVersion, priorAPIVersion)
+		}
+		if !got.Timestamp.Equal(priorTS) {
+			t.Errorf("close-out ts = %s, want the prior incarnation's own %s: a now-stamp would sort after"+
+				" the successor's first row and exclude the live successor from every later warm",
+				got.Timestamp, priorTS)
+		}
+		if got.Data != "" || got.Diff != "" || got.SHA256 != "" {
+			t.Errorf("close-out carries data/diff/sha256 (%q/%q/%q); event_type alone marks a deletion in schema v1",
+				got.Data, got.Diff, got.SHA256)
+		}
+		if got.Namespace != "default" || got.Name != "web" || got.Kind != "Pod" {
+			t.Errorf("close-out identity = %s/%s (%s), want default/web (Pod)", got.Namespace, got.Name, got.Kind)
+		}
+
+		// Exactly one: the successor is alive, so nothing else may be recorded as
+		// dead, and the recovery must not double-emit.
+		stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
+			"close-out recovery emitted more than one Deleted row for one unrecorded death")
+	})
+}
+
+// TestWarmScopeClosesOutAReincarnationTheGCPassCouldNotClaim covers the other
+// ordering of the same restart, and the one the e2e suite actually produces.
+//
+// Here the warm's history read wins the race against the successor's own first
+// row reaching the sink, so history returns a *single* incarnation: the old UID
+// is seeded like any ordinary object and swept like one. The sweep then finds a
+// different UID live under that name and its claim is refused — correctly, since
+// the cache entry belongs to the successor — and with only the seed-time
+// classification nobody would ever record that the old incarnation died.
+//
+// The refusal is the proof. The close-out still waits for history to catch up, so
+// that the row it writes is dated from the old incarnation's own last event and
+// stays byte-identical across re-emissions.
+func TestWarmScopeClosesOutAReincarnationTheGCPassCouldNotClaim(t *testing.T) {
+	h := newWarmHarness(t)
+	filter := scopeFilterFor(podScope)
+
+	// History as the seed read sees it: one incarnation, because the successor's
+	// Snapshot row has not been flushed to the sink yet.
+	h.reader.setStates(filter, incarnation("web", oldUID, "hash-old", priorAPIVersion, priorTS))
+	h.reader.setWasActive(filter, true)
+	h.scopes.markSynced(podScope)
+
+	// A worker got to the successor first: the cache entry is the new
+	// incarnation's, so the seed's StoreIfAbsent declines and the sweep's
+	// UID-gated claim will be refused.
+	st := h.pipeline.sinks.get(testSink)
+	st.cache.Reserve(podKey("web").cacheKey(), CacheEntry{Hash: "hash-new", UID: newUID})
+	h.lister.set(podKey("web"), newPod("web", newUID, "11", "nginx"))
+
+	h.run(t)
+	h.warmNow(podScope)
+	waitFor(t, func() bool { return len(h.reader.historyReads()) > 0 },
+		func() string { return "the seed read of a history that holds only the old incarnation" })
+
+	// The successor's own first row reaches the sink now — the evidence the
+	// close-out has to be dated from.
+	h.reader.setStates(filter,
+		incarnation("web", oldUID, "hash-old", priorAPIVersion, priorTS),
+		incarnation("web", newUID, "hash-new", "v1", successorTS),
+	)
+
+	waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
+		func() string { return "the close-out for the reincarnation the sweep could not claim" })
+
+	got := h.deletedRecords()[0]
+	if got.UID != oldUID {
+		t.Errorf("close-out uid = %q, want the refused incarnation's %q", got.UID, oldUID)
+	}
+	if got.APIVersion != priorAPIVersion || !got.Timestamp.Equal(priorTS) {
+		t.Errorf("close-out = (api_version %q, ts %s), want the history row's (%s, %s)",
+			got.APIVersion, got.Timestamp, priorAPIVersion, priorTS)
+	}
+	if got.Data != "" || got.Diff != "" || got.SHA256 != "" {
+		t.Errorf("close-out carries data/diff/sha256 (%q/%q/%q), want all empty", got.Data, got.Diff, got.SHA256)
+	}
+
+	// The refusal stands: recording the old incarnation's death must not disturb
+	// the live successor's entry, which no close-out ever claims (Invariant 3).
+	entry, ok := st.cache.Load(podKey("web").cacheKey())
+	if !ok || entry.UID != newUID || entry.PendingDelete {
+		t.Errorf("the live successor's entry was disturbed by the close-out: %+v (present %v)", entry, ok)
+	}
+	stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
+		"the refused reincarnation was closed out more than once")
+}
+
+// TestCloseOutsAreNeverEmittedForPreHistoryWhenTheScopeWasNeverActive is the epoch
+// gate on close-out recovery, and the most damaging failure this component has.
+//
+// A brand-new rule over a kind that carries older history from some other scope
+// will find unclosed incarnations in that history. This process never watched
+// them, so recording their deaths would fabricate deletions for pre-history —
+// exactly what the same gate stops the zombie GC pass from doing. The gate is not
+// optional and is not a heuristic: no previous open epoch, no Deleted rows of any
+// kind.
+func TestCloseOutsAreNeverEmittedForPreHistoryWhenTheScopeWasNeverActive(t *testing.T) {
+	// A different name from the other recovery tests, so this scope's history
+	// cannot be confused with theirs when both run in the same package.
+	const object = "api"
+	history := []sink.KnownState{
+		incarnation(object, oldUID, "hash-old", priorAPIVersion, priorTS),
+		incarnation(object, newUID, "hash-new", "v1", successorTS),
+	}
+
+	t.Run("no previous open epoch: nothing is written at all", func(t *testing.T) {
+		h := newWarmHarness(t)
+		filter := scopeFilterFor(podScope)
+		h.reader.setStates(filter, history...)
+		h.reader.setWasActive(filter, false)
+		h.scopes.markSynced(podScope)
+		h.lister.set(podKey(object), newPod(object, newUID, "11", "nginx"))
+
+		h.run(t)
+		h.warmNow(podScope)
+		h.awaitWarm(t, podScope)
+		waitFor(t, func() bool { return len(h.reader.epochProbes()) > 0 },
+			func() string { return "the epoch check to run" })
+
+		stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
+			"an unclosed incarnation in pre-history was fabricated into a deletion")
+	})
+
+	t.Run("a previous open epoch: exactly one Deleted row", func(t *testing.T) {
+		h := newWarmHarness(t)
+		filter := scopeFilterFor(podScope)
+		h.reader.setStates(filter, history...)
+		h.reader.setWasActive(filter, true)
+		h.scopes.markSynced(podScope)
+		h.lister.set(podKey(object), newPod(object, newUID, "11", "nginx"))
+
+		h.run(t)
+		h.warmNow(podScope)
+		h.awaitWarm(t, podScope)
+
+		waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
+			func() string { return "the close-out row once the epoch check passes" })
+		if got := h.deletedRecords()[0].UID; got != oldUID {
+			t.Errorf("Deleted row uid = %q, want the prior incarnation's %q", got, oldUID)
+		}
+		stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
+			"more than one Deleted row was written for one unrecorded death")
+	})
+}
+
+// TestCloseOutRecordIsDeterministicFromHistory proves the idempotency the retry
+// path depends on: every field of a close-out comes from history, so re-emitting
+// one (the write failed, the process died mid-retry, the scope was re-warmed
+// before the row landed) produces a byte-identical row that resource_states'
+// ReplacingMergeTree collapses on merge.
+//
+// The equivalent assertion one layer down is TestInsertArgsTimestampFrozen in
+// internal/sink/clickhouse, which proves insertArgs is a pure function of the
+// record — including the timestamp, the one field a "fix" to time.Now() would
+// make vary. Because that holds, an identical record renders to identical
+// positional args, and this test asserts the record half here rather than
+// importing an unexported helper from a package that already imports this one.
+func TestCloseOutRecordIsDeterministicFromHistory(t *testing.T) {
+	prior := reincarnation{
+		namespace:  "default",
+		name:       "web",
+		uid:        oldUID,
+		apiVersion: priorAPIVersion,
+		ts:         priorTS,
+	}
+	key := Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default", Name: "web"}
+
+	first := prior.closeOutRecord(testClusterID, key)
+	second := prior.closeOutRecord(testClusterID, key)
+
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("close-out records differ between builds:\n first  = %+v\n second = %+v", first, second)
+	}
+	if !first.Timestamp.Equal(priorTS) {
+		t.Errorf("close-out ts = %s, want the history instant %s; a time.Now() stamp would make every"+
+			" re-emission a new row instead of a duplicate ReplacingMergeTree can collapse",
+			first.Timestamp, priorTS)
+	}
+	if first.EventType != "Deleted" || first.UID != oldUID || first.APIVersion != priorAPIVersion {
+		t.Errorf("close-out = %+v, want a Deleted row for %s at api_version %s", first, oldUID, priorAPIVersion)
+	}
+	if first.Data != "" || first.Diff != "" || first.SHA256 != "" {
+		t.Errorf("close-out carries data/diff/sha256, want all empty: %+v", first)
+	}
+}
+
+// TestEmitCloseOutsNeedsNoInformerSync covers the close-outs-without-GC-targets
+// path: the recovery compares nothing against the live cache — its evidence is
+// entirely historical — so it neither consults the informer's readiness nor waits
+// for it. That is why warm gates only the GC pass on awaitScopeSync
+// (`len(seeded) > 0 && !c.awaitScopeSync(...)`), and a warm with nothing to sweep
+// proceeds straight to the epoch check.
+//
+// It drives emitCloseOuts directly because seedScope always yields a current
+// incarnation alongside any prior (one identity's newest row is the seed by
+// definition), so an empty target list with a non-empty prior list is a state the
+// classification cannot produce — the guard is defensive, and this is the
+// behaviour it protects.
+func TestEmitCloseOutsNeedsNoInformerSync(t *testing.T) {
+	h := newWarmHarness(t)
+	// Deliberately never synced, and no live object for the key at all.
+	h.run(t)
+
+	priors := []reincarnation{
+		{namespace: "default", name: "web", uid: oldUID, apiVersion: priorAPIVersion, ts: priorTS},
+	}
+	recovered := h.coord.emitCloseOuts(h.ctx, logr.Discard(), scopeRef{sink: testSink, scope: podScope}, priors)
+	if recovered != 1 {
+		t.Fatalf("emitCloseOuts returned %d, want 1", recovered)
+	}
+
+	waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
+		func() string { return "the close-out row without the informer ever reporting synced" })
+	if got := h.deletedRecords()[0].UID; got != oldUID {
+		t.Errorf("Deleted row uid = %q, want %q", got, oldUID)
+	}
+	if n := h.scopes.syncChecked(); n != 0 {
+		t.Errorf("close-out recovery consulted the informer's readiness %d times, want 0", n)
+	}
+}
+
+// TestForgetSinkRestoresBootReconciliationAndCancelsWarms covers the second half
+// of Task 1.12: Pipeline.RemoveSink discards a deleted sink's caches, but the
+// coordinator used to keep the sink marked boot-reconciled forever. A sink deleted
+// and re-created under the same name would then never have its boot pass run
+// again, so scopes orphaned during its absence would stay open in watch_scopes
+// indefinitely — a self-heal that silently stops working.
+func TestForgetSinkRestoresBootReconciliationAndCancelsWarms(t *testing.T) {
+	h := newWarmHarness(t)
+
+	// An orphan nothing desires, distinct from the scope warmed below so the
+	// second boot pass still has something to close.
+	orphanScope := ScopeKey{Group: "", Kind: "ConfigMap", Namespace: "default"}
+	orphan := scopeFilterFor(orphanScope)
+	h.reader.setActiveScopes(orphan)
+	h.reader.setStates(scopeFilterFor(podScope), knownState("web", "uid-web", "hash-web"))
+
+	h.run(t)
+
+	h.events.awaitEvents(t, 1)
+	stayFalse(t, func() bool { return len(h.events.recorded()) > 1 },
+		"the boot pass re-ran for a sink it had already reconciled")
+	passesBefore := h.reader.activeScopesCallCount()
+
+	// A warm for this sink, caught mid-read.
+	release := h.reader.blockLastKnownStates()
+	defer release()
+	h.warmNow(podScope)
+	waitFor(t, func() bool { return len(h.reader.historyReads()) > 0 },
+		func() string { return "the warm to reach the blocked history read" })
+
+	// The sink is deleted: the SinkManager evicts its pipeline state and, next to
+	// that call, forgets it here.
+	h.coord.ForgetSink(testSink)
+	h.coord.ForgetSink("a-sink-that-never-existed") // safe by contract
+	release()
+
+	// The boot pass runs again for the re-created sink, closing the scope that was
+	// orphaned while it was gone.
+	h.events.awaitEvents(t, 2)
+	if n := h.reader.activeScopesCallCount(); n <= passesBefore {
+		t.Errorf("ActiveScopes was called %d times, want more than the %d before ForgetSink", n, passesBefore)
+	}
+	for _, event := range h.events.recorded() {
+		if event.Action != sink.ScopeActionStopped || event.Scope != orphan {
+			t.Errorf("scope event = %+v, want a Stopped row for the orphan %+v", event, orphan)
+		}
+	}
+
+	// The in-flight warm was cancelled with the sink, so it neither marked its
+	// scope warm nor wrote anything for a sink that is gone.
+	st := h.pipeline.sinks.get(testSink)
+	if st.scopeWarm(Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default"}) {
+		t.Error("a warm cancelled by ForgetSink still marked its scope warm")
+	}
+	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
+		"a warm cancelled by ForgetSink still wrote resource_states rows")
 }
 
 // TestWarmScopeWarmsOnlyItsOwnScope is the "new rule on a live cluster" criterion:

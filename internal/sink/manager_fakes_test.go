@@ -224,6 +224,10 @@ func (f *fakeInstance) probeTimes() []time.Time {
 	return append([]time.Time(nil), f.probeAt...)
 }
 
+// LastKnownStates answers with no history at all. The manager only ever routes
+// this call, never interprets it, so the per-incarnation semantics of a
+// KnownState (see sink.KnownState) are exercised where they are consumed —
+// internal/pipeline's warm-up — rather than here.
 func (f *fakeInstance) LastKnownStates(context.Context, ScopeFilter) ([]KnownState, error) {
 	return nil, nil
 }
@@ -272,6 +276,34 @@ func (f *fakePipeline) removals() ([]string, map[string]int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.removed...), maps.Clone(f.removeAt)
+}
+
+// fakeWarmHooks records ForgetSink calls and when they happened, so the deletion
+// test can prove the coordinator's bookkeeping is cleared alongside — and not
+// before — the pipeline state it describes.
+type fakeWarmHooks struct {
+	clock *atomic.Int64
+
+	mu        sync.Mutex
+	forgotten []string
+	forgetAt  map[string]int64
+}
+
+func newFakeWarmHooks(clock *atomic.Int64) *fakeWarmHooks {
+	return &fakeWarmHooks{clock: clock, forgetAt: make(map[string]int64)}
+}
+
+func (f *fakeWarmHooks) ForgetSink(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forgotten = append(f.forgotten, name)
+	f.forgetAt[name] = f.clock.Add(1)
+}
+
+func (f *fakeWarmHooks) forgets() ([]string, map[string]int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.forgotten...), maps.Clone(f.forgetAt)
 }
 
 // fakeDependents is the rule index the parking callback consults.

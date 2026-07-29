@@ -48,7 +48,10 @@ type scopeActiveCall struct {
 type fakeStateReader struct {
 	mu sync.Mutex
 
-	// states answers LastKnownStates, keyed by the exact filter queried.
+	// states answers LastKnownStates, keyed by the exact filter queried. The
+	// values are *per-incarnation* rows (see sink.KnownState), so a test states a
+	// delete-and-recreate the operator missed by listing two entries with the same
+	// Namespace/Name and different UIDs and timestamps.
 	states map[sink.ScopeFilter][]sink.KnownState
 	// wasActive answers ScopeWasActive; a missing entry means false, which is the
 	// brand-new-scope case.
@@ -308,6 +311,9 @@ type fakeScopes struct {
 	mu      sync.Mutex
 	synced  map[scopeRef]struct{}
 	desired map[scopeRef]struct{}
+	// syncChecks counts ScopeSynced calls, so a test can assert a path consulted
+	// the informer's readiness *not at all* rather than merely not waiting long.
+	syncChecks int
 	// settled is nil by default, which the contract defines as "no gating needed",
 	// so most tests need not think about it; the gate test supplies a real channel.
 	settled chan struct{}
@@ -342,8 +348,16 @@ func (f *fakeScopes) withSettleGate() (open func()) {
 func (f *fakeScopes) ScopeSynced(sinkName string, scope ScopeKey) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.syncChecks++
 	_, ok := f.synced[scopeRef{sink: sinkName, scope: scope}]
 	return ok
+}
+
+// syncChecked reports how many times the informer's readiness was consulted.
+func (f *fakeScopes) syncChecked() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.syncChecks
 }
 
 func (f *fakeScopes) ScopeDesired(sinkName string, scope ScopeKey) bool {
