@@ -985,10 +985,24 @@ func (c *WarmCoordinator) emitCloseOuts(ctx context.Context, log logr.Logger,
 // a close-out from.
 //
 // The wait is bounded (closeOutEvidenceTimeout) and re-reads history rather than
-// trusting a snapshot, which is also what makes it duplicate-safe: if the worker
-// that observed the reincarnation live already wrote its own close-out, that UID's
-// latest event is Deleted, the warm-up query excludes it, and this pass finds
-// nothing to do.
+// trusting a snapshot. Duplicate safety rests on two complementary guards, and
+// neither covers the other's case:
+//
+//   - The refusal reason, checked at the source (gcPass). A target only reaches
+//     this pass when the cache refused its claim with deleteClaimUIDMismatch, so a
+//     close-out whose Deleted row is merely *in flight* — deleteClaimInFlight, i.e.
+//     another caller already owns that exact deletion — is never handed over. That
+//     decision is made inside hashCache's own lock, atomically with the refusal.
+//   - The stillOpen re-read, below. If a close-out for that UID has already
+//     *landed*, the UID's latest event is Deleted, the warm-up query excludes it,
+//     and this pass finds nothing to do.
+//
+// The re-read cannot substitute for the first guard: an unwritten row is invisible
+// to history, so an in-flight close-out still reads as an open incarnation and
+// would be emitted a second time — with a different timestamp (one time.Now(), one
+// historical), which is precisely the shape ReplacingMergeTree cannot collapse.
+// Nor can the first substitute for the second: once a row lands, no cache entry
+// remains to refuse anything. Do not remove either.
 //
 // It changes no GC decision: the refusal stands, the live entry is untouched, and
 // no cache claim is taken (Invariant 3).
@@ -1091,9 +1105,11 @@ type gcResult struct {
 
 	// reincarnated are the targets this pass proved dead — the live indexer holds
 	// a different incarnation under the same name — but whose deletion it could
-	// not claim, because the successor already owns the cache entry. The refusal
-	// is correct and stands; these are handed to recoverRefusedReincarnations so
-	// the old UID's death still reaches the audit trail.
+	// not claim *because the successor already owns the cache entry*
+	// (deleteClaimUIDMismatch, and only that). The refusal is correct and stands;
+	// these are handed to recoverRefusedReincarnations so the old UID's death still
+	// reaches the audit trail. A refusal for any other reason is deliberately
+	// absent from this list — see the classification in gcPass.
 	reincarnated []gcTarget
 }
 
@@ -1176,19 +1192,35 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger,
 		// old UID's history has to be closed out either way. The claim is gated on
 		// target.uid so a reincarnation that a worker already reserved is refused
 		// rather than deleting a currently-existing object by name alone.
-		claimed, enqueueErr := c.p.emitDelete(ctx, log, key, st, writer, target.uid)
+		outcome, enqueueErr := c.p.emitDelete(ctx, log, key, st, writer, target.uid)
 		if enqueueErr != nil {
 			log.Error(enqueueErr, "🧟 Failed to queue a zombie's deletion, retrying the GC pass",
 				"namespace", target.namespace, "name", target.name)
 			return result, enqueueErr
 		}
-		if !claimed {
-			// Somebody else already owns this deletion: a worker processing this
-			// key's own disappearance, or an earlier attempt of this pass. A live
-			// successor under a different UID is the third case, and the only one
-			// that leaves something unrecorded — the refusal protects the
-			// successor's entry, but the old UID's death still has to be told.
-			if found && string(obj.GetUID()) != target.uid {
+		if outcome != deleteClaimed {
+			// Only a UID mismatch leaves something unrecorded: the key belongs to the
+			// successor, so the refusal protects a live object and nobody else will
+			// record the old incarnation's death. deleteClaimInFlight is the opposite —
+			// another caller already owns this exact deletion and its row is on its way,
+			// so recovering it here would write a second, differently-timestamped
+			// Deleted row that ReplacingMergeTree cannot collapse. deleteClaimAbsent
+			// carries no evidence that a successor owns the key at all.
+			//
+			// deleteClaimInFlight is reachable from this pass's own retry: attempt 1
+			// claims the old UID and enqueues a now-stamped Deleted row, a later target
+			// errors the pass, and the retry re-walks this key while that row is still
+			// unwritten. Task 2.1 should force exactly that interleaving under real
+			// write reordering (claim, error the sweep on a later target, retry while
+			// the successor's row overtakes the in-flight Deleted) so this guard has a
+			// permanent chaos-level regression test, not only a unit-level one.
+			//
+			// Both conditions are required, and they are independent sources: the
+			// outcome is the cache's statement that the key changed hands, decided
+			// atomically under its lock, while found/liveUID is the live indexer's
+			// statement that a successor exists — the two-source agreement
+			// recoverRefusedReincarnations rests its evidence on.
+			if outcome == deleteClaimUIDMismatch && found && string(obj.GetUID()) != target.uid {
 				result.reincarnated = append(result.reincarnated, target)
 			}
 			continue

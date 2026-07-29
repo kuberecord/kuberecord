@@ -754,6 +754,168 @@ func TestWarmScopeClosesOutAReincarnationTheGCPassCouldNotClaim(t *testing.T) {
 		"the refused reincarnation was closed out more than once")
 }
 
+// gcSweep drives one zombie sweep over targets directly, with no seeding, so a test
+// can put the dedup cache into a state seedScope would otherwise overwrite (or
+// decline to produce at all — an absent entry cannot survive a seed).
+func (h *warmHarness) gcSweep(t *testing.T, targets ...gcTarget) gcResult {
+	t.Helper()
+	result, err := h.coord.gcPass(h.ctx, logr.Discard(), scopeRef{sink: testSink, scope: podScope}, targets)
+	if err != nil {
+		t.Fatalf("gcPass: %v", err)
+	}
+	return result
+}
+
+// webTarget is the GC target every refusal-classification test below sweeps: the
+// old incarnation of default/web, as a point-in-time read of history believed it.
+var webTarget = gcTarget{namespace: "default", name: "web", uid: oldUID}
+
+// TestGCPassDoesNotRecoverADeleteClaimAlreadyInFlight is the refusal-reason guard.
+//
+// hashCache.ReserveDelete refuses for three materially different reasons, and the
+// sweep must recover only one of them. Here an earlier attempt of this very sweep
+// already claimed the old incarnation's deletion — the pass errored on a later
+// target and was retried, so nothing has released the claim and its Deleted row is
+// still on its way to the sink. The claim is refused with deleteClaimInFlight.
+//
+// The live indexer cannot tell that apart from the case that *does* need
+// recovering: awaitScopeSync gates the sweep on HasSynced, so the successor is
+// guaranteed to be visible under a different UID either way. Classifying on the
+// indexer alone therefore hands this target to recoverRefusedReincarnations by
+// default, which re-reads history, sees an incarnation with no landed Deleted row
+// (an unwritten row is invisible to history), and emits a *second* close-out for
+// one UID — one stamped time.Now() by emitDelete, one dated from history, so
+// resource_states' ReplacingMergeTree cannot collapse them.
+func TestGCPassDoesNotRecoverADeleteClaimAlreadyInFlight(t *testing.T) {
+	h := newWarmHarness(t)
+	key := podKey("web")
+
+	// An earlier sweep attempt owns this deletion; its write has not settled.
+	st := h.pipeline.sinks.get(testSink)
+	st.cache.Reserve(key.cacheKey(), CacheEntry{Hash: "hash-old", UID: oldUID})
+	_, claimVersion, outcome := st.cache.ReserveDelete(key.cacheKey(), oldUID)
+	if outcome != deleteClaimed {
+		t.Fatalf("seeding the in-flight claim: outcome = %s, want claimed", outcome)
+	}
+
+	// The successor is live under a new UID, exactly as the synced indexer reports
+	// it in the case this must not be confused with.
+	h.lister.set(key, newPod("web", newUID, "11", "nginx"))
+
+	result := h.gcSweep(t, webTarget)
+
+	if len(result.reincarnated) != 0 {
+		t.Errorf("reincarnated = %+v, want empty: this deletion's row is already in flight, and recovering"+
+			" it would write a second, differently-timestamped Deleted row for one UID", result.reincarnated)
+	}
+	if result.zombies != 0 {
+		t.Errorf("zombies = %d, want 0: the claim was refused, so this pass enqueued nothing", result.zombies)
+	}
+	if got := h.writer.recorded(); len(got) != 0 {
+		t.Errorf("the sweep enqueued %+v, want nothing", got)
+	}
+
+	// The pre-existing claim belongs to the earlier attempt and must be left
+	// exactly as it was — neither released nor re-versioned (Invariant 3).
+	entry, ok := st.cache.Load(key.cacheKey())
+	if !ok || !entry.PendingDelete || entry.Version != claimVersion || entry.UID != oldUID {
+		t.Errorf("the in-flight claim was disturbed: %+v (present %v), want %s still pending at version %d",
+			entry, ok, oldUID, claimVersion)
+	}
+}
+
+// TestGCPassStillRecoversAGenuineUIDMismatch is the other side of that guard: the
+// narrowed classification must not over-correct and drop the case Task 1.12 exists
+// for.
+//
+// The cache holds the successor (a worker Reserved it), so the claim is refused
+// with deleteClaimUIDMismatch — the key changed hands, nobody else owns the old
+// UID's deletion, and its death would otherwise never reach the audit trail. The
+// recovered row is still dated from history, not from the recovery.
+func TestGCPassStillRecoversAGenuineUIDMismatch(t *testing.T) {
+	h := newWarmHarness(t)
+	key := podKey("web")
+	filter := scopeFilterFor(podScope)
+
+	// A worker got to the successor first: the key belongs to UID-B, unclaimed.
+	st := h.pipeline.sinks.get(testSink)
+	st.cache.Reserve(key.cacheKey(), CacheEntry{Hash: "hash-new", UID: newUID})
+	h.lister.set(key, newPod("web", newUID, "11", "nginx"))
+
+	// History has caught up by now: both incarnations are on record, so the
+	// close-out has a prior row to be dated from.
+	h.reader.setStates(filter,
+		incarnation("web", oldUID, "hash-old", priorAPIVersion, priorTS),
+		incarnation("web", newUID, "hash-new", "v1", successorTS),
+	)
+
+	result := h.gcSweep(t, webTarget)
+
+	wantRefused := []gcTarget{webTarget}
+	if !reflect.DeepEqual(result.reincarnated, wantRefused) {
+		t.Fatalf("reincarnated = %+v, want %+v: a UID mismatch is the one refusal that leaves a death unrecorded",
+			result.reincarnated, wantRefused)
+	}
+
+	recovered := h.coord.recoverRefusedReincarnations(h.ctx, logr.Discard(),
+		scopeRef{sink: testSink, scope: podScope}, result.reincarnated)
+	if recovered != 1 {
+		t.Fatalf("recovered = %d, want 1", recovered)
+	}
+
+	deleted := h.deletedRecords()
+	if len(deleted) != 1 {
+		t.Fatalf("Deleted rows = %+v, want exactly one close-out for the old incarnation", deleted)
+	}
+	got := deleted[0]
+	if got.UID != oldUID {
+		t.Errorf("close-out uid = %q, want the refused incarnation's %q", got.UID, oldUID)
+	}
+	if !got.Timestamp.Equal(priorTS) || got.APIVersion != priorAPIVersion {
+		t.Errorf("close-out = (ts %s, api_version %q), want the history row's (%s, %q)",
+			got.Timestamp, got.APIVersion, priorTS, priorAPIVersion)
+	}
+	if got.Data != "" || got.Diff != "" || got.SHA256 != "" {
+		t.Errorf("close-out carries data/diff/sha256 (%q/%q/%q), want all empty", got.Data, got.Diff, got.SHA256)
+	}
+
+	// The refusal stands: the live successor's entry is never claimed.
+	entry, ok := st.cache.Load(key.cacheKey())
+	if !ok || entry.UID != newUID || entry.PendingDelete {
+		t.Errorf("the live successor's entry was disturbed: %+v (present %v)", entry, ok)
+	}
+}
+
+// TestGCPassDoesNotRecoverAnAbsentCacheEntry covers the third refusal reason. With
+// no entry for the key there is nothing to claim and, crucially, no cache-side
+// evidence that a successor owns it: the indexer's live UID alone says only that
+// *something* answers to that name now, which is equally true after this key's
+// Deleted row already landed and removed the entry. Recovering on that would
+// re-emit a close-out for a UID whose death is already recorded.
+func TestGCPassDoesNotRecoverAnAbsentCacheEntry(t *testing.T) {
+	h := newWarmHarness(t)
+	key := podKey("web")
+
+	// Nothing is seeded into the cache, and a different UID is live under the name.
+	h.lister.set(key, newPod("web", newUID, "11", "nginx"))
+
+	result := h.gcSweep(t, webTarget)
+
+	if len(result.reincarnated) != 0 {
+		t.Errorf("reincarnated = %+v, want empty: an absent entry is no evidence that a successor owns the key",
+			result.reincarnated)
+	}
+	if result.zombies != 0 {
+		t.Errorf("zombies = %d, want 0", result.zombies)
+	}
+	if got := h.writer.recorded(); len(got) != 0 {
+		t.Errorf("the sweep enqueued %+v, want nothing", got)
+	}
+	if entry, ok := h.pipeline.sinks.get(testSink).cache.Load(key.cacheKey()); ok {
+		t.Errorf("the refused claim created a cache entry: %+v", entry)
+	}
+}
+
 // TestCloseOutsAreNeverEmittedForPreHistoryWhenTheScopeWasNeverActive is the epoch
 // gate on close-out recovery, and the most damaging failure this component has.
 //
