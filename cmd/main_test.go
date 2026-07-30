@@ -366,6 +366,9 @@ func TestBuildSinkConfig(t *testing.T) {
 				BatchMaxWait:         defaults.batchMaxWait,
 				EnqueueTimeout:       defaults.enqueueTimeout,
 				ShutdownDrainTimeout: defaults.drainTimeout,
+				// checkpointEvery has no --writer-* twin (the CRD defaults it), so
+				// an omitted field falls back to the shipped cadence itself.
+				CheckpointEvery: clickhouse.DefaultCheckpointEvery,
 			},
 		},
 		{
@@ -373,12 +376,13 @@ func TestBuildSinkConfig(t *testing.T) {
 			spec: v1alpha1.ClickHouseSinkSpec{
 				Connection: connection,
 				Writer: v1alpha1.WriterSpec{
-					QueueSize:      int32Ptr(9000),
-					Workers:        int32Ptr(16),
-					BatchMaxRows:   int32Ptr(2500),
-					BatchMaxWait:   duration(250 * time.Millisecond),
-					EnqueueTimeout: duration(time.Second),
-					DrainTimeout:   duration(30 * time.Second),
+					QueueSize:       int32Ptr(9000),
+					Workers:         int32Ptr(16),
+					BatchMaxRows:    int32Ptr(2500),
+					BatchMaxWait:    duration(250 * time.Millisecond),
+					EnqueueTimeout:  duration(time.Second),
+					DrainTimeout:    duration(30 * time.Second),
+					CheckpointEvery: int32Ptr(7),
 				},
 			},
 			autoCreate: true,
@@ -396,6 +400,7 @@ func TestBuildSinkConfig(t *testing.T) {
 				BatchMaxWait:         250 * time.Millisecond,
 				EnqueueTimeout:       time.Second,
 				ShutdownDrainTimeout: 30 * time.Second,
+				CheckpointEvery:      7,
 			},
 		},
 		{
@@ -420,6 +425,7 @@ func TestBuildSinkConfig(t *testing.T) {
 				BatchMaxWait:         defaults.batchMaxWait,
 				EnqueueTimeout:       defaults.enqueueTimeout,
 				ShutdownDrainTimeout: defaults.drainTimeout,
+				CheckpointEvery:      clickhouse.DefaultCheckpointEvery,
 			},
 		},
 	}

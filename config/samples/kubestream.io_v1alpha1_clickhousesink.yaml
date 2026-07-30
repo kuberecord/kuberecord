@@ -25,6 +25,10 @@ spec:
     batchMaxWait: 1s
     enqueueTimeout: 2s
     drainTimeout: 15s
+    # Every 50th consecutive diff-only Modified row for an object is written as a
+    # Checkpoint instead: same row, plus the full state, so "what did this look
+    # like at time T?" replays at most 50 diffs. 0 turns it off.
+    checkpointEvery: 50
   policy:
     # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
     # entirely to admit everything except the hard deny-list (D8: v1/Secret).

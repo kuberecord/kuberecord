@@ -61,6 +61,16 @@ const (
 	DefaultEnqueueTimeout = 2 * time.Second
 	// DefaultShutdownDrainTimeout bounds the post-shutdown drain phase.
 	DefaultShutdownDrainTimeout = 15 * time.Second
+	// DefaultCheckpointEvery is how many consecutive diff-only Modified rows one
+	// object gets before the next one is promoted to a Checkpoint (a row carrying
+	// the full state as well as the diff), bounding a reader's replay walk to
+	// this many diffs. 50 keeps the storage cost of the extra full states in the
+	// noise (one full state per 50 diffs, ZSTD(3)-compressed) while making
+	// "reconstruct state at time T" a bounded query rather than a walk back to
+	// the object's creation. Zero disables checkpointing; unlike the knobs above,
+	// zero is therefore *meaningful* here and is never clamped to this default —
+	// only a negative value is.
+	DefaultCheckpointEvery = 50
 )
 
 const (
@@ -129,6 +139,18 @@ type Config struct {
 	WriteWorkers         int
 	EnqueueTimeout       time.Duration
 	ShutdownDrainTimeout time.Duration
+	// CheckpointEvery is how many consecutive diff-only Modified rows this sink
+	// accepts for one object before the next one is written as a Checkpoint (full
+	// data *and* diff), bounding a reader's replay cost. Sourced from the sink's
+	// own spec.writer.checkpointEvery (Task 2.2), which the CRD defaults to
+	// DefaultCheckpointEvery.
+	//
+	// Zero is meaningful — it disables checkpointing for this sink — so it is
+	// deliberately *not* treated as "unset" the way the knobs above are; only a
+	// negative value falls back to the default. Every value reaching here is
+	// explicit, since cmd/main.go resolves the optional CR field before building
+	// this struct.
+	CheckpointEvery int
 }
 
 // Metrics is the narrow slice of pipeline metrics CHWriter records. It is an
@@ -217,6 +239,20 @@ type CHWriter struct {
 	insertTimeout        time.Duration
 	maxRetryBackoff      time.Duration
 	shutdownDrainTimeout time.Duration
+	// checkpointEvery is this sink's Checkpoint cadence, read by the pipeline
+	// through the CheckpointEvery method below (it implements
+	// pipeline.CheckpointPolicy). Like maxIsolationPhase it is a field rather
+	// than a NewCHWriter parameter — the constructor's positional signature is a
+	// stable contract the existing tests depend on — so NewCHWriter installs
+	// DefaultCheckpointEvery and Open overwrites it from Config, exactly as it
+	// does for database and autoCreate.
+	//
+	// It is written once, before the writer is handed to the SinkManager, and
+	// only read afterwards; a re-tuned cadence arrives as a new fingerprint and
+	// therefore as a new instance (see Config.Fingerprint), never as a mutation
+	// of a running one, which is what keeps this lock-free on the hot path.
+	checkpointEvery int
+
 	// maxIsolationPhase caps the whole per-row poison-isolation phase of one
 	// flushBatch (all rows, not each row), so a hung backend cannot pin a worker
 	// for insertTimeout × batchMaxRows. It is not a NewCHWriter parameter (the
@@ -295,6 +331,7 @@ func NewCHWriter(conn driver.Conn, queueSize, workers, batchMaxRows int, insertT
 		insertTimeout:        insertTimeout,
 		maxRetryBackoff:      maxRetryBackoff,
 		shutdownDrainTimeout: shutdownDrainTimeout,
+		checkpointEvery:      DefaultCheckpointEvery,
 		maxIsolationPhase:    defaultMaxIsolationPhase,
 		drainCtx:             context.Background(),
 		metrics:              metrics,
@@ -326,8 +363,23 @@ func Open(cfg Config, metrics Metrics) (*CHWriter, error) {
 		cfg.ShutdownDrainTimeout, cfg.BatchMaxWait, cfg.EnqueueTimeout, metrics)
 	w.database = cfg.Database
 	w.autoCreate = cfg.AutoCreateSchema
+	if cfg.CheckpointEvery >= 0 {
+		// Zero is honoured as "checkpointing off for this sink"; only a negative
+		// value (which no CRD-validated spec can produce) keeps the default.
+		w.checkpointEvery = cfg.CheckpointEvery
+	}
 	return w, nil
 }
+
+// CheckpointEvery implements pipeline.CheckpointPolicy: how many consecutive
+// diff-only Modified rows this sink accepts for one object before the next one is
+// written as a Checkpoint, or 0 when the sink's owner disabled checkpointing.
+//
+// It is a policy read, not a write-path decision: the pipeline consults it while
+// assembling a record (see internal/pipeline.checkpointDue), because whether a row
+// carries full state is a property of the record, and this writer only ever
+// inserts the row it is handed.
+func (w *CHWriter) CheckpointEvery() int { return w.checkpointEvery }
 
 // startAutoCreate applies the shipped DDL in the background, when this writer
 // was opened with AutoCreateSchema.

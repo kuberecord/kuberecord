@@ -63,6 +63,10 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// batchMaxRows in [1, 100000] and workers in [1, 64].
 				"maximum: 100000",
 				"maximum: 64",
+				// checkpointEvery in [0, 10000] — the floor is 0 (the off switch)
+				// rather than 1, which is what makes it worth pinning here.
+				"maximum: 10000",
+				"minimum: 0",
 				// kinds: "*" or a valid Kind, and no duplicates.
 				`pattern: ^(\*|[A-Z][A-Za-z0-9]{0,62})$`,
 				"x-kubernetes-list-type: set",
@@ -71,6 +75,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"default: 5000",
 				"default: 1000",
 				"default: 15s",
+				"default: 50",
 			},
 		},
 		{

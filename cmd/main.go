@@ -588,6 +588,11 @@ func newSinkConfigBuilder(defaults writerTuning, autoCreateSchema bool) controll
 			BatchMaxWait:         durationOrDefault(spec.Writer.BatchMaxWait, defaults.batchMaxWait),
 			EnqueueTimeout:       durationOrDefault(spec.Writer.EnqueueTimeout, defaults.enqueueTimeout),
 			ShutdownDrainTimeout: durationOrDefault(spec.Writer.DrainTimeout, defaults.drainTimeout),
+			// checkpointEvery has no --writer-* twin: the CRD defaults it to
+			// clickhouse.DefaultCheckpointEvery, so an omitted field is already the
+			// shipped cadence, and 0 is a meaningful value ("no checkpoints for
+			// this sink") that a fleet-wide fallback could only obscure.
+			CheckpointEvery: intOrDefault(spec.Writer.CheckpointEvery, clickhouse.DefaultCheckpointEvery),
 		}, nil
 	}
 }

@@ -18,6 +18,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -154,6 +155,11 @@ func (f *fakeRouter) remove(name string) {
 type fakeWriter struct {
 	mu      sync.Mutex
 	records []sink.Record
+	// checkpointEvery makes this writer a CheckpointPolicy. It starts at 0 —
+	// checkpointing off — so a test that says nothing about checkpoints gets a
+	// pure diff stream, and one that does states its own cadence explicitly
+	// rather than inheriting a number from the harness.
+	checkpointEvery int
 	// notify fans out accepted records so a test can wait for one instead of
 	// polling. It is buffered generously and never blocks Enqueue.
 	notify chan sink.Record
@@ -169,6 +175,22 @@ func newFakeWriter() *fakeWriter {
 func (w *fakeWriter) Start(ctx context.Context) error {
 	<-ctx.Done()
 	return nil
+}
+
+// CheckpointEvery implements CheckpointPolicy, so the fake sink expresses a
+// Checkpoint cadence exactly the way the real one does (via the writer, resolved
+// per work item) rather than through a back door into the pipeline.
+func (w *fakeWriter) CheckpointEvery() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.checkpointEvery
+}
+
+// setCheckpointEvery declares this sink's Checkpoint cadence; 0 disables it.
+func (w *fakeWriter) setCheckpointEvery(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.checkpointEvery = n
 }
 
 func (w *fakeWriter) Enqueue(_ context.Context, job sink.Job) error {
@@ -317,6 +339,26 @@ func newHarness(t *testing.T, sinkNames ...string) *testHarness {
 		router.set(name, writer)
 	}
 
+	p := newTestPipeline(t, lister, router)
+
+	logs := &recordingLogSink{}
+	return &testHarness{
+		pipeline: p,
+		lister:   lister,
+		router:   router,
+		writer:   writer,
+		logs:     logs,
+		ctx:      logr.NewContext(context.Background(), logr.New(logs)),
+	}
+}
+
+// newTestPipeline builds a Pipeline over the given doubles, with an isolated
+// metrics registry and a fast rate limiter. It is separate from newHarness so a
+// test can build a *second* pipeline over the same doubles — which is what
+// simulating an operator restart amounts to, since every pipeline-side cache is
+// per-process (Invariant 6).
+func newTestPipeline(t *testing.T, lister ListerRegistry, router SinkRouter) *Pipeline {
+	t.Helper()
 	p, err := New(Options{
 		ClusterID: "test-cluster",
 		Workers:   4,
@@ -332,16 +374,17 @@ func newHarness(t *testing.T, sinkNames ...string) *testHarness {
 	// Every Pipeline owns a delaying queue with its own background goroutine;
 	// shutting it down keeps tests that never call Start goroutine-clean.
 	t.Cleanup(p.queue.ShutDown)
+	return p
+}
 
-	logs := &recordingLogSink{}
-	return &testHarness{
-		pipeline: p,
-		lister:   lister,
-		router:   router,
-		writer:   writer,
-		logs:     logs,
-		ctx:      logr.NewContext(context.Background(), logr.New(logs)),
-	}
+// restart replaces the harness's Pipeline with a fresh one over the same doubles,
+// standing in for an operator restart: the watch cache and the sink's history
+// survive (the lister and writer are the same objects), while every in-memory
+// pipeline cache — hashCache entries, warm scopes, the per-key modified counter —
+// starts empty, exactly as it does in a new process.
+func (h *testHarness) restart(t *testing.T) {
+	t.Helper()
+	h.pipeline = newTestPipeline(t, h.lister, h.router)
 }
 
 // run starts the worker pool and returns a stop function that cancels it and
@@ -372,6 +415,11 @@ func (h *testHarness) run(t *testing.T) (stop func()) {
 
 const testSink = "default"
 
+// testUID is the object UID the fixtures below stamp when a spec does not care
+// which incarnation it is looking at (a spec that *does* care — the
+// reincarnation ones — passes its own UID to newPod).
+const testUID = "uid-1"
+
 // podKey builds a v1/Pod key in the default namespace for the named object.
 func podKey(name string) Key {
 	return Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default", Name: name}
@@ -382,6 +430,31 @@ func podKey(name string) Key {
 // produce a genuine content change between events.
 func newPod(name, uid, resourceVersion, image string) *unstructured.Unstructured {
 	return newPodIn("default", name, uid, resourceVersion, image)
+}
+
+// selectorEntries is how many spec.nodeSelector entries newPodWithSelector adds.
+// Forty is chosen so that renaming every key produces a patch comfortably larger
+// than the whole object, with enough margin that the fixture does not sit on the
+// trigger's boundary (the specs assert that premise explicitly).
+const selectorEntries = 40
+
+// newPodWithSelector builds a Pod carrying selectorEntries spec.nodeSelector
+// entries named "<keyPrefix>0".."<keyPrefix>39".
+//
+// It exists to craft the one case the size-based checkpoint trigger is about: two
+// consecutive states whose *diff* is larger than the newer state itself. Renaming
+// every key (a different keyPrefix) makes jsondiff emit a remove **and** an add
+// per entry, each carrying the full JSON pointer, so the patch outgrows a small
+// object — which is precisely when storing the diff alone saves nothing and still
+// costs the reader a replay step.
+func newPodWithSelector(name, resourceVersion, keyPrefix string) *unstructured.Unstructured {
+	selector := make(map[string]any, selectorEntries)
+	for i := range selectorEntries {
+		selector[fmt.Sprintf("%s%d", keyPrefix, i)] = "y"
+	}
+	pod := newPod(name, testUID, resourceVersion, "busybox:1")
+	pod.Object["spec"].(map[string]any)["nodeSelector"] = selector
+	return pod
 }
 
 // newPodIn is newPod for a specific namespace, so a spec can build two objects

@@ -151,6 +151,108 @@ func ObjectHash(obj *unstructured.Unstructured) (string, error) {
 	return norm.Hash, nil
 }
 
+// NormalizedJSON returns the canonical normalized JSON of obj — the exact bytes
+// the write path hashes, diffs against, and puts in a row's data column — without
+// any of the pipeline's state.
+//
+// It exists for the same reason ObjectHash does, and for Task 2.2 specifically:
+// the reconstruction recipe published in docs/SCHEMA.md is only meaningful if a
+// test can prove that (last data-bearing row) + (subsequent diffs) reproduces the
+// live object *byte for byte*. The alternative was for the suite to reimplement
+// normalizeObject's strip rules, which would mean the assertion silently stopped
+// comparing the real thing the first time those rules changed.
+//
+// It does not mutate obj (see normalizeObject).
+func NormalizedJSON(obj *unstructured.Unstructured) ([]byte, error) {
+	norm, err := normalizeObject(obj)
+	if err != nil {
+		return nil, err
+	}
+	return norm.JSON, nil
+}
+
+// CheckpointPolicy is the optional half of a sink.Writer that declares how often
+// its diff-only history should be interrupted by a full-state Checkpoint row.
+//
+// It is declared here, next to the code that consults it, rather than in
+// internal/sink, for the same reason ListerRegistry and SinkRouter are: the
+// pipeline is the consumer, and internal/sink/clickhouse must stay free of any
+// import of this package (it already mirrors that rule for metrics). A Writer
+// that does not implement it gets no checkpoints at all — checkpointing is a
+// declared per-sink policy, not a default the pipeline can invent on a backend's
+// behalf.
+type CheckpointPolicy interface {
+	// CheckpointEvery returns the number of consecutive diff-only Modified
+	// writes after which the next one is promoted to a Checkpoint. Zero (or
+	// negative) disables checkpointing entirely for that sink.
+	CheckpointEvery() int
+}
+
+// checkpointEveryFor resolves the key's sink's checkpoint cadence. A backend that
+// declares no policy reports 0, i.e. disabled (see CheckpointPolicy).
+func checkpointEveryFor(writer sink.Writer) int {
+	policy, ok := writer.(CheckpointPolicy)
+	if !ok {
+		return 0
+	}
+	return policy.CheckpointEvery()
+}
+
+// checkpointReason names why a Modified write was promoted to a Checkpoint, so
+// the log line says which of the two independent triggers fired rather than
+// leaving an operator to infer it from the row.
+type checkpointReason string
+
+const (
+	// checkpointReasonCount is the cadence trigger: this is the every-Nth
+	// Modified write for the key.
+	checkpointReasonCount checkpointReason = "count"
+	// checkpointReasonSize is the efficiency trigger: this single diff is larger
+	// than the object it describes, so storing the diff alone saves nothing and
+	// still costs a replay step.
+	checkpointReasonSize checkpointReason = "size"
+)
+
+// checkpointDue decides whether the Modified write being assembled should be
+// promoted to a Checkpoint (a row carrying the full data *and* the diff).
+//
+// Two independent triggers, either of which is enough:
+//
+//   - count: modifiedRun — this key's consecutive diff-only Modified rows,
+//     including the one being written — has reached every. This is what bounds
+//     replay cost for a long-lived object.
+//   - size: this write's diff is larger than the full object it describes. A diff
+//     that big is pure loss (more bytes than the state, and a replay step on top),
+//     and it fires regardless of how far the run has progressed.
+//
+// Both operands of the size comparison must be *uncompressed* bytes of the same
+// two things the row is actually made of, and two readings are explicitly wrong:
+//
+//   - the row's data *column* is not an operand. It is empty on a Modified row by
+//     the schema-v1 design, so comparing against it would make every diff look
+//     oversized and fire the trigger on every single update.
+//   - the cached baseline is not an operand either. It is zstd-compressed (Task
+//     0.7 mandates ≥60% compression), so comparing a raw diff against it would
+//     over-trigger by roughly the compression ratio.
+//
+// fullJSON is therefore the freshly serialized normalized object the caller
+// already holds at diff time, which makes the check free.
+//
+// every <= 0 disables *both* triggers: a sink that opted out of checkpointing
+// must never get a Checkpoint row, however unflattering the diff's size.
+func checkpointDue(every, modifiedRun int, diffBytes, fullJSON []byte) (checkpointReason, bool) {
+	if every <= 0 {
+		return "", false
+	}
+	if modifiedRun >= every {
+		return checkpointReasonCount, true
+	}
+	if len(diffBytes) > len(fullJSON) {
+		return checkpointReasonSize, true
+	}
+	return "", false
+}
+
 // Process settles one work item: it compares what the watch cache holds for the
 // key's identity against what the key's sink has already been told, and enqueues
 // at most one record describing the difference.
@@ -242,6 +344,13 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	var eventType = "Added"
 	var diffString = ""
 	var dataString = string(norm.JSON)
+
+	// modifiedRun is the diff-only-Modified run length this write leaves behind
+	// for the key (see CacheEntry.ModifiedSinceCheckpoint). It stays 0 for every
+	// row that carries full data — Added, Snapshot, a full-state fallback, and a
+	// Checkpoint all re-baseline the replay window — and is only advanced on the
+	// plain-diff path below.
+	var modifiedRun int
 
 	// revertEntry is what the cache should fall back to if the write below
 	// ultimately fails, so a lost write can never be mistaken for a
@@ -346,9 +455,23 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 			} else if patchBytes, err := json.Marshal(patch); err != nil {
 				log.Error(err, "⚠️ Failed to marshal JSON diff, falling back to full state")
 				switchToFullState()
+			} else if reason, due := checkpointDue(checkpointEveryFor(writer),
+				cachedEntry.ModifiedSinceCheckpoint+1, patchBytes, norm.JSON); due {
+				// A Checkpoint is a Modified in every semantic sense except its
+				// event_type and its populated data column: it carries the diff
+				// *and* the full state, so a reader replaying an object's history
+				// never has to walk further back than the last one, while the warm
+				// queries (argMax over the whole history) are unaffected.
+				eventType = "Checkpoint"
+				diffString = string(patchBytes)
+				dataString = string(norm.JSON)
+				log.Info("📌 Change detected (Checkpoint: full state alongside the diff)",
+					"reason", string(reason), "diff_bytes", len(patchBytes), "state_bytes", len(norm.JSON),
+					"modified_run", cachedEntry.ModifiedSinceCheckpoint+1)
 			} else {
 				diffString = string(patchBytes)
 				dataString = ""
+				modifiedRun = cachedEntry.ModifiedSinceCheckpoint + 1
 				log.Info("📝 Change detected (Diff)")
 			}
 			entryCopy := cachedEntry
@@ -385,11 +508,12 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	}
 
 	confirmedEntry := CacheEntry{
-		Hash:       norm.Hash,
-		JSON:       baselineData,
-		Encoding:   baselineEnc,
-		UID:        norm.UID,
-		APIVersion: norm.APIVersion,
+		Hash:                    norm.Hash,
+		JSON:                    baselineData,
+		Encoding:                baselineEnc,
+		UID:                     norm.UID,
+		APIVersion:              norm.APIVersion,
+		ModifiedSinceCheckpoint: modifiedRun,
 	}
 
 	// Reserve atomically assigns the next version for this key and stores

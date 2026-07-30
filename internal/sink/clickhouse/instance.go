@@ -60,11 +60,11 @@ func (c Config) Fingerprint() string {
 	// discarded, so this stays clean under Invariant 4's no-silent-errors rule.
 	if _, err := fmt.Fprintf(h,
 		"addr=%q db=%q user=%q pass=%q dial=%q read=%q autocreate=%t "+
-			"batchrows=%d batchwait=%q queue=%d workers=%d enqueue=%q drain=%q",
+			"batchrows=%d batchwait=%q queue=%d workers=%d enqueue=%q drain=%q checkpoint=%d",
 		c.Addr, c.Database, c.Username, c.Password,
 		c.DialTimeout.String(), c.ReadTimeout.String(), c.AutoCreateSchema,
 		c.BatchMaxRows, c.BatchMaxWait.String(), c.WriteQueueSize, c.WriteWorkers,
-		c.EnqueueTimeout.String(), c.ShutdownDrainTimeout.String(),
+		c.EnqueueTimeout.String(), c.ShutdownDrainTimeout.String(), c.CheckpointEvery,
 	); err != nil {
 		// Unreachable; a digest of nothing would silently make every
 		// configuration look identical, so it is reported rather than returned.

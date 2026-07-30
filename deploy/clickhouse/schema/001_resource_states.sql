@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS resource_states
 (
     ts               DateTime64(9, 'UTC') CODEC(Delta, ZSTD(1)),
     cluster_id       LowCardinality(String),
-    event_type       LowCardinality(String), -- Added|Modified|Deleted|Snapshot|Checkpoint (Checkpoint reserved until Task 2.2)
+    event_type       LowCardinality(String), -- Added|Modified|Deleted|Snapshot|Checkpoint
     api_group        LowCardinality(String),
     api_version      LowCardinality(String),
     kind             LowCardinality(String),

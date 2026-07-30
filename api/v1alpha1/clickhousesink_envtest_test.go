@@ -91,6 +91,29 @@ func TestClickHouseSinkValidation(t *testing.T) {
 			obj:  sinkWithWriter(WriterSpec{BatchMaxRows: ptrTo(int32(100000))}),
 		},
 		{
+			// The ceiling is an honesty bound (see CheckpointEvery): a cadence
+			// beyond it disables bounded replay while looking enabled.
+			name:    "checkpointevery-above-range-is-rejected",
+			obj:     sinkWithWriter(WriterSpec{CheckpointEvery: ptrTo(int32(10001))}),
+			wantErr: "should be less than or equal to 10000",
+		},
+		{
+			name:    "checkpointevery-below-range-is-rejected",
+			obj:     sinkWithWriter(WriterSpec{CheckpointEvery: ptrTo(int32(-1))}),
+			wantErr: "should be greater than or equal to 0",
+		},
+		{
+			// Zero is *not* out of range: it is the documented way to turn
+			// checkpointing off for a sink, unlike every other writer knob whose
+			// floor is 1.
+			name: "checkpointevery-zero-is-accepted-as-the-off-switch",
+			obj:  sinkWithWriter(WriterSpec{CheckpointEvery: ptrTo(int32(0))}),
+		},
+		{
+			name: "checkpointevery-at-upper-bound-is-accepted",
+			obj:  sinkWithWriter(WriterSpec{CheckpointEvery: ptrTo(int32(10000))}),
+		},
+		{
 			name:    "workers-above-range-is-rejected",
 			obj:     sinkWithWriter(WriterSpec{Workers: ptrTo(int32(65))}),
 			wantErr: "should be less than or equal to 64",
@@ -160,6 +183,7 @@ func TestClickHouseSinkDefaults(t *testing.T) {
 		{field: "spec.writer.batchMaxWait", got: durationString(got.Spec.Writer.BatchMaxWait), want: "1s"},
 		{field: "spec.writer.enqueueTimeout", got: durationString(got.Spec.Writer.EnqueueTimeout), want: "2s"},
 		{field: "spec.writer.drainTimeout", got: durationString(got.Spec.Writer.DrainTimeout), want: "15s"},
+		{field: "spec.writer.checkpointEvery", got: int32String(got.Spec.Writer.CheckpointEvery), want: "50"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {

@@ -8,6 +8,28 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
 ### Added
 
+- **`Checkpoint` rows** — the `event_type` the schema reserved now ships. A
+  `Checkpoint` is a `Modified` that also carries the full state, so
+  reconstructing "what did this object look like at time T?" replays a bounded
+  number of diffs instead of walking back to the object's creation. It is
+  written every `spec.writer.checkpointEvery` consecutive diff-only `Modified`
+  rows for an object (new per-sink field, default `50`, `0` disables, bounded
+  `[0, 10000]`), and additionally whenever a single diff comes out larger than
+  the object it describes — a diff that big costs more than the state it
+  replaces. Aggregate reads are unaffected (`Checkpoint` carries the same
+  identity, `uid` and `sha256` a `Modified` would have); only a replay treats it
+  specially, as its base. The cadence counter lives in the operator's memory and
+  resets on restart, which costs nothing because a restart re-baselines with a
+  full-state row anyway.
+- `docs/SCHEMA.md` publishes the **official state-reconstruction recipe** (read
+  with `FINAL` → newest `data`-bearing row → replay subsequent RFC 6902 patches →
+  verify against `sha256`), executed and asserted byte-for-byte against a live
+  object by a new integration test.
+- `pipeline.NormalizedJSON`, the canonical normalized JSON of an object, exported
+  for the same reason `pipeline.ObjectHash` was: so an acceptance suite compares
+  against what the write path actually produced instead of reimplementing the
+  normalization rules and drifting from them.
+
 - A chaos / failure-mode suite (`make test-chaos`) that runs the operator on its
   own Kind cluster against a ClickHouse it stops and starts, and kills the
   operator itself. One scenario per failure mode — backend down at boot, a

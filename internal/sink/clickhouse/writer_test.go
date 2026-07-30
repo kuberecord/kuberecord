@@ -869,3 +869,60 @@ func TestLastKnownStatesQueryScoping(t *testing.T) {
 		}
 	})
 }
+
+// Compile-time proof that CHWriter still satisfies the pipeline's optional
+// Checkpoint-policy half of the sink contract (Task 2.2). It is asserted from a
+// test file rather than from writer.go because the production package must not
+// import internal/pipeline (see the Metrics interface for the same rule); losing
+// the method would otherwise be invisible — the pipeline's type assertion would
+// simply stop matching and every sink would silently stop checkpointing.
+var _ pipeline.CheckpointPolicy = (*CHWriter)(nil)
+
+// TestCheckpointEveryResolution pins how a sink's Checkpoint cadence reaches the
+// writer the pipeline consults.
+//
+// The zero case is the whole point: every other writer knob treats 0 as "unset,
+// use the default", but here 0 is a *meaningful* value — the sink owner's off
+// switch — so it must survive Open unchanged. Only a negative value (which no
+// CRD-validated spec can produce) falls back to the shipped default.
+func TestCheckpointEveryResolution(t *testing.T) {
+	t.Run("a directly constructed writer ships the default cadence", func(t *testing.T) {
+		w := NewCHWriter(nil, 1, 1, 1, time.Second, 0, time.Second, time.Second, time.Second, probeMetrics())
+		if got := w.CheckpointEvery(); got != DefaultCheckpointEvery {
+			t.Errorf("CheckpointEvery() = %d, want the shipped default %d", got, DefaultCheckpointEvery)
+		}
+	})
+
+	tests := []struct {
+		name string
+		cfg  int
+		want int
+	}{
+		{name: "an explicit cadence is honoured", cfg: 7, want: 7},
+		{name: "zero disables checkpointing and is never clamped", cfg: 0, want: 0},
+		{name: "a negative value falls back to the default", cfg: -3, want: DefaultCheckpointEvery},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, err := Open(Config{
+				Addr:            "127.0.0.1:9000",
+				Database:        "kubestream",
+				Username:        "default",
+				DialTimeout:     time.Second,
+				ReadTimeout:     time.Second,
+				CheckpointEvery: tt.cfg,
+			}, probeMetrics())
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := w.conn.Close(); err != nil {
+					t.Errorf("closing the connection: %v", err)
+				}
+			})
+			if got := w.CheckpointEvery(); got != tt.want {
+				t.Errorf("CheckpointEvery() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
