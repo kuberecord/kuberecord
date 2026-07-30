@@ -1,12 +1,13 @@
 version: "2"
 run:
   allow-parallel-runners: true
-  # Without this the `//go:build e2e` suite is invisible to the linter — and to
+  # Without this the tagged acceptance suites are invisible to the linter — and to
   # `go vet`, which `make build`/`make test` run over the default build only. The
-  # e2e suite is the Phase 1 gate (Task 1.11); "make lint passes" has to mean
-  # something for it too.
+  # e2e suite is the Phase 1 gate (Task 1.11) and the chaos suite is the Phase 2
+  # failure-mode gate (Task 2.1); "make lint passes" has to mean something for both.
   build-tags:
     - e2e
+    - chaos
 linters:
   default: none
   enable:

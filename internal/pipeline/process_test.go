@@ -410,3 +410,77 @@ func TestProcessRecordCarriesProvenance(t *testing.T) {
 		t.Errorf("resourceVersion leaked into the stored object state: %s", record.Data)
 	}
 }
+
+// TestObjectHashMatchesTheRecordedHash pins the contract ObjectHash exists for:
+// the value an acceptance suite recomputes from the API server's copy of an
+// object is the value the write path put in the sha256 column for it.
+//
+// Without this, Task 2.1's "no gaps" criterion — after an outage, the final
+// sha256 in ClickHouse equals a live recompute — would be comparing two numbers
+// that merely happened to agree, and would stop comparing anything at all the
+// first time normalization changed on only one side.
+func TestObjectHashMatchesTheRecordedHash(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("hashed")
+	h.warm(key)
+
+	pod := newPod(key.Name, "uid-1", "17", "busybox:1")
+	meta := pod.Object["metadata"].(map[string]any)
+	meta["labels"] = map[string]any{"app": "demo"}
+	h.lister.set(key, pod)
+
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	record := h.writer.awaitRecords(t, 1)[0]
+
+	got, err := ObjectHash(pod)
+	if err != nil {
+		t.Fatalf("ObjectHash: %v", err)
+	}
+	if got != record.SHA256 {
+		t.Errorf("ObjectHash = %q, want the recorded %q", got, record.SHA256)
+	}
+}
+
+// TestObjectHashIgnoresTransportFields asserts that the copy an acceptance suite
+// reads from the API server hashes identically to the copy the operator observes
+// through its informer.
+//
+// The two differ in exactly three ways — the informer's transform strips
+// managedFields and adds the actors annotation, and every write bumps
+// resourceVersion and generation — so a hash that were sensitive to any of them
+// would make the recompute comparison fail on a perfectly converged object.
+func TestObjectHashIgnoresTransportFields(t *testing.T) {
+	fromAPIServer := newPod("shape", "uid-1", "17", "busybox:1")
+	apiMeta := fromAPIServer.Object["metadata"].(map[string]any)
+	apiMeta["managedFields"] = []any{map[string]any{"manager": "kubectl", "operation": "Apply"}}
+	apiMeta["generation"] = int64(3)
+
+	fromInformer := newPod("shape", "uid-1", "23", "busybox:1")
+	informerMeta := fromInformer.Object["metadata"].(map[string]any)
+	informerMeta["annotations"] = map[string]any{ActorsAnnotation: "kubectl"}
+	informerMeta["generation"] = int64(4)
+
+	apiHash, err := ObjectHash(fromAPIServer)
+	if err != nil {
+		t.Fatalf("ObjectHash(api server copy): %v", err)
+	}
+	informerHash, err := ObjectHash(fromInformer)
+	if err != nil {
+		t.Fatalf("ObjectHash(informer copy): %v", err)
+	}
+	if apiHash != informerHash {
+		t.Errorf("the same object hashed differently through the two paths: %q vs %q", apiHash, informerHash)
+	}
+
+	// And it is still a content hash: a real change must change it.
+	changed := newPod("shape", "uid-1", "17", "busybox:2")
+	changedHash, err := ObjectHash(changed)
+	if err != nil {
+		t.Fatalf("ObjectHash(changed): %v", err)
+	}
+	if changedHash == apiHash {
+		t.Error("ObjectHash ignored a change to the object's spec")
+	}
+}

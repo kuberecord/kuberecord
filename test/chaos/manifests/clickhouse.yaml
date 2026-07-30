@@ -1,0 +1,152 @@
+# Single-node ClickHouse for the chaos suite (Task 2.1).
+#
+# It is deliberately *not* the e2e fixture (test/e2e/manifests/clickhouse.yaml),
+# and the two differences are the whole reason this file exists:
+#
+#   - Storage is a PersistentVolumeClaim, not an emptyDir. The chaos suite's
+#     outage primitive is a real container stop/start — the Deployment is scaled
+#     to zero and back — and every recovery assertion reads rows written *before*
+#     the outage. On an emptyDir those rows would vanish with the pod, and the
+#     suite would be asserting against a backend that quietly forgot the history
+#     it is supposed to have converged. kind ships a default StorageClass
+#     (rancher local-path), so no StorageClass dependency is introduced.
+#   - replicas is 0. The first scenario requires the operator to boot against a
+#     backend that is not there, so the fixture is applied stopped and the suite
+#     decides when it runs. BeforeSuite starts it once first, to bind the volume
+#     and let the image's entrypoint create the database, and stops it again
+#     before the operator is deployed — otherwise the very first outage would
+#     also have to absorb volume provisioning, and the writer's retry budget
+#     (60s) would be racing a StorageClass rather than testing a recovery.
+#
+# Everything else follows the e2e fixture: its own namespace so one
+# `delete namespace` removes the backend, and the password projected from a
+# Secret the suite creates with the same value the operator's shipped
+# credentials Secret holds, so the two sides of the connection cannot drift.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubestream-chaos-clickhouse
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: chaos-fixture
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-data
+  namespace: kubestream-chaos-clickhouse
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: kubestream-chaos-clickhouse
+  labels:
+    app: clickhouse
+spec:
+  # Started and stopped by the suite; see the header.
+  replicas: 0
+  # Recreate, not RollingUpdate: a ReadWriteOnce volume cannot be held by two
+  # servers at once, and there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 101 is the `clickhouse` user baked into the official image. fsGroup
+        # makes the volumes writable for it without a root init container.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:24.8
+        # The suite side-loads this image into the kind node, so it must never
+        # be re-pulled from a registry mid-run — least of all during an outage
+        # window the assertions are timing.
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLICKHOUSE_DB
+          value: kubestream
+        - name: CLICKHOUSE_USER
+          value: kubestream
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: password
+        ports:
+        - name: native
+          containerPort: 9000
+        - name: http
+          containerPort: 8123
+        # /ping over the HTTP port is the only endpoint that answers before the
+        # server is fully open for queries, which is exactly the edge a recovery
+        # assertion must not race against.
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: logs
+          mountPath: /var/log/clickhouse-server
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: clickhouse-data
+      - name: logs
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: kubestream-chaos-clickhouse
+  labels:
+    app: clickhouse
+spec:
+  selector:
+    app: clickhouse
+  ports:
+  - name: native
+    port: 9000
+    targetPort: native
+  - name: http
+    port: 8123
+    targetPort: http

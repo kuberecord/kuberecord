@@ -1,0 +1,45 @@
+# The operator install the chaos suite deploys.
+#
+# It is the same overlay shape the e2e suite uses (test/e2e/manifests/operator):
+# `config/default` plus a pinned image, `--ch-auto-create-schema`, and the
+# `restricted` Pod Security Standard label applied before the manager pod is ever
+# admitted. Nothing here weakens the shipped install — the point of a chaos suite
+# is to break the *backend*, not the operator's own deployment, so the thing being
+# restarted and starved has to be the manifest that actually ships.
+#
+# --ch-auto-create-schema carries extra weight here. The chaos backend is stopped
+# when the operator boots and is stopped again mid-run, so the DDL path is
+# exercised against a server that appears late and then disappears — which is
+# precisely the condition it retries for.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../../config/default
+
+images:
+- name: controller
+  newName: example.com/kubestream
+  newTag: v0.0.1
+
+patches:
+# The base applies a `kubestream-` name prefix, so the target is matched by
+# regex: the patch must keep working whether or not that prefix changes.
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: .*controller-manager
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --ch-auto-create-schema
+# `/` inside a JSON Pointer segment is escaped as `~1`.
+- target:
+    version: v1
+    kind: Namespace
+    name: kubestream-system
+  patch: |
+    - op: add
+      path: /metadata/labels/pod-security.kubernetes.io~1enforce
+      value: restricted

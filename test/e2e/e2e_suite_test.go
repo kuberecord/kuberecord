@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +31,7 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
 	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kubestream/test/harness"
 	"github.com/yelzhy/kubestream/test/utils"
 )
 
@@ -156,7 +155,7 @@ var _ = BeforeSuite(func() {
 		"Failed to load the manager image into Kind")
 
 	By("loading the ClickHouse image on Kind")
-	loadClickHouseImage()
+	harness.SideloadImage(clickHouseImage)
 
 	deployOperator()
 	deployClickHouse()
@@ -193,46 +192,6 @@ func configureKubectlKubeRC() {
 	}
 }
 
-// loadClickHouseImage side-loads the ClickHouse image into the kind node,
-// pulling it to the host first only if it is not already there.
-//
-// The alternative — letting the kubelet pull it — would put a several-hundred-
-// megabyte registry download inside the suite's runtime budget on every cold
-// run, and would make the suite fail on a machine with no registry access even
-// though nothing about it needs one.
-//
-// It goes through a `docker save` archive rather than `kind load docker-image`
-// because the published image is a multi-platform index: kind imports with
-// --all-platforms, and containerd then fails looking for the manifests of the
-// platforms a single-platform pull never fetched. Exporting this host's platform
-// alone produces a plain single-platform archive kind imports without complaint.
-// (`docker save --platform` needs Docker 25 or newer.)
-func loadClickHouseImage() {
-	if _, err := utils.Run(exec.Command("docker", "image", "inspect", clickHouseImage)); err != nil {
-		By("pulling the ClickHouse image to the host")
-		_, err := utils.Run(exec.Command("docker", "pull", clickHouseImage))
-		Expect(err).NotTo(HaveOccurred(), "Failed to pull the ClickHouse image")
-	}
-
-	archiveDir, err := os.MkdirTemp("", "kubestream-e2e-images")
-	Expect(err).NotTo(HaveOccurred(), "Failed to create a temporary directory for the image archive")
-	DeferCleanup(func() {
-		if err := os.RemoveAll(archiveDir); err != nil {
-			_, _ = fmt.Fprintf(GinkgoWriter, "cleanup: removing the image archive: %v\n", err)
-		}
-	})
-
-	// The kind node runs on the host's Docker, so the host's architecture is the
-	// node's architecture; the test binary is built for it too.
-	archive := filepath.Join(archiveDir, "clickhouse.tar")
-	out, err := utils.Run(exec.Command("docker", "save",
-		"--platform", "linux/"+runtime.GOARCH, clickHouseImage, "-o", archive))
-	Expect(err).NotTo(HaveOccurred(), "Failed to export the ClickHouse image: %s", out)
-
-	Expect(utils.LoadImageArchiveToKindCluster(archive)).To(Succeed(),
-		"Failed to load the ClickHouse image into Kind")
-}
-
 // deployOperator installs CRDs, RBAC, the credentials Secret and the manager
 // from the e2e kustomize overlay (config/default plus a pinned image and
 // --ch-auto-create-schema), then waits for the Deployment to become available.
@@ -262,6 +221,9 @@ func deployClickHouse() {
 	Expect(err).NotTo(HaveOccurred(), "Failed to decode the credentials Secret")
 	chPassword = string(decoded)
 	Expect(chPassword).NotTo(BeEmpty(), "the credentials Secret carries an empty password")
+	// The shared query layer authenticates with the same password, so the suite
+	// and the operator are reading and writing as the one user the fixture makes.
+	ch.Password = chPassword
 
 	By("creating the ClickHouse namespace and credentials")
 	createNamespace(clickHouseNamespace)

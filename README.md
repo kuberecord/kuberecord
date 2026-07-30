@@ -400,6 +400,7 @@ make run              # run the controller locally against your current kubeconf
 make test             # run the unit/envtest suite (requires the envtest/etcd binaries; make setup-envtest fetches them)
 make test-integration # run the ClickHouse integration tests against a throwaway container (needs Docker)
 make test-e2e         # run the end-to-end acceptance suite on a Kind cluster (needs Docker + Kind)
+make test-chaos       # run the failure-mode (chaos) suite on a Kind cluster (needs Docker + Kind)
 make bench-load       # run the synthetic-churn load harness (Task 0.8)
 make lint             # run golangci-lint (see .golangci.yml for the enabled linters)
 make lint-fix         # run golangci-lint with --fix
@@ -430,6 +431,36 @@ Budget under 15 minutes; the RBAC scenario alone waits out the rule reconciler's
 two-minute resync on purpose, because self-healing without a restart is the
 property being tested. Override the Go test timeout with `E2E_TIMEOUT` and the
 cluster name with `KIND_CLUSTER`.
+
+### Chaos tests
+
+`make test-chaos` is the failure-mode suite. It stands the same real operator up
+on its own Kind cluster, but against a ClickHouse it **stops and starts** — and
+it kills the operator itself. Every mechanism kubestream is built around (version
+gating, delete claims, scope epochs, batch poison isolation, the bounded hand-off
+queue) exists for conditions the e2e suite never creates; this is where those
+conditions are created on purpose, and each scenario asserts through direct
+ClickHouse queries **and** the operator's own `/metrics` endpoint.
+
+| Scenario | What it proves |
+|---|---|
+| ClickHouse down at boot | rules still go active (only `Ready=False/SinkNotReady`), the scope watches in Snapshot mode (`kubestream_safe_mode=1`), and when the backend appears each pre-existing object lands **once**, as `Snapshot` and never as `Added`; the scope then leaves Snapshot mode and the next change is a `Modified` with a diff |
+| Mid-stream outage beyond the retry budget | writes fail terminally (`kubestream_writes_total{outcome="failed"}` rises) and are re-driven rather than abandoned; on recovery every object converges on exactly one latest row whose `sha256` equals a live recompute of the object |
+| Queue saturation | with the backend stopped and load three times the queue's capacity, `kubestream_enqueue_timeouts_total` rises and no `enqueue_block_seconds` observation exceeds the configured 2s timeout; the operator never restarts, and recovery drains the queue |
+| Poison row | one record made individually un-insertable fails its batch, its blameless batch-mates still land, and the poison key keeps retrying visibly (counted and logged) instead of being dropped |
+| Kill -9 + offline delete | after a `SIGKILL` with writes in flight: exactly one `Deleted` for the offline deletion, the reincarnation closed out exactly once, and `watch_scopes` left consistent — a rule deleted during the outage is closed with a `Stopped` row and **zero** `Deleted` rows, and no scope stays open once its rule is gone |
+
+Every scenario additionally asserts the standing invariant that no object's
+deletion was recorded more than once.
+
+The fixture differs from the e2e one in two ways that the scenarios require: its
+ClickHouse is backed by a PersistentVolumeClaim, so rows survive an outage, and
+its sink runs a single writer with a 50-job queue, so batching and backpressure
+are reachable deterministically. Budget an hour — three scenarios have to outlast
+the ClickHouse writer's 60-second per-batch retry budget before the failure they
+test is observable at all. Override the Go test timeout with `CHAOS_TIMEOUT`, the
+cluster name with `CHAOS_KIND_CLUSTER`, and keep the cluster up for inspection
+with `CHAOS_KEEP_CLUSTER=true`.
 
 Run `make help` for the full list of available targets (image building, Kustomize install/deploy, dependency downloads, etc.).
 

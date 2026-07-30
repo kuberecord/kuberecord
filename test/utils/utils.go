@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
@@ -90,12 +91,29 @@ func runKind(args ...string) error {
 	return err
 }
 
-// GetProjectDir will return the directory where the project is
+// GetProjectDir returns the module root — the directory every command Run
+// executes in, and the base every manifest path in the suites is relative to.
+//
+// It walks up from the working directory looking for go.mod rather than
+// stripping a known suffix. The suffix form only worked for the one suite it was
+// written for (`/test/e2e`); a second suite under test/ silently got its own
+// directory back instead of the project root, and every relative manifest path
+// would then resolve against the wrong place. Walking up is correct for any
+// caller, including one that has already been chdir'd to the root by a previous
+// Run.
 func GetProjectDir() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return wd, fmt.Errorf("failed to get current working directory: %w", err)
 	}
-	wd = strings.ReplaceAll(wd, "/test/e2e", "")
-	return wd, nil
+	for dir := wd; ; {
+		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return wd, fmt.Errorf("no go.mod found in %s or any parent directory", wd)
+		}
+		dir = parent
+	}
 }

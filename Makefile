@@ -190,6 +190,56 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# The chaos suite (Task 2.1) is the Phase 2 failure-mode gate: the same real
+# operator on a real Kind cluster as the e2e suite, but against a ClickHouse the
+# suite stops and starts, with the operator killed mid-flight and its hand-off
+# queue driven into saturation. It gets its own Kind cluster because its very
+# first scenario needs the operator to boot against a backend that is not there —
+# the opposite of the state every e2e scenario starts from — and because a
+# half-finished chaos run must never be what an e2e run inherits.
+#
+# Runtime is dominated by waiting, not by work: three of the five scenarios have
+# to outlast the ClickHouse writer's 60-second per-batch retry budget before the
+# failure they are testing is even observable, and two of those wait out two full
+# cycles. Budget an hour; hence the timeout below.
+CHAOS_KIND_CLUSTER ?= kubestream-test-chaos
+CHAOS_TIMEOUT ?= 60m
+# As with the e2e suite, teardown is unconditional so a failed run cannot poison
+# the next one; CHAOS_KEEP_CLUSTER=true keeps the cluster up for inspection when
+# the operator log the suite dumps is not enough.
+CHAOS_KEEP_CLUSTER ?= false
+
+.PHONY: setup-test-chaos
+setup-test-chaos: ## Set up a Kind cluster for the chaos suite if it does not exist
+	@command -v $(KIND) >/dev/null 2>&1 || { \
+		echo "Kind is not installed. Please install Kind manually."; \
+		exit 1; \
+	}
+	@case "$$($(KIND) get clusters)" in \
+		*"$(CHAOS_KIND_CLUSTER)"*) \
+			echo "Kind cluster '$(CHAOS_KIND_CLUSTER)' already exists. Skipping creation." ;; \
+		*) \
+			echo "Creating Kind cluster '$(CHAOS_KIND_CLUSTER)'..."; \
+			$(KIND) create cluster --name $(CHAOS_KIND_CLUSTER) ;; \
+	esac
+
+.PHONY: test-chaos
+test-chaos: setup-test-chaos manifests generate fmt vet ## Run the chaos suite. Expects an isolated environment using Kind.
+	@set +e; \
+	KIND=$(KIND) KIND_CLUSTER=$(CHAOS_KIND_CLUSTER) \
+		go test -tags=chaos ./test/chaos/ -v -ginkgo.v -timeout $(CHAOS_TIMEOUT); \
+	status=$$?; \
+	if [ "$(CHAOS_KEEP_CLUSTER)" = "true" ]; then \
+		echo "CHAOS_KEEP_CLUSTER=true: leaving Kind cluster '$(CHAOS_KIND_CLUSTER)' up for inspection."; \
+	else \
+		$(MAKE) cleanup-test-chaos; \
+	fi; \
+	exit $$status
+
+.PHONY: cleanup-test-chaos
+cleanup-test-chaos: ## Tear down the Kind cluster used for the chaos suite
+	@$(KIND) delete cluster --name $(CHAOS_KIND_CLUSTER)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
@@ -288,6 +338,17 @@ deploy-e2e: manifests kustomize ## Deploy the controller with the e2e overlay. U
 .PHONY: undeploy-e2e
 undeploy-e2e: kustomize ## Remove the controller installed by deploy-e2e. Used by test-e2e.
 	"$(KUSTOMIZE)" build test/e2e/manifests/operator | "$(KUBECTL)" delete --ignore-not-found=true -f -
+
+# The chaos overlay is the same shape as the e2e one (see
+# test/chaos/manifests/operator/kustomization.yaml). The two exist separately so
+# each suite can evolve its own fixtures without silently changing the other's.
+.PHONY: deploy-chaos
+deploy-chaos: manifests kustomize ## Deploy the controller with the chaos overlay. Used by test-chaos.
+	"$(KUSTOMIZE)" build test/chaos/manifests/operator | "$(KUBECTL)" apply -f -
+
+.PHONY: undeploy-chaos
+undeploy-chaos: kustomize ## Remove the controller installed by deploy-chaos. Used by test-chaos.
+	"$(KUSTOMIZE)" build test/chaos/manifests/operator | "$(KUBECTL)" delete --ignore-not-found=true -f -
 
 ##@ Dependencies
 

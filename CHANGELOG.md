@@ -4,6 +4,34 @@ All notable changes to kubestream are recorded here. The project is pre-1.0 and
 follows [Semantic Versioning](https://semver.org/) loosely: while the API group
 is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
+## Unreleased — Phase 2: proving the foundation at both extremes
+
+### Added
+
+- A chaos / failure-mode suite (`make test-chaos`) that runs the operator on its
+  own Kind cluster against a ClickHouse it stops and starts, and kills the
+  operator itself. One scenario per failure mode — backend down at boot, a
+  mid-stream outage longer than the writer's retry budget, hand-off-queue
+  saturation, a poison row that fails its batch, and a `SIGKILL` mid-flight
+  followed by offline deletions — each asserting through direct ClickHouse
+  queries *and* the operator's `/metrics` endpoint, plus a standing invariant
+  that no object's deletion is ever recorded twice. `make deploy-chaos` /
+  `make undeploy-chaos` install the operator with the suite's overlay.
+- `pipeline.ObjectHash`, the canonical content hash of an object, exported so an
+  acceptance suite can recompute what the write path put in the `sha256` column
+  instead of reimplementing the normalization rules and silently drifting from
+  them.
+- `test/harness`, the acceptance vocabulary (kubectl wrappers, ClickHouse
+  querying, condition and pod decoding, manifest rendering, metrics scraping and
+  parsing) now shared by `test/e2e` and `test/chaos`, so both suites read the
+  sink through one definition of what a row means.
+
+### Changed
+
+- `test/utils.GetProjectDir` finds the module root by walking up to `go.mod`
+  rather than stripping the literal `/test/e2e` from the working directory, which
+  resolved to the wrong place for any suite outside that one directory.
+
 ## Unreleased — Phase 1: the two-tier CRD architecture
 
 ### Removed — BREAKING: all environment-variable configuration of *what* and *where*

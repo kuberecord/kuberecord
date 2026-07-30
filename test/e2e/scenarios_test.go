@@ -21,7 +21,6 @@ package e2e
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
@@ -496,16 +495,6 @@ func withAction(query scopeQuery, action sink.ScopeAction) scopeQuery {
 	return query
 }
 
-// creationEvents are the two tags an object's first appearance can carry.
-//
-// Which one it gets depends on whether the scope had finished warming from the
-// sink's history when the pipeline first saw the object — Added if it had,
-// Snapshot if it had not (Pipeline.MarkScopeWarm). A test that only cares
-// *whether* the appearance was recorded, or how many times, must therefore count
-// both; asserting Added specifically is only sound where the scenario has an
-// explicit barrier proving the scope was already warm.
-var creationEvents = []string{eventAdded, eventSnapshot}
-
 // expectRuleStreaming waits until a rule is fully realised: policy-admitted,
 // kind-resolved, RBAC-granted and installed in the registry. Every scenario
 // starts from this state, so asserting it here means a later failure is about
@@ -516,86 +505,6 @@ func expectRuleStreaming(kind, name, namespace string) {
 		ready := expectCondition(g, kind, name, namespace, v1alpha1.ConditionReady, statusTrue)
 		g.Expect(ready.Reason).To(Equal(controller.ReasonStreaming))
 	}, ruleReadyTimeout, pollInterval).Should(Succeed())
-}
-
-// eventuallyUID waits for an object to exist and returns its UID — the identity
-// every row assertion is keyed by, and the only thing that distinguishes an
-// object from its replacement under the same name.
-func eventuallyUID(kind, name, namespace string) string {
-	GinkgoHelper()
-	var uid string
-	Eventually(func(g Gomega) {
-		var err error
-		uid, err = objectUID(kind, name, namespace)
-		g.Expect(err).NotTo(HaveOccurred())
-	}, ruleReadyTimeout, pollInterval).Should(Succeed())
-	return uid
-}
-
-// eventuallyExactlyOneRow waits until the filter matches exactly one row and
-// returns it.
-//
-// It settles on an exact count rather than a lower bound because that is the
-// claim these scenarios actually make — "exactly one Deleted row" is the
-// difference between a truthful audit trail and a duplicated one, and an
-// assertion that stopped at "at least one" could not tell them apart. The
-// optional timeout overrides the suite default for the waits that follow an
-// operator restart.
-func eventuallyExactlyOneRow(filter objectFilter, timeout ...time.Duration) resourceRow {
-	GinkgoHelper()
-	var rows []resourceRow
-	assertion := Eventually(func(g Gomega) {
-		var err error
-		rows, err = resourceRows(filter)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(rows).To(HaveLen(1))
-	})
-	if len(timeout) > 0 {
-		assertion = assertion.WithTimeout(timeout[0]).WithPolling(pollInterval)
-	}
-	assertion.Should(Succeed())
-	return rows[0]
-}
-
-// eventuallyAnyRows waits for at least one matching row, without committing to
-// how many or of which event type.
-func eventuallyAnyRows(filter objectFilter) []resourceRow {
-	GinkgoHelper()
-	var rows []resourceRow
-	Eventually(func(g Gomega) {
-		var err error
-		rows, err = resourceRows(filter)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(rows).NotTo(BeEmpty())
-	}).Should(Succeed())
-	return rows
-}
-
-// consistentlyRowCount asserts the match count stays at want for the quiet
-// window. It is how every "and no further rows appear" claim is made: an
-// Eventually that passed the moment the right row landed cannot tell whether a
-// wrong one arrives a second later.
-func consistentlyRowCount(filter objectFilter, want int) {
-	GinkgoHelper()
-	Consistently(func(g Gomega) {
-		rows, err := resourceRows(filter)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(rows).To(HaveLen(want))
-	}).Should(Succeed())
-}
-
-// eventuallyScopeRows waits for at least one matching watch_scopes row and
-// returns every match, oldest first.
-func eventuallyScopeRows(query scopeQuery) []scopeRow {
-	GinkgoHelper()
-	var rows []scopeRow
-	Eventually(func(g Gomega) {
-		var err error
-		rows, err = scopeRows(query)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(rows).NotTo(BeEmpty())
-	}).Should(Succeed())
-	return rows
 }
 
 // scaleOperator takes the manager Deployment to replicas and waits for reality
