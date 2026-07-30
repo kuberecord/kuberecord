@@ -1,0 +1,15 @@
+{
+  "name": "medium",
+  "description": "Mid-size production cluster: a few thousand watched objects under steady deploy traffic.",
+  "objects": 5000,
+  "rate": 100,
+  "payloadBytes": 2048,
+  "duration": "60s",
+  "deleteRatio": 0,
+  "concurrency": 16,
+  "kinds": ["ConfigMap", "Deployment"],
+  "pass": {
+    "minRecordsPerSec": 95,
+    "maxEnqueueBlockP99Ms": 10
+  }
+}

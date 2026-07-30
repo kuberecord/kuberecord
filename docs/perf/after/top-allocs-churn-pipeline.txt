@@ -1,0 +1,34 @@
+File: loadgen.test
+Type: alloc_space
+Time: 2026-07-30 23:51:03 CEST
+Active filters:
+   focus=internal/pipeline
+Showing nodes accounting for 46.82MB, 18.68% of 250.56MB total
+Dropped 70 nodes (cum <= 1.25MB)
+Showing top 25 nodes out of 91
+      flat  flat%   sum%        cum   cum%
+   10.26MB  4.09%  4.09%    17.04MB  6.80%  encoding/json.(*decodeState).objectInterface
+    5.78MB  2.31%  6.40%     5.78MB  2.31%  encoding/json.unquote (inline)
+    4.38MB  1.75%  8.15%     8.16MB  3.26%  encoding/json.Marshal
+    3.53MB  1.41%  9.55%     3.53MB  1.41%  github.com/klauspost/compress/zstd.(*Encoder).encodeAll
+    3.37MB  1.35% 10.90%     3.40MB  1.36%  github.com/klauspost/compress/zstd.(*Decoder).DecodeAll
+    2.73MB  1.09% 11.99%     2.73MB  1.09%  go.uber.org/zap/internal/bufferpool.init.NewPool.func1
+    2.10MB  0.84% 12.83%     2.10MB  0.84%  github.com/yelzhy/kubestream/internal/pipeline.stripVolatileFields
+    2.07MB  0.83% 13.65%     3.60MB  1.44%  encoding/json.mapEncoder.encode
+    1.66MB  0.66% 14.32%     1.66MB  0.66%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.NestedNullCoercingStringMap
+    1.53MB  0.61% 14.93%     1.53MB  0.61%  reflect.unsafe_New
+    1.48MB  0.59% 15.52%    44.71MB 17.84%  github.com/yelzhy/kubestream/internal/pipeline.(*Pipeline).processUpsert
+       1MB   0.4% 15.92%        1MB   0.4%  go.uber.org/zap.(*Logger).clone (inline)
+    0.88MB  0.35% 16.27%     5.53MB  2.21%  encoding/json.(*decodeState).literalInterface
+    0.78MB  0.31% 16.58%     0.78MB  0.31%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.setNestedFieldNoCopy
+    0.75MB   0.3% 16.88%     0.75MB   0.3%  github.com/go-logr/zapr.(*zapLogger).handleFields
+    0.75MB   0.3% 17.18%     0.75MB   0.3%  github.com/yelzhy/kubestream/internal/sink/clickhouse.insertArgs
+    0.69MB  0.27% 17.46%    17.95MB  7.16%  encoding/json.Unmarshal
+    0.66MB  0.26% 17.72%    19.83MB  7.91%  github.com/wI2L/jsondiff.CompareJSON
+    0.47MB  0.19% 17.91%     0.47MB  0.19%  github.com/wI2L/jsondiff.(*Patch).append (inline)
+    0.38MB  0.15% 18.06%     0.38MB  0.15%  time.newTimer
+    0.34MB  0.14% 18.20%     0.72MB  0.29%  time.NewTimer
+    0.34MB  0.14% 18.33%     0.34MB  0.14%  encoding/hex.EncodeToString (inline)
+    0.31MB  0.13% 18.46%    50.16MB 20.02%  github.com/yelzhy/kubestream/internal/pipeline.(*Pipeline).Process
+    0.28MB  0.11% 18.57%     0.28MB  0.11%  go.uber.org/zap/zapcore.init.func4
+    0.28MB  0.11% 18.68%     0.28MB  0.11%  github.com/wI2L/jsondiff.(*pointer).appendEscapeKey (inline)
