@@ -1,0 +1,15 @@
+{
+  "name": "massive",
+  "description": "D2's massive half: 20,000 watched objects across mixed GVKs at 500 mutations/sec, 10% of them delete-and-recreate churn.",
+  "objects": 20000,
+  "rate": 500,
+  "payloadBytes": 1024,
+  "duration": "60s",
+  "deleteRatio": 0.1,
+  "concurrency": 64,
+  "kinds": ["ConfigMap", "Deployment", "ServiceAccount"],
+  "pass": {
+    "minRecordsPerSec": 500,
+    "maxEnqueueBlockP99Ms": 10
+  }
+}

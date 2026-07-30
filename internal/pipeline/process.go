@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"sync"
 	"time"
 
@@ -63,12 +64,21 @@ type normalizedObject struct {
 // normalizeObject strips the volatile and operator-internal fields from obj and
 // hashes what remains.
 //
-// It works on a deep copy, never on the argument. That is not defensive
-// paranoia: the object comes from ListerRegistry and may be the informer's own
-// cached instance, shared with every other reader in the process, so mutating it
-// would corrupt the watch cache for everyone — including this pipeline's own
-// next diff. One copy per changed object is the price of that safety, and it is
-// the same copy the old cache-backed client made implicitly on every Get.
+// It never mutates obj. That is not defensive paranoia: the object comes from
+// ListerRegistry and may be the informer's own cached instance, shared with every
+// other reader in the process, so mutating it would corrupt the watch cache for
+// everyone — including this pipeline's own next diff.
+//
+// It used to buy that guarantee with a full DeepCopy of the object, which
+// measured (Task 2.3) as the single largest allocation source in the data plane —
+// roughly half the bytes allocated per work item, paid on *every* event including
+// the ones that deduplicate away and write nothing. The copy is now confined to
+// the maps this function actually edits: a fresh top-level map, a fresh
+// `metadata` map, and a fresh `annotations` map when one key has to come out of
+// it (see stripVolatileFields). Everything else — spec, status, and every nested
+// value under them, which is the overwhelming bulk of a Kubernetes object — is
+// shared with the caller's object by reference and only ever read, by
+// json.Marshal.
 //
 // What is stripped, and why:
 //   - managedFields: enormous, and it changes on writes that change nothing
@@ -84,13 +94,14 @@ type normalizedObject struct {
 //     object before the transform ran, which is exactly the regression the hash
 //     test guards.
 func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
-	obj = obj.DeepCopy()
-
 	out := normalizedObject{
 		UID:             string(obj.GetUID()),
 		ResourceVersion: obj.GetResourceVersion(),
 		APIVersion:      obj.GroupVersionKind().Version,
-		Labels:          obj.GetLabels(),
+		// GetLabels returns a fresh map, which is what the Record needs: it
+		// travels to the sink and outlives this call, so it must not alias the
+		// informer's own map.
+		Labels: obj.GetLabels(),
 	}
 	if out.Labels == nil {
 		out.Labels = make(map[string]string)
@@ -102,24 +113,14 @@ func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
 	// managedFields, which keeps the actors column correct rather than silently
 	// empty when a lister does not transform.
 	annotations := obj.GetAnnotations()
-	if encoded, ok := annotations[ActorsAnnotation]; ok {
-		out.Actors = decodeActors(encoded)
+	_, hasActorsAnnotation := annotations[ActorsAnnotation]
+	if hasActorsAnnotation {
+		out.Actors = decodeActors(annotations[ActorsAnnotation])
 	} else {
 		out.Actors = ExtractActors(obj)
 	}
 
-	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "resourceVersion")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
-	if _, ok := annotations[ActorsAnnotation]; ok {
-		if len(annotations) == 1 {
-			unstructured.RemoveNestedField(obj.Object, "metadata", "annotations")
-		} else {
-			unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", ActorsAnnotation)
-		}
-	}
-
-	objJSON, err := json.Marshal(obj.Object)
+	objJSON, err := json.Marshal(stripVolatileFields(obj.Object, hasActorsAnnotation))
 	if err != nil {
 		return normalizedObject{}, err
 	}
@@ -128,6 +129,71 @@ func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
 	out.JSON = objJSON
 	out.Hash = hex.EncodeToString(hashBytes[:])
 	return out, nil
+}
+
+// stripVolatileFields returns a view of object with the fields normalizeObject
+// strips removed, copying only the maps it has to edit and sharing everything
+// else with the argument by reference. The result is for marshalling only: it
+// aliases the caller's object, so it must never be mutated or retained.
+//
+// stripActorsAnnotation says whether the caller found the operator's actors
+// annotation via the object's typed accessor. It is threaded in rather than
+// re-derived here so the decision is made once, off the same value the actors
+// were read from — an object whose annotations map holds a non-string value makes
+// that accessor report nothing, and this function must strip exactly what the
+// caller believed it read (nothing, in that case) rather than form its own
+// opinion from the raw map.
+//
+// An object with no `metadata` map, or a `metadata` that is not a map, is
+// returned untouched: there is nothing to strip, and hashing it as-is is what the
+// old copy-then-remove code did too (RemoveNestedField is a no-op on a path that
+// does not exist).
+func stripVolatileFields(object map[string]any, stripActorsAnnotation bool) map[string]any {
+	metadata, ok := object["metadata"].(map[string]any)
+	if !ok {
+		return object
+	}
+
+	strippedMeta := make(map[string]any, len(metadata))
+	for field, value := range metadata {
+		switch field {
+		case "managedFields", "resourceVersion", "generation":
+			// Dropped: enormous (managedFields) or bumped on every write
+			// (resourceVersion, generation), so hashing them would make every
+			// object look changed on every event.
+			continue
+		case "annotations":
+			if !stripActorsAnnotation {
+				strippedMeta[field] = value
+				continue
+			}
+			existing, isMap := value.(map[string]any)
+			if !isMap {
+				strippedMeta[field] = value
+				continue
+			}
+			if len(existing) == 1 {
+				// Ours was the only annotation, so the map goes too: an object
+				// whose only annotation was the operator's must hash identically
+				// to the same object before the transform ran.
+				continue
+			}
+			withoutActors := make(map[string]any, len(existing)-1)
+			for name, annotation := range existing {
+				if name != ActorsAnnotation {
+					withoutActors[name] = annotation
+				}
+			}
+			strippedMeta[field] = withoutActors
+		default:
+			strippedMeta[field] = value
+		}
+	}
+
+	stripped := make(map[string]any, len(object))
+	maps.Copy(stripped, object)
+	stripped["metadata"] = strippedMeta
+	return stripped
 }
 
 // ObjectHash returns the canonical content hash of obj — the value that reaches
@@ -343,7 +409,18 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 
 	var eventType = "Added"
 	var diffString = ""
-	var dataString = string(norm.JSON)
+
+	// carriesFullState says whether this row's data column holds the object's
+	// whole normalized state. Every data-bearing row does (Added, Snapshot, a
+	// full-state fallback, a Checkpoint); a plain diff-only Modified does not.
+	//
+	// It is a bool rather than the string itself because the conversion copies the
+	// entire normalized object, and the two most frequent outcomes on a busy
+	// cluster — a dedup skip and a diff-only Modified — would build that copy and
+	// then throw it away. Measured (Task 2.3) at roughly a tenth of the bytes
+	// allocated per work item, for a value most work items never use. The string
+	// is materialized once, in the Record literal below.
+	var carriesFullState = true
 
 	// modifiedRun is the diff-only-Modified run length this write leaves behind
 	// for the key (see CacheEntry.ModifiedSinceCheckpoint). It stays 0 for every
@@ -428,7 +505,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 			// diff/marshal itself fails) — writing the full current state is
 			// always correct on its own, just larger than a diff would be.
 			switchToFullState := func() {
-				dataString = string(norm.JSON)
+				carriesFullState = true
 				diffString = ""
 			}
 
@@ -464,13 +541,13 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				// queries (argMax over the whole history) are unaffected.
 				eventType = "Checkpoint"
 				diffString = string(patchBytes)
-				dataString = string(norm.JSON)
+				carriesFullState = true
 				log.Info("📌 Change detected (Checkpoint: full state alongside the diff)",
 					"reason", string(reason), "diff_bytes", len(patchBytes), "state_bytes", len(norm.JSON),
 					"modified_run", cachedEntry.ModifiedSinceCheckpoint+1)
 			} else {
 				diffString = string(patchBytes)
-				dataString = ""
+				carriesFullState = false
 				modifiedRun = cachedEntry.ModifiedSinceCheckpoint + 1
 				log.Info("📝 Change detected (Diff)")
 			}
@@ -536,6 +613,13 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 		} else {
 			st.cache.DeleteIfCurrent(objectKey, version)
 		}
+	}
+
+	// The one place the normalized state becomes a string, and only for the rows
+	// that actually carry it (see carriesFullState).
+	dataString := ""
+	if carriesFullState {
+		dataString = string(norm.JSON)
 	}
 
 	record := sink.Record{

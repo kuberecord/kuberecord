@@ -235,7 +235,7 @@ Every setting is available as both a CLI flag and an environment variable (flag 
 | `--metrics-cert-path` / `--metrics-cert-name` / `--metrics-cert-key` | — | *(empty)* / `tls.crt` / `tls.key` | Metrics server TLS certificate. |
 | `--enable-http2` | — | `false` | Enable HTTP/2 on the metrics/webhook servers (disabled by default due to known CVEs). |
 
-The six `--writer-*` flags are **fallbacks**, applied per field: a `ClickHouseSink` that states `spec.writer.workers` uses its own value, one that omits it uses the flag (D2: operators must be able to size the write path per environment, and a fleet-wide default should not have to be repeated on every sink). The per-attempt retry backoff cap (60s) remains an internal default. Use `make bench-load` to measure the effect of a given tuning against a dockerized ClickHouse (see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)).
+The six `--writer-*` flags are **fallbacks**, applied per field: a `ClickHouseSink` that states `spec.writer.workers` uses its own value, one that omits it uses the flag (D2: operators must be able to size the write path per environment, and a fleet-wide default should not have to be repeated on every sink). The per-attempt retry backoff cap (60s) remains an internal default. Use `make bench-load PROFILE=small|medium|massive` to measure the effect of a given tuning against a dockerized ClickHouse; the measured envelope for each profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — is published in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 Both probes are plain pings. A cluster with no sinks is a valid, healthy state, and a sink that is unreachable is reported as a condition on its own CR — not as process unreadiness, which would take the pod out of service and stop every *other* sink with it.
 
@@ -402,7 +402,9 @@ make test             # run the unit/envtest suite (requires the envtest/etcd bi
 make test-integration # run the ClickHouse integration tests against a throwaway container (needs Docker)
 make test-e2e         # run the end-to-end acceptance suite on a Kind cluster (needs Docker + Kind)
 make test-chaos       # run the failure-mode (chaos) suite on a Kind cluster (needs Docker + Kind)
-make bench-load       # run the synthetic-churn load harness (Task 0.8)
+make bench-load       # run the synthetic-churn load harness on a named scale profile
+                      #   PROFILE=small|medium|massive (see test/loadgen/profiles/);
+                      #   PPROF_DIR=<dir> also writes heap/alloc profiles there
 make lint             # run golangci-lint (see .golangci.yml for the enabled linters)
 make lint-fix         # run golangci-lint with --fix
 make fmt vet          # gofmt + go vet

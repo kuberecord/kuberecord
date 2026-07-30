@@ -41,7 +41,8 @@ import (
 	"github.com/yelzhy/kubestream/internal/pipeline"
 )
 
-// resyncPeriod is 0 for every informer in the pool: no periodic resync.
+// resyncPeriod is 0 for every informer in the pool: no periodic resync. This is a
+// recorded decision (Task 2.3), re-confirmed against measurement, not an omission.
 //
 // A resync re-delivers every cached object to the handlers at a fixed interval.
 // The classic reason to want that — a reconciler that may have failed to act on
@@ -52,6 +53,16 @@ import (
 // (D2) is exactly the kind of periodic work that turns a quiet operator into a
 // noisy one. Watch-driven only, therefore, with the WatchManager's own 30s pool
 // diff as the level-triggering safety net.
+//
+// The cost side of that decision is now measured rather than asserted. Every
+// re-delivered object costs a full work item that settles on the dedup path — a
+// lister read, a normalize, a marshal and a hash — which after Task 2.3's
+// allocation work is ~36 KB of garbage and ~66 µs of CPU for a realistic Pod
+// (BenchmarkProcessDedup in internal/pipeline). At the massive profile's 20,000
+// objects that is hundreds of megabytes of allocation and seconds of CPU per
+// sweep, spent entirely to re-derive "nothing changed" — against a churn window
+// that costs 0.43 cores in total (docs/PERFORMANCE.md). A resync would be the
+// single largest source of avoidable work in the process.
 const resyncPeriod = 0
 
 // stopWaitTimeout bounds how long stopping one informer waits for its goroutine
@@ -215,7 +226,7 @@ func (p *pool) start(ctx context.Context, key informerKey, gvk schema.GroupVersi
 		},
 	)
 
-	if err := informer.SetTransform(transformObject); err != nil {
+	if err := informer.SetTransform(TransformObject); err != nil {
 		return fmt.Errorf("install informer transform for %s: %w", key, err)
 	}
 	// A watch that cannot be established (most often missing RBAC for a kind a
@@ -408,39 +419,79 @@ func (p *pool) fanOut(entry *informerEntry, obj, previous any) {
 		return
 	}
 
-	// A tombstone whose object was lost carries no labels, so selectors cannot be
-	// evaluated for it. Fanning out to every interested sink is the truthful
-	// choice: the object is gone, and a key for an identity no sink ever recorded
-	// settles as a no-op in the pipeline (its delete claim finds no cache entry),
-	// whereas skipping the event could strand a recorded object as permanently
-	// live in the sink.
-	var previousLabels map[string]string
-	if previous != nil {
-		if prev, prevErr := eventTargetOf(previous); prevErr == nil {
-			previousLabels = prev.labels
+	// Labels are read lazily — at most once per event, and only if some interest
+	// actually filters on them. Extracting them costs a fresh map copy per object
+	// (unstructured.GetLabels deep-copies), twice on an update, and the
+	// overwhelmingly common case is that every interested rule asked for
+	// everything and no selector is ever consulted. Measured (Task 2.3) at two
+	// avoidable allocations per Add and four per Update, on the informer
+	// notification path — the one path Invariant 1 says must stay cheap.
+	var (
+		currentLabels  map[string]string
+		previousLabels map[string]string
+		labelsRead     bool
+	)
+	readLabels := func() {
+		if labelsRead {
+			return
+		}
+		labelsRead = true
+		currentLabels = target.labelsOf()
+		// A tombstone whose object was lost carries no labels; previous is nil on
+		// Add and Delete. Both sides being absent is fine — matchesEither then
+		// simply evaluates the selectors it does have.
+		if previous != nil {
+			if prev, prevErr := eventTargetOf(previous); prevErr == nil {
+				previousLabels = prev.labelsOf()
+			}
 		}
 	}
 
 	for _, in := range p.table.interestsFor(entry.key) {
-		if target.labelsKnown && !in.matchesEither(target.labels, previousLabels) {
-			continue
+		// A tombstone whose object was lost has no labels to evaluate selectors
+		// against. Fanning out to every interested sink is the truthful choice:
+		// the object is gone, and a key for an identity no sink ever recorded
+		// settles as a no-op in the pipeline (its delete claim finds no cache
+		// entry), whereas skipping the event could strand a recorded object as
+		// permanently live in the sink.
+		if !in.matchAll && target.labelsKnown() {
+			readLabels()
+			if !in.matchesEither(currentLabels, previousLabels) {
+				continue
+			}
 		}
 		p.queue.Add(in.keyFor(target.namespace, target.name))
 	}
 }
 
 // eventTarget is the minimum an event contributes to fan-out: which object it is,
-// and what it is labelled (when that is knowable).
+// and — on demand — what it is labelled.
 type eventTarget struct {
 	namespace string
 	name      string
-	labels    map[string]string
 
-	// labelsKnown is false for a tombstone whose last-known object was lost, the
-	// one case where selector filtering has nothing to evaluate against. A
-	// separate flag rather than a nil-labels check, because "no labels" and "we
-	// don't know the labels" must lead to opposite decisions.
-	labelsKnown bool
+	// obj is the object the event carried, kept so its labels can be extracted
+	// only if a selector actually needs them (see fanOut). It is nil for a
+	// tombstone whose last-known object was lost.
+	obj *unstructured.Unstructured
+}
+
+// labelsKnown reports whether this event has an object to evaluate selectors
+// against. It is false only for a tombstone whose last-known object was lost.
+//
+// It is asked as its own question, rather than callers checking for empty labels,
+// because "this object has no labels" and "we cannot know this object's labels"
+// must lead to opposite decisions: the first excludes the object from a selector's
+// scope, the second fans out to everyone.
+func (t eventTarget) labelsKnown() bool { return t.obj != nil }
+
+// labelsOf returns the object's labels as a fresh map, or nil when the event
+// carried no object to read them from.
+func (t eventTarget) labelsOf() map[string]string {
+	if t.obj == nil {
+		return nil
+	}
+	return t.obj.GetLabels()
 }
 
 // eventTargetOf extracts an event's identity, unwrapping a
@@ -469,14 +520,13 @@ func eventTargetOf(obj any) (eventTarget, error) {
 		return eventTarget{}, fmt.Errorf("informer delivered a %T, want *unstructured.Unstructured", obj)
 	}
 	return eventTarget{
-		namespace:   u.GetNamespace(),
-		name:        u.GetName(),
-		labels:      u.GetLabels(),
-		labelsKnown: true,
+		namespace: u.GetNamespace(),
+		name:      u.GetName(),
+		obj:       u,
 	}, nil
 }
 
-// transformObject is every informer's cache.TransformFunc: it harvests the actor
+// TransformObject is every informer's cache.TransformFunc: it harvests the actor
 // names from metadata.managedFields onto an annotation and then deletes
 // managedFields from the copy that gets cached.
 //
@@ -502,7 +552,13 @@ func eventTargetOf(obj any) (eventTarget, error) {
 // entirely — the stream would lose it silently — so a malformed object degrades
 // to "cached as-is" instead (Invariant 5); ExtractActors already logs the
 // malformed parts it skipped.
-func transformObject(obj any) (any, error) {
+//
+// It is exported for one caller: the load harness (test/loadgen, Task 2.3), whose
+// informers must cache objects in exactly the shape production's do. The RSS
+// envelopes published in docs/PERFORMANCE.md are largely the size of those caches,
+// so a harness with its own copy of this logic would eventually publish numbers
+// for a shape the operator no longer uses.
+func TransformObject(obj any) (any, error) {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		return obj, nil

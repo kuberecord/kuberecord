@@ -154,7 +154,8 @@ type Options struct {
 	Metrics *PipelineMetrics
 	// RateLimiter governs the delay before a failed key is retried. Nil means
 	// client-go's default controller rate limiter (5ms → 1000s exponential per
-	// item, plus a global 10 qps/100 burst bucket). Tests substitute a faster
+	// item, plus a global 10 qps/100 burst bucket); see New for why that default
+	// is the shipped choice and what it costs at scale. Tests substitute a faster
 	// one so a retry assertion doesn't wait on real backoff.
 	RateLimiter workqueue.TypedRateLimiter[Key]
 }
@@ -213,6 +214,35 @@ func New(opts Options) (*Pipeline, error) {
 	}
 	rateLimiter := opts.RateLimiter
 	if rateLimiter == nil {
+		// The shipped retry pacing is client-go's DefaultTypedControllerRateLimiter,
+		// unchanged — and that is a recorded decision (Task 2.3), not an inherited
+		// default nobody looked at.
+		//
+		// It is the max of two limiters, and only AddRateLimited passes through
+		// them. Add — the path every informer event takes — is never delayed, so
+		// nothing here paces normal streaming; this is exclusively about what
+		// happens after a *failure*:
+		//
+		//   - per item, exponential 5 ms → 1000 s. A key whose write keeps failing
+		//     backs off to a ~17-minute ceiling instead of spinning on a dead
+		//     backend, and a settled item's Forget clears the accumulated penalty
+		//     (see processNext), so a transient failure leaves no lasting tax.
+		//   - overall, a 10 qps / 100 burst token bucket. This is what shapes a
+		//     *mass* retry: a sink outage fails every in-flight write at once, and
+		//     without it the entire working set would re-arrive together and
+		//     hammer a backend that is already unhealthy.
+		//
+		// The consequence at the massive profile's scale (20,000 objects, see
+		// docs/PERFORMANCE.md) is that re-delivery after a total sink outage is
+		// paced at 10 keys/second, so the tail of a full recovery is on the order
+		// of half an hour. That is accepted, because it is a latency window and
+		// never a loss window: the pipeline is level-triggered, so whenever a key
+		// does come back around it writes the object's *current* state, and any
+		// object that changes again in the meantime is re-enqueued immediately by
+		// its own informer event through the undelayed Add path. Raising the bucket
+		// would buy a faster tail in exchange for a thundering herd against a
+		// backend that has just recovered — the failure mode the chaos suite
+		// (Task 2.1) exists to keep out.
 		rateLimiter = workqueue.DefaultTypedControllerRateLimiter[Key]()
 	}
 
@@ -244,6 +274,20 @@ func New(opts Options) (*Pipeline, error) {
 // Kubernetes API plus the sink (Invariant 6).
 func (p *Pipeline) Add(key Key) {
 	p.queue.Add(key)
+}
+
+// QueueLen reports how many work items are waiting to be picked up — the data
+// plane's backlog, and the only figure that distinguishes "the pipeline kept up"
+// from "the pipeline fell behind but the sink's hand-off queue never noticed."
+//
+// It exists for diagnostics: the load harness (Task 2.3) samples it to publish a
+// peak-backlog figure per scale profile, since the sink-side write_queue_depth
+// gauge only describes the last hop. It deliberately does not become a metric —
+// client-go's own workqueue collectors already expose depth to Prometheus when a
+// metrics provider is registered, and a second gauge for the same number would
+// invite the two to disagree.
+func (p *Pipeline) QueueLen() int {
+	return p.queue.Len()
 }
 
 // Start runs the worker pool until ctx is cancelled, then shuts the queue down

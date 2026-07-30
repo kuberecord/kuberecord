@@ -1,0 +1,15 @@
+{
+  "name": "small",
+  "description": "Tiny cluster: one team's namespace, a handful of config objects, occasional edits.",
+  "objects": 500,
+  "rate": 10,
+  "payloadBytes": 2048,
+  "duration": "30s",
+  "deleteRatio": 0,
+  "concurrency": 4,
+  "kinds": ["ConfigMap"],
+  "pass": {
+    "minRecordsPerSec": 9,
+    "maxEnqueueBlockP99Ms": 10
+  }
+}

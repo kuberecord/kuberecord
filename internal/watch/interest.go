@@ -368,7 +368,23 @@ func (t *interestTable) lookupIdentity(ref pipeline.Key) []*scopeInterest {
 		// candidates do redundant work.
 		return interests
 	}
-	return append(slices.Clone(interests), t.byIdentity[clusterWide]...)
+
+	// Only a genuine two-sided answer needs a combined slice. One side is almost
+	// always empty — a rule watches a named namespace or every namespace, rarely
+	// both for the same kind and sink — and this runs once per work item, so
+	// cloning unconditionally allocated on every lookup for a result identical to
+	// one of the table's own slices (measured in Task 2.3). Handing that slice
+	// back is safe for exactly the reason interestsFor's is: replace installs
+	// freshly built slices and never mutates a published one, and callers must not
+	// mutate what they receive.
+	clusterWideInterests := t.byIdentity[clusterWide]
+	if len(interests) == 0 {
+		return clusterWideInterests
+	}
+	if len(clusterWideInterests) == 0 {
+		return interests
+	}
+	return append(slices.Clone(interests), clusterWideInterests...)
 }
 
 // interestsForScope returns the interests installed for exactly one (sink, scope)

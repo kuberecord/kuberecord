@@ -1,0 +1,17 @@
+
+===== kubestream load harness result =====
+profile               : massive: objects=20000 rate=500/s payload=1024B duration=1m0s delete-ratio=0.10 concurrency=64 kinds=ConfigMap+Deployment+ServiceAccount
+hardware              : darwin/arm64, 8 logical CPUs, Go go1.26.2
+sustained records/sec : 545  (32693 records settled over 60.0s churn)
+enqueue-block p50     : 0.002 ms
+enqueue-block p99     : 0.007 ms
+peak write_queue_depth: 56
+peak pipeline backlog : 1 work items
+CPU over churn        : 0.42 cores (user 19.2s + sys 5.8s over 60.0s wall)
+peak process RSS      : 399.0 MiB
+Go heap in use        : 331.5 MiB
+Go runtime Sys        : 393.2 MiB
+hashCache entries     : 20002
+dedup skips / dropped : 0 / 0
+==========================================
+

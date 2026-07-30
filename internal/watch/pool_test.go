@@ -73,13 +73,13 @@ func TestTransformObject(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := transformObject(tc.obj)
+			out, err := TransformObject(tc.obj)
 			if err != nil {
-				t.Fatalf("transformObject returned an error: %v", err)
+				t.Fatalf("TransformObject returned an error: %v", err)
 			}
 			u, ok := out.(*unstructured.Unstructured)
 			if !ok {
-				t.Fatalf("transformObject returned a %T, want *unstructured.Unstructured", out)
+				t.Fatalf("TransformObject returned a %T, want *unstructured.Unstructured", out)
 			}
 
 			if _, found, _ := unstructured.NestedFieldNoCopy(u.Object, "metadata", "managedFields"); found {
@@ -104,11 +104,11 @@ func TestTransformObject(t *testing.T) {
 // Without the managedFields guard, a second pass would find no managers and wipe
 // the actors annotation the first pass wrote.
 func TestTransformObjectIsIdempotent(t *testing.T) {
-	first, err := transformObject(podWithManagedFields("ns-a", "web", "argocd-controller"))
+	first, err := TransformObject(podWithManagedFields("ns-a", "web", "argocd-controller"))
 	if err != nil {
 		t.Fatalf("first transform: %v", err)
 	}
-	second, err := transformObject(first)
+	second, err := TransformObject(first)
 	if err != nil {
 		t.Fatalf("second transform: %v", err)
 	}
@@ -136,12 +136,12 @@ func TestTransformObjectDegradesGracefully(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := transformObject(tc.obj)
+			out, err := TransformObject(tc.obj)
 			if err != nil {
-				t.Fatalf("transformObject returned an error: %v", err)
+				t.Fatalf("TransformObject returned an error: %v", err)
 			}
 			if out == nil {
-				t.Fatal("transformObject dropped the object")
+				t.Fatal("TransformObject dropped the object")
 			}
 		})
 	}
@@ -206,8 +206,8 @@ func TestEventTargetOf(t *testing.T) {
 			if got.namespace != tc.wantNamespace || got.name != tc.wantName {
 				t.Errorf("identity = %q/%q, want %q/%q", got.namespace, got.name, tc.wantNamespace, tc.wantName)
 			}
-			if got.labelsKnown != tc.wantLabelsKnown {
-				t.Errorf("labelsKnown = %t, want %t", got.labelsKnown, tc.wantLabelsKnown)
+			if got.labelsKnown() != tc.wantLabelsKnown {
+				t.Errorf("labelsKnown() = %t, want %t", got.labelsKnown(), tc.wantLabelsKnown)
 			}
 		})
 	}

@@ -102,16 +102,32 @@ test-integration: ## Run integration tests against a dockerized ClickHouse.
 # against a throwaway dockerized ClickHouse plus an in-process envtest apiserver.
 # It reuses the same container bring-up as test-integration and additionally
 # provides KUBEBUILDER_ASSETS (as the `test` target does) so envtest can start.
-# LOADGEN_* override the small default profile, e.g.:
-#   make bench-load LOADGEN_OBJECTS=200 LOADGEN_RATE=2000 LOADGEN_DURATION=30s
-LOADGEN_OBJECTS ?= 50
-LOADGEN_RATE ?= 200
-LOADGEN_PAYLOAD_BYTES ?= 2048
-LOADGEN_DURATION ?= 10s
-LOADGEN_DELETE_RATIO ?= 0
+#
+# PROFILE names one of the shipped scale profiles in test/loadgen/profiles/
+# (Task 2.3): small, medium or massive. The profile file is the whole load
+# definition — objects, rate, payload, duration, delete ratio, kinds, and the
+# pass criteria the run judges itself against — so a published envelope in
+# docs/PERFORMANCE.md is reproducible from its name alone:
+#   make bench-load PROFILE=massive
+#
+# PPROF_DIR, if set, is a repo-relative directory the run writes its heap/alloc
+# profiles and summary into; that is how the before/after pairs in docs/perf/
+# were produced:
+#   make bench-load PROFILE=massive PPROF_DIR=docs/perf/after
+#
+# LOADGEN_* still override individual knobs on top of the chosen profile, for
+# bisecting one dimension without editing a shipped file:
+#   make bench-load PROFILE=massive LOADGEN_DURATION=30s
+#
+# The timeout is generous because the massive profile spends minutes before its
+# measured window even opens: 20,000 objects have to be created and their Added
+# rows drained so the churn window measures churn rather than a backlog.
+BENCH_TIMEOUT ?= 45m
+PROFILE ?= small
+PPROF_DIR ?=
 
 .PHONY: bench-load
-bench-load: setup-envtest ## Run the load benchmark harness (small default profile) against a dockerized ClickHouse.
+bench-load: setup-envtest ## Run the load benchmark harness (PROFILE=small|medium|massive) against a dockerized ClickHouse.
 	@echo "Starting ClickHouse container '$(CH_IT_CONTAINER)'..."
 	@$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) >/dev/null 2>&1 || true
 	@$(CONTAINER_TOOL) run -d --name $(CH_IT_CONTAINER) \
@@ -131,9 +147,8 @@ bench-load: setup-envtest ## Run the load benchmark harness (small default profi
 	done; \
 	KUBEBUILDER_ASSETS="$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" \
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
-		go test -tags=integration ./test/loadgen/ -run TestLoadGenChurn -v -timeout 10m \
-			-objects=$(LOADGEN_OBJECTS) -rate=$(LOADGEN_RATE) -payload-bytes=$(LOADGEN_PAYLOAD_BYTES) \
-			-duration=$(LOADGEN_DURATION) -delete-ratio=$(LOADGEN_DELETE_RATIO)
+		go test -tags=integration ./test/loadgen/ -run TestLoadGenChurn -v -timeout $(BENCH_TIMEOUT) \
+			-profile=$(PROFILE) $(if $(PPROF_DIR),-pprof-dir=$(CURDIR)/$(PPROF_DIR),)
 
 # The e2e suite (Task 1.11) is the Phase 1 gate: a real Kind cluster, a real
 # in-cluster ClickHouse (test/e2e/manifests/), real CRs, and every assertion made

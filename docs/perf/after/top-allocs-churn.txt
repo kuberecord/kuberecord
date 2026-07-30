@@ -1,0 +1,32 @@
+File: loadgen.test
+Type: alloc_space
+Time: 2026-07-30 23:51:03 CEST
+Showing nodes accounting for 188.28MB, 75.14% of 250.56MB total
+Dropped 270 nodes (cum <= 1.25MB)
+Showing top 25 nodes out of 233
+      flat  flat%   sum%        cum   cum%
+   39.08MB 15.60% 15.60%    55.01MB 21.95%  sigs.k8s.io/json/internal/golang/encoding/json.(*decodeState).objectInterface
+   24.02MB  9.59% 25.18%    24.02MB  9.59%  io.ReadAll
+   13.70MB  5.47% 30.65%    13.74MB  5.48%  sigs.k8s.io/json/internal/golang/encoding/json.unquote (inline)
+   10.73MB  4.28% 34.94%    11.95MB  4.77%  path.Join
+   10.26MB  4.09% 39.03%    17.04MB  6.80%  encoding/json.(*decodeState).objectInterface
+    8.77MB  3.50% 42.53%     8.77MB  3.50%  bytes.growSlice
+    6.40MB  2.55% 45.08%     6.40MB  2.55%  github.com/ClickHouse/ch-go/proto.(*ColStr).Append
+    6.14MB  2.45% 47.54%    11.11MB  4.43%  encoding/json.mapEncoder.encode
+    5.80MB  2.32% 49.85%     5.80MB  2.32%  golang.org/x/net/http2.init.func2
+    5.78MB  2.31% 52.16%     5.78MB  2.31%  encoding/json.unquote (inline)
+    5.66MB  2.26% 54.41%     5.66MB  2.26%  reflect.unsafe_New
+    5.62MB  2.24% 56.66%     5.62MB  2.24%  golang.org/x/net/http2.init.func3
+    5.28MB  2.11% 58.76%     5.28MB  2.11%  k8s.io/apimachinery/pkg/runtime.(*RawExtension).UnmarshalJSON
+    4.38MB  1.75% 60.51%     8.16MB  3.26%  encoding/json.Marshal
+    4.13MB  1.65% 62.16%    12.20MB  4.87%  k8s.io/client-go/rest.(*Request).URL
+    4.12MB  1.64% 63.80%     4.12MB  1.64%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.setNestedFieldNoCopy
+    3.53MB  1.41% 65.21%     3.53MB  1.41%  github.com/klauspost/compress/zstd.(*Encoder).encodeAll
+    3.42MB  1.36% 66.58%     3.42MB  1.36%  golang.org/x/net/http2.(*ClientConn).roundTrip
+    3.37MB  1.35% 67.92%     3.40MB  1.36%  github.com/klauspost/compress/zstd.(*Decoder).DecodeAll
+    3.32MB  1.32% 69.25%     3.32MB  1.32%  sigs.k8s.io/json/internal/golang/encoding/json.(*scanner).pushParseState
+    3.26MB  1.30% 70.55%     3.92MB  1.56%  golang.org/x/net/http2.(*clientConnReadLoop).handleResponse
+    3.20MB  1.28% 71.82%     3.20MB  1.28%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.NestedNullCoercingStringMap
+    3.10MB  1.24% 73.06%    70.81MB 28.26%  sigs.k8s.io/json/internal/golang/encoding/json.Unmarshal
+    2.73MB  1.09% 74.15%     2.73MB  1.09%  go.uber.org/zap/internal/bufferpool.init.NewPool.func1
+    2.48MB  0.99% 75.14%     2.48MB  0.99%  k8s.io/apimachinery/pkg/util/net.CloneHeader
