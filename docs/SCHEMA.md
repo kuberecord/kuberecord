@@ -54,8 +54,8 @@ One row per observed state transition of a watched object.
 | `resource_version` | `String` | The object's `metadata.resourceVersion` at observation time. |
 | `labels` | `Map(LowCardinality(String), String)` | The object's labels at observation time. |
 | `actors` | `Array(LowCardinality(String))` | Field-manager names harvested from `metadata.managedFields` — the cheapest "who probably changed this" signal. De-duplicated and sorted; empty manager names are recorded as `unknown`. **Always empty (`[]`) on `Deleted` rows** — there is no live object left to inspect, so a deletion's authorship is intentionally not attributed. |
-| `data` | `String` (`ZSTD(3)`) | Full normalized JSON of the object. Populated on `Added`, `Snapshot`, and `Checkpoint`; **empty** otherwise. |
-| `diff` | `String` (`ZSTD(3)`) | RFC 6902 JSON Patch describing the change. Populated on `Modified` (and `Checkpoint`); **empty** otherwise. See [Diff format](#diff-format). |
+| `data` | `String` (`ZSTD(3)`) | Full normalized JSON of the object. Populated on `Added`, `Snapshot`, `Checkpoint`, and any `Modified` that fell back to full state; **empty** otherwise. |
+| `diff` | `String` (`ZSTD(3)`) | RFC 6902 JSON Patch describing the change. Populated on `Modified` and `Checkpoint` (a `Checkpoint` carries both, and its `data` is the state *after* the diff); **empty** otherwise. See [Diff format](#diff-format) and [Checkpoint rows](#checkpoint-rows). |
 | `sha256` | `String` | Hex SHA-256 of the normalized JSON, used for dedup/version-gating. **Empty on `Deleted`.** |
 
 **Engine & layout:**
@@ -269,9 +269,10 @@ last-known states as *as-of its `Stopped` row*, not as current.
   warmed from ClickHouse history* (startup "SafeMode"). Tagged `Snapshot`
   rather than `Added` so a slow/unavailable ClickHouse at startup can't
   masquerade as a mass duplicate-`Added` storm. Carries full `data`.
-- **`Checkpoint`** — **reserved until Task 2.2**; no code emits it yet. It will
-  carry either full `data` or a `diff`. The column set and validation accept it
-  now so the schema need not change when it lands.
+- **`Checkpoint`** — a `Modified` in every semantic sense except its
+  `event_type` and its populated `data`: it carries the `diff` **and** the full
+  state, so a reader replaying an object's history never has to walk back
+  further than the last one. See [Checkpoint rows](#checkpoint-rows).
 
 Typical lifecycle for one object:
 
@@ -295,6 +296,111 @@ before hashing and diffing, so cosmetic churn does not generate rows.
 **Graceful degradation:** if no prior JSON baseline exists, or the diff/marshal
 fails, the operator writes the full current state to `data` and leaves `diff`
 empty — a full-state row is always correct, merely larger than a diff.
+
+## Checkpoint rows
+
+Diffs make the stream cheap to write and cheap to store, but they make a *read*
+unbounded: with `Modified` rows carrying diffs only, "what did this object look
+like at time T?" means replaying every diff back to the object's last full row —
+and for a Deployment that has been reconciled for a year, that is the whole
+year. A `Checkpoint` row is a `Modified` that also carries the full state, which
+caps that walk.
+
+Two independent triggers promote a `Modified` write to a `Checkpoint`:
+
+1. **Cadence** — every `spec.writer.checkpointEvery` consecutive diff-only
+   `Modified` rows for one object (default **50**; `0` disables checkpointing
+   for that sink entirely). This is what bounds replay: a reconstruction never
+   applies more than `checkpointEvery` patches.
+2. **Size** — a single write whose diff is *larger* than the object it
+   describes. Such a diff is pure loss: more bytes than the state itself, plus a
+   replay step on top. It fires regardless of how far the cadence has
+   progressed — but not when checkpointing is disabled.
+
+Both sides of the size comparison are **uncompressed** bytes of the diff and of
+the freshly serialized full object the pipeline already holds at diff time, so
+the check costs nothing. Neither the row's `data` *column* (empty on a
+`Modified`, which would make the trigger fire on every update) nor the
+operator's in-memory zstd-compressed baseline (which would over-trigger by the
+compression ratio) is ever an operand.
+
+Consequences for a consumer:
+
+- **`Checkpoint` is not a special case for aggregate reads.** It has the same
+  identity, `uid`, `sha256` and `labels` a `Modified` would have carried, so
+  `argMax(…, ts)` queries — including the operator's own warm-up read — are
+  unaffected. Only a *replay* treats it specially, as its base.
+- **A `Checkpoint`'s own `diff` must not be re-applied on top of its `data`.**
+  The two describe the same transition: `data` is the state *after* the diff.
+- **The cadence is per operator process, not per object lifetime.** The counter
+  behind trigger 1 lives in the operator's memory and resets on restart, which
+  costs nothing: a restarting operator starts from an empty (or history-warmed)
+  cache, so its first row for an object is a full-state `Added`/`Snapshot`
+  anyway, and the replay window re-baselines there. Nothing durable depends on
+  the counter (Invariant 6), and a reconstruction never needs to know what it
+  was — it reads the rows.
+
+### Reconstructing state at an instant
+
+This is the official recipe. It is what
+`TestCheckpointStateReconstructionIntegration`
+(`internal/sink/clickhouse/checkpoint_integration_test.go`) executes and asserts
+byte-for-byte against the live object, so it stays true rather than merely
+documented.
+
+**Step 1 — read the object's history up to the target instant.** `FINAL` is
+required, not optional: the write path is at-least-once, and replaying one
+object's patch twice is not idempotent (a `remove` op fails the second time, an
+`add` duplicates).
+
+```sql
+SELECT ts, event_type, data, diff
+FROM resource_states FINAL
+WHERE cluster_id = {cluster:String}
+  AND api_group  = {group:String}      -- '' for the core group
+  AND kind       = {kind:String}
+  AND namespace  = {namespace:String}  -- '' for cluster-scoped objects
+  AND name       = {name:String}
+  AND ts        <= {at:DateTime64(9, 'UTC')}
+ORDER BY ts;
+```
+
+**Step 2 — find the base.** Take the **last row with a non-empty `data`** (an
+`Added`, a `Snapshot`, a `Checkpoint`, or a `Modified` that fell back to full
+state). Its `data` is the starting document. If the result set holds no
+`data`-bearing row, history for this object begins before your retention window
+and the state at `T` is not reconstructible.
+
+Everything before the base row is irrelevant — that is the bound checkpointing
+buys you.
+
+**Step 3 — replay forward.** Apply the `diff` of every row *after* the base row,
+in `ts` order, as an RFC 6902 JSON Patch. Skip the base row's own `diff` (see
+above). Rows with an empty `diff` and non-empty `data` are full-state rows: they
+*replace* the document rather than patching it.
+
+**Step 4 — stop at a deletion.** If a `Deleted` row appears in the range, the
+object did not exist at `T` — for that `uid`. Treat a `Deleted` row as terminal
+for its `uid` regardless of `ts` ties (see [Deletion
+semantics](#deletion-semantics--no-sentinels)), and start again from the next
+`uid`'s first row if a successor was recreated under the same name.
+
+**Verifying a reconstruction.** The `sha256` of the row you finished on is the
+hex SHA-256 of the operator's normalized JSON for that state. Canonicalize your
+reconstructed document (re-serialize it with sorted object keys) and hash it:
+the two must match. That check is what turns "the replay ran without errors"
+into "the replay produced the right state".
+
+The digest to check it against — no replay needed, which also answers "is this
+object's recorded state current?" on its own:
+
+```sql
+-- Latest recorded hash and last-known event for one object.
+SELECT argMax(event_type, ts) AS last_event, argMax(sha256, ts) AS sha256, max(ts) AS ts
+FROM resource_states
+WHERE cluster_id = {cluster:String} AND api_group = {group:String}
+  AND kind = {kind:String} AND namespace = {namespace:String} AND name = {name:String};
+```
 
 ## Identity is version-agnostic
 

@@ -127,6 +127,28 @@ type WriterSpec struct {
 	// +optional
 	// +kubebuilder:default="15s"
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// CheckpointEvery is how many consecutive diff-only `Modified` rows this sink
+	// accepts for one object before the next one is written as a `Checkpoint` —
+	// a row carrying the full state *and* the diff.
+	//
+	// It is the knob that bounds replay cost. With diffs-only history,
+	// reconstructing "state at time T" means replaying every diff back to the
+	// object's last full row, which is unbounded for a long-lived object; a
+	// Checkpoint every N modifications caps that walk at N diffs (see
+	// docs/SCHEMA.md). It is per-sink because the trade — storage for query cost
+	// — belongs to whoever owns the ClickHouse instance and its analysts.
+	//
+	// `0` disables checkpointing entirely for this sink. The ceiling of 10000 is
+	// not a technical limit but an honesty one: a cadence beyond it is
+	// indistinguishable from disabling the feature while looking like it is on.
+	// A single diff that comes out larger than the object it describes is
+	// checkpointed regardless of the cadence — unless checkpointing is disabled.
+	// +optional
+	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10000
+	CheckpointEvery *int32 `json:"checkpointEvery,omitempty"`
 }
 
 // SinkPolicy is the sink owner's admission policy over what may be written to

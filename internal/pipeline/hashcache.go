@@ -383,6 +383,27 @@ type CacheEntry struct {
 	// (see docs/SCHEMA.md: api_version is provenance, never identity). It is
 	// empty for a history-warmed entry, whose source row is not re-read.
 	APIVersion string
+	// ModifiedSinceCheckpoint counts the consecutive diff-only "Modified" rows
+	// written for this key since the last row that carried full data (an
+	// "Added"/"Snapshot", a full-state fallback, or a "Checkpoint"). It is what
+	// bounds replay cost for a long-lived object: a reader reconstructing "state
+	// at time T" replays at most this many diffs before it reaches a
+	// data-bearing row (see docs/SCHEMA.md, "Reconstructing state at an
+	// instant"), and the counter is what tells the write path when to interrupt
+	// the diff run with a Checkpoint (see checkpointDue).
+	//
+	// It rides the same version gating as every other field: Reserve stores the
+	// advanced count optimistically and a failed write reverts to the
+	// pre-write entry, so a row that never reached the sink never advances the
+	// run — the count always describes rows that are actually in the sink.
+	//
+	// It is deliberately in-memory only and **resets on operator restart**,
+	// which costs nothing: a restart starts from an empty (or history-warmed,
+	// JSON-less) cache, so the first row it writes for a key is data-bearing
+	// anyway and re-baselines the replay window. Persisting the counter would
+	// buy a slightly earlier checkpoint at the cost of durable state outside
+	// the Kubernetes API and the sink (Invariant 6).
+	ModifiedSinceCheckpoint int
 	// Version is assigned by hashCache.Reserve/StoreIfAbsent and is the basis
 	// for CommitIfCurrent/DeleteIfCurrent's staleness check: an async write's
 	// outcome is only applied if the entry's Version hasn't moved on since

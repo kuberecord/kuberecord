@@ -55,6 +55,7 @@ func baseConfig() Config {
 		WriteWorkers:         4,
 		EnqueueTimeout:       2 * time.Second,
 		ShutdownDrainTimeout: 15 * time.Second,
+		CheckpointEvery:      DefaultCheckpointEvery,
 	}
 }
 
@@ -90,6 +91,12 @@ func TestConfigFingerprint(t *testing.T) {
 		{"workers", func(c *Config) { c.WriteWorkers = 8 }},
 		{"enqueue timeout", func(c *Config) { c.EnqueueTimeout = 3 * time.Second }},
 		{"drain timeout", func(c *Config) { c.ShutdownDrainTimeout = 20 * time.Second }},
+		// Re-tuning the Checkpoint cadence must recycle the instance too: the
+		// cadence is read off the running writer (CheckpointEvery), so a
+		// fingerprint that ignored it would leave the old cadence in effect until
+		// the next restart.
+		{"checkpoint cadence", func(c *Config) { c.CheckpointEvery = 10 }},
+		{"checkpointing disabled", func(c *Config) { c.CheckpointEvery = 0 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
