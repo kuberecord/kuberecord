@@ -1,0 +1,153 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package harness
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// The manifests a scenario applies, rendered as strings and piped through
+// KubectlStdin. See that function for why they are not templated onto disk.
+
+// RuleResource is one entry of a rule's spec.resources.
+type RuleResource struct {
+	Group   string
+	Version string
+	Kind    string
+}
+
+// resourcesYAML renders a rule's spec.resources list at the given indent.
+func resourcesYAML(resources []RuleResource, indent string) string {
+	var b strings.Builder
+	for _, r := range resources {
+		fmt.Fprintf(&b, "%s- group: %q\n%s  version: %q\n%s  kind: %q\n",
+			indent, r.Group, indent, r.Version, indent, r.Kind)
+	}
+	return b.String()
+}
+
+// StreamRuleYAML renders a namespaced StreamRule. sinkRef is left out on
+// purpose: it defaults to "default", which is the sink both suites install, and
+// spelling it would only hide that the default works.
+func StreamRuleYAML(namespace, name string, resources []RuleResource) string {
+	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  resources:
+%s`, name, namespace, resourcesYAML(resources, "  "))
+}
+
+// ClusterStreamRuleYAML renders a cluster-scoped ClusterStreamRule with no
+// namespaceSelector, i.e. one all-namespaces target per named resource.
+func ClusterStreamRuleYAML(name string, resources []RuleResource) string {
+	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+kind: ClusterStreamRule
+metadata:
+  name: %s
+spec:
+  resources:
+%s`, name, resourcesYAML(resources, "  "))
+}
+
+// DeploymentYAML renders the object the workload scenarios stream.
+//
+// The pause image is what every kind node already has cached, so no scenario
+// ever waits on a registry pull; whether the pods actually run is irrelevant,
+// since what is being watched is the Deployment object itself.
+func DeploymentYAML(namespace, name string, replicas int) string {
+	return fmt.Sprintf(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+spec:
+  replicas: %d
+  selector:
+    matchLabels:
+      app: %s
+  template:
+    metadata:
+      labels:
+        app: %s
+    spec:
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10
+        imagePullPolicy: IfNotPresent
+`, name, namespace, name, replicas, name, name)
+}
+
+// IngressYAML renders a minimal, valid Ingress. It needs no ingress controller
+// to exist: the scenario watches the object, not the traffic.
+func IngressYAML(namespace, name string) string {
+	return fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  rules:
+  - host: %s.e2e.kubestream.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: %s
+            port:
+              number: 80
+`, name, namespace, name, name)
+}
+
+// ConfigMapYAML renders a ConfigMap carrying data.
+//
+// It is the chaos suite's workhorse object: nothing schedules for it, so a
+// hundred of them cost the cluster under test nothing, and its arbitrary string
+// values are how that suite dials a record's size — from an ordinary few hundred
+// bytes up to the oversized payload its poison-row scenario needs.
+//
+// Keys are emitted in sorted order and values are Go-quoted, so a payload
+// containing newlines, quotes or a megabyte of filler stays a single valid YAML
+// scalar and the rendered manifest is byte-stable across calls.
+func ConfigMapYAML(namespace, name string, data map[string]string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: %s
+  namespace: %s
+data:
+`, name, namespace)
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(&b, "  %s: %s\n", key, strconv.Quote(data[key]))
+	}
+	return b.String()
+}

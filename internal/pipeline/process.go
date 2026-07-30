@@ -130,6 +130,27 @@ func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
 	return out, nil
 }
 
+// ObjectHash returns the canonical content hash of obj — the value that reaches
+// the sink's sha256 column — without any of the pipeline's state.
+//
+// It exists for the acceptance suites, and specifically for Task 2.1's
+// "no gaps" criterion: after an outage, the final sha256 recorded in ClickHouse
+// must equal a hash recomputed from the object as it now lives in the API
+// server. The alternative was for the suite to reimplement normalizeObject's
+// strip rules, which would mean the assertion silently stopped comparing
+// anything the first time those rules changed — the exact drift the criterion is
+// meant to catch. Routing the suite through the same function the write path
+// uses makes the comparison a real one.
+//
+// It does not mutate obj (see normalizeObject).
+func ObjectHash(obj *unstructured.Unstructured) (string, error) {
+	norm, err := normalizeObject(obj)
+	if err != nil {
+		return "", err
+	}
+	return norm.Hash, nil
+}
+
 // Process settles one work item: it compares what the watch cache holds for the
 // key's identity against what the key's sink has already been told, and enqueues
 // at most one record describing the difference.

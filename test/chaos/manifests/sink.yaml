@@ -1,0 +1,59 @@
+# The ClickHouseSink every chaos scenario streams to.
+#
+# Named "default" because that is the name a rule's spec.sinkRef defaults to, so
+# the suite's rules carry no sinkRef boilerplate — the same shape a real
+# single-sink install has. credentialsSecretRef omits a namespace on purpose: it
+# resolves to the operator's own namespace, the only place the operator holds
+# Secret read rights (Task 1.9).
+#
+# The writer knobs are tuned to make failure *reachable and deterministic*, which
+# is the opposite of how a production sink is tuned and the opposite of the e2e
+# fixture's "flush eagerly so assertions are quick":
+#
+#   - workers: 1. Poison-row isolation is only exercised if the poison record and
+#     its blameless neighbours land in the *same* batch. With one drainer, a burst
+#     of objects created in a single apply is guaranteed to batch together; with
+#     two, the burst splits and the scenario silently degrades into "two batches
+#     failed" without testing isolation at all.
+#   - queueSize: 50. The hand-off queue has to actually fill for the saturation
+#     scenario to observe enqueue_block_seconds and enqueue_timeouts_total; at the
+#     shipped 5000 the suite would have to generate two orders of magnitude more
+#     churn to reach the same state, for no extra coverage.
+#   - batchMaxWait: 500ms. Long enough that a burst applied in one kubectl call
+#     coalesces into one batch, short enough that a trickle still flushes inside
+#     an assertion's patience.
+#   - enqueueTimeout: 2s. The saturation scenario asserts that no enqueue ever
+#     blocked longer than this, so it is the value the histogram is read against.
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: chaos-fixture
+spec:
+  connection:
+    addr: clickhouse.kubestream-chaos-clickhouse.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      name: kubestream-clickhouse-credentials
+  writer:
+    queueSize: 50
+    workers: 1
+    batchMaxRows: 200
+    batchMaxWait: 500ms
+    enqueueTimeout: 2s
+    drainTimeout: 15s
+  policy:
+    # ConfigMaps only. Every chaos scenario churns them: nothing schedules for a
+    # ConfigMap, so hundreds cost the cluster under test nothing, and its
+    # arbitrary string data is how the poison-row scenario dials a record past
+    # the size its CHECK constraint rejects. Spelling the list out rather than
+    # leaving it empty means an accidental extra watch fails loudly as
+    # PolicyAllowed=False instead of quietly writing rows nobody asserted on.
+    allowedGVKs:
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
