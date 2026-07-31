@@ -1,5 +1,11 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+# VERSION is the version of the *shipped artifacts*: the Helm chart's appVersion
+# and the image the committed dist/install.yaml names. It is deliberately not
+# IMG's default — IMG is a developer's local build tag, VERSION is what a user
+# installs — and it is the one place a release bump has to happen (see
+# deploy/charts/kubestream/Chart.yaml, which must carry the same value).
+VERSION ?= 0.1.0
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -59,8 +65,12 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# helm and kustomize are prerequisites because test/chart renders the chart and
+# builds config/default to compare the two install paths against each other
+# (Task 2.4). Those tests skip when the binaries are missing, so without this the
+# chart's only real guard against drift would silently not run.
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # Integration tests run against a real, dockerized ClickHouse (build tag
@@ -189,10 +199,22 @@ E2E_TIMEOUT ?= 30m
 # cluster up when that is not enough.
 E2E_KEEP_CLUSTER ?= false
 
+# E2E_INSTALL selects *how* the suite installs the operator, and nothing else:
+# kustomize (config/default, the default), helm (the chart) or installer
+# (dist/install.yaml). The scenarios are identical in all three — the chart and
+# the installer produce the same object names as config/default, which is what
+# makes "the 1.11 happy path passes unmodified" a testable claim rather than a
+# hopeful one (Task 2.4). E2E_FOCUS, when set, is passed to Ginkgo as a focus
+# regex.
+E2E_INSTALL ?= kustomize
+E2E_FOCUS ?=
+
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@set +e; \
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT); \
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_INSTALL=$(E2E_INSTALL) \
+		go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) \
+			$(if $(E2E_FOCUS),-ginkgo.focus="$(E2E_FOCUS)",); \
 	status=$$?; \
 	if [ "$(E2E_KEEP_CLUSTER)" = "true" ]; then \
 		echo "E2E_KEEP_CLUSTER=true: leaving Kind cluster '$(KIND_CLUSTER)' up for inspection."; \
@@ -200,6 +222,27 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 		$(MAKE) cleanup-test-e2e; \
 	fi; \
 	exit $$status
+
+# The two install-path smokes. Each gets its own Kind cluster: `helm install`
+# refuses to adopt objects it does not own, so a cluster left behind by a
+# kustomize run would fail the helm smoke for a reason that has nothing to do
+# with the chart.
+#
+# They focus the Phase 1 happy path — the acceptance criterion is that *it*
+# passes unmodified against either install — which keeps each smoke to roughly one
+# scenario rather than three times the full suite. Run the whole suite against an
+# install path with E2E_FOCUS= (empty).
+SMOKE_FOCUS ?= streams a Deployment
+HELM_KIND_CLUSTER ?= kubestream-test-e2e-helm
+INSTALLER_KIND_CLUSTER ?= kubestream-test-e2e-installer
+
+.PHONY: test-e2e-helm
+test-e2e-helm: ## Run the e2e smoke against a `helm install` of deploy/charts/kubestream.
+	$(MAKE) test-e2e E2E_INSTALL=helm E2E_FOCUS="$(SMOKE_FOCUS)" KIND_CLUSTER=$(HELM_KIND_CLUSTER)
+
+.PHONY: test-e2e-installer
+test-e2e-installer: ## Run the e2e smoke against `kubectl apply -f dist/install.yaml`.
+	$(MAKE) test-e2e E2E_INSTALL=installer E2E_FOCUS="$(SMOKE_FOCUS)" KIND_CLUSTER=$(INSTALLER_KIND_CLUSTER)
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
@@ -310,11 +353,123 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm kubestream-builder
 	rm Dockerfile.cross
 
+# dist/install.yaml is the single-file install path: `kubectl apply -f` it and you
+# have the CRDs, the RBAC and the manager. It is committed, and `make
+# build-installer` with no arguments reproduces it byte for byte — that is what
+# makes it a *versioned* manifest rather than merely a generated one, since the
+# image it names is $(INSTALLER_IMG), pinned to VERSION, not a floating tag.
+# Override INSTALLER_IMG to point the manifest at your own build (the e2e
+# installer smoke does exactly that).
+#
+# The image override is applied through a throwaway overlay in dist/ rather than
+# with `kustomize edit set image` inside config/manager. That is deliberate:
+# editing the committed base rewrites the image *name* there, and both the e2e and
+# the chaos overlays select the manager image by the name `controller` — a
+# rewritten base would silently stop matching and each suite would then run
+# whatever image the base now pins, with no error anywhere.
+INSTALLER_IMG ?= ghcr.io/yelzhy/kubestream:v$(VERSION)
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
-	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	printf '%s\n' \
+		'# Generated by `make build-installer`; deleted again once dist/install.yaml is written.' \
+		'apiVersion: kustomize.config.k8s.io/v1beta1' \
+		'kind: Kustomization' \
+		'resources:' \
+		'- ../config/default' \
+		> dist/kustomization.yaml
+	cd dist && "$(KUSTOMIZE)" edit set image controller=$(INSTALLER_IMG)
+	"$(KUSTOMIZE)" build dist > dist/install.yaml
+	rm -f dist/kustomization.yaml
+
+##@ Packaging
+
+# The Helm chart is the second supported install path, and it is held to being
+# the *same install*: it renders the same object names as `kustomize build
+# config/default`, and test/chart asserts that RBAC rule for RBAC rule, so the
+# acceptance suite can run against either one unmodified.
+CHART_DIR ?= deploy/charts/kubestream
+CHART_RELEASE ?= kubestream
+CHART_NAMESPACE ?= kubestream-system
+
+# The Kubernetes version rendered manifests are validated against. Derived from
+# the same k8s.io/api version envtest is pinned to, so "the pinned Kubernetes
+# version" means one thing across the whole repo. kubeconform wants a full
+# x.y.z; the schema repository publishes .0 for every minor.
+KUBECONFORM_K8S_VERSION ?= $(ENVTEST_K8S_VERSION).0
+
+# Kinds kubeconform cannot judge, named one by one rather than waved through with
+# -ignore-missing-schemas — with an explicit list, a *typo'd* kind is still a hard
+# failure:
+#
+#   - our own three CRs have no published upstream schema. Their shape is
+#     enforced by the CRDs themselves, in envtest (api/v1alpha1) and in the kind
+#     smokes, which is stricter than anything kubeconform could do here.
+#   - CustomResourceDefinition: the upstream schema repository publishes no
+#     apiextensions group at all, at any version. The CRDs are controller-gen
+#     output, asserted by api/v1alpha1/crdmanifests_test.go and applied to a real
+#     apiserver by every envtest and kind run.
+#
+# --include-crds is still passed when rendering, so a CRD that failed to render
+# at all remains a parse error here.
+KUBECONFORM_SKIP ?= ClickHouseSink,StreamRule,ClusterStreamRule,CustomResourceDefinition
+KUBECONFORM_FLAGS ?= -strict -summary \
+	-kubernetes-version $(KUBECONFORM_K8S_VERSION) \
+	-skip $(KUBECONFORM_SKIP)
+
+# --kube-version is not optional: without a cluster to ask, `helm template`
+# assumes a very old Kubernetes and would reject the chart's own kubeVersion
+# constraint. --include-crds makes the rendering match what `helm install`
+# actually applies, so the CRDs are validated too rather than quietly skipped.
+HELM_TEMPLATE_FLAGS ?= --namespace $(CHART_NAMESPACE) \
+	--kube-version $(KUBECONFORM_K8S_VERSION) --include-crds
+
+.PHONY: helm-sync
+helm-sync: manifests ## Refresh the chart's copies of the CRDs and the RBAC presets from config/.
+	@# Helm requires CRDs to live in the chart's crds/ directory and preset rules
+	@# are read out of files/presets/ at render time, so both are copies of
+	@# config/. Copies drift, so they are generated by this target and asserted
+	@# byte-identical to their sources by test/chart — a stale copy fails `make
+	@# test`, it does not ship.
+	rm -rf "$(CHART_DIR)/crds" "$(CHART_DIR)/files/presets"
+	mkdir -p "$(CHART_DIR)/crds" "$(CHART_DIR)/files/presets"
+	cp config/crd/bases/*.yaml "$(CHART_DIR)/crds/"
+	cp config/rbac/presets/*.yaml "$(CHART_DIR)/files/presets/"
+	@echo "Synced $$(ls -1 "$(CHART_DIR)/crds" | wc -l | tr -d ' ') CRDs and $$(ls -1 "$(CHART_DIR)/files/presets" | wc -l | tr -d ' ') presets into $(CHART_DIR)."
+
+.PHONY: helm-lint
+helm-lint: helm ## Lint the chart against its default values and every ci/ values file.
+	"$(HELM)" lint "$(CHART_DIR)" --strict --kube-version $(KUBECONFORM_K8S_VERSION)
+	@for values in "$(CHART_DIR)"/ci/*-values.yaml; do \
+		echo "==> helm lint --strict --values $$values"; \
+		"$(HELM)" lint "$(CHART_DIR)" --strict --kube-version $(KUBECONFORM_K8S_VERSION) \
+			--values "$$values" || exit 1; \
+	done
+
+.PHONY: helm-template
+helm-template: helm ## Render the chart to stdout (VALUES=<file> to render a values file).
+	@"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" $(HELM_TEMPLATE_FLAGS) \
+		$(if $(VALUES),--values "$(VALUES)",)
+
+.PHONY: helm-kubeconform
+helm-kubeconform: helm kubeconform ## Validate the chart's rendered output against the pinned Kubernetes version.
+	@echo "==> kubeconform: $(CHART_DIR) (default values), Kubernetes $(KUBECONFORM_K8S_VERSION)"
+	"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" $(HELM_TEMPLATE_FLAGS) \
+		| "$(KUBECONFORM)" $(KUBECONFORM_FLAGS) -
+	@for values in "$(CHART_DIR)"/ci/*-values.yaml; do \
+		echo "==> kubeconform: $(CHART_DIR) ($$values)"; \
+		"$(HELM)" template "$(CHART_RELEASE)" "$(CHART_DIR)" $(HELM_TEMPLATE_FLAGS) \
+			--values "$$values" | "$(KUBECONFORM)" $(KUBECONFORM_FLAGS) - || exit 1; \
+	done
+
+.PHONY: installer-kubeconform
+installer-kubeconform: build-installer kubeconform ## Validate dist/install.yaml against the pinned Kubernetes version.
+	@echo "==> kubeconform: dist/install.yaml, Kubernetes $(KUBECONFORM_K8S_VERSION)"
+	"$(KUBECONFORM)" $(KUBECONFORM_FLAGS) dist/install.yaml
+
+.PHONY: verify-packaging
+verify-packaging: helm-lint helm-kubeconform installer-kubeconform ## Lint and validate both install paths (chart + dist/install.yaml).
 
 ##@ Deployment
 
@@ -354,6 +509,63 @@ deploy-e2e: manifests kustomize ## Deploy the controller with the e2e overlay. U
 undeploy-e2e: kustomize ## Remove the controller installed by deploy-e2e. Used by test-e2e.
 	"$(KUSTOMIZE)" build test/e2e/manifests/operator | "$(KUBECTL)" delete --ignore-not-found=true -f -
 
+# The Helm install path the e2e suite smokes (E2E_INSTALL=helm).
+#
+# The three steps ahead of `helm upgrade --install` are the real user path, not
+# test scaffolding: Helm's --create-namespace cannot label a namespace, and the
+# chart deliberately never templates a password, so both are the installer's job.
+# Doing them here rather than after the install matters — the namespace is
+# `restricted` *before* the manager pod is ever admitted, so a chart that violated
+# Pod Security would fail this deploy instead of slipping in ahead of the label.
+E2E_HELM_VALUES ?= test/e2e/manifests/helm-values.yaml
+# The password is the same placeholder config/manager ships, so both install paths
+# hand the suite's ClickHouse fixture an identical credential.
+E2E_CH_PASSWORD ?= changeme
+
+.PHONY: deploy-e2e-helm
+deploy-e2e-helm: helm helm-sync ## Install the operator with the Helm chart, e2e values. Used by test-e2e.
+	"$(KUBECTL)" create namespace $(CHART_NAMESPACE) --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	"$(KUBECTL)" label namespace $(CHART_NAMESPACE) pod-security.kubernetes.io/enforce=restricted --overwrite
+	"$(KUBECTL)" create secret generic kubestream-clickhouse-credentials \
+		--namespace $(CHART_NAMESPACE) --from-literal=password=$(E2E_CH_PASSWORD) \
+		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+	"$(HELM)" upgrade --install $(CHART_RELEASE) "$(CHART_DIR)" \
+		--namespace $(CHART_NAMESPACE) --values $(E2E_HELM_VALUES) --wait --timeout 5m
+
+.PHONY: undeploy-e2e-helm
+undeploy-e2e-helm: helm ## Remove the Helm-installed controller. Used by test-e2e.
+	@# The CRDs are left behind: Helm never deletes what it installed from crds/,
+	@# and pretending otherwise here would hide that from anyone reading this as
+	@# documentation of the uninstall path.
+	-"$(HELM)" uninstall $(CHART_RELEASE) --namespace $(CHART_NAMESPACE) --wait
+	-"$(KUBECTL)" delete namespace $(CHART_NAMESPACE) --ignore-not-found=true
+
+# The single-file install path the e2e suite smokes (E2E_INSTALL=installer):
+# exactly what a user gets from `kubectl apply -f dist/install.yaml`, built here
+# against the image the suite side-loads.
+#
+# The one delta is --ch-auto-create-schema, appended after the apply. The shipped
+# manifest does not carry it (the operator runs no DDL uninvited), and the suite
+# needs the schema to reach a freshly-started ClickHouse; a post-apply patch keeps
+# that delta visible instead of burying it in a second overlay that would then
+# drift from the artifact under test.
+.PHONY: deploy-e2e-installer
+deploy-e2e-installer: kustomize ## Install the operator from dist/install.yaml. Used by test-e2e.
+	$(MAKE) build-installer INSTALLER_IMG=$(E2E_INSTALLER_IMG)
+	"$(KUBECTL)" apply -f dist/install.yaml
+	"$(KUBECTL)" patch deployment kubestream-controller-manager -n $(CHART_NAMESPACE) --type=json \
+		-p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--ch-auto-create-schema"}]'
+
+.PHONY: undeploy-e2e-installer
+undeploy-e2e-installer: ## Remove the controller installed from dist/install.yaml. Used by test-e2e.
+	"$(KUBECTL)" delete --ignore-not-found=true -f dist/install.yaml
+
+# The image the installer smoke pins. It must match the tag test/e2e builds and
+# side-loads into Kind (managerImage in test/e2e/e2e_suite_test.go), for the same
+# reason the e2e kustomize overlay pins one: a manifest naming an image the node
+# does not have would sit in ImagePullBackOff, not fail.
+E2E_INSTALLER_IMG ?= example.com/kubestream:v0.0.1
+
 # The chaos overlay is the same shape as the e2e one (see
 # test/chaos/manifests/operator/kustomization.yaml). The two exist separately so
 # each suite can evolve its own fixtures without silently changing the other's.
@@ -379,10 +591,18 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+# Helm and kubeconform are bootstrapped into bin/ like every other tool here,
+# through `go install` — both are Go programs, so the packaging targets and the
+# chart tests need no separately-provisioned toolchain on a developer machine or
+# in CI.
+HELM ?= $(LOCALBIN)/helm
+KUBECONFORM ?= $(LOCALBIN)/kubeconform
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
+HELM_VERSION ?= v3.21.3
+KUBECONFORM_VERSION ?= v0.8.0
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -417,6 +637,16 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
+
+.PHONY: helm
+helm: $(HELM) ## Download helm locally if necessary.
+$(HELM): $(LOCALBIN)
+	$(call go-install-tool,$(HELM),helm.sh/helm/v3/cmd/helm,$(HELM_VERSION))
+
+.PHONY: kubeconform
+kubeconform: $(KUBECONFORM) ## Download kubeconform locally if necessary.
+$(KUBECONFORM): $(LOCALBIN)
+	$(call go-install-tool,$(KUBECONFORM),github.com/yannh/kubeconform/cmd/kubeconform,$(KUBECONFORM_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

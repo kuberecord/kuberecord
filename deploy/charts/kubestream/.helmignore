@@ -1,0 +1,17 @@
+# Patterns to ignore when building a chart package.
+#
+# Note what is *not* here: files/ is packaged, because the watch presets under
+# files/presets/ are read at render time by templates/rbac/watcher-presets.yaml.
+# ci/ is likewise packaged; it is small, and shipping the values files a release
+# was linted with makes them reproducible from the chart alone.
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.project
+.idea/
+.vscode/

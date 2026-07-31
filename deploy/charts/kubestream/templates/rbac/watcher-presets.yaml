@@ -1,0 +1,41 @@
+{{- if .Values.rbac.create }}
+{{- /*
+Watch presets, one ClusterRole per enabled entry of `rbac.presets`.
+
+The rules are not written here: each preset's body is read from
+files/presets/<name>.yaml, which `make helm-sync` copies verbatim from
+config/rbac/presets/. That indirection exists so the two install paths cannot
+disagree about what a preset grants — there is one definition of
+"core-workloads", and test/chart fails if the chart's copy has drifted from it.
+Only the object's name and labels are the chart's own, and the name is taken from
+the source file too, so a Helm-installed `kubestream-watcher-networking` is the
+same object a `kubectl apply -f config/rbac/presets/networking.yaml` would
+aggregate.
+
+Enabling a preset here is exactly equivalent to applying that file by hand; both
+are picked up by the aggregated watcher role by label, with no restart.
+*/ -}}
+{{- range $preset, $enabled := .Values.rbac.presets }}
+{{- if $enabled }}
+{{- $path := printf "files/presets/%s.yaml" $preset }}
+{{- $raw := $.Files.Get $path }}
+{{- if not $raw }}
+{{- fail (printf "kubestream: rbac.presets.%s is enabled but the chart ships no %s — check the name against config/rbac/presets/, or run `make helm-sync` if you added one" $preset $path) }}
+{{- end }}
+{{- $parsed := fromYaml $raw }}
+{{- if not $parsed.rules }}
+{{- fail (printf "kubestream: %s carries no rules — the chart's copy is stale or malformed; run `make helm-sync`" $path) }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubestream.fullname" $ }}-{{ $parsed.metadata.name }}
+  labels:
+    {{- include "kubestream.labels" $ | nindent 4 }}
+    kubestream.io/aggregate-to-watcher: "true"
+rules:
+  {{- toYaml $parsed.rules | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}

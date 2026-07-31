@@ -8,6 +8,39 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
 ### Added
 
+- **A Helm chart** (`deploy/charts/kubestream`) and a **committed, versioned
+  `dist/install.yaml`**, alongside the existing kustomize path. All three install
+  *the same operator*: the chart renders the same object names as
+  `kustomize build config/default`, and `test/chart` asserts that object by
+  object — every Role, ClusterRole and binding compared rule for rule, plus the
+  manager's arguments, environment, probes and security contexts. That is what
+  lets the Phase 1 acceptance suite run against any of them unmodified:
+  `E2E_INSTALL=kustomize|helm|installer` changes how the operator is installed and
+  nothing else, and `make test-e2e-helm` / `make test-e2e-installer` run the
+  lifecycle scenario against the two new paths (both in CI, on their own Kind
+  clusters).
+  Chart values cover the image (tag or digest), resources, replicas and leader
+  election, the metrics endpoint, **which watch presets to install** (a boolean
+  per preset, `core-workloads` on by default), extra labels, arbitrary manager
+  flags and environment, pod placement, and an optional starter `ClickHouseSink`
+  behind `createDefaultSink` (default `false`). The chart **never** creates or
+  templates a Secret — a password given as a value would live in the release's
+  stored manifest and in every `helm get values` — so sink credentials remain the
+  installer's to create. Every value is documented in
+  `deploy/charts/kubestream/README.md`.
+  The chart's `crds/` and `files/presets/` are generated copies of
+  `config/crd/bases/` and `config/rbac/presets/` (Helm requires the first inside
+  the chart; the preset templates read the second at render time).
+  `make helm-sync` refreshes them and a test fails if they are stale, so a preset
+  cannot mean two different things depending on how you installed.
+- Packaging targets: `make helm-lint` (`helm lint --strict`, default values and
+  both `ci/` values files), `make helm-kubeconform` (`helm template` piped through
+  kubeconform at the Kubernetes version the repo already pins for envtest),
+  `make installer-kubeconform`, `make helm-template`, and `make verify-packaging`
+  which runs the lot. `helm` and `kubeconform` are bootstrapped into `bin/` by the
+  Makefile like every other tool, so `make test` — which now runs the chart tests
+  — needs nothing provisioned.
+
 - **`Checkpoint` rows** — the `event_type` the schema reserved now ships. A
   `Checkpoint` is a `Modified` that also carries the full state, so
   reconstructing "what did this object look like at time T?" replays a bounded
@@ -53,6 +86,13 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 - `test/utils.GetProjectDir` finds the module root by walking up to `go.mod`
   rather than stripping the literal `/test/e2e` from the working directory, which
   resolved to the wrong place for any suite outside that one directory.
+- `make build-installer` applies its image override through a throwaway overlay in
+  `dist/` instead of `kustomize edit set image` inside `config/manager`. Editing
+  the committed base rewrote the manager image's *name* there, and both the e2e and
+  the chaos overlays select that image by the name `controller` — so building an
+  installer for a real registry would have silently stopped those overlays from
+  matching, leaving each suite to run whatever image the base then pinned. The
+  target's output is unchanged, and it no longer dirties the working tree.
 
 ## Unreleased — Phase 1: the two-tier CRD architecture
 

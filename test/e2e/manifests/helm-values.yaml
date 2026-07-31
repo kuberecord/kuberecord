@@ -1,0 +1,24 @@
+# The chart values the e2e suite installs with (E2E_INSTALL=helm).
+#
+# It is the chart's *defaults* plus exactly two deltas, mirroring the e2e kustomize
+# overlay one for one so the suite tests the shipped chart rather than a parallel
+# configuration that could drift from it:
+#
+#   1. the image is pinned to the tag the suite builds and side-loads into Kind
+#      (managerImage in e2e_suite_test.go — these two must agree);
+#   2. --ch-auto-create-schema is passed, which is how the acceptance criteria
+#      allow the schema to reach a freshly-started ClickHouse. The flag is off by
+#      default (the operator runs no DDL uninvited), so passing it here also proves
+#      the chart's extraArgs pass-through reaches the manager's command line.
+#
+# Everything else — the namespace, the `restricted` Pod Security label and the
+# credentials Secret — is created by `make deploy-e2e-helm` before the install,
+# because that is the real user path: Helm cannot label a namespace it creates, and
+# the chart deliberately never templates a password.
+image:
+  repository: example.com/kubestream
+  tag: v0.0.1
+  pullPolicy: IfNotPresent
+
+extraArgs:
+  - --ch-auto-create-schema

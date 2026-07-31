@@ -1,0 +1,60 @@
+{{- if and .Values.rbac.create .Values.leaderElection.enabled }}
+# Leader election, and only that: the lease the operator holds while it is the
+# active instance. Rendered only when leaderElection.enabled is true, because with
+# the flag off these are permissions no code path uses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kubestream.fullname" . }}-leader-election-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubestream.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kubestream.fullname" . }}-leader-election-rolebinding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubestream.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kubestream.fullname" . }}-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kubestream.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

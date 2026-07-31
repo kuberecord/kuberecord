@@ -281,12 +281,35 @@ The operator is configured entirely through custom resources: it boots healthy a
 
 ### 1. Install the CRDs and the operator
 
+Three install paths, all installing the same operator — the same object names, the
+same permissions, the same container arguments. `test/chart` asserts that
+equivalence object by object, and the acceptance suite runs against each of them
+unmodified.
+
+**Helm** ([chart README](deploy/charts/kubestream/README.md) documents every value):
+
+```sh
+helm install kubestream deploy/charts/kubestream \
+  --namespace kubestream-system --create-namespace \
+  --set clusterID=prod-eu-west-1
+```
+
+**A single manifest** — [`dist/install.yaml`](dist/install.yaml) is committed and
+versioned; `make build-installer` reproduces it, and `INSTALLER_IMG=<image>` points
+it at your own build:
+
+```sh
+kubectl apply -f dist/install.yaml
+```
+
+**Kustomize**, which is also the development path:
+
 ```sh
 make docker-build docker-push IMG=<some-registry>/kubestream:tag
 make deploy IMG=<some-registry>/kubestream:tag       # CRDs + operator
 ```
 
-`make install` installs the [CRDs](#custom-resources-kubestreamiov1alpha1) alone, which is enough to run the operator locally with `make run`. Set `CLUSTER_ID` on the Deployment (`config/manager/manager.yaml`) to something that identifies this cluster — it is stamped on every row. At this point:
+`make install` installs the [CRDs](#custom-resources-kubestreamiov1alpha1) alone, which is enough to run the operator locally with `make run`. Whichever path you take, set the cluster identifier — `clusterID` for Helm, `CLUSTER_ID` on the Deployment (`config/manager/manager.yaml`) otherwise — to something that identifies this cluster, because it is stamped on every row and rows already written keep the old value. At this point:
 
 ```sh
 kubectl -n kubestream-system get deploy kubestream-controller-manager   # Running, ready, streaming nothing
@@ -347,6 +370,11 @@ kubectl apply -f config/samples/kubestream.io_v1alpha1_streamrule.yaml
 kubectl get streamrule -A
 ```
 
+A Helm install picks its presets by value — `--set rbac.presets.networking=true` is
+exactly equivalent to applying that file, since aggregation is by label — but
+either way the grant can be added to a live cluster with no restart and no
+upgrade.
+
 ```yaml
 apiVersion: kubestream.io/v1alpha1
 kind: StreamRule
@@ -386,9 +414,17 @@ More query recipes, and the meaning of every column, are in [`docs/SCHEMA.md`](d
 ### Uninstalling
 
 ```sh
-make undeploy   # operator + CRDs
-make uninstall  # CRDs only
+helm uninstall kubestream -n kubestream-system   # Helm install (leaves the CRDs — see below)
+kubectl delete -f dist/install.yaml              # single-manifest install
+make undeploy                                    # kustomize install: operator + CRDs
+make uninstall                                   # CRDs only
 ```
+
+Helm never deletes what it installed from a chart's `crds/` directory, so a
+`helm uninstall` leaves the CRDs — and therefore your sinks and rules — behind;
+remove them explicitly if that is what you want. Deleting the CRDs deletes every
+CR of those kinds, but not a single row: the sink is the durable store
+(Invariant 6), and nothing in an uninstall touches ClickHouse.
 
 ## Local Development
 
@@ -405,6 +441,8 @@ make test-chaos       # run the failure-mode (chaos) suite on a Kind cluster (ne
 make bench-load       # run the synthetic-churn load harness on a named scale profile
                       #   PROFILE=small|medium|massive (see test/loadgen/profiles/);
                       #   PPROF_DIR=<dir> also writes heap/alloc profiles there
+make verify-packaging # lint the Helm chart and validate both install paths' manifests
+make build-installer  # regenerate the committed dist/install.yaml
 make lint             # run golangci-lint (see .golangci.yml for the enabled linters)
 make lint-fix         # run golangci-lint with --fix
 make fmt vet          # gofmt + go vet
@@ -434,6 +472,20 @@ Budget under 15 minutes; the RBAC scenario alone waits out the rule reconciler's
 two-minute resync on purpose, because self-healing without a restart is the
 property being tested. Override the Go test timeout with `E2E_TIMEOUT` and the
 cluster name with `KIND_CLUSTER`.
+
+The suite is install-path agnostic: `E2E_INSTALL=kustomize|helm|installer` chooses
+*how* the operator gets onto the cluster and changes nothing else, because all
+three paths produce the same object names.
+
+```sh
+make test-e2e-helm       # the happy path against `helm install deploy/charts/kubestream`
+make test-e2e-installer  # the happy path against `kubectl apply -f dist/install.yaml`
+```
+
+Both focus the lifecycle scenario (that is the packaging claim being tested, and it
+keeps each smoke to one scenario); `E2E_FOCUS=` runs the whole suite against the
+chosen path. Each gets its own Kind cluster, because `helm install` refuses to
+adopt objects another install path already owns.
 
 ### Chaos tests
 
