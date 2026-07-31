@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -167,6 +169,13 @@ type harness struct {
 	// Parker bridges "a sink is gone" back onto the rule reconcilers.
 	Parker *Parker
 
+	// RuleMetrics is the kubestream_rules gauge both rule reconcilers of this
+	// harness count into, on a registry private to the test. The process-wide
+	// instance would work too, but its counts would then span every test in the
+	// package running against the same apiserver.
+	RuleMetrics *RuleMetrics
+	metricsReg  *prometheus.Registry
+
 	// OperatorNamespace is where this test's credentials Secrets live.
 	OperatorNamespace string
 
@@ -237,7 +246,9 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		ProbeResults:      make(chan sink.ProbeResult, 16),
 		OperatorNamespace: operatorNamespace,
 		stopped:           make(chan struct{}),
+		metricsReg:        prometheus.NewRegistry(),
 	}
+	h.RuleMetrics = NewRuleMetrics(h.metricsReg)
 
 	buildConfig := opts.buildConfig
 	if buildConfig == nil {
@@ -265,6 +276,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		Resolver:     watch.NewResolver(mgr.GetRESTMapper()),
 		Access:       h.Reviewer,
 		ResyncPeriod: opts.resyncPeriod,
+		Metrics:      h.RuleMetrics,
 	}
 	namespaced := NewStreamRuleReconciler(base)
 	if err := namespaced.SetupWithManager(mgr); err != nil {
@@ -480,6 +492,23 @@ func (h *harness) waitForTargets(ruleKey string, want []string) {
 	waitFor(h.t, fmt.Sprintf("rule %q targets %v", ruleKey, want), func() (bool, string) {
 		got := h.targetsFor(ruleKey)
 		return slicesEqual(got, want), fmt.Sprintf("%v", got)
+	})
+}
+
+// waitForReadyGauge blocks until kubestream_rules{condition="Ready",status} reaches
+// want. It polls rather than reading once because the gauge is published by a
+// reconcile that has to happen first, exactly like every other assertion here.
+//
+// The roll-up condition is the only one asserted through the harness: it is the
+// one every rule carries and the one the shipped alert is written against. The
+// per-condition arithmetic is covered against a bare RuleMetrics in
+// metrics_test.go, where it needs no apiserver.
+func (h *harness) waitForReadyGauge(status string, want float64) {
+	h.t.Helper()
+	series := fmt.Sprintf("kubestream_rules{condition=%q,status=%q}", v1alpha1.ConditionReady, status)
+	waitFor(h.t, fmt.Sprintf("%s = %v", series, want), func() (bool, string) {
+		got := testutil.ToFloat64(h.RuleMetrics.rules.WithLabelValues(v1alpha1.ConditionReady, status))
+		return got == want, fmt.Sprintf("%v", got)
 	})
 }
 

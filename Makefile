@@ -471,6 +471,17 @@ installer-kubeconform: build-installer kubeconform ## Validate dist/install.yaml
 .PHONY: verify-packaging
 verify-packaging: helm-lint helm-kubeconform installer-kubeconform ## Lint and validate both install paths (chart + dist/install.yaml).
 
+# The shipped dashboard and alert rules (Task 2.5). test/observability already runs
+# under `make test` — it validates both artifacts against their JSON Schemas and
+# checks that every metric they query is one the operator's collectors declare.
+# What this target adds is promtool: whether the PromQL actually parses is a
+# question only Prometheus's own checker can answer, and exporting PROMTOOL turns
+# that sub-check from a skip into a requirement.
+.PHONY: verify-observability
+verify-observability: promtool ## Validate deploy/grafana and deploy/prometheus, including `promtool check rules`.
+	@echo "==> validating the dashboard and alert rules (promtool: $(PROMTOOL))"
+	PROMTOOL="$(PROMTOOL)" go test ./test/observability/... -count=1
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -597,12 +608,21 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 # in CI.
 HELM ?= $(LOCALBIN)/helm
 KUBECONFORM ?= $(LOCALBIN)/kubeconform
+# promtool is the one tool here that is not `go install`-able: the Prometheus
+# module carries replace directives, which Go refuses to honour for a package
+# installed from outside its own module. It is fetched from the release tarball
+# instead — see the promtool target.
+PROMTOOL ?= $(LOCALBIN)/promtool
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
 HELM_VERSION ?= v3.21.3
 KUBECONFORM_VERSION ?= v0.8.0
+# The Prometheus *release* version, which is what the download URL is built from
+# (the Go module version of the same release reads v0.313.2 — the repository never
+# adopted a /v3 module path — but no Go path is involved here).
+PROMTOOL_VERSION ?= 3.13.2
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -647,6 +667,30 @@ $(HELM): $(LOCALBIN)
 kubeconform: $(KUBECONFORM) ## Download kubeconform locally if necessary.
 $(KUBECONFORM): $(LOCALBIN)
 	$(call go-install-tool,$(KUBECONFORM),github.com/yannh/kubeconform/cmd/kubeconform,$(KUBECONFORM_VERSION))
+
+# promtool is extracted from the official Prometheus release archive rather than
+# `go install`ed, because the Prometheus module's replace directives make it
+# uninstallable as a package. The version-suffixed binary and the symlink follow
+# the same convention as go-install-tool, so switching PROMTOOL_VERSION re-fetches
+# rather than silently keeping the old binary.
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool locally if necessary.
+$(PROMTOOL): $(LOCALBIN)
+	@[ -f "$(PROMTOOL)-$(PROMTOOL_VERSION)" ] && \
+		[ "$$(readlink -- "$(PROMTOOL)" 2>/dev/null)" = "$(PROMTOOL)-$(PROMTOOL_VERSION)" ] || { \
+	set -e; \
+	os=$$(go env GOOS); arch=$$(go env GOARCH); \
+	archive="prometheus-$(PROMTOOL_VERSION).$$os-$$arch"; \
+	url="https://github.com/prometheus/prometheus/releases/download/v$(PROMTOOL_VERSION)/$$archive.tar.gz"; \
+	echo "Downloading $$url"; \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	curl -fsSL "$$url" | tar -xzf - -C "$$tmp" "$$archive/promtool"; \
+	rm -f "$(PROMTOOL)"; \
+	mv "$$tmp/$$archive/promtool" "$(PROMTOOL)-$(PROMTOOL_VERSION)"; \
+	chmod +x "$(PROMTOOL)-$(PROMTOOL_VERSION)"; \
+	} ;\
+	ln -sf "$$(realpath "$(PROMTOOL)-$(PROMTOOL_VERSION)")" "$(PROMTOOL)"
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

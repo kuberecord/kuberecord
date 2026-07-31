@@ -1,0 +1,707 @@
+{
+  "uid": "kubestream-operator-health",
+  "title": "kubestream — Operator Health",
+  "description": "Health of the kubestream operator itself: how saturated each sink's hand-off queue is, whether writes are settling, how well batches coalesce, and which rules and scopes are not serving. Built entirely on the metrics the operator exports on --metrics-bind-address; see docs/OPERATING.md.",
+  "tags": ["kubestream", "operator", "clickhouse"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "prometheus",
+        "description": "The Prometheus that scrapes the operator's metrics endpoint.",
+        "hide": 0,
+        "regex": "",
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "sink",
+        "label": "Sink",
+        "description": "Which ClickHouseSink to chart. One operator can serve several, and every write-path series is labelled by sink so a backend falling behind is attributable to that backend.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(kubestream_write_queue_capacity, sink)",
+        "query": {
+          "qryType": 1,
+          "query": "label_values(kubestream_write_queue_capacity, sink)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Write queue depth vs capacity",
+      "description": "Depth is how many jobs are buffered in a sink's bounded hand-off queue; capacity is the ceiling. The gap between the two is the operator's remaining headroom, and depth converging on capacity is the earliest warning that ClickHouse cannot keep up with the observed change rate — it precedes enqueue blocking, which precedes enqueue timeouts and dropped throughput. Capacity is drawn as a dashed line because it only moves when a sink is reconfigured.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*capacity.*"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [10, 10],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "kubestream_write_queue_depth{sink=~\"$sink\"}",
+          "legendFormat": "{{sink}} depth"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "kubestream_write_queue_capacity{sink=~\"$sink\"}",
+          "legendFormat": "{{sink}} capacity"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Write outcomes",
+      "description": "Settled write jobs per second, split by outcome. A job is counted exactly once, when it settles — so a write that succeeded after five retries appears here once, as a success. Any sustained `failed` rate means rows are being lost to the sink's retry budget and is what the KubestreamWriteFailures alert fires on; a `success` rate that falls without a matching `failed` rate is a throughput dip, not an error.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "wps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*failed.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (sink, outcome) (rate(kubestream_writes_total{sink=~\"$sink\"}[5m]))",
+          "legendFormat": "{{sink}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Write latency p99",
+      "description": "The 99th percentile of a job's time from first attempt to final settle, retries included. This is the sink's responsiveness as the pipeline experiences it, not the latency of a single INSERT: a p99 that climbs while the failure rate stays at zero is a backend that is slow but still accepting, which is exactly the condition that fills the hand-off queue. p50 is drawn alongside so a long tail is distinguishable from a uniform slowdown.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kubestream_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "legendFormat": "{{sink}} p99"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.50, sum by (le, sink) (rate(kubestream_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "legendFormat": "{{sink}} p50"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Retry rate",
+      "description": "Write attempts beyond the first, per second. Retries are invisible in the outcome panel — a job that succeeded on its fourth attempt counts there as one success — so this is the only place a retry storm shows up before it turns into failures. A nonzero rate against a healthy success rate means the backend is flapping, and each retried job is holding a queue slot for the whole of its backoff.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (sink) (rate(kubestream_write_retry_attempts_total{sink=~\"$sink\"}[5m]))",
+          "legendFormat": "{{sink}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "heatmap",
+      "title": "Batch size distribution",
+      "description": "Rows per flushed insert batch, observed once per flush. This is how well the batcher is coalescing: mass near the configured batchMaxRows means full, efficient inserts, while mass near 1 means trickle traffic is flushing on the batchMaxWait timer instead — harmless on a quiet cluster, and a tuning signal on a busy one, where it means ClickHouse is being handed many small parts to merge.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {},
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "reverse": false,
+          "exponent": 0.5,
+          "fill": "dark-orange"
+        },
+        "exemplars": {
+          "color": "rgba(255,0,255,0.7)"
+        },
+        "filterValues": {
+          "le": 1e-9
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto",
+          "value": "flushes/sec"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": true
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "unit": "short",
+          "reverse": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "format": "heatmap",
+          "expr": "sum by (le) (rate(kubestream_write_batch_rows_bucket{sink=~\"$sink\"}[5m]))",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Enqueue backpressure",
+      "description": "The hot path's own view of saturation: p99 of the time Enqueue spent waiting for room in the queue, and the rate at which that wait gave up. Blocking above zero means pipeline workers are being paid for in latency; a nonzero timeout rate means the queue stayed full for the whole enqueue timeout and work is being shed. The KubestreamEnqueueTimeouts alert fires on the second series, and this panel is where an operator lands to see how long the first one had been climbing beforehand.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*timeouts.*"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kubestream_enqueue_block_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "legendFormat": "{{sink}} block p99"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum by (sink) (rate(kubestream_enqueue_timeouts_total{sink=~\"$sink\"}[5m]))",
+          "legendFormat": "{{sink}} timeouts"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Degraded rules",
+      "description": "How many StreamRules and ClusterStreamRules currently report Ready=False. A degraded rule is not streaming what its author asked for — a missing RBAC grant, a kind that does not resolve, a policy denial, or a sink that is not Ready — and the operator will not crash-loop over it, so this count is the only fleet-wide signal that one exists. Any value above zero deserves a `kubectl get streamrules,clusterstreamrules -A` to find which.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum(kubestream_rules{condition=\"Ready\",status=\"false\"})",
+          "legendFormat": "degraded"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "SafeMode scopes",
+      "description": "How many (sink, scope) pairs are still warming their dedup baseline from sink history. While a scope is in SafeMode its cache misses are recorded as Snapshot rather than as Added, so nothing is mistaken for a creation. A handful right after a restart or a new rule is normal and clears within seconds; a count that stays up means warm-up is not completing — usually a sink that cannot be read back.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true,
+          "expr": "sum(kubestream_safe_mode{sink=~\"$sink\"})",
+          "legendFormat": "warming"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "SafeMode scopes — which ones",
+      "description": "The scopes behind the count to its left, one row per (sink, group, kind, namespace) pair still warming. A cluster-scoped target reports an empty namespace. This is the panel to read when the SafeMode count refuses to fall: the kind and namespace name the rule whose warm-up is stuck.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": ["sum"],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "pod": true,
+              "service": true
+            },
+            "renameByName": {
+              "Value": "warming",
+              "group": "API group",
+              "kind": "Kind",
+              "namespace": "Namespace",
+              "sink": "Sink"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "expr": "kubestream_safe_mode{sink=~\"$sink\"} == 1",
+          "legendFormat": "__auto"
+        }
+      ]
+    }
+  ]
+}

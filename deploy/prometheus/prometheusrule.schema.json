@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kubestream.io/schemas/prometheusrule.schema.json",
+  "title": "PrometheusRule (kubestream subset)",
+  "description": "Structural contract for the alert rules shipped in deploy/prometheus/. It covers the prometheus-operator PrometheusRule envelope and the Prometheus rule-file grammar inside .spec, restricted to alerting rules — kubestream ships no recording rules, and a recording rule that appeared here without a deliberate decision would be a mistake, not a feature. Whether the PromQL parses is promtool's job (make verify-observability); this file is about shape.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "const": "monitoring.coreos.com/v1"
+    },
+    "kind": {
+      "const": "PrometheusRule"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "labels"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "labels": {
+          "description": "Required because a PrometheusRule with no labels matches no Prometheus: the operator selects rules by label, so an unlabelled rule file installs cleanly and is silently never evaluated.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["groups"],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/group"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "duration": {
+      "description": "A Prometheus duration: a positive integer and a unit.",
+      "type": "string",
+      "pattern": "^[0-9]+(ms|[smhdwy])$"
+    },
+    "group": {
+      "type": "object",
+      "required": ["name", "interval", "rules"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "interval": {
+          "$ref": "#/$defs/duration"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/alertingRule"
+          }
+        }
+      }
+    },
+    "alertingRule": {
+      "type": "object",
+      "required": ["alert", "expr", "for", "labels", "annotations"],
+      "properties": {
+        "alert": {
+          "description": "CamelCase, like the alerts in the upstream kubernetes-mixin, so a fired alert is greppable and reads as a sentence in a notification.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]+$"
+        },
+        "expr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "for": {
+          "description": "Required, never omitted. An alert with no `for` fires on a single evaluation, which for every signal here would page on a scrape-length blip.",
+          "$ref": "#/$defs/duration"
+        },
+        "labels": {
+          "type": "object",
+          "required": ["severity"],
+          "properties": {
+            "severity": {
+              "enum": ["critical", "warning", "info"]
+            }
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "required": ["summary", "description", "runbook_url"],
+          "properties": {
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "description": "Says what is happening, what it costs, and what to look at next. An alert that only restates its own expression is one an on-call engineer has to reverse-engineer at 3am.",
+              "type": "string",
+              "minLength": 1
+            },
+            "runbook_url": {
+              "type": "string",
+              "pattern": "^https://"
+            }
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

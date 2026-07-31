@@ -566,6 +566,47 @@ func TestRuleDeletionWithdrawsTargets(t *testing.T) {
 	h.waitForTargets(ruleKey, nil)
 }
 
+// TestRuleGaugeCountsDegradedRules is the metric half of the "degraded rules"
+// panel and the Ready=False alert: the count the dashboard reads has to follow a
+// real rule through degrading, recovering and being deleted.
+//
+// It runs against the reconcilers rather than against RuleMetrics directly
+// because the interesting part is the wiring — a gauge that is never observed, or
+// never forgotten, is unit-test-green and operationally useless.
+func TestRuleGaugeCountsDegradedRules(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+	sinkName := uniqueName("gaugesink")
+	h.createReadySink(sinkName, v1alpha1.SinkPolicy{})
+
+	namespace := uniqueName("ns")
+	h.createNamespace(namespace, nil)
+
+	// A rule naming v1/Secret is refused outright (D8), which is the cheapest way
+	// to get a rule that is genuinely Ready=False rather than merely slow.
+	denied := h.newStreamRule(namespace, "denied", sinkName, resourceEntry("", "Secret"))
+	h.waitForRuleCondition(denied, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSecretsDenied)
+	h.waitForReadyGauge("false", 1)
+
+	// A healthy rule alongside it counts into the other series, and does not
+	// disturb the degraded count.
+	healthy := h.newStreamRule(namespace, "healthy", sinkName, resourceEntry("", "ConfigMap"))
+	h.waitForRuleCondition(healthy, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	h.waitForReadyGauge("true", 1)
+	h.waitForReadyGauge("false", 1)
+
+	// Deleting the degraded rule is how an operator makes the alert stop; if the
+	// count survived the delete, it never would.
+	var live v1alpha1.StreamRule
+	if err := h.Client.Get(context.Background(), client.ObjectKeyFromObject(denied), &live); err != nil {
+		t.Fatalf("get the denied rule: %v", err)
+	}
+	if err := h.Client.Delete(context.Background(), &live); err != nil {
+		t.Fatalf("delete the denied rule: %v", err)
+	}
+	h.waitForReadyGauge("false", 0)
+	h.waitForReadyGauge("true", 1)
+}
+
 // TestParkerWakesDependentRules covers the sink runtime's park callback end to end: a
 // rule key handed back by the runtime must turn into a reconcile of that exact rule.
 func TestParkerWakesDependentRules(t *testing.T) {

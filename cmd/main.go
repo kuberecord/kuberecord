@@ -519,6 +519,10 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 		Registry: op.registry,
 		Resolver: watch.NewResolver(mgr.GetRESTMapper()),
 		Access:   clientset.AuthorizationV1().SelfSubjectAccessReviews(),
+		// One gauge for both rule kinds: it counts a set that spans them. Passed
+		// through the shared base value so the two reconcilers below cannot end up
+		// counting into two different instances.
+		Metrics: controller.RuleMetricsInstance(),
 	}
 	namespaced := controller.NewStreamRuleReconciler(base)
 	if err := namespaced.SetupWithManager(mgr); err != nil {

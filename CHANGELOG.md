@@ -8,6 +8,41 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
 ### Added
 
+- **An operator-health dashboard and sample alert rules.**
+  [`deploy/grafana/operator-health.json`](deploy/grafana/operator-health.json) is a
+  Grafana dashboard covering the whole write path — queue depth against capacity,
+  write outcomes, latency p99, batch-size distribution, retry rate, enqueue
+  backpressure — plus the two control-plane signals an operator needs: how many
+  rules are degraded and which scopes are still warming in SafeMode. It is pinned
+  to no particular Grafana or Prometheus: both the data source and the sink are
+  dashboard variables.
+  [`deploy/prometheus/alerts.yaml`](deploy/prometheus/alerts.yaml) is a
+  `PrometheusRule` with four alerts — queue over 80% capacity for 5m, any
+  failed-write rate for 10m, any rule `Ready=False` for 15m, any enqueue-timeout
+  rate for 5m — each carrying the reasoning for its threshold in a comment above
+  it. [`docs/OPERATING.md`](docs/OPERATING.md) is the page that ties them together:
+  every metric, every panel, and what to actually do when an alert fires.
+- **`kubestream_rules{condition,status}`** — a new gauge from the rule
+  reconcilers, counting how many `StreamRule`s and `ClusterStreamRule`s hold each
+  condition at each status. It is deliberately identity-free (it counts rules, it
+  does not name them: naming would make series cardinality a function of how many
+  rules a cluster defines, and `kubectl` answers "which one?" perfectly well), and
+  both rule kinds count into one series. Every `(condition, status)` series is
+  published at 0 before any rule is reconciled, so an alert written against
+  `status="false"` is well-defined from process start rather than starting its
+  clock the moment the first rule degrades.
+- `make verify-observability` validates both artifacts against JSON Schemas
+  shipped beside them, runs `promtool check rules` over the `PrometheusRule`'s
+  `.spec` (promtool is bootstrapped into `bin/` from the pinned Prometheus
+  release), and cross-checks every `kubestream_*` metric either file queries
+  against the set the operator's collectors actually declare — so renaming a
+  metric fails the build instead of quietly emptying a panel. The schema and
+  cross-check halves run under plain `make test`; a new `Observability` workflow
+  runs the full target in CI. Grafana publishes no stable, self-contained
+  dashboard JSON Schema, so `deploy/grafana/dashboard.schema.json` is a curated
+  subset written for this repository — a lint-grade check, documented as such in
+  `docs/OPERATING.md`.
+
 - **A Helm chart** (`deploy/charts/kubestream`) and a **committed, versioned
   `dist/install.yaml`**, alongside the existing kustomize path. All three install
   *the same operator*: the chart renders the same object names as

@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kubestream.io/schemas/grafana-dashboard.schema.json",
+  "title": "Grafana dashboard (kubestream subset)",
+  "description": "Structural contract for the dashboards shipped in deploy/grafana/. Grafana publishes no stable, self-contained JSON Schema for a dashboard — its own model is a Go/TypeScript type that changes shape between minor releases — so this is a deliberately curated subset: the fields a dashboard must get right to import cleanly and to stay reviewable, and nothing else. Unknown properties are allowed everywhere so a dashboard exported from a newer Grafana still validates; what is pinned is that the fields we do rely on exist and are well formed.",
+  "type": "object",
+  "required": [
+    "uid",
+    "title",
+    "description",
+    "schemaVersion",
+    "refresh",
+    "time",
+    "templating",
+    "panels"
+  ],
+  "properties": {
+    "uid": {
+      "description": "Stable identifier. Pinned in the file so re-importing updates the dashboard in place instead of creating a second copy, and so docs can deep-link to it.",
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]{1,40}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "timezone": {
+      "type": "string"
+    },
+    "editable": {
+      "type": "boolean"
+    },
+    "graphTooltip": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "schemaVersion": {
+      "description": "Grafana's own dashboard-model version. Floored at 36 (Grafana 9) because everything below it predates the panel options this dashboard uses.",
+      "type": "integer",
+      "minimum": 36
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "refresh": {
+      "type": "string",
+      "pattern": "^([0-9]+[smhd])?$"
+    },
+    "time": {
+      "type": "object",
+      "required": ["from", "to"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "annotations": {
+      "type": "object",
+      "required": ["list"],
+      "properties": {
+        "list": {
+          "type": "array"
+        }
+      }
+    },
+    "links": {
+      "type": "array"
+    },
+    "templating": {
+      "type": "object",
+      "required": ["list"],
+      "properties": {
+        "list": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/variable"
+          }
+        }
+      }
+    },
+    "panels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/panel"
+      }
+    }
+  },
+  "$defs": {
+    "datasourceRef": {
+      "description": "Every datasource reference goes through the dashboard's own datasource variable. A hard-coded uid would import as a broken panel on any Grafana but the one the dashboard was exported from.",
+      "type": "object",
+      "required": ["type", "uid"],
+      "properties": {
+        "type": {
+          "const": "prometheus"
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "gridPos": {
+      "type": "object",
+      "required": ["h", "w", "x", "y"],
+      "properties": {
+        "h": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "w": {
+          "description": "Grafana's grid is 24 columns wide.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "required": ["refId", "expr", "datasource"],
+      "properties": {
+        "refId": {
+          "type": "string",
+          "pattern": "^[A-Z]$"
+        },
+        "expr": {
+          "description": "PromQL. Non-empty here; that it parses, and that every metric it names is one the operator actually exports, is asserted by test/observability.",
+          "type": "string",
+          "minLength": 1
+        },
+        "datasource": {
+          "$ref": "#/$defs/datasourceRef"
+        },
+        "legendFormat": {
+          "type": "string"
+        },
+        "format": {
+          "enum": ["time_series", "table", "heatmap"]
+        },
+        "instant": {
+          "type": "boolean"
+        },
+        "range": {
+          "type": "boolean"
+        }
+      }
+    },
+    "panel": {
+      "type": "object",
+      "required": ["id", "type", "title", "description", "datasource", "gridPos", "targets"],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "enum": ["timeseries", "stat", "heatmap", "table", "gauge", "barchart", "row"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "description": "Required, not optional. A panel whose meaning is not written down is a panel an on-call operator has to guess at; the description is the panel's documentation and is where the 'why' of each metric lives.",
+          "type": "string",
+          "minLength": 1
+        },
+        "datasource": {
+          "$ref": "#/$defs/datasourceRef"
+        },
+        "gridPos": {
+          "$ref": "#/$defs/gridPos"
+        },
+        "fieldConfig": {
+          "type": "object",
+          "required": ["defaults", "overrides"],
+          "properties": {
+            "defaults": {
+              "type": "object"
+            },
+            "overrides": {
+              "type": "array"
+            }
+          }
+        },
+        "options": {
+          "type": "object"
+        },
+        "transformations": {
+          "type": "array"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/target"
+          }
+        }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "required": ["name", "type", "label"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "type": {
+          "enum": ["datasource", "query", "custom", "constant", "interval", "textbox", "adhoc"]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "hide": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    }
+  }
+}
