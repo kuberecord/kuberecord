@@ -129,6 +129,23 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   matching, leaving each suite to run whatever image the base then pinned. The
   target's output is unchanged, and it no longer dirties the working tree.
 
+### Fixed
+
+- **The `helm` and `kubeconform` pins no longer break every CI job that needs
+  them.** `helm.sh/helm/v3@v3.21.3` and `github.com/yannh/kubeconform@v0.8.0` both
+  declare `go 1.26`, one minor ahead of this module's own `go` directive. That is
+  normally invisible — Go just downloads a newer toolchain — but CI runs
+  `actions/setup-go` with `go-version-file: go.mod`, and that action also exports
+  `GOTOOLCHAIN=local`, which switches the automatic download off. `go install` then
+  refused outright, and the failure landed on the *bootstrap*, so it took down every
+  target that depends on either binary before a single test ran: `make test` (whose
+  prerequisites now include `helm`), `make verify-packaging`, and `make
+  test-e2e-helm`. The pins move back to `helm v3.21.0` and `kubeconform v0.7.0`, the
+  newest releases of each that still build under this module's Go version. The
+  ceiling is now written down beside the pins, because the failure cannot reproduce
+  on a machine that already has `bin/` populated or a newer Go on `$PATH` — which is
+  every developer machine, and is why it reached `main`.
+
 ## Unreleased — Phase 1: the two-tier CRD architecture
 
 ### Removed — BREAKING: all environment-variable configuration of *what* and *where*
