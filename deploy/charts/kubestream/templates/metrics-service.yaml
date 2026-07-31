@@ -1,0 +1,24 @@
+{{- if .Values.metrics.enabled }}
+# The metrics endpoint's Service. Named `<manager>-metrics-service` to match the
+# kustomize install, so a ServiceMonitor or scrape config written for one install
+# path works unchanged against the other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kubestream.managerName" . }}-metrics-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubestream.labels" . | nindent 4 }}
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ports:
+  - name: {{ if .Values.metrics.secure }}https{{ else }}http{{ end }}
+    port: {{ .Values.metrics.port }}
+    protocol: TCP
+    targetPort: {{ .Values.metrics.port }}
+  selector:
+    {{- include "kubestream.selectorLabels" . | nindent 4 }}
+{{- end }}

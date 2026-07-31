@@ -1,0 +1,101 @@
+# The two supported install paths (Task 2.4): the Helm chart and the versioned
+# single-file dist/install.yaml.
+#
+# Three jobs, cheapest first. The verify job needs no cluster and catches almost
+# everything — a chart that does not lint, a rendering the pinned Kubernetes
+# version would reject, a preset toggle that adds the wrong object, a committed
+# install manifest that no longer matches its sources. The two smoke jobs then
+# prove the thing lint cannot: that each path installs an operator that actually
+# streams, by running the Phase 1 happy path against it on a real Kind cluster.
+name: Install Paths
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  verify:
+    permissions:
+      contents: read
+    name: Lint and validate rendered manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      # helm, kubeconform, kustomize and controller-gen are all bootstrapped into
+      # bin/ by the Makefile itself, so there is nothing else to provision here.
+      - name: Lint the chart and validate both install paths
+        run: make verify-packaging
+
+      - name: Chart template tests
+        run: go test ./test/chart/ -v
+
+      # The committed dist/install.yaml is meant to be reproducible from its
+      # sources: `make build-installer` with no arguments must reproduce it byte
+      # for byte. A CRD or RBAC change that forgot to rebuild it fails here rather
+      # than shipping a manifest that installs an older operator than the code.
+      - name: dist/install.yaml is up to date
+        run: |
+          make build-installer
+          git diff --exit-code -- dist/install.yaml \
+            || { echo "::error::dist/install.yaml is stale — run 'make build-installer' and commit the result"; exit 1; }
+
+  smoke-helm:
+    permissions:
+      contents: read
+    name: helm install on Kind
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Run the e2e happy path against a Helm install
+        run: make test-e2e-helm
+
+  smoke-installer:
+    permissions:
+      contents: read
+    name: kubectl apply -f dist/install.yaml on Kind
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Run the e2e happy path against the install manifest
+        run: make test-e2e-installer

@@ -108,6 +108,23 @@ that file's comments say how to drop it or add the others. Commenting it out is
 supported and safe: the operator boots healthy with no watch rights at all and
 every rule reports `RBACGranted=False` until a preset arrives.
 
+A Helm install selects the same presets by value, one boolean each, with the same
+default:
+
+```sh
+helm upgrade kubestream deploy/charts/kubestream --namespace kubestream-system \
+  --reuse-values --set rbac.presets.networking=true
+```
+
+The chart renders each enabled preset from the very file listed above — it reads
+`config/rbac/presets/<name>.yaml` at render time, and a test fails if its packaged
+copy has drifted — so `--set rbac.presets.networking=true` and
+`kubectl apply -f config/rbac/presets/networking.yaml` grant exactly the same
+thing. Because aggregation is by label, the two also compose: a preset applied by
+hand is picked up by a Helm-installed operator, and neither needs a restart. Set
+`rbac.presets.core-workloads=false` for an install with no standing watch rights
+at all.
+
 `rbac-read` deserves a decision rather than a habit. Streaming role changes is
 kubestream's highest-value audit trail ("who was granted cluster-admin, and
 when?"), and it also means the cluster's full authorization graph, and every

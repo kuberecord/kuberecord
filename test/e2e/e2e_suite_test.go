@@ -118,10 +118,30 @@ const (
 	pollInterval = 2 * time.Second
 )
 
+// The install paths the suite can bring the operator up through. Which one runs
+// is chosen by E2E_INSTALL; the scenarios never learn which it was.
+//
+// All three produce the same object names — that is a property asserted
+// independently by test/chart, and the reason the Phase 1 scenarios below are
+// literally unmodified across them (Task 2.4). What each path proves is
+// different: kustomize is the development install, helm is the chart a user
+// installs from, and installer is the single committed dist/install.yaml.
+const (
+	installKustomize = "kustomize"
+	installHelm      = "helm"
+	installInstaller = "installer"
+)
+
 var (
 	// managerImage is the manager image built and side-loaded for this run. It
-	// must match the image the e2e kustomize overlay pins.
+	// must match the image the e2e kustomize overlay pins, the tag
+	// test/e2e/manifests/helm-values.yaml sets, and E2E_INSTALLER_IMG.
 	managerImage = "example.com/kubestream:v0.0.1"
+
+	// installMode is the install path under test, from E2E_INSTALL (default
+	// kustomize). Read once in BeforeSuite so an unknown value fails the run
+	// immediately rather than silently falling back to a path nobody asked for.
+	installMode = installKustomize
 
 	// chPassword is the ClickHouse password, read out of the operator's shipped
 	// credentials Secret in BeforeSuite so the fixture server and the sink are
@@ -144,6 +164,7 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	configureKubectlKubeRC()
+	resolveInstallMode()
 
 	By("building the manager image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
@@ -170,8 +191,9 @@ var _ = AfterSuite(func() {
 	deleteResourceQuietly("clickhousesink", sinkName, "")
 
 	By("undeploying the operator")
-	if out, err := utils.Run(exec.Command("make", "undeploy-e2e")); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup: undeploy-e2e: %v\n%s", err, out)
+	target := undeployTarget()
+	if out, err := utils.Run(exec.Command("make", target)); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "cleanup: %s: %v\n%s", target, err, out)
 	}
 
 	By("removing the ClickHouse fixture")
@@ -192,12 +214,56 @@ func configureKubectlKubeRC() {
 	}
 }
 
-// deployOperator installs CRDs, RBAC, the credentials Secret and the manager
-// from the e2e kustomize overlay (config/default plus a pinned image and
-// --ch-auto-create-schema), then waits for the Deployment to become available.
+// resolveInstallMode reads E2E_INSTALL and records which install path this run
+// exercises. An unrecognised value is a hard failure: silently defaulting would
+// mean a CI job named after the chart quietly testing the kustomize install.
+func resolveInstallMode() {
+	requested := os.Getenv("E2E_INSTALL")
+	if requested == "" {
+		requested = installKustomize
+	}
+	Expect(requested).To(BeElementOf(installKustomize, installHelm, installInstaller),
+		"E2E_INSTALL must be one of kustomize, helm or installer")
+	installMode = requested
+	_, _ = fmt.Fprintf(GinkgoWriter, "installing the operator via %q\n", installMode)
+}
+
+// deployTarget and undeployTarget map the install mode onto the Makefile targets
+// that own each path. The suite installs through make rather than by shelling out
+// to kubectl or helm itself so that what CI runs, what a developer runs and what
+// the README documents are one set of commands.
+func deployTarget() string {
+	switch installMode {
+	case installHelm:
+		return "deploy-e2e-helm"
+	case installInstaller:
+		return "deploy-e2e-installer"
+	default:
+		return "deploy-e2e"
+	}
+}
+
+func undeployTarget() string {
+	switch installMode {
+	case installHelm:
+		return "undeploy-e2e-helm"
+	case installInstaller:
+		return "undeploy-e2e-installer"
+	default:
+		return "undeploy-e2e"
+	}
+}
+
+// deployOperator installs the CRDs, the RBAC, the credentials Secret and the
+// manager through the selected install path, then waits for the Deployment to
+// become available.
+//
+// Every path lands on the same names — namespace kubestream-system, Deployment
+// kubestream-controller-manager, Secret kubestream-clickhouse-credentials — so
+// nothing past this function knows or cares which one ran.
 func deployOperator() {
-	By("deploying the operator with the e2e overlay")
-	out, err := utils.Run(exec.Command("make", "deploy-e2e"))
+	By(fmt.Sprintf("deploying the operator via %s", installMode))
+	out, err := utils.Run(exec.Command("make", deployTarget()))
 	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the operator: %s", out)
 
 	By("waiting for the controller-manager to become available")

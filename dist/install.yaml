@@ -1,0 +1,1363 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+    control-plane: controller-manager
+  name: kubestream-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: clickhousesinks.kubestream.io
+spec:
+  group: kubestream.io
+  names:
+    kind: ClickHouseSink
+    listKind: ClickHouseSinkList
+    plural: clickhousesinks
+    singular: clickhousesink
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .spec.connection.addr
+      name: ADDR
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ClickHouseSink declares one ClickHouse instance kubestream may write to.
+
+          It is cluster-scoped (D6) because rules in any namespace reference it by
+          name, and because a sink is infrastructure owned by the platform team rather
+          than by whoever owns the namespace a rule lives in. The password is the only
+          part not in this object; it lives in the Secret named by
+          spec.connection.credentialsSecretRef.
+
+          The ADDR printer column shows the full "host:port" from
+          spec.connection.addr: CRD printer columns are plain JSONPath with no string
+          functions, so the host cannot be split out declaratively.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ClickHouseSink.
+            properties:
+              connection:
+                description: Connection is how to reach ClickHouse.
+                properties:
+                  addr:
+                    description: |-
+                      Addr is the ClickHouse native-protocol endpoint as "host:port", e.g.
+                      "clickhouse.kubestream-system.svc:9000".
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef names the Secret holding this sink's password.
+                      Its namespace defaults to the operator's own namespace — see
+                      SecretReference.Namespace for why that default is a security boundary
+                      rather than a convenience.
+                    properties:
+                      name:
+                        description: Name is the Secret's name.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the Secret's namespace. Empty means the namespace the
+                          operator itself runs in.
+
+                          That default is a security property, not a convenience: the operator's
+                          aggregated ClusterRole grants Secret read access *only* in its own
+                          namespace (Task 1.9, D7). A cluster-scoped ClickHouseSink is editable by
+                          anyone with cluster-level write access to the CRD, so if this field
+                          could freely name any namespace, creating a sink would become a way to
+                          make the operator read a Secret its RBAC never intended to expose. Left
+                          empty, a sink can only ever reach credentials an administrator has
+                          deliberately placed alongside the operator.
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  database:
+                    default: kubestream
+                    description: Database is the ClickHouse database holding kubestream's
+                      tables.
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                  dialTimeout:
+                    default: 5s
+                    description: DialTimeout bounds establishing a connection to Addr.
+                    type: string
+                  readTimeout:
+                    default: 10s
+                    description: ReadTimeout bounds a single query's read phase.
+                    type: string
+                  username:
+                    default: default
+                    description: |-
+                      Username is the ClickHouse user the operator authenticates as. Its
+                      password comes from CredentialsSecretRef.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - addr
+                - credentialsSecretRef
+                type: object
+              policy:
+                description: Policy restricts what may be written to this sink.
+                properties:
+                  allowedGVKs:
+                    description: |-
+                      AllowedGVKs restricts which resource types may be streamed to this sink.
+
+                      An empty (or omitted) list allows everything *except* the hard deny-list
+                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      re-enable it. Deny is enforced in code, not merely in config, so the
+                      permissive default can never become a way to exfiltrate Secrets.
+                    items:
+                      description: |-
+                        GVKSelector matches a set of resource types for sink admission policy.
+
+                        It is a group/version plus a *list* of kinds (rather than a flat GVK list)
+                        because the common policy statement is "everything in this group" — spelled
+                        `kinds: ["*"]` — and enumerating every Kind of a large group by hand would
+                        both bloat the CR and go stale the moment a new Kind ships.
+                      properties:
+                        group:
+                          default: ""
+                          description: Group is the API group this selector admits.
+                            Empty means the core group.
+                          maxLength: 253
+                          pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                        kinds:
+                          description: |-
+                            Kinds are the admitted Kinds within group/version. The single entry `*`
+                            admits every Kind in that group/version.
+
+                            The list is a set: the API server rejects duplicate entries outright
+                            (`x-kubernetes-list-type: set`), which is both cheaper and stricter than
+                            an equivalent CEL uniqueness rule would be.
+                          items:
+                            maxLength: 63
+                            pattern: ^(\*|[A-Z][A-Za-z0-9]{0,62})$
+                            type: string
+                          maxItems: 128
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        version:
+                          description: Version is the API version this selector admits.
+                          maxLength: 63
+                          pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                          type: string
+                      required:
+                      - kinds
+                      - version
+                      type: object
+                    maxItems: 128
+                    type: array
+                type: object
+              writer:
+                description: Writer sizes the asynchronous write path for this sink.
+                properties:
+                  batchMaxRows:
+                    default: 1000
+                    description: |-
+                      BatchMaxRows is the row count at which a worker flushes its accumulated
+                      insert batch. Row-per-INSERT is ClickHouse's pathological write pattern,
+                      so the floor is 1 only to keep the knob honest, never as a recommended
+                      value; the ceiling of 100000 bounds the memory one worker can hold and
+                      the size of the batch a single failure can poison.
+                    format: int32
+                    maximum: 100000
+                    minimum: 1
+                    type: integer
+                  batchMaxWait:
+                    default: 1s
+                    description: |-
+                      BatchMaxWait is the longest a batch's first job waits for the batch to
+                      fill before it is flushed regardless. It is what keeps a quiet cluster's
+                      records from sitting in memory indefinitely behind an unmet row target.
+                    type: string
+                  checkpointEvery:
+                    default: 50
+                    description: |-
+                      CheckpointEvery is how many consecutive diff-only `Modified` rows this sink
+                      accepts for one object before the next one is written as a `Checkpoint` —
+                      a row carrying the full state *and* the diff.
+
+                      It is the knob that bounds replay cost. With diffs-only history,
+                      reconstructing "state at time T" means replaying every diff back to the
+                      object's last full row, which is unbounded for a long-lived object; a
+                      Checkpoint every N modifications caps that walk at N diffs (see
+                      docs/SCHEMA.md). It is per-sink because the trade — storage for query cost
+                      — belongs to whoever owns the ClickHouse instance and its analysts.
+
+                      `0` disables checkpointing entirely for this sink. The ceiling of 10000 is
+                      not a technical limit but an honesty one: a cadence beyond it is
+                      indistinguishable from disabling the feature while looking like it is on.
+                      A single diff that comes out larger than the object it describes is
+                      checkpointed regardless of the cadence — unless checkpointing is disabled.
+                    format: int32
+                    maximum: 10000
+                    minimum: 0
+                    type: integer
+                  drainTimeout:
+                    default: 15s
+                    description: |-
+                      DrainTimeout is the budget for flushing queued writes during graceful
+                      shutdown, before the connection is closed and any still-queued job is
+                      settled as failed.
+                    type: string
+                  enqueueTimeout:
+                    default: 2s
+                    description: |-
+                      EnqueueTimeout is how long Enqueue waits for queue room before returning
+                      an error. It is a backpressure signal, never a silent drop: the caller
+                      propagates the error so the pipeline's own requeue/backoff takes over.
+                    type: string
+                  queueSize:
+                    default: 5000
+                    description: |-
+                      QueueSize is the capacity, in jobs, of the async hand-off queue between
+                      pipeline workers and this sink's writers.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 1
+                    type: integer
+                  workers:
+                    default: 4
+                    description: |-
+                      Workers is how many goroutines drain the queue into ClickHouse. The
+                      upper bound is 64 because ClickHouse punishes high insert concurrency
+                      far more than it rewards it — past a few dozen concurrent inserters the
+                      server spends its time merging parts, not ingesting.
+                    format: int32
+                    maximum: 64
+                    minimum: 1
+                    type: integer
+                type: object
+            required:
+            - connection
+            type: object
+          status:
+            description: status defines the observed state of ClickHouseSink.
+            properties:
+              conditions:
+                description: |-
+                  Conditions carries Ready, SchemaValid and CredentialsResolved (see the
+                  condition-type constants). All three are set by asynchronous probes:
+                  a control-plane reconciler never dials ClickHouse on its own goroutine
+                  (Invariant 1), so an unreachable sink slows nothing down — it just
+                  reports here.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: clusterstreamrules.kubestream.io
+spec:
+  group: kubestream.io
+  names:
+    kind: ClusterStreamRule
+    listKind: ClusterStreamRuleList
+    plural: clusterstreamrules
+    singular: clusterstreamrule
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .spec.sinkRef
+      name: SINK
+      type: string
+    - jsonPath: .status.activeWatches
+      name: WATCHES
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ClusterStreamRule declares that the resources it names, across the
+          namespaces its selector matches, should be streamed to a ClickHouseSink.
+
+          It is cluster-scoped (D6) and is the only rule type permitted to name
+          cluster-scoped kinds (Nodes, Namespaces, CRDs …), because doing so requires
+          cluster-level authority the namespaced StreamRule deliberately does not
+          assume. Its status uses the same StreamRuleStatus shape as StreamRule, so a
+          single set of condition semantics covers both.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ClusterStreamRule.
+            properties:
+              namespaceSelector:
+                description: |-
+                  NamespaceSelector chooses the namespaces this rule applies to. Nil means
+                  every namespace, including namespaces created after the rule.
+
+                  It selects on *namespace* labels, not object labels — use
+                  resources[].labelSelector for the latter. A selector matching no
+                  namespace is legal and leaves the rule Ready with activeWatches=0; it is
+                  a normal transient state while the namespaces that will match are still
+                  being created.
+
+                  Cluster-scoped kinds named by this rule ignore the selector entirely:
+                  they have no namespace to select on. ClusterStreamRule is the only type
+                  permitted to name them.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              resources:
+                description: |-
+                  Resources are the resource types this rule streams. At least one is
+                  required — an empty rule is always an authoring mistake, and rejecting it
+                  at admission is far kinder than a rule that reconciles green while
+                  streaming nothing.
+                items:
+                  description: |-
+                    WatchedResource names one resource type a rule wants streamed.
+
+                    It is a (group, version, kind) triple plus an optional label selector rather
+                    than a plural resource name because the CRD is authored by humans against
+                    the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
+                    `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+                    is also where an unknown kind is detected and parked.
+                  properties:
+                    group:
+                      default: ""
+                      description: |-
+                        Group is the API group, e.g. "apps" or "networking.k8s.io". Empty means
+                        the core group (`v1/Pod`). Must be empty or a DNS-1123 subdomain.
+                      maxLength: 253
+                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    kind:
+                      description: |-
+                        Kind is the resource Kind in upper camel case, e.g. "Deployment" — not
+                        the plural resource name ("deployments").
+                      maxLength: 63
+                      pattern: ^[A-Z][A-Za-z0-9]{0,62}$
+                      type: string
+                    labelSelector:
+                      description: |-
+                        LabelSelector optionally narrows the rule to objects carrying matching
+                        labels. Nil selects every object of this kind in scope.
+
+                        Selectors are applied by the event handler, not by the informer's
+                        ListWatch: one informer per (GVR, namespace) is shared by every rule and
+                        sink interested in that target, so changing a selector re-filters events
+                        without tearing down and re-listing a watch (Task 1.4). The trade-off is
+                        deliberate — informer bandwidth in exchange for a pool that never
+                        thrashes on a selector edit.
+                      properties:
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    version:
+                      description: |-
+                        Version is the API version to watch, e.g. "v1" or "v1beta1".
+
+                        The recorded object identity is version-agnostic (Invariant 7), so
+                        naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
+                        objects seen through two different lenses — do not do that; pick the
+                        version you want the stored payload rendered in.
+                      maxLength: 63
+                      pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                  required:
+                  - kind
+                  - version
+                  type: object
+                maxItems: 128
+                minItems: 1
+                type: array
+              sinkRef:
+                default: default
+                description: |-
+                  SinkRef names the ClickHouseSink (cluster-scoped, so no namespace) that
+                  this rule's records are written to.
+
+                  It is immutable. Re-pointing a live rule at a different sink would strand
+                  the dedup/diff baseline the pipeline has built for every object in scope:
+                  the new sink has no history for them, so either every object re-emits as
+                  a duplicate or, worse, diffs get written against a baseline the target
+                  sink never received. Rather than build a cross-sink cache migration for a
+                  rare operation, moving a rule is delete + recreate — which re-warms the
+                  cache from the new sink's own history, correctly and by construction.
+
+                  Omitting the field defaults it to "default", so rules in a single-sink
+                  cluster carry no boilerplate. Spelling it as an explicit empty string is
+                  rejected rather than defaulted: an author who typed the key meant to
+                  name a sink.
+                maxLength: 253
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: 'sinkRef is immutable: delete and recreate this rule to
+                    point it at a different sink'
+                  rule: self == oldSelf
+            required:
+            - resources
+            type: object
+          status:
+            description: status defines the observed state of ClusterStreamRule.
+            properties:
+              activeWatches:
+                description: |-
+                  ActiveWatches is how many (GVR, namespace) watch targets this rule
+                  currently contributes to the data plane. It is the field that makes
+                  "is this rule actually doing anything?" answerable from `kubectl get`
+                  alone — a rule can be Ready with zero active watches if, for example,
+                  its namespaceSelector currently matches no namespace.
+
+                  Informers are shared across rules, so this counts the rule's *targets*,
+                  not a number of goroutines it exclusively owns.
+                format: int32
+                type: integer
+              conditions:
+                description: |-
+                  Conditions carries Ready, RBACGranted, PolicyAllowed and
+                  ResourceResolved (see the constants above). A rule that cannot run
+                  degrades here and only here: the process never exits and every other
+                  rule keeps streaming (Invariant 5).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation this status reflects.
+                  Without it a client cannot distinguish "Ready, and up to date" from
+                  "Ready, but that verdict predates your last edit".
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: streamrules.kubestream.io
+spec:
+  group: kubestream.io
+  names:
+    kind: StreamRule
+    listKind: StreamRuleList
+    plural: streamrules
+    singular: streamrule
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .spec.sinkRef
+      name: SINK
+      type: string
+    - jsonPath: .status.activeWatches
+      name: WATCHES
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          StreamRule declares that the resources it names, *in its own namespace*,
+          should be streamed to a ClickHouseSink.
+
+          It is namespaced (D3, D6) so that streaming intent is delegable: a team with
+          write access only to their namespace can opt their own workloads into the
+          audit trail without cluster-level privileges, and the watch it creates can
+          never reach beyond that namespace. Naming a cluster-scoped kind here is
+          therefore invalid and degrades the rule with
+          ResourceResolved=False/ClusterScopedKind — use ClusterStreamRule for those.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of StreamRule.
+            properties:
+              resources:
+                description: |-
+                  Resources are the resource types this rule streams. At least one is
+                  required — an empty rule is always an authoring mistake, and rejecting it
+                  at admission is far kinder than a rule that reconciles green while
+                  streaming nothing.
+                items:
+                  description: |-
+                    WatchedResource names one resource type a rule wants streamed.
+
+                    It is a (group, version, kind) triple plus an optional label selector rather
+                    than a plural resource name because the CRD is authored by humans against
+                    the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
+                    `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+                    is also where an unknown kind is detected and parked.
+                  properties:
+                    group:
+                      default: ""
+                      description: |-
+                        Group is the API group, e.g. "apps" or "networking.k8s.io". Empty means
+                        the core group (`v1/Pod`). Must be empty or a DNS-1123 subdomain.
+                      maxLength: 253
+                      pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    kind:
+                      description: |-
+                        Kind is the resource Kind in upper camel case, e.g. "Deployment" — not
+                        the plural resource name ("deployments").
+                      maxLength: 63
+                      pattern: ^[A-Z][A-Za-z0-9]{0,62}$
+                      type: string
+                    labelSelector:
+                      description: |-
+                        LabelSelector optionally narrows the rule to objects carrying matching
+                        labels. Nil selects every object of this kind in scope.
+
+                        Selectors are applied by the event handler, not by the informer's
+                        ListWatch: one informer per (GVR, namespace) is shared by every rule and
+                        sink interested in that target, so changing a selector re-filters events
+                        without tearing down and re-listing a watch (Task 1.4). The trade-off is
+                        deliberate — informer bandwidth in exchange for a pool that never
+                        thrashes on a selector edit.
+                      properties:
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    version:
+                      description: |-
+                        Version is the API version to watch, e.g. "v1" or "v1beta1".
+
+                        The recorded object identity is version-agnostic (Invariant 7), so
+                        naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
+                        objects seen through two different lenses — do not do that; pick the
+                        version you want the stored payload rendered in.
+                      maxLength: 63
+                      pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                      type: string
+                  required:
+                  - kind
+                  - version
+                  type: object
+                maxItems: 128
+                minItems: 1
+                type: array
+              sinkRef:
+                default: default
+                description: |-
+                  SinkRef names the ClickHouseSink (cluster-scoped, so no namespace) that
+                  this rule's records are written to.
+
+                  It is immutable. Re-pointing a live rule at a different sink would strand
+                  the dedup/diff baseline the pipeline has built for every object in scope:
+                  the new sink has no history for them, so either every object re-emits as
+                  a duplicate or, worse, diffs get written against a baseline the target
+                  sink never received. Rather than build a cross-sink cache migration for a
+                  rare operation, moving a rule is delete + recreate — which re-warms the
+                  cache from the new sink's own history, correctly and by construction.
+
+                  Omitting the field defaults it to "default", so rules in a single-sink
+                  cluster carry no boilerplate. Spelling it as an explicit empty string is
+                  rejected rather than defaulted: an author who typed the key meant to
+                  name a sink.
+                maxLength: 253
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: 'sinkRef is immutable: delete and recreate this rule to
+                    point it at a different sink'
+                  rule: self == oldSelf
+            required:
+            - resources
+            type: object
+          status:
+            description: status defines the observed state of StreamRule.
+            properties:
+              activeWatches:
+                description: |-
+                  ActiveWatches is how many (GVR, namespace) watch targets this rule
+                  currently contributes to the data plane. It is the field that makes
+                  "is this rule actually doing anything?" answerable from `kubectl get`
+                  alone — a rule can be Ready with zero active watches if, for example,
+                  its namespaceSelector currently matches no namespace.
+
+                  Informers are shared across rules, so this counts the rule's *targets*,
+                  not a number of goroutines it exclusively owns.
+                format: int32
+                type: integer
+              conditions:
+                description: |-
+                  Conditions carries Ready, RBACGranted, PolicyAllowed and
+                  ResourceResolved (see the constants above). A rule that cannot run
+                  degrades here and only here: the process never exits and every other
+                  rule keeps streaming (Invariant 5).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation this status reflects.
+                  Without it a client cannot distinguish "Ready, and up to date" from
+                  "Ready, but that verdict predates your last edit".
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-leader-election-role
+  namespace: kubestream-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubestream-manager-role
+  namespace: kubestream-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubestream-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - selfsubjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - kubestream.io
+  resources:
+  - clickhousesinks
+  - clusterstreamrules
+  - streamrules
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kubestream.io
+  resources:
+  - clickhousesinks/status
+  - clusterstreamrules/status
+  - streamrules/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubestream-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubestream-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      kubestream.io/aggregate-to-watcher: "true"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-watcher
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+    kubestream.io/aggregate-to-watcher: "true"
+  name: kubestream-watcher-core-workloads
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  - configmaps
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - daemonsets
+  - statefulsets
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-leader-election-rolebinding
+  namespace: kubestream-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubestream-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-manager-secret-rolebinding
+  namespace: kubestream-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubestream-manager-role
+subjects:
+- kind: ServiceAccount
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubestream-manager-role
+subjects:
+- kind: ServiceAccount
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubestream-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubestream-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-watcher-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubestream-watcher
+subjects:
+- kind: ServiceAccount
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+  name: kubestream-clickhouse-credentials
+  namespace: kubestream-system
+stringData:
+  password: changeme
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+    control-plane: controller-manager
+  name: kubestream-controller-manager-metrics-service
+  namespace: kubestream-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: kubestream
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kubestream
+    control-plane: controller-manager
+  name: kubestream-controller-manager
+  namespace: kubestream-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubestream
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: kubestream
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        command:
+        - /manager
+        env:
+        - name: CLUSTER_ID
+          value: local-kind-cluster
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        image: ghcr.io/yelzhy/kubestream:v0.1.0
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts: []
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: kubestream-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []

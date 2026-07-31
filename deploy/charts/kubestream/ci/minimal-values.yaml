@@ -1,0 +1,18 @@
+# The smallest install the chart can produce: no metrics endpoint, no leader
+# election, no standing watch rights at all. Linted and validated in CI so that
+# "turn everything off" stays a supported configuration rather than an untested
+# code path — an operator installed like this boots healthy and idle, and every
+# rule reports RBACGranted=False until a preset or a labelled ClusterRole of the
+# user's own appears.
+metrics:
+  enabled: false
+leaderElection:
+  enabled: false
+rbac:
+  create: true
+  presets:
+    core-workloads: false
+    batch: false
+    networking: false
+    rbac-read: false
+    storage: false

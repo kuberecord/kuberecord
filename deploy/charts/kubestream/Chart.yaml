@@ -1,0 +1,30 @@
+apiVersion: v2
+name: kubestream
+description: |
+  Kubernetes-native operator that streams cluster state changes to ClickHouse
+  for audit, GitOps forensics and change intelligence.
+type: application
+# version is the chart's own version; appVersion is the operator release it
+# installs by default (values.yaml leaves image.tag empty so it follows this
+# field). Both must move together with the Makefile's VERSION.
+version: 0.1.0
+appVersion: "v0.1.0"
+# The chart installs no webhooks and no cert-manager (D4): validation is entirely
+# CRD structural schemas plus CEL (x-kubernetes-validations), which is why the
+# floor is 1.29 — the release where CEL validation cost budgets and
+# `x-kubernetes-validations` on all schema nodes are generally available.
+kubeVersion: ">= 1.29.0-0"
+home: https://github.com/yelzhy/kubestream
+sources:
+  - https://github.com/yelzhy/kubestream
+keywords:
+  - kubernetes
+  - audit
+  - clickhouse
+  - observability
+  - gitops
+annotations:
+  # The CRDs live in crds/ per Helm convention, which means Helm installs them
+  # but never upgrades or deletes them. Declared here so the constraint is
+  # visible to anyone reading the chart metadata rather than only its README.
+  kubestream.io/crd-lifecycle: install-only

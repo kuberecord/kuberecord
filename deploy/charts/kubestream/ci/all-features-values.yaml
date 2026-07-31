@@ -1,0 +1,114 @@
+# The opposite extreme: every optional object the chart can render, at once —
+# all five watch presets, the metrics endpoint, two replicas behind leader
+# election, the starter sink, and every pod-placement and pass-through value
+# populated. This is the rendering kubeconform validates most, because it is the
+# only one in which some templates produce output at all.
+replicaCount: 2
+
+image:
+  # Pinned by digest rather than tag, so the digest branch of the image helper is
+  # exercised by a real render. The digest is a well-formed placeholder; nothing
+  # in lint or kubeconform pulls it.
+  repository: ghcr.io/yelzhy/kubestream
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull
+
+clusterID: prod-eu-west-1
+
+leaderElection:
+  enabled: true
+
+metrics:
+  enabled: true
+  secure: true
+  port: 8443
+  service:
+    annotations:
+      prometheus.io/scrape: "true"
+
+rbac:
+  create: true
+  presets:
+    core-workloads: true
+    batch: true
+    networking: true
+    rbac-read: true
+    storage: true
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/kubestream
+
+extraLabels:
+  app.kubernetes.io/part-of: platform-audit
+  team: platform
+
+podAnnotations:
+  example.com/config-hash: deadbeef
+
+extraArgs:
+  - --ch-auto-create-schema
+  - --pipeline-workers=16
+
+extraEnv:
+  - name: WRITER_BATCH_MAX_ROWS
+    value: "5000"
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations:
+  - key: platform
+    operator: Equal
+    value: audit
+    effect: NoSchedule
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/arch
+              operator: In
+              values: ["amd64", "arm64"]
+
+priorityClassName: system-cluster-critical
+terminationGracePeriodSeconds: 30
+
+createDefaultSink: true
+defaultSink:
+  name: default
+  connection:
+    addr: clickhouse.clickhouse.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      name: clickhouse-credentials
+    dialTimeout: 5s
+    readTimeout: 10s
+  writer:
+    queueSize: 20000
+    workers: 8
+    batchMaxRows: 5000
+    batchMaxWait: 1s
+    checkpointEvery: 50
+  policy:
+    allowedGVKs:
+      - group: apps
+        version: v1
+        kinds: ["*"]
+      - group: ""
+        version: v1
+        kinds: ["ConfigMap", "Service"]
