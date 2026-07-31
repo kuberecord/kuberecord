@@ -1,0 +1,38 @@
+# The shipped operator-health dashboard and alert rules (Task 2.5).
+#
+# The JSON-schema half of this already runs under `make test`, because
+# test/observability is an ordinary Go package. This job exists for the half that
+# needs a tool: `promtool check rules` over the PrometheusRule's .spec, which is
+# the only thing that actually parses the PromQL. promtool is bootstrapped into
+# bin/ by the Makefile from the pinned Prometheus release, so there is nothing to
+# provision here.
+#
+# It is a separate workflow rather than a step of the test job so a broken
+# dashboard reports as a broken dashboard, not as a failing unit test.
+name: Observability
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  verify:
+    permissions:
+      contents: read
+    name: Validate the dashboard and alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Validate deploy/grafana and deploy/prometheus
+        run: make verify-observability

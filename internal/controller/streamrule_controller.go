@@ -278,6 +278,12 @@ type RuleReconciler struct {
 	// ResyncPeriod overrides defaultRuleResyncPeriod. Tests shorten it.
 	ResyncPeriod time.Duration
 
+	// Metrics is the shared kubestream_rules gauge both rule kinds count into. It
+	// must be the same instance for both reconcilers, since the gauge is a count
+	// over the union of their rules; the constructors below default it to the
+	// process-wide instance when the caller leaves it nil.
+	Metrics *RuleMetrics
+
 	// kind is which of the two CRDs this instance serves.
 	kind ruleKind
 
@@ -292,6 +298,7 @@ type RuleReconciler struct {
 // for.
 func NewStreamRuleReconciler(base RuleReconciler) *RuleReconciler {
 	base.kind = streamRuleKind
+	base.defaultMetrics()
 	return &base
 }
 
@@ -299,7 +306,21 @@ func NewStreamRuleReconciler(base RuleReconciler) *RuleReconciler {
 // cluster-scoped ClusterStreamRule.
 func NewClusterStreamRuleReconciler(base RuleReconciler) *RuleReconciler {
 	base.kind = clusterStreamRuleKind
+	base.defaultMetrics()
 	return &base
+}
+
+// defaultMetrics points an unset Metrics at the process-wide instance.
+//
+// Defaulting rather than requiring the field keeps every existing construction
+// site working and, more importantly, makes the wiring impossible to get subtly
+// wrong: a caller that builds the two reconcilers from one base value shares one
+// gauge whether it set the field or not, and a caller that sets it deliberately
+// (a test with its own registry) is left alone.
+func (r *RuleReconciler) defaultMetrics() {
+	if r.Metrics == nil {
+		r.Metrics = RuleMetricsInstance()
+	}
 }
 
 // +kubebuilder:rbac:groups=kubestream.io,resources=streamrules;clusterstreamrules,verbs=get;list;watch
@@ -332,6 +353,7 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			// running.
 			log.Info("Rule is gone; withdrawing its watch targets", "rule", ruleKey)
 			r.Registry.Remove(ruleKey)
+			r.Metrics.Forget(ruleKey)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get %s %s: %w", r.kind.kind, req.NamespacedName, err)
@@ -343,6 +365,7 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// scope for a rule that is already on its way out.
 		log.Info("Rule is being deleted; withdrawing its watch targets", "rule", ruleKey)
 		r.Registry.Remove(ruleKey)
+		r.Metrics.Forget(ruleKey)
 		return ctrl.Result{}, nil
 	}
 
@@ -374,14 +397,22 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// desired state that is actually installed, which after a failed Upsert is not
 	// the same thing.
 	activeWatches := int32(r.Registry.TargetCountForRule(ruleKey)) //nolint:gosec // bounded by the CRD's MaxItems
+	// written is the merged condition set the last update attempt actually sent.
+	// It is captured inside the mutation rather than read off `status`, because
+	// `status` holds only the conditions *this* pass decided: a pass that returned
+	// early leaves the rest of the rule's conditions untouched on the object, and
+	// the gauge is meant to describe the rule, not the pass.
+	var written []metav1.Condition
 	if err := updateStatus(ctx, r.Client, obj, func(fresh client.Object) {
 		freshStatus := r.kind.status(fresh)
 		status.apply(&freshStatus.Conditions)
 		freshStatus.ActiveWatches = activeWatches
 		freshStatus.ObservedGeneration = status.generation
+		written = slices.Clone(freshStatus.Conditions)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update %s %s status: %w", r.kind.kind, req.NamespacedName, err)
 	}
+	r.Metrics.Observe(ruleKey, written)
 	emitReadyEvent(r.Recorder, obj, previousReady, ready)
 
 	if outcome.err != nil {

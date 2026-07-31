@@ -268,6 +268,17 @@ is deleted, so an absent backend does not linger as a live-but-idle one.
 | `kubestream_safe_mode` | Gauge (0/1) | `sink`, `group`, `kind`, `namespace` | `1` while a `(sink, scope)` pair's cache is still warming (Snapshot mode), `0` once warm. |
 | `kubestream_pipeline_dropped_total` | Counter | `reason="scope_stopped"` | Work items deliberately discarded — today only because the item's watch scope was deactivated before a worker picked it up. Never a deletion. |
 
+The control plane adds one gauge of its own, counting rules rather than writes:
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `kubestream_rules` | Gauge | `condition`, `status="true"\|"false"\|"unknown"` | How many `StreamRule`s and `ClusterStreamRule`s currently hold each condition at each status. Deliberately identity-free — it counts rules, it does not name them — so `kubestream_rules{condition="Ready",status="false"}` answers "is anything degraded?" and `kubectl` answers "which?". |
+
+A Grafana dashboard and a sample `PrometheusRule` built on all of the above ship
+in [`deploy/grafana/`](deploy/grafana/) and [`deploy/prometheus/`](deploy/prometheus/);
+[`docs/OPERATING.md`](docs/OPERATING.md) explains what each panel is for, what each
+alert threshold is argued from, and what to do when one fires.
+
 ## Getting Started
 
 ### Prerequisites
