@@ -615,10 +615,26 @@ KUBECONFORM ?= $(LOCALBIN)/kubeconform
 PROMTOOL ?= $(LOCALBIN)/promtool
 
 ## Tool Versions
+#
+# Every version pinned here is subject to one hard ceiling: the tool's module must
+# declare a `go` directive no newer than this repository's own (see go.mod). CI runs
+# actions/setup-go with `go-version-file: go.mod`, and that action additionally
+# exports GOTOOLCHAIN=local — which switches off the automatic toolchain download
+# that would otherwise paper over the gap. A tool needing a newer Go therefore does
+# not quietly fetch one; `go install` fails outright and takes the whole bootstrap
+# with it:
+#
+#   go: helm.sh/helm/v3@v3.21.3 requires go >= 1.26.0 (running go 1.25.7; GOTOOLCHAIN=local)
+#
+# The failure never reproduces on a developer machine that already has bin/ populated
+# or a newer Go on $PATH, so before raising any pin below, check the tool's go.mod —
+# `go mod download -x` on the module, or the .mod file on proxy.golang.org.
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
-HELM_VERSION ?= v3.21.3
-KUBECONFORM_VERSION ?= v0.8.0
+# helm v3.21.1 and kubeconform v0.8.0 are the first releases of each to require
+# Go 1.26; these are the newest that still build under the go.mod `go` directive.
+HELM_VERSION ?= v3.21.0
+KUBECONFORM_VERSION ?= v0.7.0
 # The Prometheus *release* version, which is what the download URL is built from
 # (the Go module version of the same release reads v0.313.2 — the repository never
 # adopted a /v3 module path — but no Go path is involved here).
