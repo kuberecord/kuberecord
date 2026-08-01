@@ -86,13 +86,17 @@ desired-state registry (watch targets, written by the control plane)
 - **`hashCache` internals**: a mutex-protected map from the canonical identity key `"<group>|<Kind>|<namespace>/<name>"` — version-agnostic, per Invariant 7 — to a versioned `CacheEntry` (hash, compressed normalized JSON, UID, version, pending-delete flag). All commits/deletes are gated on the version issued when the corresponding write was reserved, and the key's shape is what lets a stopped watch scope be evicted by prefix.
 - **Warm-up + GC, per watch scope**: warm-up queries the sink for the latest known state of every object in one scope, seeds that scope's dedup cache (without clobbering anything a live work item already wrote), waits for the scope's informer to finish its initial List, and only then diffs the seeded snapshot against the live cluster to close out "zombie" objects that disappeared while the operator was offline. It is per-scope and incremental: a rule created hours after boot warms only what it added, and touches no other scope's history or cache. Until a scope has been warmed, a cache-miss in it is recorded as `Snapshot` rather than `Added`.
 - **Scope epochs**: "we stopped watching X" and "X was deleted" are different truths, so they leave different traces. Watch-scope transitions are recorded in `watch_scopes` — one `Started` row when a `(sink, scope)` pair gains its first interested rule, one `Stopped` when it loses its last — and a zombie is only closed out if that log shows the scope was genuinely watched in a previous epoch. Deleting a rule therefore yields one `Stopped` row and **no** `Deleted` rows for the objects it covered; a rule deleted while the operator was down is reconciled the same way on the next start. See [`docs/SCHEMA.md`](docs/SCHEMA.md#watch_scopes).
-- **ClickHouse schema v1 is shipped in this repository** — the DDL lives under [`deploy/clickhouse/schema/`](deploy/clickhouse/schema/) and every column is documented in [`docs/SCHEMA.md`](docs/SCHEMA.md).
+- **ClickHouse schema v1 is shipped in this repository, and frozen** — the DDL lives under [`deploy/clickhouse/schema/`](deploy/clickhouse/schema/) and every column is documented in [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ### ClickHouse schema
 
 `kubestream` writes the per-object change stream to `resource_states` and the
 watch-scope epoch log to `watch_scopes`. The full, authoritative DDL is shipped
 in-repo and documented column-by-column:
+
+> **Schema v1 is stable.** These two tables are a public API: within `v1` no
+> column is renamed, retyped, or removed, and changes are additive only — see
+> [Stability & Versioning](docs/SCHEMA.md#stability--versioning).
 
 - **DDL:** [`deploy/clickhouse/schema/001_resource_states.sql`](deploy/clickhouse/schema/001_resource_states.sql), [`deploy/clickhouse/schema/002_watch_scopes.sql`](deploy/clickhouse/schema/002_watch_scopes.sql)
 - **Reference:** [`docs/SCHEMA.md`](docs/SCHEMA.md) — column semantics, the `event_type` state machine, the RFC 6902 diff format, the version-agnostic identity rule, and a suggested (optional) `TTL` clause.

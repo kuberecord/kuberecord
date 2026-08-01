@@ -7,10 +7,114 @@ schema. The DDL is shipped in-repo under
 - [`001_resource_states.sql`](../deploy/clickhouse/schema/001_resource_states.sql) — the per-object change stream.
 - [`002_watch_scopes.sql`](../deploy/clickhouse/schema/002_watch_scopes.sql) — the watch-scope epoch log.
 
-> **Schema stability.** Under [D5] the schema gets one free redesign now (this
-> is it) and is then **frozen as a public API** in Task 2.6. Every column below
-> is deliberate; treat additions as append-only and breaking changes as
-> off-limits after the freeze.
+> **Schema v1 is frozen.** Under [D5] the schema got exactly one free redesign
+> window, and that window is now **closed**: as of Task 2.6 these two tables are
+> a **public API** with an additive-only change policy. Every column below is
+> deliberate, and none of them will change meaning, name, or type under `v1`.
+> See [Stability & Versioning](#stability--versioning) for what that guarantees
+> you and what it costs us.
+
+## Stability & Versioning
+
+**Schema version: `v1` — frozen.** Consumers may build queries, dashboards, and
+downstream pipelines against everything in this document and expect it to keep
+working for the life of `v1`.
+
+### What the freeze covers
+
+- The **table names** `resource_states` and `watch_scopes`.
+- The **name, ClickHouse type, and documented semantics** of every column in the
+  two tables above. A column is never renamed, retyped, repurposed, or dropped
+  under `v1`.
+- The **engine and key layout** — `ReplacingMergeTree` and the `ORDER BY` tuple
+  on `resource_states`, `MergeTree` and its `ORDER BY` on `watch_scopes`.
+  The sort key is not cosmetic: at-least-once re-inserts collapse *because* a
+  byte-identical row collides on the full `ORDER BY` key (see [Delivery
+  semantics](#delivery-semantics)). Changing it would silently turn de-duplicated
+  rows into duplicates, so it is as frozen as the columns.
+- The **deletion contract**: `event_type` alone carries deletion semantics, and
+  no data column will ever regain a magic-string sentinel.
+
+### What the freeze deliberately does *not* cover
+
+- **The set of `event_type` values is open.** `Added | Modified | Deleted |
+  Snapshot | Checkpoint` are the values `v1` emits today; a future minor release
+  may add one. Treat `event_type` as an open enum: a consumer that must be
+  exhaustive should branch on the values it knows and pass others through, not
+  fail on them. Existing values never change meaning.
+- **The shape of the JSON inside `data` and `diff`.** That is the Kubernetes
+  object as the API server served it (normalized, and from Task 3.3 optionally
+  redacted). kubestream does not own it and cannot freeze it.
+- **Anything a deployment adds on top** — TTL clauses, extra indices,
+  projections, materialized views, the database name. All of it is yours; the
+  operator neither sets nor inspects it.
+
+### Additive-only change policy
+
+Any `v1` schema change must be **purely additive**, and must satisfy all of:
+
+1. It adds a **new column** — never a modification or removal of an existing one.
+2. The new column is `Nullable(...)` or carries a `DEFAULT`, so rows written by
+   an operator that predates it are still valid rows.
+3. It is appended **after** the existing columns and appears in **neither**
+   `ORDER BY` nor `PARTITION BY`. Touching either would rewrite the dedup
+   contract above, which makes the change breaking no matter how it is spelled.
+4. It ships as a new numbered DDL file in
+   [`deploy/clickhouse/schema/`](../deploy/clickhouse/schema/) using
+   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the auto-create path stays
+   idempotent and an existing table is migrated in place.
+5. It is documented in the column tables above in the same change.
+
+This is what makes both directions of operator/table version skew safe:
+
+| Skew | Behavior |
+|---|---|
+| **Table newer than operator** (column added, operator not yet upgraded) | Fully tolerated, no degradation. Validation checks that every *required* column is present and correctly typed; it never enumerates the observed set, so unknown columns are ignored. The write path names its columns explicitly in the `INSERT`, so the unknown column simply takes its `DEFAULT`; the read paths `SELECT` named columns and never `SELECT *`. |
+| **Operator newer than table** (operator requires a column the table lacks) | Degrades that sink alone: `SchemaValid=False` on the `ClickHouseSink`, naming the missing table/column. The process does not crash-loop and other sinks are unaffected. Apply the new DDL file to resolve it. |
+
+The first row is a **tested contract**, not an implementation accident:
+`TestValidateSchema` covers it against a fake `system.columns`, and
+`TestSchemaForwardCompatibilityIntegration`
+(`internal/sink/clickhouse/schema_integration_test.go`) proves it end-to-end
+against a live ClickHouse — it adds columns to both tables, then asserts
+validation passes *and* a real insert and warm-up read still round-trip.
+
+### Breaking changes
+
+A change that cannot be expressed additively — a retyped column, a different
+sort key, a split table — does **not** happen to `v1`. It ships as a **new major
+table version** (`resource_states_v2`) created alongside the existing table, with
+a documented `INSERT INTO ... SELECT` migration and a release note. Both tables
+are readable during the transition, and the operator writing `v2` is a new major
+of the operator. An in-place incompatible `ALTER` is never performed by
+kubestream and is never asked of an operator, because it would strand every query
+already written against `v1`.
+
+### Phase 3 fit check (the freeze gate)
+
+Freezing was gated on confirming that the already-designed Phase 3 features fit
+`v1` as it stands. Both do, so `v1` is frozen with no columns added:
+
+- **Kubernetes Events ingestion (Task 3.1)** — an Event is structurally just
+  another GVK. It is identified by the ordinary `api_group`/`kind`/`namespace`/
+  `name` tuple, its full normalized JSON (including `count`, `involvedObject`,
+  `reason`, `type`, `message`) lands in `data`, and `labels`/`actors` populate as
+  they do for any object. An API server bumping `count` changes the normalized
+  content, so it is an ordinary content change and produces a `Modified` row —
+  full-`data`, empty-`diff`, since Events skip diffing. Everything else that
+  differs about Events (suppressing `Deleted` emission, skipping the GC pass,
+  never `Snapshot`-tagging) is *pipeline* behavior keyed on the GVK, and pipeline
+  behavior needs no column. Scope rows are unchanged.
+- **Redaction (Task 3.3)** — redaction scrubs values *after* normalization and
+  *before* hashing, so it changes the bytes stored in `data` and `diff` and the
+  value of `sha256`. Those are three existing columns holding the same kinds of
+  values they always held; the redaction sentinel is self-describing where it
+  appears. The one addition worth considering — per-row provenance of *which*
+  policy was applied — was rejected: policy identity is configuration state that
+  belongs on the `ClickHouseSink` CR and its status, not duplicated onto every
+  row, where it would inflate every insert to answer a question `kubectl` answers
+  exactly. If that judgement is ever reversed, it is a nullable additive column,
+  which the policy above permits without a freeze violation.
 
 ## Applying the schema
 
@@ -27,7 +131,10 @@ startup.
 
 Regardless of how the tables are created, every sink's health probe introspects
 `system.columns` for both tables and verifies every required column name and
-type. A mismatch is reported as `SchemaValid=False` on that `ClickHouseSink`,
+type. The check is **required-column, not exhaustive**: a column the operator
+does not know about is ignored rather than treated as drift, which is what makes
+the additive-only policy in [Stability & Versioning](#stability--versioning)
+safe. A mismatch is reported as `SchemaValid=False` on that `ClickHouseSink`,
 with the offending table/column in the condition message. It degrades that sink
 alone: the process does not crash-loop, its readiness probe stays healthy (a
 readiness flip would take every *other* sink out of service too), and the rules

@@ -50,6 +50,16 @@ type schemaColumn struct {
 // live table that drifts from this degrades its own ClickHouseSink (via the
 // health probe's SchemaValid condition) rather than letting the operator write
 // rows that would silently mismatch the frozen public schema.
+//
+// It is a *required* set, not an exhaustive one: a live table may carry columns
+// absent from this map and still validate. That tolerance is a guarantee of the
+// frozen schema (docs/SCHEMA.md, "Stability & Versioning"), not an accident of
+// how validateSchema iterates — under the additive-only policy a table may be
+// migrated ahead of the operator that writes to it, and an operator that
+// degraded its sink over a column it has no opinion about would turn a
+// deliberately safe migration order into an outage. The write path is explicit
+// about its columns for the same reason (see insertResourceStateQuery), so an
+// unknown column simply takes its DEFAULT.
 var requiredColumns = map[string][]schemaColumn{
 	tableResourceStates: {
 		{"ts", "DateTime64(9, 'UTC')"},
