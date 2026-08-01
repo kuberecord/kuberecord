@@ -118,6 +118,27 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
 ### Changed
 
+- **The ClickHouse schema is frozen at `v1`.** D5's one free redesign window is
+  now closed: `resource_states` and `watch_scopes` are a public API. Within `v1`
+  no column is renamed, retyped, repurposed, or removed, and neither the engines
+  nor the sort keys change — the `ORDER BY` tuple is what makes an at-least-once
+  re-insert collapse instead of duplicating, so it is as frozen as the columns.
+  Future changes are **additive only** (a new `Nullable`/`DEFAULT`-ed column,
+  appended, outside the sort key, shipped as a numbered `ALTER TABLE ... ADD
+  COLUMN IF NOT EXISTS` file); anything else becomes a new major table version
+  with a documented migration, never an in-place incompatible `ALTER`.
+  [`docs/SCHEMA.md`](docs/SCHEMA.md#stability--versioning) states the policy and
+  records the gate it passed: Events ingestion and redaction, the two Phase 3
+  features designed against this schema, were both re-checked on paper and need
+  **no new columns** — Events reuse `kind`/`data`/`labels`/`actors` with a
+  `count` bump as an ordinary content change, and redaction rewrites values
+  inside `data`/`diff` before hashing.
+  The schema check's tolerance of *unknown* columns is now a stated guarantee
+  rather than an implementation detail, and is tested as one: a table migrated
+  ahead of the operator writing to it validates, accepts inserts, and reads back
+  through the warm-up query unchanged, with the unknown columns taking their
+  declared defaults. That is what makes "migrate the table first, roll the
+  operator second" a safe order.
 - `test/utils.GetProjectDir` finds the module root by walking up to `go.mod`
   rather than stripping the literal `/test/e2e` from the working directory, which
   resolved to the wrong place for any suite outside that one directory.

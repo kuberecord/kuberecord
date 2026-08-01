@@ -87,6 +87,7 @@ func TestValidateSchema(t *testing.T) {
 		rows        [][3]string
 		wantErr     bool
 		wantInError []string // substrings the mismatch error must name
+		notInError  []string // substrings the mismatch error must not name
 	}{
 		{
 			name:    "matching schema returns no error",
@@ -123,6 +124,42 @@ func TestValidateSchema(t *testing.T) {
 			wantInError: []string{tableResourceStates, "sha256", "FixedString(64)", "String"},
 		},
 		{
+			// Forward compatibility, per the frozen schema's additive-only
+			// policy: a table migrated ahead of the operator carries columns
+			// this build has never heard of, and must still validate.
+			name: "unknown extra column on resource_states is tolerated",
+			rows: append(fullSchemaRows(),
+				[3]string{tableResourceStates, "redaction_policy", "Nullable(String)"},
+				[3]string{tableResourceStates, "future_flag", "UInt8"},
+			),
+			wantErr: false,
+		},
+		{
+			name: "unknown extra column on watch_scopes is tolerated",
+			rows: append(fullSchemaRows(),
+				[3]string{tableWatchScopes, "operator_version", "LowCardinality(String)"},
+			),
+			wantErr: false,
+		},
+		{
+			// Tolerance must not become blindness: an extra column may not mask
+			// a genuinely missing one, and the error names only the real drift.
+			name: "extra column does not mask a missing one",
+			rows: func() [][3]string {
+				var out [][3]string
+				for _, r := range fullSchemaRows() {
+					if r[0] == tableResourceStates && r[1] == "diff" {
+						continue // drop a column the operator does depend on
+					}
+					out = append(out, r)
+				}
+				return append(out, [3]string{tableResourceStates, "future_flag", "UInt8"})
+			}(),
+			wantErr:     true,
+			wantInError: []string{tableResourceStates, "diff"},
+			notInError:  []string{"future_flag"},
+		},
+		{
 			name: "missing table is reported",
 			rows: func() [][3]string {
 				var out [][3]string
@@ -153,6 +190,11 @@ func TestValidateSchema(t *testing.T) {
 				for _, want := range tt.wantInError {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q does not mention %q", err.Error(), want)
+					}
+				}
+				for _, unwanted := range tt.notInError {
+					if strings.Contains(err.Error(), unwanted) {
+						t.Errorf("error %q mentions %q, which is not drift the operator may report", err.Error(), unwanted)
 					}
 				}
 				return
