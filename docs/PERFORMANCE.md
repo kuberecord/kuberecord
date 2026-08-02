@@ -155,27 +155,51 @@ payload=2KiB, duration=10s`):
 | peak `write_queue_depth` | 3          |
 | process RSS              | ~71 MiB    |
 
+That load predates the named profiles, but it is still expressible against them,
+which is what keeps the table above reproducible:
+
+```sh
+make bench-load PROFILE=small LOADGEN_OBJECTS=50 LOADGEN_RATE=200 \
+  LOADGEN_PAYLOAD_BYTES=2048 LOADGEN_DURATION=10s
+```
+
 Pushed harder (`objects=300–400, rate=4000–6000/s, concurrency=16–64`), achieved
-throughput plateaus at **~550–565 records/sec** while the write path stays
+throughput plateaued at **~550–565 records/sec** while the write path stayed
 essentially idle — p99 enqueue-block <0.01 ms and peak `write_queue_depth` ≤11.
 
-> **Superseded by Task 2.3.** This section originally attributed that plateau to
-> "the envtest apiserver's own write throughput". It was in fact the harness's own
-> client-side rate limiter (envtest's 1,000-QPS `rest.Config`, two requests per
-> mutation). The write path's real ceiling on the same hardware is nearly four
-> times higher — see the SLO verdict immediately below. The rest of the figures in
-> this section stand; only the attribution was wrong.
+> **Superseded by Task 2.3 — read that plateau as an estimate, not a
+> measurement.** This section originally attributed it to "the envtest apiserver's
+> own write throughput". It was in fact the harness's own client-side rate limiter
+> (envtest's 1,000-QPS `rest.Config`, two requests per mutation). Two things follow.
+> The attribution was wrong, and the corrected story is below. And the figure
+> itself is no longer traceable: it came from command-line knobs the harness no
+> longer has, no committed profile run under [`docs/perf/`](perf/) stands behind it,
+> and re-running the same load today raises the client's QPS and produces a
+> different number. It is kept because *why* it was wrong is worth keeping, not
+> because ~550–565 is a usable figure. The low-rate table above is unaffected — at
+> 200 mutations/sec the limiter never bound, and the command above reproduces it.
 
 ### Initial SLO, and its verdict (Task 2.3)
 
 > **Sustain ≥2,000 records/sec single-replica with p99 enqueue-block <10 ms while
 > ClickHouse is healthy.**
 
-**Met.** Measured at 20,000 watched objects across mixed GVKs:
-**1,972 records/sec sustained** with a **p99 enqueue-block of 0.015 ms** and a peak
-hand-off queue depth of 30 out of 5,000 — i.e. the write path met the throughput
-target while remaining three orders of magnitude inside the latency budget and
-never coming close to saturating its queue. Reproduce with:
+**1,972 records/sec sustained**, at 20,000 watched objects across mixed GVKs,
+under an **offered load of 2,000 mutations/sec** — with a **p99 enqueue-block of
+0.015 ms** and a peak hand-off queue depth of 30 out of 5,000, on the hardware
+documented below.
+
+**Latency half: met**, by three orders of magnitude, and the queue never came close
+to saturating. **Throughput half: near-target, not met as stated** — 1,972 is 98.6 %
+of the 2,000 floor, and 98.6 % of a floor is not clearing it. What the run does
+demonstrate is that the pipeline kept pace with the load it was driven at: it
+sustained ~1,972 records/sec while being offered 2,000 mutations/sec, at 20,000
+objects, without the hand-off queue or the enqueue latency showing strain. It does
+**not** demonstrate a ceiling — nothing here drove the write path hard enough to
+make it fall behind, so 1,972 is the highest rate yet applied, not the highest it
+can do. The SLO above is left exactly as written rather than lowered to fit: a
+target narrowly missed is worth more on the record than a target quietly moved.
+Reproduce with:
 
 ```sh
 make bench-load PROFILE=massive LOADGEN_RATE=2000 LOADGEN_DURATION=30s
@@ -274,9 +298,11 @@ measurements.
 `records/sec` tracks the applied mutation rate rather than any ceiling: every
 profile settled every record it was given, with 0 dropped generator ticks. The
 `massive` figure exceeds its 500 mutations/sec because 10 % of those mutations are
-delete-and-recreate pairs, which produce two records each. For where the ceiling
-actually is, see the SLO verdict above (1,972 records/sec at the same 20,000
-objects).
+delete-and-recreate pairs, which produce two records each. The highest rate the
+write path has been *driven* at is the SLO run above — 1,972 records/sec settled
+against 2,000 offered, at the same 20,000 objects. That is a demonstrated rate,
+not a measured ceiling: nothing in these runs has yet driven the pipeline hard
+enough to make it fall behind.
 
 `hashCache` entries exceed the profile's object count by the handful of ambient
 objects a real cluster always has (envtest's own `kube-root-ca.crt` ConfigMaps and

@@ -1210,10 +1210,14 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger,
 			// deleteClaimInFlight is reachable from this pass's own retry: attempt 1
 			// claims the old UID and enqueues a now-stamped Deleted row, a later target
 			// errors the pass, and the retry re-walks this key while that row is still
-			// unwritten. Task 2.1 should force exactly that interleaving under real
-			// write reordering (claim, error the sweep on a later target, retry while
-			// the successor's row overtakes the in-flight Deleted) so this guard has a
-			// permanent chaos-level regression test, not only a unit-level one.
+			// unwritten. That interleaving is covered at the unit level here and by the
+			// standing duplicate invariant in test/chaos, and deliberately *not* by a
+			// dedicated chaos scenario: reproducing it from outside the process requires
+			// erroring the sweep on a later target at a precise moment, which is not
+			// externally controllable without a fault-injection hook in the recovery
+			// path — test-only machinery in production code, for coverage that already
+			// exists. See test/chaos's package comment for the full argument and the
+			// condition under which to revisit it.
 			//
 			// Both conditions are required, and they are independent sources: the
 			// outcome is the cache's statement that the key changed hands, decided

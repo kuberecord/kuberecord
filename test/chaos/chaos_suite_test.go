@@ -36,6 +36,43 @@ limitations under the License.
 // invariant every e2e scenario starts from. The two share their vocabulary
 // (test/harness) so the restart scenario here can reuse the Phase 1 restart
 // assertions literally rather than paraphrase them.
+//
+// # One scenario deliberately absent: the in-flight delete-claim interleaving
+//
+// Task 1.13 classifies a refused delete claim by reason, and the reason that must
+// *not* be recovered is deleteClaimInFlight: another caller already owns that
+// exact deletion and its Deleted row is on its way, so re-emitting it here would
+// write a second, differently-timestamped row that ReplacingMergeTree cannot
+// collapse. Reaching that branch requires a specific interleaving — the GC pass
+// claims an old UID, a *later* target in the same sweep errors the pass, and the
+// retry re-walks the first key while the successor's row overtakes the still
+// unwritten Deleted.
+//
+// There is no scenario here that forces it, and that is a decision rather than an
+// omission. The interleaving is not deterministically reproducible from outside
+// the process: it turns on erroring the sweep at a precise point in its own
+// iteration order, which nothing external controls. Making it reproducible would
+// mean adding a fault-injection hook to gcPass, collectZombies or the writer —
+// test-only machinery living permanently in the recovery path, which is a worse
+// trade than the coverage is worth, because the coverage already exists in three
+// layers:
+//
+//  1. The Task 1.13 unit tests in internal/pipeline, which drive the refusal
+//     classification directly and assert the in-flight case is never handed to
+//     recoverRefusedReincarnations. Deterministic, and the only layer that can be.
+//  2. harness.ExpectNoDuplicateDeletes, asserted after *every* scenario in this
+//     suite rather than inside one. A second Deleted row for one (identity, uid)
+//     is exactly what breaking this guard produces, so any scenario that happened
+//     to hit the interleaving would fail the suite.
+//  3. Probabilistic exposure through the kill-mid-flight scenario, which kills the
+//     operator with writes genuinely in flight and then makes it recover offline
+//     deletions and reincarnations from history — the conditions the branch lives
+//     under, without a guarantee of hitting it on any given run.
+//
+// Revisit if layer 2 ever fires in CI without an obvious cause. This interleaving
+// is the first hypothesis to test, and at that point a fault-injection hook stops
+// being speculative machinery and starts being the cheapest way to reproduce a
+// real bug — which is when it becomes worth its cost.
 package chaos
 
 import (
