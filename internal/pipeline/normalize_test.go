@@ -41,6 +41,13 @@ import (
 // the oracle for the equivalence test — the point is to compare against the
 // algorithm that produced every hash already stored in a real deployment, not
 // against a restatement of the current one.
+//
+// Task 3.3 added one step to the oracle: the built-in last-applied scrub, which
+// applies to every object under every policy. It is written here the obvious
+// way — deep copy, set the field — rather than by calling the redactor, so the
+// test still compares the copy-on-write implementation against an independent
+// statement of what it should produce, which is the only version of this
+// assertion worth having.
 func referenceNormalizedJSON(t *testing.T, obj *unstructured.Unstructured) []byte {
 	t.Helper()
 	copied := obj.DeepCopy()
@@ -53,6 +60,12 @@ func referenceNormalizedJSON(t *testing.T, obj *unstructured.Unstructured) []byt
 			unstructured.RemoveNestedField(copied.Object, "metadata", "annotations")
 		} else {
 			unstructured.RemoveNestedField(copied.Object, "metadata", "annotations", ActorsAnnotation)
+		}
+	}
+	if _, ok := annotations[LastAppliedConfigAnnotation]; ok {
+		if err := unstructured.SetNestedField(copied.Object, RedactionSentinel,
+			"metadata", "annotations", LastAppliedConfigAnnotation); err != nil {
+			t.Fatalf("reference redaction: %v", err)
 		}
 	}
 	out, err := json.Marshal(copied.Object)
@@ -181,7 +194,7 @@ func normalizeShapes() []struct {
 func TestNormalizeObjectMatchesTheDeepCopyReference(t *testing.T) {
 	for _, shape := range normalizeShapes() {
 		t.Run(shape.name, func(t *testing.T) {
-			norm, err := normalizeObject(shape.obj)
+			norm, err := normalizeObject(shape.obj, nil)
 			if err != nil {
 				t.Fatalf("normalizeObject: %v", err)
 			}
@@ -203,7 +216,7 @@ func TestNormalizeObjectMatchesTheDeepCopyReference(t *testing.T) {
 				name += "/raw-managedfields"
 			}
 			t.Run(name, func(t *testing.T) {
-				norm, err := normalizeObject(object.obj)
+				norm, err := normalizeObject(object.obj, nil)
 				if err != nil {
 					t.Fatalf("normalizeObject: %v", err)
 				}
@@ -225,7 +238,7 @@ func TestNormalizeObjectLeavesTheInputUntouched(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal before: %v", err)
 			}
-			if _, err := normalizeObject(shape.obj); err != nil {
+			if _, err := normalizeObject(shape.obj, nil); err != nil {
 				t.Fatalf("normalizeObject: %v", err)
 			}
 			after, err := json.Marshal(shape.obj.Object)
@@ -247,11 +260,11 @@ func TestNormalizeObjectLeavesTheInputUntouched(t *testing.T) {
 func TestNormalizeObjectIsRepeatable(t *testing.T) {
 	for _, shape := range normalizeShapes() {
 		t.Run(shape.name, func(t *testing.T) {
-			first, err := normalizeObject(shape.obj)
+			first, err := normalizeObject(shape.obj, nil)
 			if err != nil {
 				t.Fatalf("normalizeObject (first): %v", err)
 			}
-			second, err := normalizeObject(shape.obj)
+			second, err := normalizeObject(shape.obj, nil)
 			if err != nil {
 				t.Fatalf("normalizeObject (second): %v", err)
 			}

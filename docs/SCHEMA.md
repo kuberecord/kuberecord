@@ -50,8 +50,8 @@ working for the life of `v1`.
   exhaustive should branch on the values it knows and pass others through, not
   fail on them. Existing values never change meaning.
 - **The shape of the JSON inside `data` and `diff`.** That is the Kubernetes
-  object as the API server served it (normalized, and from Task 3.3 optionally
-  redacted). kubestream does not own it and cannot freeze it.
+  object as the API server served it (normalized, and optionally
+  [redacted](#redaction)). kubestream does not own it and cannot freeze it.
 - **Anything a deployment adds on top** — TTL clauses, extra indices,
   projections, materialized views, the database name. All of it is yours; the
   operator neither sets nor inspects it.
@@ -138,6 +138,9 @@ Freezing was gated on confirming that the already-designed Phase 3 features fit
   row, where it would inflate every insert to answer a question `kubectl` answers
   exactly. If that judgement is ever reversed, it is a nullable additive column,
   which the policy above permits without a freeze violation.
+
+Both have since shipped, and both shipped with **no columns added** — see
+[Kubernetes Events](#kubernetes-events) and [Redaction](#redaction).
 
 ## Applying the schema
 
@@ -548,6 +551,118 @@ Two operational notes:
 Query recipes for Events — including "everything that happened to object X around
 time T" — are in [`docs/QUERIES.md`](QUERIES.md).
 
+## Redaction
+
+Values can be scrubbed out of every object before it is stored. Redaction is
+configured in two places, and the two are **additive**:
+
+- **`ClickHouseSink.spec.policy.redaction`** — the sink owner's floor, applied to
+  everything any rule streams to that sink.
+- **`StreamRule.spec.extraRedaction`** / **`ClusterStreamRule.spec.extraRedaction`**
+  — a rule's additions on top of that floor.
+
+A rule can add paths; nothing can take one away. Where two rules stream the same
+object to the same sink, the union of their paths applies — there is exactly one
+stored payload and one hash per object per sink, so honouring less than the union
+would let one rule's existence unredact another's stream.
+
+```yaml
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+spec:
+  policy:
+    redaction:
+    - fieldPath: data.password
+---
+apiVersion: kubestream.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: app-config
+  namespace: demo
+spec:
+  resources:
+  - group: ""
+    version: v1
+    kind: ConfigMap
+  extraRedaction:
+  - fieldPath: spec.template.spec.containers[*].env[*].value
+  - annotation: my.company.io/api-token
+```
+
+### Where it happens, and why that is the whole point
+
+Values are scrubbed **after normalization and before hashing**. Everything
+downstream is therefore a function of the *redacted* content:
+
+| Column | Effect |
+|---|---|
+| `data` | the redacted object |
+| `diff` | computed between two already-redacted states, so a change to a scrubbed value produces no patch operation carrying it |
+| `sha256` | the hash of the redacted object |
+
+The consequence worth stating plainly: two states of an object that differ
+**only** in a redacted value are indistinguishable to kubestream. They hash
+identically, so the second one deduplicates and **no row is written at all**.
+That is deliberate. A design that redacted on the way out would leak the value
+through the diff, and one that hashed before redacting would leave the `sha256`
+column as a stable oracle to grind guessed values against.
+
+The flip side is equally deliberate: kubestream cannot tell you *that* a redacted
+value changed. If you need change detection on a secretish field, redact its
+neighbours instead of it, or stream the object to a second sink under a different
+policy.
+
+### Path syntax
+
+The grammar is deliberately tiny, and it is not JSONPath:
+
+| Form | Matches |
+|---|---|
+| `data.password` | dot-separated field names |
+| `spec.containers[*].env[*].value` | `[*]` iterates every element of an array |
+| `spec.args[*]` | a terminal wildcard replaces each element |
+| `annotation: my.company.io/api-token` | one annotation key, whatever characters it contains |
+
+Nothing whose match set depends on the object's contents — no filters, no
+recursive descent, no indices — is accepted, so what a policy redacts is
+readable off the policy. The syntax is validated at admission by the CRDs: a
+malformed path is rejected by the API server, not discovered at stream time.
+
+The `annotation:` shorthand exists because annotation keys contain dots and
+slashes: `kubectl.kubernetes.io/last-applied-configuration` written as a
+`fieldPath` would mean six nested maps that do not exist. Exactly one of
+`fieldPath` and `annotation` is set per entry.
+
+### What a redacted value looks like
+
+The value is replaced by the literal string `[REDACTED]`; the structure around it
+is preserved. A reader can see that the field existed and was scrubbed, rather
+than being unable to tell a hidden field from an absent one. A path whose leaf is
+a map or an array replaces that whole subtree with the same string, and a path
+that matches nothing in a given object is a silent no-op — which is what lets one
+policy apply across a mixed resource list.
+
+### Always on: `kubectl.kubernetes.io/last-applied-configuration`
+
+This annotation is scrubbed on **every** object, under **every** policy,
+including an entirely empty one. `kubectl apply` copies the complete submitted
+object into it, so it embeds a verbatim second copy of the very values a policy
+removes; leaving it alone would make every other rule cosmetic. It cannot be
+turned off.
+
+### What redaction is not
+
+- **Not a Secrets unlock.** `v1/Secret` is denied in code (D8) and no redaction
+  policy admits one, however thoroughly it would scrub it.
+- **Not a substitute for query-side access control.** Everything not on a path is
+  stored verbatim, and the flattening caveat in [`docs/RBAC.md`](RBAC.md) still
+  applies: anyone who can query ClickHouse sees every object any rule streams.
+- **Not retroactive.** Rows written before a path was added keep whatever they
+  recorded. Adding a path changes the object's content and therefore its hash, so
+  the next event for each object writes a fresh, redacted row.
+
 ## Diff format
 
 `Modified` rows store an **RFC 6902 JSON Patch** in the `diff` column, produced
@@ -555,6 +670,8 @@ by [`wI2L/jsondiff`](https://github.com/wI2L/jsondiff) comparing the previous
 normalized JSON against the current one. Normalization strips volatile fields
 (`metadata.managedFields`, `metadata.resourceVersion`, `metadata.generation`)
 before hashing and diffing, so cosmetic churn does not generate rows.
+[Redaction](#redaction) runs in the same pass, on both sides, so a diff can never
+carry a value the policy scrubbed out of `data`.
 
 **Graceful degradation:** if no prior JSON baseline exists, or the diff/marshal
 fails, the operator writes the full current state to `data` and leaves `diff`
@@ -656,6 +773,12 @@ hex SHA-256 of the operator's normalized JSON for that state. Canonicalize your
 reconstructed document (re-serialize it with sorted object keys) and hash it:
 the two must match. That check is what turns "the replay ran without errors"
 into "the replay produced the right state".
+
+If the stream is [redacted](#redaction), both the replayed document and the hash
+describe the *redacted* object — consistently, since redaction happens before
+hashing. Comparing a reconstruction against a **live** object therefore means
+applying the same policy to the live copy first; `pipeline.ObjectHash` takes the
+policy as an argument for exactly this reason.
 
 The digest to check it against — no replay needed, which also answers "is this
 object's recorded state current?" on its own:

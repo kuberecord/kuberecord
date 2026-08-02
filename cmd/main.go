@@ -315,6 +315,21 @@ func (d *dataPlane) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, boo
 	return d.watches.Get(ref)
 }
 
+// RedactionFor implements pipeline.RedactionRegistry.
+//
+// Unbound reports "no policy", which makes the pipeline retry rather than write.
+// It is unreachable in practice — Get is consulted first on every work item and
+// fails the same lookup with errDataPlaneUnbound — but the direction matters
+// more than the reachability: an unwired data plane must never be the reason an
+// object is written with less redaction than its rules asked for.
+func (d *dataPlane) RedactionFor(ref pipeline.Key) (*pipeline.RedactionPolicy, bool) {
+	if d.watches == nil {
+		setupLog.Error(errDataPlaneUnbound, "Cannot resolve a redaction policy", "key", ref.String())
+		return nil, false
+	}
+	return d.watches.RedactionFor(ref)
+}
+
 // ScopeSynced implements pipeline.ScopeStates.
 func (d *dataPlane) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
 	if d.watches == nil {
@@ -411,11 +426,12 @@ func (op *operator) setupDataPlane(mgr ctrl.Manager, cfg operatorConfig) error {
 	op.sinks = sinks
 
 	pipe, err := pipeline.New(pipeline.Options{
-		ClusterID: cfg.clusterID,
-		Workers:   cfg.pipelineWorkers,
-		Lister:    op.plane,
-		Router:    sinks,
-		Metrics:   metrics,
+		ClusterID:  cfg.clusterID,
+		Workers:    cfg.pipelineWorkers,
+		Lister:     op.plane,
+		Router:     sinks,
+		Redactions: op.plane,
+		Metrics:    metrics,
 	})
 	if err != nil {
 		return fmt.Errorf("build the pipeline: %w", err)

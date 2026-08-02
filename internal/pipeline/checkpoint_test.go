@@ -187,7 +187,7 @@ func TestProcessCheckpointFiresOnExactlyTheNthModified(t *testing.T) {
 	// The full state in data must be the object's own normalized JSON as of the
 	// checkpointed event (the third update), i.e. the exact bytes a
 	// reconstruction is expected to land on.
-	wantJSON, err := NormalizedJSON(newPod(key.Name, testUID, rv(4), image(2)))
+	wantJSON, err := NormalizedJSON(newPod(key.Name, testUID, rv(4), image(2)), nil)
 	if err != nil {
 		t.Fatalf("NormalizedJSON: %v", err)
 	}
@@ -393,11 +393,11 @@ func TestProcessCheckpointCounterResetsAfterRestart(t *testing.T) {
 // is reported as a broken fixture rather than as a broken trigger.
 func assertDiffSize(t *testing.T, before, after *unstructured.Unstructured, wantOversized bool) {
 	t.Helper()
-	beforeJSON, err := NormalizedJSON(before)
+	beforeJSON, err := NormalizedJSON(before, nil)
 	if err != nil {
 		t.Fatalf("NormalizedJSON(before): %v", err)
 	}
-	afterJSON, err := NormalizedJSON(after)
+	afterJSON, err := NormalizedJSON(after, nil)
 	if err != nil {
 		t.Fatalf("NormalizedJSON(after): %v", err)
 	}

@@ -113,6 +113,51 @@ func (f *fakeLister) getCount() int {
 	return f.gets
 }
 
+// fakeRedactions is a map-backed RedactionRegistry keyed by watch scope, which
+// is the granularity a real policy is installed at (one compiled policy per
+// interest — see WatchManager.RedactionFor).
+//
+// An unconfigured scope answers "built-in scrubs only, and yes this scope is
+// live", so every test that says nothing about redaction behaves exactly as the
+// pipeline did before Task 3.3. Only drop() produces the not-ok answer, which is
+// the "the scope stopped between the lister read and the policy lookup" race.
+type fakeRedactions struct {
+	mu       sync.RWMutex
+	policies map[ScopeKey]*RedactionPolicy
+	dropped  map[ScopeKey]struct{}
+}
+
+func newFakeRedactions() *fakeRedactions {
+	return &fakeRedactions{
+		policies: make(map[ScopeKey]*RedactionPolicy),
+		dropped:  make(map[ScopeKey]struct{}),
+	}
+}
+
+func (f *fakeRedactions) RedactionFor(ref Key) (*RedactionPolicy, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if _, gone := f.dropped[ref.Scope()]; gone {
+		return nil, false
+	}
+	return f.policies[ref.Scope()], true
+}
+
+// set installs a compiled policy for one scope.
+func (f *fakeRedactions) set(scope ScopeKey, policy *RedactionPolicy) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.policies[scope] = policy
+}
+
+// drop simulates a scope whose last interest disappeared, so no policy can be
+// resolved for it at all.
+func (f *fakeRedactions) drop(scope ScopeKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dropped[scope] = struct{}{}
+}
+
 // fakeRouter is a map-backed SinkRouter. Removing a name reproduces the
 // "sink deleted or mid-recycle" condition the pipeline must survive.
 type fakeRouter struct {
@@ -312,11 +357,12 @@ func (s *recordingLogSink) countOf(target error) int {
 // testHarness bundles a Pipeline with the doubles behind it, so each test states
 // only the behaviour it cares about.
 type testHarness struct {
-	pipeline *Pipeline
-	lister   *fakeLister
-	router   *fakeRouter
-	writer   *fakeWriter
-	logs     *recordingLogSink
+	pipeline   *Pipeline
+	lister     *fakeLister
+	router     *fakeRouter
+	writer     *fakeWriter
+	redactions *fakeRedactions
+	logs       *recordingLogSink
 	// ctx carries the recording logger, so log assertions work for code that
 	// pulls its logger from the context (as Process does).
 	ctx context.Context
@@ -335,20 +381,22 @@ func newHarness(t *testing.T, sinkNames ...string) *testHarness {
 	lister := newFakeLister()
 	router := newFakeRouter()
 	writer := newFakeWriter()
+	redactions := newFakeRedactions()
 	for _, name := range sinkNames {
 		router.set(name, writer)
 	}
 
-	p := newTestPipeline(t, lister, router)
+	p := newTestPipeline(t, lister, router, redactions)
 
 	logs := &recordingLogSink{}
 	return &testHarness{
-		pipeline: p,
-		lister:   lister,
-		router:   router,
-		writer:   writer,
-		logs:     logs,
-		ctx:      logr.NewContext(context.Background(), logr.New(logs)),
+		pipeline:   p,
+		lister:     lister,
+		router:     router,
+		writer:     writer,
+		redactions: redactions,
+		logs:       logs,
+		ctx:        logr.NewContext(context.Background(), logr.New(logs)),
 	}
 }
 
@@ -357,14 +405,16 @@ func newHarness(t *testing.T, sinkNames ...string) *testHarness {
 // test can build a *second* pipeline over the same doubles — which is what
 // simulating an operator restart amounts to, since every pipeline-side cache is
 // per-process (Invariant 6).
-func newTestPipeline(t *testing.T, lister ListerRegistry, router SinkRouter) *Pipeline {
+func newTestPipeline(t *testing.T, lister ListerRegistry, router SinkRouter,
+	redactions RedactionRegistry) *Pipeline {
 	t.Helper()
 	p, err := New(Options{
-		ClusterID: "test-cluster",
-		Workers:   4,
-		Lister:    lister,
-		Router:    router,
-		Metrics:   NewPipelineMetrics(prometheus.NewRegistry()),
+		ClusterID:  "test-cluster",
+		Workers:    4,
+		Lister:     lister,
+		Router:     router,
+		Redactions: redactions,
+		Metrics:    NewPipelineMetrics(prometheus.NewRegistry()),
 		RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[Key](
 			time.Millisecond, 20*time.Millisecond),
 	})
@@ -384,7 +434,7 @@ func newTestPipeline(t *testing.T, lister ListerRegistry, router SinkRouter) *Pi
 // starts empty, exactly as it does in a new process.
 func (h *testHarness) restart(t *testing.T) {
 	t.Helper()
-	h.pipeline = newTestPipeline(t, h.lister, h.router)
+	h.pipeline = newTestPipeline(t, h.lister, h.router, h.redactions)
 }
 
 // run starts the worker pool and returns a stop function that cancels it and

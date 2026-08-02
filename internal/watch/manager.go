@@ -506,6 +506,39 @@ func (m *WatchManager) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, 
 // future caller can classify it; today every caller simply retries.
 var errInformerNotRunning = errors.New("watch scope is registered but its informer is not running")
 
+// RedactionFor returns the redaction policy ref's objects must be scrubbed with
+// before they are hashed and written. It implements pipeline.RedactionRegistry.
+//
+// It answers from the very same interest table — and the same two-step
+// exact-namespace-then-cluster-wide lookup — that Get uses to decide whether
+// ref's scope is active at all. That is what makes the two answers consistent by
+// construction: an object the pipeline is allowed to write is always one whose
+// policy is installed, and ok=false means precisely "no interest covers this any
+// more", which the pipeline never writes through.
+//
+// Interests are merged rather than picked between when more than one answers,
+// because more than one is exactly the ambiguous case: a namespaced rule and a
+// cluster-wide rule, or two API versions of one resource, all landing on one
+// hashCache entry. Merging is a union (see pipeline.MergeRedaction), so no
+// interest's presence can weaken another's policy.
+func (m *WatchManager) RedactionFor(ref pipeline.Key) (*pipeline.RedactionPolicy, bool) {
+	interests := m.table.lookupIdentity(ref)
+	switch len(interests) {
+	case 0:
+		return nil, false
+	case 1:
+		// The overwhelmingly common case: hand back the policy compiled at
+		// pool-diff time, allocating nothing on the hot path.
+		return interests[0].redaction, true
+	default:
+		policies := make([]*pipeline.RedactionPolicy, 0, len(interests))
+		for _, in := range interests {
+			policies = append(policies, in.redaction)
+		}
+		return pipeline.MergeRedaction(policies...), true
+	}
+}
+
 // ScopeDesired reports whether any rule currently wants this (sink, scope) pair.
 // It implements half of pipeline.ScopeStates.
 //
@@ -649,9 +682,9 @@ func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 		}
 
 		informer := informerKey{GVR: gvr, Namespace: key.Namespace}
-		in, err := newScopeInterest(key, informer, state.Selectors, state.RuleKeys)
+		in, err := newScopeInterest(key, informer, state.Selectors, state.Redactions, state.RuleKeys)
 		if err != nil {
-			log.Error(err, "Skipping a watch target whose selectors could not be parsed",
+			log.Error(err, "Skipping a watch target whose selectors or redaction policy could not be parsed",
 				"sink", key.Sink, "gvk", key.GVK.String(), "namespace", key.Namespace, "rules", state.RuleKeys)
 			continue
 		}

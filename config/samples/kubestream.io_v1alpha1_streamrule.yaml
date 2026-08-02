@@ -22,3 +22,8 @@ spec:
     labelSelector:
       matchLabels:
         kubestream.io/audit: "true"
+  # Added to the sink's own redaction floor — a rule can add paths, never remove
+  # them. A path matching nothing in a given object is a silent no-op, so one
+  # entry can cover a mixed resources list.
+  extraRedaction:
+  - fieldPath: spec.template.spec.containers[*].env[*].value

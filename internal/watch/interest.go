@@ -20,6 +20,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,16 +125,28 @@ type scopeInterest struct {
 	// matchAll short-circuits the union when any contributing rule asked for
 	// everything, which makes the overwhelmingly common case a single bool read.
 	matchAll bool
+
+	// redaction is the compiled union of every contributing rule's redaction
+	// paths (Task 3.3), compiled once at pool-diff time for the same reason the
+	// selectors are parsed here: the alternative is re-parsing a policy per
+	// object per event on the pipeline's hot path. nil means no rule configured
+	// anything, which still leaves the data plane's built-in scrubs in force.
+	redaction *pipeline.RedactionPolicy
 }
 
 // newScopeInterest builds the interest for one snapshot target, parsing its
-// merged selector set.
+// merged selector set and compiling its merged redaction policy.
 //
-// A selector that fails to parse is an anomaly rather than a user error — the
-// registry canonicalized every selector through the same parser before storing
-// it (see plan.Upsert) — so it is reported rather than silently dropped, and the
-// caller degrades that one target instead of the whole pass (Invariant 5).
-func newScopeInterest(key plan.TargetKey, informer informerKey, selectors, ruleKeys []string) (*scopeInterest, error) {
+// A selector or redaction path that fails to parse is an anomaly rather than a
+// user error — the registry canonicalized every selector through the same parser
+// before storing it (see plan.Upsert), and the CRD's own validation rejects a
+// malformed redaction path at admission — so it is reported rather than silently
+// dropped, and the caller degrades that one target instead of the whole pass
+// (Invariant 5). Degrading means the target streams nothing, which for a
+// redaction failure is the only safe direction: the alternative would be
+// streaming objects whose author asked for parts of them to be scrubbed.
+func newScopeInterest(key plan.TargetKey, informer informerKey,
+	selectors, redactions, ruleKeys []string) (*scopeInterest, error) {
 	in := &scopeInterest{
 		informer: informer,
 		gvk:      key.GVK,
@@ -164,7 +177,42 @@ func newScopeInterest(key plan.TargetKey, informer informerKey, selectors, ruleK
 		// (which the registry only produces for a target nobody selects on).
 		in.matchAll = true
 	}
+
+	paths := redactionPaths(redactions)
+	if len(paths) > 0 {
+		policy, err := pipeline.CompileRedaction(paths)
+		if err != nil {
+			return nil, fmt.Errorf("compile redaction policy: %w", err)
+		}
+		in.redaction = policy
+	}
 	return in, nil
+}
+
+// redactionPaths flattens the per-rule redaction sets a target carries into one
+// deduplicated, sorted path list — the union every contributing rule's policy
+// adds up to (see plan.TargetState.Redactions).
+//
+// Empty entries are dropped rather than compiled: a rule that configured no
+// redaction contributes the empty string, and it means "I add nothing", not "an
+// empty path".
+func redactionPaths(redactions []string) []string {
+	var paths []string
+	seen := make(map[string]struct{})
+	for _, set := range redactions {
+		for path := range strings.SplitSeq(set, "\n") {
+			if path == "" {
+				continue
+			}
+			if _, done := seen[path]; done {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 // id returns this interest's identity in the table.

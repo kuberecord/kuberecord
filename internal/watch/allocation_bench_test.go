@@ -65,6 +65,7 @@ func benchTable(b *testing.B, sinks []string, selectors []string) *interestTable
 			plan.TargetKey{GVK: benchGVK, Namespace: "", Sink: sinkName},
 			benchInformerKey,
 			selectors,
+			nil,
 			[]string{"ClusterStreamRule/bench"},
 		)
 		if err != nil {

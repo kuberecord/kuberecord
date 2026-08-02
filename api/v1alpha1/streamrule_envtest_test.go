@@ -160,7 +160,86 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			obj:    e.build(ruleSpec(deploymentResource())),
 			mutate: e.appendResource,
 		},
+		// Redaction path syntax (Task 3.3). The rejections are what stops a
+		// malformed policy from reaching the data plane, where the only remaining
+		// options would be to degrade the rule silently or to stream unredacted.
+		{
+			name: "redaction-field-path-is-accepted",
+			obj:  e.build(redactingSpec(RedactionRule{FieldPath: "data.password"})),
+		},
+		{
+			name: "redaction-array-wildcard-is-accepted",
+			obj: e.build(redactingSpec(RedactionRule{
+				FieldPath: "spec.template.spec.containers[*].env[*].value",
+			})),
+		},
+		{
+			name: "redaction-annotation-shorthand-is-accepted",
+			obj:  e.build(redactingSpec(RedactionRule{Annotation: "my.company.io/api-token"})),
+		},
+		{
+			name: "redaction-annotation-shorthand-accepts-a-dotted-key",
+			obj: e.build(redactingSpec(RedactionRule{
+				Annotation: "kubectl.kubernetes.io/last-applied-configuration",
+			})),
+		},
+		{
+			name:    "redaction-with-both-fields-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: "data.password", Annotation: "token"})),
+			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
+		{
+			name:    "redaction-with-neither-field-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{})),
+			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
+		{
+			name:    "redaction-indexed-path-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: "spec.containers[0].name"})),
+			wantErr: "should match",
+		},
+		{
+			name:    "redaction-leading-dot-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: ".data.password"})),
+			wantErr: "should match",
+		},
+		{
+			name:    "redaction-trailing-dot-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: "data.password."})),
+			wantErr: "should match",
+		},
+		{
+			name:    "redaction-jsonpath-syntax-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: "$.data.password"})),
+			wantErr: "should match",
+		},
+		{
+			name:    "redaction-quoted-segment-is-rejected-in-a-field-path",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: `metadata.annotations["token"]`})),
+			wantErr: "should match",
+		},
+		{
+			// A key that could close the quote the data plane renders it into
+			// (see pipeline.AnnotationRedactionPath) would let an author express
+			// a path they did not write.
+			name:    "redaction-annotation-with-a-quote-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{Annotation: `to"ken`})),
+			wantErr: "should match",
+		},
+		{
+			name:    "redaction-empty-field-path-is-rejected",
+			obj:     e.build(redactingSpec(RedactionRule{FieldPath: ""})),
+			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
 	}
+}
+
+// redactingSpec is a valid rule spec whose extraRedaction is exactly rule, so a
+// rejection names the redaction rule under test and nothing else.
+func redactingSpec(rule RedactionRule) StreamRuleSpec {
+	spec := ruleSpec(deploymentResource())
+	spec.ExtraRedaction = []RedactionRule{rule}
+	return spec
 }
 
 func TestStreamRuleValidation(t *testing.T) {

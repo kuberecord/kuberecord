@@ -75,6 +75,23 @@ type WatchTarget struct {
 	// canonicalizes it before storing, so `a=1,b=2` and `b=2,a=1` are one and
 	// the same target and never look like a change to the data plane.
 	Selector string
+
+	// Redaction is the newline-separated set of value paths this rule wants
+	// scrubbed out of the target's objects before they are hashed and written
+	// (Task 3.3): the rule's own `spec.extraRedaction` merged with its sink's
+	// `spec.policy.redaction`, already canonicalized, sorted and deduplicated by
+	// the reconciler. The empty string means "nothing beyond the data plane's
+	// built-in scrubs".
+	//
+	// It is one opaque string rather than a slice for the reason the doc comment
+	// above gives: a WatchTarget must stay comparable to be a map key. The
+	// registry never parses it — path syntax belongs to the data plane, which is
+	// the only tier that has to apply it (see pipeline.CompileRedaction).
+	//
+	// Like Selector it is *not* part of TargetKey, so editing a redaction policy
+	// re-projects the interest without tearing down and re-listing the informer
+	// serving it.
+	Redaction string
 }
 
 // TargetKey is the identity of a watch target as the data plane sees it.
@@ -121,6 +138,18 @@ type TargetState struct {
 	// redundant. Merging rather than intersecting is the only choice that
 	// preserves per-rule intent when rules overlap.
 	Selectors []string
+
+	// Redactions are the distinct redaction path sets the contributing rules
+	// asked for, sorted, deduplicated — each entry being one rule's newline-
+	// separated WatchTarget.Redaction.
+	//
+	// They too are a *union*, and here that is a security property rather than a
+	// convenience: there is exactly one stored payload and one hash per (sink,
+	// identity), so if two rules streaming the same object disagree about what to
+	// scrub, honouring only their intersection would let one rule's existence
+	// unredact the other's stream. The data plane merges them accordingly (see
+	// pipeline.MergeRedaction).
+	Redactions []string
 }
 
 // CanonicalSelector renders a metav1.LabelSelector as the canonical string form
@@ -176,6 +205,11 @@ type targetEntry struct {
 	// selectors counts how many contributions ask for each canonical selector,
 	// across all rules.
 	selectors map[string]int
+	// redactions counts how many contributions ask for each redaction path set,
+	// across all rules. Counted rather than set-valued for the same reason
+	// selectors are: one rule can contribute several targets to the same key and
+	// the last one removed must not drop a path set an earlier one still wants.
+	redactions map[string]int
 }
 
 // Registry is the thread-safe desired-state registry: rule keys in, merged
@@ -321,9 +355,10 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 	out := make(map[TargetKey]TargetState, len(r.targets))
 	for key, entry := range r.targets {
 		out[key] = TargetState{
-			Key:       key,
-			RuleKeys:  slices.Sorted(maps.Keys(entry.rules)),
-			Selectors: slices.Sorted(maps.Keys(entry.selectors)),
+			Key:        key,
+			RuleKeys:   slices.Sorted(maps.Keys(entry.rules)),
+			Selectors:  slices.Sorted(maps.Keys(entry.selectors)),
+			Redactions: slices.Sorted(maps.Keys(entry.redactions)),
 		}
 	}
 	return out
@@ -388,13 +423,23 @@ func (r *Registry) addRefLocked(ruleKey string, t WatchTarget) {
 	entry, ok := r.targets[key]
 	if !ok {
 		entry = &targetEntry{
-			rules:     make(map[string]int),
-			selectors: make(map[string]int),
+			rules:      make(map[string]int),
+			selectors:  make(map[string]int),
+			redactions: make(map[string]int),
 		}
 		r.targets[key] = entry
 	}
 	entry.rules[ruleKey]++
 	entry.selectors[t.Selector]++
+	if t.Redaction != "" {
+		// A rule that configured no redaction contributes nothing to the union,
+		// so it is not counted at all. That is not the same treatment the empty
+		// *selector* gets — "" there means "match everything", a real and
+		// load-bearing member of the merged set — whereas "" here means "I add
+		// no paths", and carrying it would put a meaningless entry in every
+		// snapshot, log line and compiled policy.
+		entry.redactions[t.Redaction]++
+	}
 }
 
 // dropRefLocked withdraws one contribution of t by ruleKey, deleting the target
@@ -416,6 +461,11 @@ func (r *Registry) dropRefLocked(ruleKey string, t WatchTarget) {
 	}
 	if entry.selectors[t.Selector]--; entry.selectors[t.Selector] <= 0 {
 		delete(entry.selectors, t.Selector)
+	}
+	if t.Redaction != "" {
+		if entry.redactions[t.Redaction]--; entry.redactions[t.Redaction] <= 0 {
+			delete(entry.redactions, t.Redaction)
+		}
 	}
 	if len(entry.rules) == 0 {
 		delete(r.targets, key)

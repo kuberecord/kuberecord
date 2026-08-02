@@ -153,7 +153,7 @@ func BenchmarkNormalizeObject(b *testing.B) {
 			b.Run(shape.name+"/"+object.name, func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
-					if _, err := normalizeObject(object.obj); err != nil {
+					if _, err := normalizeObject(object.obj, nil); err != nil {
 						b.Fatalf("normalizeObject: %v", err)
 					}
 				}
@@ -176,7 +176,7 @@ func BenchmarkNormalizeObjectDoesNotMutate(b *testing.B) {
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := normalizeObject(object); err != nil {
+		if _, err := normalizeObject(object, nil); err != nil {
 			b.Fatalf("normalizeObject: %v", err)
 		}
 	}

@@ -69,6 +69,7 @@ type (
 	kubeCondition   = harness.Condition
 	operatorPodInfo = harness.PodInfo
 	ruleResource    = harness.RuleResource
+	redactionEntry  = harness.RedactionEntry
 )
 
 // Event types, condition statuses, groups and kinds, as this suite spells them.
@@ -90,6 +91,7 @@ const (
 	kindNode       = harness.KindNode
 	kindIngress    = harness.KindIngress
 	kindEvent      = harness.KindEvent
+	kindConfigMap  = harness.KindConfigMap
 )
 
 // creationEvents are the two tags an object's first appearance can carry — see
@@ -99,6 +101,11 @@ var creationEvents = harness.CreationEvents
 func kubectl(args ...string) (string, error) { return harness.Kubectl(args...) }
 
 func applyYAML(manifest string) { harness.ApplyYAML(fieldManager, manifest) }
+
+// clientSideApplyYAML applies without --server-side, which is the only mode that
+// writes kubectl.kubernetes.io/last-applied-configuration. Only the redaction
+// scenario wants that; see harness.ClientSideApplyYAML.
+func clientSideApplyYAML(manifest string) { harness.ClientSideApplyYAML(manifest) }
 
 func applyFile(path string) { harness.ApplyFile(path) }
 
@@ -145,6 +152,17 @@ func theOperatorPod(g Gomega) operatorPodInfo {
 
 func streamRuleYAML(namespace, name string, resources []ruleResource) string {
 	return harness.StreamRuleYAML(namespace, name, resources)
+}
+
+// redactingStreamRuleYAML renders a StreamRule that scrubs the given paths out
+// of every object it streams (Task 3.3).
+func redactingStreamRuleYAML(namespace, name string, resources []ruleResource,
+	redaction []redactionEntry) string {
+	return harness.RedactingStreamRuleYAML(namespace, name, resources, redaction)
+}
+
+func configMapYAML(namespace, name string, data map[string]string) string {
+	return harness.ConfigMapYAML(namespace, name, data)
 }
 
 func clusterStreamRuleYAML(name string, resources []ruleResource) string {

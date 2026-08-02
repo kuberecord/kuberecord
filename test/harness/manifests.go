@@ -57,6 +57,47 @@ spec:
 %s`, name, namespace, resourcesYAML(resources, "  "))
 }
 
+// RedactionEntry is one entry of a rule's spec.extraRedaction (or a sink's
+// spec.policy.redaction — they are the same type). Exactly one field is set,
+// which the CRD enforces; rendering both would produce a manifest the API server
+// rejects, and a scenario asserting on redaction would fail for the wrong reason.
+type RedactionEntry struct {
+	FieldPath  string
+	Annotation string
+}
+
+// redactionYAML renders an extraRedaction list at the given indent.
+func redactionYAML(entries []RedactionEntry, indent string) string {
+	var b strings.Builder
+	for _, e := range entries {
+		if e.Annotation != "" {
+			fmt.Fprintf(&b, "%s- annotation: %q\n", indent, e.Annotation)
+			continue
+		}
+		fmt.Fprintf(&b, "%s- fieldPath: %q\n", indent, e.FieldPath)
+	}
+	return b.String()
+}
+
+// RedactingStreamRuleYAML renders a namespaced StreamRule that scrubs the given
+// paths out of every object it streams (Task 3.3).
+//
+// It is a separate renderer rather than a variadic on StreamRuleYAML so that the
+// scenarios which say nothing about redaction keep rendering byte-identical
+// manifests to the ones they rendered before redaction existed.
+func RedactingStreamRuleYAML(namespace, name string, resources []RuleResource,
+	redaction []RedactionEntry) string {
+	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  resources:
+%s  extraRedaction:
+%s`, name, namespace, resourcesYAML(resources, "  "), redactionYAML(redaction, "  "))
+}
+
 // ClusterStreamRuleYAML renders a cluster-scoped ClusterStreamRule with no
 // namespaceSelector, i.e. one all-namespaces target per named resource.
 func ClusterStreamRuleYAML(name string, resources []RuleResource) string {
