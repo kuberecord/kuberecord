@@ -179,7 +179,7 @@ func TestExtractActorsDoesNotMutate(t *testing.T) {
 // test-local re-implementation that could drift away from it.
 func normalizedHash(t *testing.T, obj *unstructured.Unstructured) string {
 	t.Helper()
-	norm, err := normalizeObject(obj)
+	norm, err := normalizeObject(obj, nil)
 	if err != nil {
 		t.Fatalf("normalizeObject: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestActorsAnnotationDoesNotPerturbHash(t *testing.T) {
 // untransformed (so the column is never silently empty).
 func TestNormalizeReadsActorsFromAnnotationOrManagedFields(t *testing.T) {
 	fromAnnotation := newHashFixture(map[string]any{ActorsAnnotation: "argocd-controller,kubectl"})
-	norm, err := normalizeObject(fromAnnotation)
+	norm, err := normalizeObject(fromAnnotation, nil)
 	if err != nil {
 		t.Fatalf("normalizeObject: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestNormalizeReadsActorsFromAnnotationOrManagedFields(t *testing.T) {
 	fromManagedFields := newHashFixture(nil)
 	meta := fromManagedFields.Object["metadata"].(map[string]any)
 	meta["managedFields"] = []any{managedField("kube-controller-manager"), managedField("kubectl")}
-	norm, err = normalizeObject(fromManagedFields)
+	norm, err = normalizeObject(fromManagedFields, nil)
 	if err != nil {
 		t.Fatalf("normalizeObject: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestNormalizeReadsActorsFromAnnotationOrManagedFields(t *testing.T) {
 	both := newHashFixture(map[string]any{ActorsAnnotation: "argocd-controller"})
 	meta = both.Object["metadata"].(map[string]any)
 	meta["managedFields"] = []any{managedField("kubectl")}
-	norm, err = normalizeObject(both)
+	norm, err = normalizeObject(both, nil)
 	if err != nil {
 		t.Fatalf("normalizeObject: %v", err)
 	}

@@ -147,7 +147,41 @@ func TestClickHouseSinkValidation(t *testing.T) {
 			obj:     sinkWithPolicy(GVKSelector{Group: "apps", Version: "v1", Kinds: []string{}}),
 			wantErr: "should have at least 1 items",
 		},
+		// Redaction (Task 3.3). The syntax cases are the same ones the rule CRD
+		// runs (see ruleValidationCases) — the two fields are the same type, and
+		// a sink's floor is exactly as unforgiving as a rule's addition.
+		{
+			name:    "sink-redaction-field-path-is-accepted",
+			obj:     sinkWithRedaction(RedactionRule{FieldPath: "data.password"}),
+			wantErr: "",
+		},
+		{
+			name: "sink-redaction-annotation-is-accepted",
+			obj:  sinkWithRedaction(RedactionRule{Annotation: "my.company.io/api-token"}),
+		},
+		{
+			name:    "sink-redaction-with-both-fields-is-rejected",
+			obj:     sinkWithRedaction(RedactionRule{FieldPath: "data.password", Annotation: "token"}),
+			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
+		{
+			name:    "sink-redaction-with-neither-field-is-rejected",
+			obj:     sinkWithRedaction(RedactionRule{}),
+			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
+		{
+			name:    "sink-redaction-indexed-path-is-rejected",
+			obj:     sinkWithRedaction(RedactionRule{FieldPath: "spec.containers[0].name"}),
+			wantErr: "should match",
+		},
 	})
+}
+
+// sinkWithRedaction returns a valid sink whose policy scrubs exactly rule.
+func sinkWithRedaction(rule RedactionRule) *ClickHouseSink {
+	s := validSink()
+	s.Spec.Policy = SinkPolicy{Redaction: []RedactionRule{rule}}
+	return s
 }
 
 // TestClickHouseSinkDefaults pins the writer/connection defaults to the shipped

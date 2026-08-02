@@ -279,14 +279,23 @@ unaffected: the process never exits over one bad rule (Invariant 5).
 
 This is [D1] taken at face value: only the platform team queries ClickHouse for
 now, so the flattening is a documented, accepted limitation rather than a solved
-problem. Redaction is Phase 3 (Task 3.3).
+problem.
 
-Until then, treat a ClickHouse credential for the kubestream tables as
-approximately equivalent to cluster-wide read access on every kind any active
-preset grants, and gate it accordingly. Two knobs limit the exposure without any
-new code: install only the presets you need (an ungranted kind is never
-recorded), and scope rules with `namespaceSelector` so that namespaces you would
-not want flattened are never streamed in the first place.
+Treat a ClickHouse credential for the kubestream tables as approximately
+equivalent to cluster-wide read access on every kind any active preset grants,
+and gate it accordingly. Three knobs limit the exposure without any new code:
+install only the presets you need (an ungranted kind is never recorded), scope
+rules with `namespaceSelector` so that namespaces you would not want flattened
+are never streamed in the first place, and **redact** the values that must not be
+readable even by someone holding the credential.
+
+[Redaction](SCHEMA.md#redaction) narrows what a flattened read exposes; it does
+not un-flatten it. A sink's `spec.policy.redaction` scrubs configured values out
+of every object before it is hashed and stored, and a rule may add to that floor
+through `spec.extraRedaction` — so a value on a redacted path is simply not in
+ClickHouse to be read. Everything *not* on a path is still stored verbatim and
+still readable by anyone with the credential, which is why redaction is a way to
+bound the blast radius of the flattening rather than an answer to it.
 
 ## Verifying an install
 

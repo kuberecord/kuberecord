@@ -84,6 +84,22 @@ func ApplyYAML(fieldManager, manifest string) {
 	Expect(err).NotTo(HaveOccurred(), "failed to apply manifest: %s", out)
 }
 
+// ClientSideApplyYAML applies a manifest the old way — client-side, without
+// --server-side.
+//
+// It exists for one scenario and should not be the default: client-side apply is
+// what writes `kubectl.kubernetes.io/last-applied-configuration`, stuffing a
+// verbatim copy of the whole submitted object into an annotation on it. Every
+// other suite wants server-side apply (see ApplyYAML) for the actors column; the
+// redaction scenario wants precisely this annotation, because scrubbing it is the
+// always-on half of Task 3.3 and a fixture that never produced one would assert
+// nothing.
+func ClientSideApplyYAML(manifest string) {
+	GinkgoHelper()
+	out, err := KubectlStdin(manifest, "apply", "-f", "-")
+	Expect(err).NotTo(HaveOccurred(), "failed to apply manifest: %s", out)
+}
+
 // ApplyFile applies a manifest that lives in the repository. The path is
 // relative to the project root, which is the directory every command here runs
 // in.

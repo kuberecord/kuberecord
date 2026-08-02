@@ -76,6 +76,10 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"default: 1000",
 				"default: 15s",
 				"default: 50",
+				// The sink's redaction floor validates exactly like a rule's
+				// additions do.
+				"pattern: " + RedactionFieldPathPattern,
+				"rule: has(self.fieldPath) != has(self.annotation)",
 			},
 		},
 		{
@@ -99,6 +103,11 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// sinkRef defaulted, non-empty and immutable.
 				"default: default",
 				"rule: self == oldSelf",
+				// Redaction path syntax, and the one rule a pattern cannot
+				// express: exactly one of the two spellings.
+				"pattern: " + RedactionFieldPathPattern,
+				"pattern: " + RedactionAnnotationPattern,
+				"rule: has(self.fieldPath) != has(self.annotation)",
 			},
 			mustNotExist: []string{
 				// A namespaced rule must not gain a namespaceSelector *field*:
@@ -124,6 +133,9 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// this is the assertion that catches controller-gen dropping
 				// an inherited rule.
 				"rule: self == oldSelf",
+				// Inlining must carry the redaction rules across too.
+				"pattern: " + RedactionFieldPathPattern,
+				"rule: has(self.fieldPath) != has(self.annotation)",
 				"namespaceSelector:",
 			},
 		},
@@ -165,6 +177,10 @@ func TestCRDPatternConstantsMatchMarkers(t *testing.T) {
 		{name: "group", file: "kubestream.io_streamrules.yaml", pattern: GroupPattern},
 		{name: "version", file: "kubestream.io_streamrules.yaml", pattern: VersionPattern},
 		{name: "kindsEntry", file: "kubestream.io_clickhousesinks.yaml", pattern: KindsEntryPattern},
+		{name: "redactionFieldPath", file: "kubestream.io_streamrules.yaml", pattern: RedactionFieldPathPattern},
+		{name: "redactionAnnotation", file: "kubestream.io_streamrules.yaml", pattern: RedactionAnnotationPattern},
+		{name: "redactionFieldPathOnSink", file: "kubestream.io_clickhousesinks.yaml",
+			pattern: RedactionFieldPathPattern},
 	}
 
 	for _, tt := range tests {

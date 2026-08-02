@@ -82,8 +82,8 @@ func pending(ch <-chan struct{}) int {
 func formatSnapshot(snap map[TargetKey]TargetState) string {
 	lines := make([]string, 0, len(snap))
 	for key, st := range snap {
-		lines = append(lines, fmt.Sprintf("  %s|%s|%s rules=%v selectors=%q",
-			key.Sink, key.GVK, key.Namespace, st.RuleKeys, st.Selectors))
+		lines = append(lines, fmt.Sprintf("  %s|%s|%s rules=%v selectors=%q redactions=%q",
+			key.Sink, key.GVK, key.Namespace, st.RuleKeys, st.Selectors, st.Redactions))
 	}
 	slices.Sort(lines)
 	if len(lines) == 0 {
@@ -694,4 +694,141 @@ func TestTargetCountForRule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// redactingTarget is target() plus a redaction path set, for the specs below.
+// The ordinary target() helper leaves Redaction empty, which is what every rule
+// that configures no redaction contributes.
+//
+// It pins the sink, kind and namespace because every spec below is about one
+// target: what varies between them is which rules contribute it, under which
+// selector, asking for which paths.
+func redactingTarget(selector, redaction string) WatchTarget {
+	t := target(sinkDefault, gvkDeployment, nsProd, selector)
+	t.Redaction = redaction
+	return t
+}
+
+// TestRedactionMergesAsAUnion covers the Task 3.3 property the data plane
+// depends on: rules landing on one target contribute their redaction path sets
+// to a union, and a set survives exactly as long as some rule still asks for it.
+//
+// Union rather than replacement is a security property, not a merge convenience:
+// one target is one hashCache entry and one stored payload, so if the two
+// disagreed and the registry picked a winner, adding a rule could *unredact*
+// another rule's stream.
+func TestRedactionMergesAsAUnion(t *testing.T) {
+	const (
+		floorOnly = "data.password"
+		withExtra = "data.password\nspec.containers[*].env[*].value"
+	)
+
+	reg := New()
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{
+		redactingTarget(selEverything, floorOnly),
+	})
+	mustUpsert(t, reg, ruleB, []WatchTarget{
+		redactingTarget(selEverything, withExtra),
+	})
+	// A third rule on the same target that configures nothing: it must add no
+	// entry at all, since "" means "I contribute no paths" rather than a real
+	// member of the set (unlike the empty *selector*, which means "everything").
+	mustUpsert(t, reg, ruleC, []WatchTarget{
+		target(sinkDefault, gvkDeployment, nsProd, selEverything),
+	})
+
+	want := TargetState{
+		Key:        key,
+		RuleKeys:   []string{ruleA, ruleB, ruleC},
+		Selectors:  []string{selEverything},
+		Redactions: []string{floorOnly, withExtra},
+	}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	// Dropping the rule that asked for the extra path withdraws that set and
+	// leaves the other one standing.
+	reg.Remove(ruleB)
+	want.RuleKeys = []string{ruleA, ruleC}
+	want.Redactions = []string{floorOnly}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	// The rule that never contributed a set cannot remove one either.
+	reg.Remove(ruleC)
+	want.RuleKeys = []string{ruleA}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+}
+
+// TestRedactionRefCountsAcrossOneRulesTargets covers the ref-counting case the
+// per-rule map exists for: one rule contributing the same target twice (two
+// selectors, same kind and namespace) must not have the first contribution's
+// removal drop a path set the second still wants.
+func TestRedactionRefCountsAcrossOneRulesTargets(t *testing.T) {
+	const redaction = "data.password"
+	reg := New()
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{
+		redactingTarget(selAppWeb, redaction),
+		redactingTarget(selAppAPI, redaction),
+	})
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:        key,
+			RuleKeys:   []string{ruleA},
+			Selectors:  []string{selAppAPI, selAppWeb},
+			Redactions: []string{redaction},
+		},
+	})
+
+	// Drop one of the two selectors: the redaction set is still wanted by the
+	// other contribution.
+	mustUpsert(t, reg, ruleA, []WatchTarget{
+		redactingTarget(selAppAPI, redaction),
+	})
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:        key,
+			RuleKeys:   []string{ruleA},
+			Selectors:  []string{selAppAPI},
+			Redactions: []string{redaction},
+		},
+	})
+}
+
+// TestRedactionEditIsATargetChange covers the level-triggering consequence: a
+// rule that edits only its redaction policy must notify the data plane, because
+// the compiled policy has to be rebuilt — while a re-Upsert of the same policy
+// must not, or every resync would churn.
+func TestRedactionEditIsATargetChange(t *testing.T) {
+	reg := New()
+	initial := []WatchTarget{
+		redactingTarget(selEverything, "data.password"),
+	}
+	mustUpsert(t, reg, ruleA, initial)
+	if n := pending(reg.Changes()); n != 1 {
+		t.Fatalf("after the initial Upsert: pending notifications = %d, want 1", n)
+	}
+
+	mustUpsert(t, reg, ruleA, initial)
+	if n := pending(reg.Changes()); n != 0 {
+		t.Errorf("re-Upserting an unchanged policy notified %d times, want 0", n)
+	}
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{
+		redactingTarget(selEverything, "data.password\ndata.token"),
+	})
+	if n := pending(reg.Changes()); n != 1 {
+		t.Errorf("editing the policy notified %d times, want 1", n)
+	}
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:        key,
+			RuleKeys:   []string{ruleA},
+			Selectors:  []string{selEverything},
+			Redactions: []string{"data.password\ndata.token"},
+		},
+	})
 }

@@ -35,7 +35,7 @@ func podsInNamespace(namespace string) informerKey {
 func interestFor(t *testing.T, sink, namespace string, selectors, ruleKeys []string) *scopeInterest {
 	t.Helper()
 	key := plan.TargetKey{Sink: sink, GVK: podGVK, Namespace: namespace}
-	in, err := newScopeInterest(key, podsInNamespace(namespace), selectors, ruleKeys)
+	in, err := newScopeInterest(key, podsInNamespace(namespace), selectors, nil, ruleKeys)
 	if err != nil {
 		t.Fatalf("newScopeInterest(%q, %q, %v): %v", sink, namespace, selectors, err)
 	}
@@ -112,7 +112,7 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			key := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
-			in, err := newScopeInterest(key, podsInNamespace("ns-a"), tc.selectors, []string{"rule-1"})
+			in, err := newScopeInterest(key, podsInNamespace("ns-a"), tc.selectors, nil, []string{"rule-1"})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected a selector parse error, got nil")
@@ -137,7 +137,7 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 // (Invariant 7) even though the interest itself carries a versioned GVR.
 func TestScopeInterestDerivedIdentity(t *testing.T) {
 	key := plan.TargetKey{Sink: "sink-a", GVK: deploymentGVK, Namespace: "ns-a"}
-	in, err := newScopeInterest(key, informerKey{GVR: deploymentGVR, Namespace: "ns-a"}, nil, []string{"rule-1"})
+	in, err := newScopeInterest(key, informerKey{GVR: deploymentGVR, Namespace: "ns-a"}, nil, nil, []string{"rule-1"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestInterestTableLookupIdentity(t *testing.T) {
 // are the same lookup, and the candidate must not be returned twice.
 func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
 	key := plan.TargetKey{Sink: "sink-a", GVK: namespaceGVK, Namespace: ""}
-	in, err := newScopeInterest(key, informerKey{GVR: namespaceGVR}, nil, []string{"rule-1"})
+	in, err := newScopeInterest(key, informerKey{GVR: namespaceGVR}, nil, nil, []string{"rule-1"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -373,4 +373,135 @@ func TestInterestTableConcurrentAccess(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+// TestNewScopeInterestCompilesRedaction covers the Task 3.3 translation step: a
+// target's per-rule redaction sets become one compiled policy, merged as a union,
+// and a set nobody can parse degrades the target rather than the pass.
+func TestNewScopeInterestCompilesRedaction(t *testing.T) {
+	builtin := pipeline.AnnotationRedactionPath(pipeline.LastAppliedConfigAnnotation)
+
+	tests := []struct {
+		name       string
+		redactions []string
+		wantPaths  []string
+		wantErr    bool
+	}{
+		{
+			name:       "no rule configured any",
+			redactions: nil,
+			// nil, i.e. the data plane's built-in scrubs and nothing else.
+			wantPaths: nil,
+		},
+		{
+			name:       "an empty set contributes nothing",
+			redactions: []string{""},
+			wantPaths:  nil,
+		},
+		{
+			name:       "one rule's set",
+			redactions: []string{"data.password\ndata.token"},
+			wantPaths:  []string{builtin, "data.password", "data.token"},
+		},
+		{
+			name: "two rules union, duplicates collapse",
+			redactions: []string{
+				"data.password",
+				"data.password\nspec.containers[*].env[*].value",
+			},
+			wantPaths: []string{builtin, "data.password", "spec.containers[*].env[*].value"},
+		},
+		{
+			name:       "a malformed path degrades the target",
+			redactions: []string{"spec.containers[0].name"},
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			key := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
+			in, err := newScopeInterest(key, podsInNamespace("ns-a"), nil, tc.redactions, []string{"rule-1"})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected a redaction compile error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newScopeInterest: %v", err)
+			}
+			if tc.wantPaths == nil {
+				if in.redaction != nil {
+					t.Errorf("redaction = %v, want nil (built-in scrubs only)", in.redaction.Paths())
+				}
+				return
+			}
+			want := slices.Clone(tc.wantPaths)
+			slices.Sort(want)
+			if got := in.redaction.Paths(); !slices.Equal(got, want) {
+				t.Errorf("redaction paths = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestWatchManagerRedactionForUnionsInterests covers the lookup the pipeline
+// makes per work item, in the ambiguous case that makes merging mandatory: one
+// object answered for by both a namespaced interest and a cluster-wide one.
+//
+// Both land on the same hashCache entry, so there is one payload and one hash for
+// the two of them. Picking either policy over the other would let one rule's
+// existence unredact the other's stream; the union cannot.
+func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
+	namespaced := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
+	clusterWide := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: ""}
+
+	inNamespace, err := newScopeInterest(namespaced, podsInNamespace("ns-a"), nil,
+		[]string{"data.password"}, []string{"rule-ns"})
+	if err != nil {
+		t.Fatalf("newScopeInterest(namespaced): %v", err)
+	}
+	inCluster, err := newScopeInterest(clusterWide, podsInNamespace(""), nil,
+		[]string{"spec.containers[*].env[*].value"}, []string{"rule-cluster"})
+	if err != nil {
+		t.Fatalf("newScopeInterest(cluster-wide): %v", err)
+	}
+
+	m := &WatchManager{table: newInterestTable()}
+	m.table.replace(map[interestID]*scopeInterest{
+		inNamespace.id(): inNamespace,
+		inCluster.id():   inCluster,
+	})
+
+	ref := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-a", Name: "web"}
+	policy, ok := m.RedactionFor(ref)
+	if !ok {
+		t.Fatal("RedactionFor reported no policy for a live scope")
+	}
+	want := []string{
+		pipeline.AnnotationRedactionPath(pipeline.LastAppliedConfigAnnotation),
+		"data.password",
+		"spec.containers[*].env[*].value",
+	}
+	slices.Sort(want)
+	if got := policy.Paths(); !slices.Equal(got, want) {
+		t.Errorf("merged paths = %v, want %v", got, want)
+	}
+
+	// A single interest answers with its own compiled policy, unmerged.
+	single, ok := m.RedactionFor(pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-b", Name: "web"})
+	if !ok {
+		t.Fatal("RedactionFor reported no policy for the cluster-wide scope")
+	}
+	if single != inCluster.redaction {
+		t.Errorf("paths = %v, want the cluster-wide interest's own policy %v",
+			single.Paths(), inCluster.redaction.Paths())
+	}
+
+	// A sink nothing is registered for is the fail-closed answer the pipeline
+	// refuses to write through.
+	if _, ok := m.RedactionFor(pipeline.Key{Sink: "sink-b", Kind: "Pod", Namespace: "ns-a", Name: "web"}); ok {
+		t.Error("RedactionFor answered for a sink with no interests")
+	}
 }

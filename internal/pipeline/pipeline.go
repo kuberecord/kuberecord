@@ -87,6 +87,13 @@ var errSinkUnavailable = errors.New("sink is not currently available")
 // this sentinel just gives Process's log.Error calls a non-nil error value.
 var errAsyncWriteFailed = errors.New("sink write did not succeed after retries")
 
+// errRedactionUnavailable is returned by processUpsert when no redaction policy
+// can be resolved for a key — the scope stopped being watched between the
+// lister's scopeActive check and the lookup. It is retryable, never a write:
+// the value of a redaction policy is entirely in never writing content without
+// one.
+var errRedactionUnavailable = errors.New("no redaction policy is installed for this scope")
+
 // errBaselineCompression is logged when compressBaseline could not compress a
 // diff baseline and fell back to storing raw bytes. It gives that Error log a
 // non-nil error value; the fallback itself is a safe degradation (Invariant
@@ -134,6 +141,24 @@ type SinkRouter interface {
 	WriterFor(name string) (sink.Writer, bool)
 }
 
+// RedactionRegistry answers "what must be scrubbed out of this key's objects
+// before they are hashed and written?" — the projection of every contributing
+// rule's redaction policy, merged with its sink's (Task 3.3).
+//
+// It is a separate interface from ListerRegistry, rather than a fifth return
+// value on Get, because the two answer questions of different lifetimes: the
+// object changes on every event, while the policy changes only when a CR is
+// edited. Task 1.4's WatchManager implements both, off the same interest table,
+// so the policy a work item is redacted under is always the one the interest
+// that made its scope active declares.
+//
+// ok=false means no interest currently covers the key — the scope stopped being
+// watched — and is never an answer the pipeline writes through: see
+// errRedactionUnavailable.
+type RedactionRegistry interface {
+	RedactionFor(ref Key) (policy *RedactionPolicy, ok bool)
+}
+
 // Options configures a Pipeline. Only Lister and Router are mandatory; the rest
 // have documented defaults so cmd/main.go's wiring (Task 1.10) stays a short,
 // readable struct literal.
@@ -148,6 +173,10 @@ type Options struct {
 	Lister ListerRegistry
 	// Router resolves a key's sink to a live Writer. Required.
 	Router SinkRouter
+	// Redactions resolves a key's redaction policy. Nil means no rule-configured
+	// redaction exists in this process, and every object is scrubbed with the
+	// built-in policy alone (see RedactionPolicy.Apply) — never with nothing.
+	Redactions RedactionRegistry
 	// Metrics collects the pipeline's Prometheus series. Nil means the
 	// process-wide instance (PipelineMetricsInstance), which is what production
 	// wants; tests pass an isolated instance built on their own registry.
@@ -169,12 +198,13 @@ type Options struct {
 // exits, and the sink's own drain (see sink.Writer.Start) then flushes whatever
 // the workers handed off.
 type Pipeline struct {
-	clusterID string
-	workers   int
-	lister    ListerRegistry
-	router    SinkRouter
-	metrics   *PipelineMetrics
-	queue     workqueue.TypedRateLimitingInterface[Key]
+	clusterID  string
+	workers    int
+	lister     ListerRegistry
+	router     SinkRouter
+	redactions RedactionRegistry
+	metrics    *PipelineMetrics
+	queue      workqueue.TypedRateLimitingInterface[Key]
 
 	// sinks holds the per-sink hashCache + warm-scope set. Nothing outside this
 	// package touches the map; the lifecycle hooks (RemoveSink, EvictScope,
@@ -247,11 +277,12 @@ func New(opts Options) (*Pipeline, error) {
 	}
 
 	p := &Pipeline{
-		clusterID: opts.ClusterID,
-		workers:   workers,
-		lister:    opts.Lister,
-		router:    opts.Router,
-		metrics:   metrics,
+		clusterID:  opts.ClusterID,
+		workers:    workers,
+		lister:     opts.Lister,
+		router:     opts.Router,
+		redactions: opts.Redactions,
+		metrics:    metrics,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(rateLimiter,
 			workqueue.TypedRateLimitingQueueConfig[Key]{Name: queueName}),
 		sinks:              newSinkStateRegistry(metrics),
@@ -362,6 +393,19 @@ func (p *Pipeline) processNext(ctx context.Context) bool {
 	// delay instead of inheriting an old exponential penalty.
 	p.queue.Forget(key)
 	return true
+}
+
+// redactionFor resolves the policy a key's object must be scrubbed with.
+//
+// A pipeline wired without a RedactionRegistry reports the built-in policy (nil)
+// for every key, and always succeeds: with no registry there is no notion of a
+// scope's policy to have lost, so failing closed would stall every write in a
+// test or a load harness while protecting nothing.
+func (p *Pipeline) redactionFor(key Key) (*RedactionPolicy, bool) {
+	if p.redactions == nil {
+		return nil, true
+	}
+	return p.redactions.RedactionFor(key)
 }
 
 // RemoveSink discards all pipeline state for a sink: its hashCache and its warm

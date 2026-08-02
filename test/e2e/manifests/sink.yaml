@@ -46,6 +46,9 @@ spec:
       version: v1
       kinds:
       - Node
+      # The redaction scenario's workhorse: a ConfigMap is the smallest object
+      # with a plainly secretish field to plant a value in.
+      - ConfigMap
       # Both Event spellings, because the Task 3.1 scenario runs its assertions
       # against each: they are two resources over one storage, and the sink
       # policy gate matches on the group, so admitting one would not admit the
@@ -59,3 +62,10 @@ spec:
       version: v1
       kinds:
       - Ingress
+    # The sink owner's redaction floor. The redaction scenario asserts that this
+    # is applied to everything written here *and* that a rule's own
+    # extraRedaction adds to it rather than replacing it, so both halves of the
+    # additive design are proved against a real cluster. It matches nothing in
+    # the other scenarios' objects, which carry no top-level `data`.
+    redaction:
+    - fieldPath: data.password

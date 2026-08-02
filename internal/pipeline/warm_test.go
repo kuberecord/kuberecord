@@ -408,7 +408,7 @@ func TestWarmScopeGCHonoursTheEpochCheck(t *testing.T) {
 	// earlier epoch would have recorded it — that is what makes the "no duplicate
 	// Added flood" assertion at the end of this test mean something.
 	pod := newPod("ancient", "uid-ancient", "9", "nginx")
-	norm, err := normalizeObject(pod)
+	norm, err := normalizeObject(pod, nil)
 	if err != nil {
 		t.Fatalf("normalizeObject: %v", err)
 	}
@@ -1451,7 +1451,7 @@ func TestWarmEventsRestartDoesNotReEmitUnchangedEvents(t *testing.T) {
 	// The sink's history now holds that row. Its hash is computed through the same
 	// function the write path used, so the seeded baseline is the real one rather
 	// than a literal that would stop matching the first time normalization changed.
-	hash, err := ObjectHash(event)
+	hash, err := ObjectHash(event, nil)
 	if err != nil {
 		t.Fatalf("ObjectHash: %v", err)
 	}

@@ -167,6 +167,22 @@ type SinkPolicy struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=128
 	AllowedGVKs []GVKSelector `json:"allowedGVKs,omitempty"`
+
+	// Redaction is this sink's redaction floor: value paths scrubbed out of
+	// every object any rule streams here, before hashing (Task 3.3).
+	//
+	// It lives on the sink for the same reason AllowedGVKs does. Whoever owns
+	// the ClickHouse instance owns what may land in it, and that authority has
+	// to hold without reviewing every StreamRule anyone writes — so a rule may
+	// add paths through its own `spec.extraRedaction`, but nothing a rule
+	// declares can remove one listed here.
+	//
+	// An empty list is not "no redaction": the data plane always scrubs
+	// `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole
+	// prior copies of the objects it annotates.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	Redaction []RedactionRule `json:"redaction,omitempty"`
 }
 
 // ClickHouseSinkSpec is the desired state of a ClickHouseSink.

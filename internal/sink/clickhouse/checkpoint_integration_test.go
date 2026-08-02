@@ -206,7 +206,7 @@ func TestCheckpointStateReconstructionIntegration(t *testing.T) {
 	//    while normalization emits Go's sorted-key order — byte-equality is a
 	//    claim about the JSON document, not about a serializer's whitespace or
 	//    ordering choices.
-	live, err := pipeline.NormalizedJSON(lister.current())
+	live, err := pipeline.NormalizedJSON(lister.current(), nil)
 	if err != nil {
 		t.Fatalf("NormalizedJSON(live object): %v", err)
 	}
@@ -220,7 +220,7 @@ func TestCheckpointStateReconstructionIntegration(t *testing.T) {
 	// the hash of the normalized state, so a matching digest proves the recipe lands
 	// on the same bytes the operator hashed rather than on something merely
 	// equivalent after canonicalization.
-	liveHash, err := pipeline.ObjectHash(lister.current())
+	liveHash, err := pipeline.ObjectHash(lister.current(), nil)
 	if err != nil {
 		t.Fatalf("ObjectHash(live object): %v", err)
 	}

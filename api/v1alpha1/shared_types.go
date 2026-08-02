@@ -109,7 +109,77 @@ const (
 	// KindsEntryPattern matches one entry of a GVKSelector's `kinds` list: a
 	// Kind, or the literal `*` meaning "every kind in this group/version".
 	KindsEntryPattern = `^(\*|[A-Z][A-Za-z0-9]{0,62})$`
+
+	// RedactionFieldPathPattern matches a RedactionRule.FieldPath: dot-separated
+	// field names, each optionally followed by the `[*]` array wildcard, as in
+	// `spec.template.spec.containers[*].env[*].value`.
+	//
+	// It is the admission-time half of a grammar whose other half is the data
+	// plane's parser (see pipeline.CompileRedaction); a controller test asserts
+	// the two accept the same strings, so a path the API server admits can never
+	// fail to compile in the pipeline and silently degrade a rule to streaming
+	// nothing. It deliberately admits no JSONPath construct — no filters, no
+	// recursive descent, no index — because a policy whose match set depends on
+	// an object's contents is one whose effect cannot be read off the policy.
+	RedactionFieldPathPattern = `^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$`
+
+	// RedactionAnnotationPattern matches a RedactionRule.Annotation: a
+	// Kubernetes annotation key, i.e. an optional DNS-subdomain prefix and a
+	// `/`, then the name itself.
+	//
+	// Quotation marks and backslashes are excluded by construction, which is
+	// load-bearing rather than incidental: the key is rendered into a quoted path
+	// segment when it crosses into the data plane (see
+	// pipeline.AnnotationRedactionPath), and a key able to close that quote could
+	// express a path its author did not write.
+	RedactionAnnotationPattern = `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 )
+
+// RedactionRule names one value to scrub out of every streamed object before it
+// is hashed, diffed and written (Task 3.3).
+//
+// Exactly one of the two fields is set. They are separate fields rather than one
+// string with two grammars because an annotation key routinely contains dots and
+// slashes — `kubectl.kubernetes.io/last-applied-configuration` — which the
+// dot-segment path syntax cannot spell unambiguously: written as a `fieldPath`
+// it would mean six nested maps that do not exist. The shorthand is therefore
+// the only way to name such a key, not sugar over a longer form.
+//
+// Redaction is *additive* everywhere it appears. A sink's policy is the floor,
+// a rule's `extraRedaction` adds to it, and rules that overlap on one target
+// contribute a union — nothing anywhere can remove a path another party asked
+// for. That is what lets a platform team hand out a sink whose redaction floor
+// they own without reviewing every rule written against it.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.fieldPath) != has(self.annotation)",message="exactly one of fieldPath or annotation must be set"
+type RedactionRule struct {
+	// FieldPath is the value to scrub, as dot-separated field names with an
+	// optional `[*]` wildcard over arrays — `data.password`,
+	// `spec.template.spec.containers[*].env[*].value`.
+	//
+	// A path that matches nothing in a given object is a silent no-op, which is
+	// what makes one policy usable across a whole kind. A path that matches a
+	// map or an array rather than a scalar replaces that whole subtree with the
+	// sentinel.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$`
+	FieldPath string `json:"fieldPath,omitempty"`
+
+	// Annotation is the shorthand for one annotation key, equivalent to a
+	// fieldPath of `metadata.annotations` indexed by this exact key.
+	//
+	// `kubectl.kubernetes.io/last-applied-configuration` never needs listing: it
+	// is scrubbed on every object under every policy, including an empty one,
+	// because kubectl copies the entire submitted object into it and it would
+	// otherwise re-leak every value the rest of the policy removes.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	Annotation string `json:"annotation,omitempty"`
+}
 
 // WatchedResource names one resource type a rule wants streamed.
 //
@@ -240,6 +310,26 @@ type StreamRuleSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	Resources []WatchedResource `json:"resources"`
+
+	// ExtraRedaction adds value paths to scrub, on top of whatever the target
+	// sink's `spec.policy.redaction` already scrubs (Task 3.3).
+	//
+	// It is strictly additive: a rule can add paths, never remove one the sink's
+	// owner configured. Values are scrubbed after normalization and *before*
+	// hashing, so a redacted value never reaches ClickHouse — not in `data`, not
+	// in a `diff` delta, and not as a hash an attacker could grind. Two objects
+	// differing only in a redacted value are indistinguishable to the pipeline
+	// and deduplicate away.
+	//
+	// The paths apply to every resource this rule names. A path matching nothing
+	// in a given object is a no-op, so one rule can redact `data.password`
+	// across a mixed resource list without splitting into two rules.
+	//
+	// Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
+	// remains denied in code (D8) whether or not a policy would scrub it.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	ExtraRedaction []RedactionRule `json:"extraRedaction,omitempty"`
 }
 
 // StreamRuleStatus is the observed state shared by StreamRule and

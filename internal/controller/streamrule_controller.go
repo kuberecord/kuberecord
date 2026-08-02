@@ -518,7 +518,12 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		ReasonAllKindsResolved, "Every kind this rule names resolved to a watchable resource",
 		ReasonKindsUnresolved)
 
-	targets, denials, err := r.reviewTargets(ctx, chSink.Name, resolved)
+	// The rule's additions are merged with the sink's floor once per pass, here,
+	// rather than per target: every target of one rule streams to one sink, so
+	// the answer cannot differ between them.
+	redaction := canonicalRedaction(chSink.Spec.Policy.Redaction, spec.ExtraRedaction)
+
+	targets, denials, err := r.reviewTargets(ctx, chSink.Name, resolved, redaction)
 	if err != nil {
 		status.set(v1alpha1.ConditionRBACGranted, metav1.ConditionUnknown, ReasonAccessReviewFailed, err.Error())
 		return planOutcome{verdict: verdict, err: err}
@@ -769,8 +774,11 @@ func (r *RuleReconciler) targetNamespaces(ctx context.Context, obj client.Object
 // Verdicts are cached per (GVR, namespace) within the pass, because two resources
 // of one rule can expand onto the same namespace set and the answer cannot differ
 // between them.
+//
+// redaction is the rule's canonical merged redaction policy (see
+// canonicalRedaction), stamped identically onto every target it produces.
 func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkName string,
-	resolved []resolvedResource) ([]plan.WatchTarget, []string, error) {
+	resolved []resolvedResource, redaction string) ([]plan.WatchTarget, []string, error) {
 	targets := make([]plan.WatchTarget, 0, len(resolved))
 	var denials []string
 	seen := make(map[string]string)
@@ -803,6 +811,7 @@ func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkName string,
 				GVK:       res.gvk,
 				Namespace: namespace,
 				Selector:  res.selector,
+				Redaction: redaction,
 			})
 		}
 	}

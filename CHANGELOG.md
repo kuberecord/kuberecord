@@ -84,6 +84,48 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   variable its dashboard does not declare — a mistake Grafana renders as an empty
   filter rather than an error.
 
+- **Redaction (`spec.policy.redaction` on a sink, `spec.extraRedaction` on a
+  rule).** Configured values are scrubbed out of every object **after
+  normalization and before hashing**, which is what makes the guarantee a real
+  one rather than a display convention: the stored payload, the diff baseline and
+  the `sha256` are all functions of the redacted content, so a scrubbed value
+  cannot resurface as a patch operation in a `diff` and cannot be ground out of
+  the hash column by an attacker testing candidates. The direct consequence is
+  that two states of an object differing **only** in a redacted value are
+  indistinguishable to kubestream: they hash identically and the second one
+  deduplicates, writing no row at all. The cost of that is stated in
+  [`docs/SCHEMA.md`](docs/SCHEMA.md#redaction) — kubestream cannot report *that*
+  a redacted value changed.
+  - The two fields are **additive in every direction**. A sink's policy is a
+    floor its owner sets without reviewing every rule written against it, a rule
+    adds to that floor, and two rules streaming one object to one sink contribute
+    the union of their paths — there is one payload and one hash per object per
+    sink, so anything less than a union would let one rule's existence unredact
+    another's stream.
+  - The path syntax is deliberately tiny: dot segments, a `[*]` array wildcard
+    (`spec.template.spec.containers[*].env[*].value`), and an `annotation:`
+    shorthand for keys whose dots and slashes a field path cannot spell. No
+    JSONPath construct whose match set depends on the object's contents is
+    accepted, so what a policy redacts is readable off the policy. Syntax is
+    enforced by CRD patterns and the exactly-one-of rule by CEL, so a malformed
+    path is rejected at admission rather than degrading a rule at stream time.
+  - **`kubectl.kubernetes.io/last-applied-configuration` is scrubbed
+    unconditionally**, under every policy including an empty one. `kubectl apply`
+    copies the entire submitted object into it, so leaving it alone would ship a
+    verbatim second copy of every value the rest of the policy removes.
+  - Redaction is **not** a Secrets unlock: `v1/Secret` stays denied in code (D8)
+    however thoroughly a policy would scrub it. It is also not an answer to the
+    RBAC-flattening caveat, only a way to bound it — see
+    [`docs/RBAC.md`](docs/RBAC.md).
+  - The ClickHouse schema is untouched (v1 stays frozen), as the Task 2.6 freeze
+    gate predicted.
+  - **Upgrade impact:** the always-on annotation scrub changes the normalized
+    content of every object that carries a last-applied annotation, so those
+    objects hash differently than they did before and each writes one fresh row
+    on its next event. That is a one-off re-baseline, not a loop — and the same
+    is true whenever a redaction path is added later. Rows written earlier keep
+    whatever they recorded; redaction is not retroactive.
+
 ### Changed
 
 - **[`deploy/grafana/dashboard.schema.json`](deploy/grafana/dashboard.schema.json)
@@ -94,6 +136,12 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   validate, so the requirement is conditional. `test/observability` validates all
   five shipped dashboards against it, and fails if a sixth is added without being
   registered for checking.
+- **`pipeline.ObjectHash` and `pipeline.NormalizedJSON` now take a
+  `*pipeline.RedactionPolicy`** (`nil` = the built-in scrubs only). They exist so
+  an acceptance suite can recompute what the write path stored instead of
+  reimplementing normalization; redaction happens before hashing, so a recompute
+  that did not know the stream's policy would silently stop comparing the real
+  thing — exactly the drift those functions were exported to prevent.
 
 ## Unreleased — Phase 2: proving the foundation at both extremes
 

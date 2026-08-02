@@ -446,7 +446,7 @@ func liveHash(kind, name, namespace string) (string, error) {
 	if err := json.Unmarshal(raw, &obj.Object); err != nil {
 		return "", fmt.Errorf("decode %s/%s: %w", kind, name, err)
 	}
-	return pipeline.ObjectHash(obj)
+	return pipeline.ObjectHash(obj, nil)
 }
 
 // expectConverged asserts that the sink's newest row for an object describes the

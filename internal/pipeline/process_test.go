@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -434,7 +435,7 @@ func TestObjectHashMatchesTheRecordedHash(t *testing.T) {
 	}
 	record := h.writer.awaitRecords(t, 1)[0]
 
-	got, err := ObjectHash(pod)
+	got, err := ObjectHash(pod, nil)
 	if err != nil {
 		t.Fatalf("ObjectHash: %v", err)
 	}
@@ -462,11 +463,11 @@ func TestObjectHashIgnoresTransportFields(t *testing.T) {
 	informerMeta["annotations"] = map[string]any{ActorsAnnotation: "kubectl"}
 	informerMeta["generation"] = int64(4)
 
-	apiHash, err := ObjectHash(fromAPIServer)
+	apiHash, err := ObjectHash(fromAPIServer, nil)
 	if err != nil {
 		t.Fatalf("ObjectHash(api server copy): %v", err)
 	}
-	informerHash, err := ObjectHash(fromInformer)
+	informerHash, err := ObjectHash(fromInformer, nil)
 	if err != nil {
 		t.Fatalf("ObjectHash(informer copy): %v", err)
 	}
@@ -476,11 +477,247 @@ func TestObjectHashIgnoresTransportFields(t *testing.T) {
 
 	// And it is still a content hash: a real change must change it.
 	changed := newPod("shape", "uid-1", "17", "busybox:2")
-	changedHash, err := ObjectHash(changed)
+	changedHash, err := ObjectHash(changed, nil)
 	if err != nil {
 		t.Fatalf("ObjectHash(changed): %v", err)
 	}
 	if changedHash == apiHash {
 		t.Error("ObjectHash ignored a change to the object's spec")
+	}
+}
+
+// --- Redaction (Task 3.3) ---
+//
+// The specs below are the pipeline half of redaction: not "does the redactor
+// rewrite a path" (redact_test.go covers that in isolation) but "does scrubbing
+// before hashing actually keep the value out of everything the sink stores" —
+// the payload, the diff, and the hash that discriminates one state from another.
+
+// podWithSecret builds a Pod whose container env carries value, plus a
+// last-applied annotation embedding the same value — which is exactly what
+// `kubectl apply` produces, and the reason the annotation is scrubbed
+// unconditionally.
+func podWithSecret(name, resourceVersion, value string) *unstructured.Unstructured {
+	pod := newPod(name, testUID, resourceVersion, "busybox:1")
+	container := pod.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	container["env"] = []any{map[string]any{"name": "TOKEN", "value": value}}
+	pod.Object["metadata"].(map[string]any)["annotations"] = map[string]any{
+		LastAppliedConfigAnnotation: `{"spec":{"containers":[{"env":[{"name":"TOKEN","value":"` + value + `"}]}]}}`,
+	}
+	return pod
+}
+
+// envRedaction is the policy the specs below stream under.
+const envRedactionPath = "spec.containers[*].env[*].value"
+
+// TestRedactedDifferenceDedupsInsteadOfLeaking is *the* security property of
+// Task 3.3, asserted by name: two states of an object that differ only in a
+// redacted value must be indistinguishable to the pipeline.
+//
+// Indistinguishable has to mean all three of these at once, which is why one
+// spec asserts all three: the same hash (so the value cannot be recovered by
+// grinding candidates against the sha256 column), a dedup skip (so no second row
+// is written at all), and therefore no diff — because a diff is where a
+// value-changed-to-a-different-value would otherwise surface in full, even
+// though the payload itself was scrubbed.
+func TestRedactedDifferenceDedupsInsteadOfLeaking(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("secretive")
+	h.warm(key)
+	h.redactions.set(key.Scope(), mustCompile(t, envRedactionPath))
+
+	h.lister.set(key, podWithSecret(key.Name, "1", "hunter2"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(first state): %v", err)
+	}
+
+	// The same object, with only the redacted value changed.
+	h.lister.set(key, podWithSecret(key.Name, "2", "correct-horse-battery-staple"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(second state): %v", err)
+	}
+
+	records := h.writer.recorded()
+	if len(records) != 1 {
+		t.Fatalf("event types = %v, want exactly one row: the second state differs only in a redacted value",
+			h.writer.eventTypes())
+	}
+	if got := testutil.ToFloat64(h.pipeline.metrics.dedupSkips); got != 1 {
+		t.Errorf("dedup_skips = %v, want 1 — the redacted difference must deduplicate, not write", got)
+	}
+
+	// The hashes of the two states, computed independently of the pipeline, are
+	// equal: the sha256 column cannot distinguish them either.
+	policy := mustCompile(t, envRedactionPath)
+	firstHash, err := ObjectHash(podWithSecret(key.Name, "1", "hunter2"), policy)
+	if err != nil {
+		t.Fatalf("ObjectHash(first): %v", err)
+	}
+	secondHash, err := ObjectHash(podWithSecret(key.Name, "2", "correct-horse-battery-staple"), policy)
+	if err != nil {
+		t.Fatalf("ObjectHash(second): %v", err)
+	}
+	if firstHash != secondHash {
+		t.Errorf("two states differing only in a redacted value hashed differently: %q vs %q",
+			firstHash, secondHash)
+	}
+	if firstHash != records[0].SHA256 {
+		t.Errorf("recorded sha256 = %q, want the redacted hash %q", records[0].SHA256, firstHash)
+	}
+
+	for _, secret := range []string{"hunter2", "correct-horse-battery-staple"} {
+		if strings.Contains(records[0].Data, secret) {
+			t.Errorf("the redacted value %q survived in the stored state: %s", secret, records[0].Data)
+		}
+	}
+}
+
+// TestRedactionHashIsStableAcrossRuns pins the other half of the dedup property:
+// the same object under the same policy hashes the same every time. Without it
+// the skip above would be luck — a hash that varied per call would re-write every
+// object on every event and the dedup assertion would fail for the wrong reason.
+func TestRedactionHashIsStableAcrossRuns(t *testing.T) {
+	policy := mustCompile(t, envRedactionPath, "metadata.name")
+	var first string
+	for run := range 5 {
+		hash, err := ObjectHash(podWithSecret("stable", "1", "hunter2"), policy)
+		if err != nil {
+			t.Fatalf("ObjectHash(run %d): %v", run, err)
+		}
+		if run == 0 {
+			first = hash
+			continue
+		}
+		if hash != first {
+			t.Fatalf("hash changed between runs: %q then %q", first, hash)
+		}
+	}
+
+	// A change *outside* the redacted paths still changes the hash — otherwise
+	// "stable" would just mean "constant", and the pipeline would stop recording
+	// real changes.
+	changed := podWithSecret("stable", "1", "hunter2")
+	changed.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"] = "busybox:2"
+	changedHash, err := ObjectHash(changed, policy)
+	if err != nil {
+		t.Fatalf("ObjectHash(changed): %v", err)
+	}
+	if changedHash == first {
+		t.Error("a change outside the redacted paths did not change the hash")
+	}
+}
+
+// TestRedactedDiffCarriesNoUnredactedFragment covers the diff path, which is the
+// leak a "redact the payload on the way out" design would miss entirely: the
+// baseline and the update are both redacted before the diff is computed, so a
+// change to a scrubbed value cannot appear as a patch operation carrying it.
+func TestRedactedDiffCarriesNoUnredactedFragment(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("diffed")
+	h.warm(key)
+	h.redactions.set(key.Scope(), mustCompile(t, envRedactionPath))
+
+	const oldSecret = "hunter2"
+	const newSecret = "correct-horse-battery-staple"
+
+	h.lister.set(key, podWithSecret(key.Name, "1", oldSecret))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(baseline): %v", err)
+	}
+
+	// A real change (the image) *and* a change to the redacted value, so this
+	// update genuinely produces a diff rather than deduplicating away.
+	updated := podWithSecret(key.Name, "2", newSecret)
+	updated.Object["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["image"] = "busybox:2"
+	h.lister.set(key, updated)
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(update): %v", err)
+	}
+
+	records := h.writer.awaitRecords(t, 2)
+	modified := records[1]
+	if modified.EventType != eventModified {
+		t.Fatalf("event types = %v, want the second row to be a Modified diff", h.writer.eventTypes())
+	}
+	if modified.Diff == "" {
+		t.Fatal("the update produced no diff, so this spec would assert nothing")
+	}
+	if !strings.Contains(modified.Diff, "busybox:2") {
+		t.Errorf("the diff does not carry the real change, so it is not the diff under test: %s", modified.Diff)
+	}
+	for _, fragment := range []string{oldSecret, newSecret} {
+		for _, column := range []struct {
+			name  string
+			value string
+		}{{"diff", modified.Diff}, {"data", modified.Data}} {
+			if strings.Contains(column.value, fragment) {
+				t.Errorf("the redacted value %q leaked into the %s column: %s",
+					fragment, column.name, column.value)
+			}
+		}
+	}
+}
+
+// TestLastAppliedIsScrubbedUnderAnEmptyPolicy is the built-in half of the AC,
+// asserted through the pipeline rather than the redactor: an operator who
+// configured no redaction at all still gets no `kubectl apply` payload in
+// ClickHouse. It is the unit-level twin of the e2e assertion.
+func TestLastAppliedIsScrubbedUnderAnEmptyPolicy(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("applied")
+	h.warm(key)
+	// Deliberately no h.redactions.set: this stream has no policy whatsoever.
+
+	h.lister.set(key, podWithSecret(key.Name, "1", "hunter2"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	record := h.writer.awaitRecords(t, 1)[0]
+	if !strings.Contains(record.Data, RedactionSentinel) {
+		t.Errorf("the last-applied annotation was not scrubbed: %s", record.Data)
+	}
+	// The env value itself is *not* redacted here — no policy asked for it — and
+	// that is the point: only the annotation's embedded copy is gone, so the
+	// assertion below proves the scrub rather than an absent fixture.
+	if !strings.Contains(record.Data, `"value":"hunter2"`) {
+		t.Errorf("the unredacted env value should still be recorded under an empty policy: %s", record.Data)
+	}
+	if strings.Contains(record.Data, `\"value\":\"hunter2\"`) {
+		t.Errorf("the last-applied annotation's embedded copy survived: %s", record.Data)
+	}
+}
+
+// TestProcessRetriesWhenNoRedactionPolicyIsInstalled covers the fail-closed
+// direction of the RedactionRegistry contract. A scope whose last interest
+// disappeared between the lister read and the policy lookup has no policy to
+// write under, and the pipeline must retry rather than write object content with
+// whatever redaction it can find — the retry then settles truthfully, because the
+// next attempt's lister read reports the scope inactive and drops.
+func TestProcessRetriesWhenNoRedactionPolicyIsInstalled(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("policyless")
+	h.warm(key)
+	h.lister.set(key, newPod(key.Name, testUID, "1", "busybox:1"))
+	h.redactions.drop(key.Scope())
+
+	err := h.pipeline.Process(h.ctx, key)
+	if !errors.Is(err, errRedactionUnavailable) {
+		t.Fatalf("Process = %v, want errRedactionUnavailable", err)
+	}
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("wrote %d record(s) with no redaction policy installed", len(records))
+	}
+	if got := h.logs.countOf(errRedactionUnavailable); got != 1 {
+		t.Errorf("logged the missing policy %d times, want 1 (Invariant 4)", got)
+	}
+
+	// The scope really is gone: the retry drops rather than looping forever.
+	h.lister.stopScope(key.Sink, key.Scope())
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(retry): %v", err)
+	}
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("wrote %d record(s) for a stopped scope", len(records))
 	}
 }

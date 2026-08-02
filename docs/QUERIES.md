@@ -11,6 +11,13 @@ The four shipped Grafana dashboards ask these same questions with the clicking
 already done; see [`docs/DASHBOARDS.md`](DASHBOARDS.md). Each section below names
 the dashboard that covers it.
 
+> **If a value reads `[REDACTED]`, that is what is stored.** Redaction happens
+> before hashing, so a scrubbed value is absent from `data`, from every `diff`,
+> and from the `sha256` — not hidden at query time. Two states of an object that
+> differ only in a redacted value produce **one** row, not two, so a "what
+> changed?" query cannot see a change confined to a redacted path. See
+> [Redaction](SCHEMA.md#redaction).
+
 ## Parameters
 
 Every query is written with ClickHouse-native query parameters, so it can be run
@@ -214,7 +221,9 @@ under that `uid`.
 
 **Step 2 — check the replay.** The `sha256` of the row you finished on is the hex
 SHA-256 of the operator's normalized JSON for that state. Re-serialize your
-reconstruction with sorted keys, hash it, and compare. This query returns the
+reconstruction with sorted keys, hash it, and compare. On a redacted stream both
+sides describe the redacted object, so the check holds unchanged — comparing
+against a *live* object is what needs the policy applied first. This query returns the
 digest to compare against — and, on its own, answers "is what I have current?"
 without any replay at all:
 

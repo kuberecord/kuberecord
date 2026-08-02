@@ -61,8 +61,8 @@ type normalizedObject struct {
 	Actors []string
 }
 
-// normalizeObject strips the volatile and operator-internal fields from obj and
-// hashes what remains.
+// normalizeObject strips the volatile and operator-internal fields from obj,
+// applies policy's redaction to what remains, and hashes the result.
 //
 // It never mutates obj. That is not defensive paranoia: the object comes from
 // ListerRegistry and may be the informer's own cached instance, shared with every
@@ -93,7 +93,14 @@ type normalizedObject struct {
 //     object whose only annotation was ours would hash differently from the same
 //     object before the transform ran, which is exactly the regression the hash
 //     test guards.
-func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
+//
+// Redaction (Task 3.3) runs last, after stripping and *before* hashing, and that
+// ordering is the whole security property. Hash, dedup baseline, diff and the
+// stored payload are then all functions of the redacted content, so two objects
+// differing only in a scrubbed value hash identically and deduplicate away
+// instead of leaking the difference through a diff delta. A nil policy is not an
+// opt-out: it applies the built-in scrubs (see RedactionPolicy.Apply).
+func normalizeObject(obj *unstructured.Unstructured, policy *RedactionPolicy) (normalizedObject, error) {
 	out := normalizedObject{
 		UID:             string(obj.GetUID()),
 		ResourceVersion: obj.GetResourceVersion(),
@@ -120,7 +127,7 @@ func normalizeObject(obj *unstructured.Unstructured) (normalizedObject, error) {
 		out.Actors = ExtractActors(obj)
 	}
 
-	objJSON, err := json.Marshal(stripVolatileFields(obj.Object, hasActorsAnnotation))
+	objJSON, err := json.Marshal(policy.Apply(stripVolatileFields(obj.Object, hasActorsAnnotation)))
 	if err != nil {
 		return normalizedObject{}, err
 	}
@@ -208,9 +215,15 @@ func stripVolatileFields(object map[string]any, stripActorsAnnotation bool) map[
 // meant to catch. Routing the suite through the same function the write path
 // uses makes the comparison a real one.
 //
+// policy must be the redaction policy the stream in question runs under, since
+// redaction happens before hashing and therefore changes the answer; nil means
+// the built-in scrubs only, which is what an un-configured stream uses. Passing
+// the wrong policy makes the comparison meaningless in the silent direction, so
+// a suite that configures redaction must thread its own compiled policy in here.
+//
 // It does not mutate obj (see normalizeObject).
-func ObjectHash(obj *unstructured.Unstructured) (string, error) {
-	norm, err := normalizeObject(obj)
+func ObjectHash(obj *unstructured.Unstructured, policy *RedactionPolicy) (string, error) {
+	norm, err := normalizeObject(obj, policy)
 	if err != nil {
 		return "", err
 	}
@@ -228,9 +241,11 @@ func ObjectHash(obj *unstructured.Unstructured) (string, error) {
 // normalizeObject's strip rules, which would mean the assertion silently stopped
 // comparing the real thing the first time those rules changed.
 //
+// policy carries the same meaning and the same caveat as it does for ObjectHash.
+//
 // It does not mutate obj (see normalizeObject).
-func NormalizedJSON(obj *unstructured.Unstructured) ([]byte, error) {
-	norm, err := normalizeObject(obj)
+func NormalizedJSON(obj *unstructured.Unstructured, policy *RedactionPolicy) ([]byte, error) {
+	norm, err := normalizeObject(obj, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +430,21 @@ func (p *Pipeline) Process(ctx context.Context, key Key) error {
 //nolint:gocyclo,logcheck
 func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, st *sinkState,
 	writer sink.Writer, obj *unstructured.Unstructured, objectKey string) error {
-	norm, err := normalizeObject(obj)
+	// Resolved here rather than in Process because this is the only path that
+	// writes object content: a Deleted row carries no data, diff or hash, so
+	// there is nothing in it to redact.
+	policy, ok := p.redactionFor(key)
+	if !ok {
+		// The scope stopped being watched between Process's scopeActive check and
+		// now, so nothing currently declares what this stream must scrub. The item
+		// is retried rather than written, because writing it would mean writing
+		// object content under no policy at all — and the retry settles it
+		// truthfully: the next attempt sees scopeActive=false and drops.
+		log.Error(errRedactionUnavailable, "No redaction policy is installed for this key's scope, retrying")
+		return errRedactionUnavailable
+	}
+
+	norm, err := normalizeObject(obj, policy)
 	if err != nil {
 		log.Error(err, "Failed to marshal object for hashing, retrying")
 		return err
