@@ -189,6 +189,71 @@ spec:
                       type: object
                     maxItems: 128
                     type: array
+                  redaction:
+                    description: |-
+                      Redaction is this sink's redaction floor: value paths scrubbed out of
+                      every object any rule streams here, before hashing (Task 3.3).
+
+                      It lives on the sink for the same reason AllowedGVKs does. Whoever owns
+                      the ClickHouse instance owns what may land in it, and that authority has
+                      to hold without reviewing every StreamRule anyone writes — so a rule may
+                      add paths through its own `spec.extraRedaction`, but nothing a rule
+                      declares can remove one listed here.
+
+                      An empty list is not "no redaction": the data plane always scrubs
+                      `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole
+                      prior copies of the objects it annotates.
+                    items:
+                      description: |-
+                        RedactionRule names one value to scrub out of every streamed object before it
+                        is hashed, diffed and written (Task 3.3).
+
+                        Exactly one of the two fields is set. They are separate fields rather than one
+                        string with two grammars because an annotation key routinely contains dots and
+                        slashes — `kubectl.kubernetes.io/last-applied-configuration` — which the
+                        dot-segment path syntax cannot spell unambiguously: written as a `fieldPath`
+                        it would mean six nested maps that do not exist. The shorthand is therefore
+                        the only way to name such a key, not sugar over a longer form.
+
+                        Redaction is *additive* everywhere it appears. A sink's policy is the floor,
+                        a rule's `extraRedaction` adds to it, and rules that overlap on one target
+                        contribute a union — nothing anywhere can remove a path another party asked
+                        for. That is what lets a platform team hand out a sink whose redaction floor
+                        they own without reviewing every rule written against it.
+                      properties:
+                        annotation:
+                          description: |-
+                            Annotation is the shorthand for one annotation key, equivalent to a
+                            fieldPath of `metadata.annotations` indexed by this exact key.
+
+                            `kubectl.kubernetes.io/last-applied-configuration` never needs listing: it
+                            is scrubbed on every object under every policy, including an empty one,
+                            because kubectl copies the entire submitted object into it and it would
+                            otherwise re-leak every value the rest of the policy removes.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                          type: string
+                        fieldPath:
+                          description: |-
+                            FieldPath is the value to scrub, as dot-separated field names with an
+                            optional `[*]` wildcard over arrays — `data.password`,
+                            `spec.template.spec.containers[*].env[*].value`.
+
+                            A path that matches nothing in a given object is a silent no-op, which is
+                            what makes one policy usable across a whole kind. A path that matches a
+                            map or an array rather than a scalar replaces that whole subtree with the
+                            sentinel.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of fieldPath or annotation must be set
+                        rule: has(self.fieldPath) != has(self.annotation)
+                    maxItems: 64
+                    type: array
                 type: object
               writer:
                 description: Writer sizes the asynchronous write path for this sink.
@@ -416,6 +481,75 @@ spec:
           spec:
             description: spec defines the desired state of ClusterStreamRule.
             properties:
+              extraRedaction:
+                description: |-
+                  ExtraRedaction adds value paths to scrub, on top of whatever the target
+                  sink's `spec.policy.redaction` already scrubs (Task 3.3).
+
+                  It is strictly additive: a rule can add paths, never remove one the sink's
+                  owner configured. Values are scrubbed after normalization and *before*
+                  hashing, so a redacted value never reaches ClickHouse — not in `data`, not
+                  in a `diff` delta, and not as a hash an attacker could grind. Two objects
+                  differing only in a redacted value are indistinguishable to the pipeline
+                  and deduplicate away.
+
+                  The paths apply to every resource this rule names. A path matching nothing
+                  in a given object is a no-op, so one rule can redact `data.password`
+                  across a mixed resource list without splitting into two rules.
+
+                  Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
+                  remains denied in code (D8) whether or not a policy would scrub it.
+                items:
+                  description: |-
+                    RedactionRule names one value to scrub out of every streamed object before it
+                    is hashed, diffed and written (Task 3.3).
+
+                    Exactly one of the two fields is set. They are separate fields rather than one
+                    string with two grammars because an annotation key routinely contains dots and
+                    slashes — `kubectl.kubernetes.io/last-applied-configuration` — which the
+                    dot-segment path syntax cannot spell unambiguously: written as a `fieldPath`
+                    it would mean six nested maps that do not exist. The shorthand is therefore
+                    the only way to name such a key, not sugar over a longer form.
+
+                    Redaction is *additive* everywhere it appears. A sink's policy is the floor,
+                    a rule's `extraRedaction` adds to it, and rules that overlap on one target
+                    contribute a union — nothing anywhere can remove a path another party asked
+                    for. That is what lets a platform team hand out a sink whose redaction floor
+                    they own without reviewing every rule written against it.
+                  properties:
+                    annotation:
+                      description: |-
+                        Annotation is the shorthand for one annotation key, equivalent to a
+                        fieldPath of `metadata.annotations` indexed by this exact key.
+
+                        `kubectl.kubernetes.io/last-applied-configuration` never needs listing: it
+                        is scrubbed on every object under every policy, including an empty one,
+                        because kubectl copies the entire submitted object into it and it would
+                        otherwise re-leak every value the rest of the policy removes.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    fieldPath:
+                      description: |-
+                        FieldPath is the value to scrub, as dot-separated field names with an
+                        optional `[*]` wildcard over arrays — `data.password`,
+                        `spec.template.spec.containers[*].env[*].value`.
+
+                        A path that matches nothing in a given object is a silent no-op, which is
+                        what makes one policy usable across a whole kind. A path that matches a
+                        map or an array rather than a scalar replaces that whole subtree with the
+                        sentinel.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$
+                      type: string
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of fieldPath or annotation must be set
+                    rule: has(self.fieldPath) != has(self.annotation)
+                maxItems: 64
+                type: array
               namespaceSelector:
                 description: |-
                   NamespaceSelector chooses the namespaces this rule applies to. Nil means
@@ -480,6 +614,21 @@ spec:
                   required — an empty rule is always an authoring mistake, and rejecting it
                   at admission is far kinder than a rule that reconciles green while
                   streaming nothing.
+
+                  Kubernetes Events (`v1/Event` or `events.k8s.io/v1/Event`, whichever you
+                  name) are streamed in a built-in Events mode, because an Event is
+                  append-only ephemera rather than durable cluster state. Naming one is the
+                  only thing you do — there is no switch, and no way to opt out, since every
+                  difference exists to stop kubestream recording something untrue:
+
+                    - every row carries the full Event, never a diff, so a count bump is
+                      readable on its own;
+                    - an Event's ~1h TTL expiry is recorded as nothing at all, never as a
+                      Deleted row;
+                    - watch scopes still open and close normally, and a restart still
+                      deduplicates against already-recorded Events.
+
+                  See docs/SCHEMA.md ("Kubernetes Events") and docs/QUERIES.md.
                 items:
                   description: |-
                     WatchedResource names one resource type a rule wants streamed.
@@ -763,12 +912,96 @@ spec:
           spec:
             description: spec defines the desired state of StreamRule.
             properties:
+              extraRedaction:
+                description: |-
+                  ExtraRedaction adds value paths to scrub, on top of whatever the target
+                  sink's `spec.policy.redaction` already scrubs (Task 3.3).
+
+                  It is strictly additive: a rule can add paths, never remove one the sink's
+                  owner configured. Values are scrubbed after normalization and *before*
+                  hashing, so a redacted value never reaches ClickHouse — not in `data`, not
+                  in a `diff` delta, and not as a hash an attacker could grind. Two objects
+                  differing only in a redacted value are indistinguishable to the pipeline
+                  and deduplicate away.
+
+                  The paths apply to every resource this rule names. A path matching nothing
+                  in a given object is a no-op, so one rule can redact `data.password`
+                  across a mixed resource list without splitting into two rules.
+
+                  Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
+                  remains denied in code (D8) whether or not a policy would scrub it.
+                items:
+                  description: |-
+                    RedactionRule names one value to scrub out of every streamed object before it
+                    is hashed, diffed and written (Task 3.3).
+
+                    Exactly one of the two fields is set. They are separate fields rather than one
+                    string with two grammars because an annotation key routinely contains dots and
+                    slashes — `kubectl.kubernetes.io/last-applied-configuration` — which the
+                    dot-segment path syntax cannot spell unambiguously: written as a `fieldPath`
+                    it would mean six nested maps that do not exist. The shorthand is therefore
+                    the only way to name such a key, not sugar over a longer form.
+
+                    Redaction is *additive* everywhere it appears. A sink's policy is the floor,
+                    a rule's `extraRedaction` adds to it, and rules that overlap on one target
+                    contribute a union — nothing anywhere can remove a path another party asked
+                    for. That is what lets a platform team hand out a sink whose redaction floor
+                    they own without reviewing every rule written against it.
+                  properties:
+                    annotation:
+                      description: |-
+                        Annotation is the shorthand for one annotation key, equivalent to a
+                        fieldPath of `metadata.annotations` indexed by this exact key.
+
+                        `kubectl.kubernetes.io/last-applied-configuration` never needs listing: it
+                        is scrubbed on every object under every policy, including an empty one,
+                        because kubectl copies the entire submitted object into it and it would
+                        otherwise re-leak every value the rest of the policy removes.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    fieldPath:
+                      description: |-
+                        FieldPath is the value to scrub, as dot-separated field names with an
+                        optional `[*]` wildcard over arrays — `data.password`,
+                        `spec.template.spec.containers[*].env[*].value`.
+
+                        A path that matches nothing in a given object is a silent no-op, which is
+                        what makes one policy usable across a whole kind. A path that matches a
+                        map or an array rather than a scalar replaces that whole subtree with the
+                        sentinel.
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$
+                      type: string
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of fieldPath or annotation must be set
+                    rule: has(self.fieldPath) != has(self.annotation)
+                maxItems: 64
+                type: array
               resources:
                 description: |-
                   Resources are the resource types this rule streams. At least one is
                   required — an empty rule is always an authoring mistake, and rejecting it
                   at admission is far kinder than a rule that reconciles green while
                   streaming nothing.
+
+                  Kubernetes Events (`v1/Event` or `events.k8s.io/v1/Event`, whichever you
+                  name) are streamed in a built-in Events mode, because an Event is
+                  append-only ephemera rather than durable cluster state. Naming one is the
+                  only thing you do — there is no switch, and no way to opt out, since every
+                  difference exists to stop kubestream recording something untrue:
+
+                    - every row carries the full Event, never a diff, so a count bump is
+                      readable on its own;
+                    - an Event's ~1h TTL expiry is recorded as nothing at all, never as a
+                      Deleted row;
+                    - watch scopes still open and close normally, and a restart still
+                      deduplicates against already-recorded Events.
+
+                  See docs/SCHEMA.md ("Kubernetes Events") and docs/QUERIES.md.
                 items:
                   description: |-
                     WatchedResource names one resource type a rule wants streamed.
