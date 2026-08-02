@@ -76,6 +76,11 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # Integration tests run against a real, dockerized ClickHouse (build tag
 # `integration`). The target boots a throwaway container, waits for it to
 # accept queries, runs the tagged tests, and always tears the container down.
+# Two suites run here: internal/sink exercises the writer and reader paths, and
+# test/queries executes every query kubestream publishes — docs/QUERIES.md and
+# the Grafana dashboards — against tables built from the shipped DDL alone, which
+# is how Task 3.2's "only frozen-schema columns" criterion is asserted. The two
+# use separate databases, because `go test` runs package binaries concurrently.
 # Non-standard host ports so this never collides with a developer's local
 # ClickHouse bound to the usual 9000/8123. The image's default user is
 # localhost-only; CLICKHOUSE_USER/PASSWORD create an any-network user the host
@@ -106,7 +111,7 @@ test-integration: ## Run integration tests against a dockerized ClickHouse.
 		sleep 1; \
 	done; \
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
-		go test -tags=integration ./internal/sink/... -run Integration -v
+		go test -tags=integration ./internal/sink/... ./test/queries/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
 # against a throwaway dockerized ClickHouse plus an in-process envtest apiserver.

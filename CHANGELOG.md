@@ -48,11 +48,52 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   drop reason, counting Events whose TTL expired. It is the one drop reason with
   a healthy nonzero rate, and its shape is the cheapest available proxy for the
   Event churn the operator is absorbing.
-- **[`docs/QUERIES.md`](docs/QUERIES.md)** — seeded with the Events recipes:
-  "everything Kubernetes said about object X around time T" (joined by
-  `involvedObject`/`regarding` UID or name out of `data`), the interleaved
-  changes-and-Events timeline for a post-mortem, and a noisiest-reasons triage
-  query. The remaining flagship queries arrive with the dashboards in Task 3.2.
+- **[`docs/QUERIES.md`](docs/QUERIES.md)** — the query library, now complete. It
+  answers the six flagship questions with runnable, commented SQL: the incident
+  window for a namespace with diffs inlined; drift your GitOps controller did not
+  cause; top flappers; reconstructing an object's state at an instant; everything
+  Kubernetes said about an object around time T (joined by
+  `involvedObject`/`regarding` out of `data`, seeded by the Events work above);
+  and what a deleted object last looked like. One parameter vocabulary runs
+  through all of them, so a set of `--param_*` flags carries from one query to the
+  next.
+- **Four product dashboards** in [`deploy/grafana/`](deploy/grafana/), reading
+  ClickHouse rather than Prometheus — the read path, without a UI to install:
+  - `object-timeline.json` — one object's rows and diffs over time, with the
+    Kubernetes Events for it on the same page.
+  - `drift-by-actor.json` — Modified rows grouped by the field managers in
+    `actors`, with a variable naming the GitOps controller's manager so its
+    changes can be excluded.
+  - `flap-report.json` — objects ranked by change count per window against a
+    threshold you set. The threshold line is a series the query returns, because
+    Grafana cannot interpolate a variable into a panel's threshold configuration
+    and a static line would silently disagree with the box.
+  - `namespace-activity.json` — change volume as a namespace-by-time heatmap.
+
+  They need the `grafana-clickhouse-datasource` plugin and a read-only ClickHouse
+  user; [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) covers installing them, what
+  each panel is for, and how to render them against load-harness demo data.
+- **Published SQL is now tested.** `make test-integration` gained
+  [`test/queries`](test/queries), which executes every statement in
+  `docs/QUERIES.md` and in every dashboard against a ClickHouse built from the
+  shipped DDL and nothing else — so "these queries use only frozen-schema
+  columns" is asserted by ClickHouse's own parser rather than by a promise, and a
+  query that returns no rows against the demo fixture fails too. The
+  unit-testable half (extraction, Grafana macro expansion, variable
+  interpolation) runs in `make test`, where it also catches a panel referencing a
+  variable its dashboard does not declare — a mistake Grafana renders as an empty
+  filter rather than an error.
+
+### Changed
+
+- **[`deploy/grafana/dashboard.schema.json`](deploy/grafana/dashboard.schema.json)
+  now covers ClickHouse-backed dashboards.** A target's datasource type decides
+  what it must carry: PromQL in `expr` for Prometheus, SQL in `rawSql` plus
+  `editorType`/`format`/`queryType` for ClickHouse. Requiring both would reject
+  every dashboard and requiring neither would let a target that queries nothing
+  validate, so the requirement is conditional. `test/observability` validates all
+  five shipped dashboards against it, and fails if a sixth is added without being
+  registered for checking.
 
 ## Unreleased — Phase 2: proving the foundation at both extremes
 

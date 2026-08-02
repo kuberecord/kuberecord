@@ -108,12 +108,12 @@
   },
   "$defs": {
     "datasourceRef": {
-      "description": "Every datasource reference goes through the dashboard's own datasource variable. A hard-coded uid would import as a broken panel on any Grafana but the one the dashboard was exported from.",
+      "description": "Every datasource reference goes through the dashboard's own datasource variable. A hard-coded uid would import as a broken panel on any Grafana but the one the dashboard was exported from. Two datasource types are shipped: the operator-health dashboard reads Prometheus (the operator's own metrics), while the product dashboards read the ClickHouse the operator writes to. Which one a target belongs to decides what a target must carry — see the conditional branches on `target`.",
       "type": "object",
       "required": ["type", "uid"],
       "properties": {
         "type": {
-          "const": "prometheus"
+          "enum": ["prometheus", "grafana-clickhouse-datasource"]
         },
         "uid": {
           "type": "string",
@@ -148,8 +148,9 @@
       "additionalProperties": false
     },
     "target": {
+      "description": "One query. A target carries either PromQL (`expr`) or SQL (`rawSql`) depending on its datasource type, which is why the requirement is conditional rather than a flat list: requiring both would reject every dashboard, and requiring neither would let a target that queries nothing validate.",
       "type": "object",
-      "required": ["refId", "expr", "datasource"],
+      "required": ["refId", "datasource"],
       "properties": {
         "refId": {
           "type": "string",
@@ -160,22 +161,82 @@
           "type": "string",
           "minLength": 1
         },
+        "rawSql": {
+          "description": "ClickHouse SQL against the frozen v1 schema. Non-empty here; that it parses and reads only frozen columns is asserted by test/queries, which runs every shipped query against a real ClickHouse built from the shipped DDL alone.",
+          "type": "string",
+          "minLength": 1
+        },
         "datasource": {
           "$ref": "#/$defs/datasourceRef"
         },
         "legendFormat": {
           "type": "string"
         },
-        "format": {
-          "enum": ["time_series", "table", "heatmap"]
-        },
         "instant": {
           "type": "boolean"
         },
         "range": {
           "type": "boolean"
+        },
+        "editorType": {
+          "description": "The ClickHouse plugin's editor mode. Pinned to `sql` on every shipped target: the alternative, `builder`, stores a structured query the plugin re-renders into SQL, which would put the actual query out of reach of review and of the test that executes it.",
+          "const": "sql"
+        },
+        "queryType": {
+          "enum": ["table", "timeseries", "logs", "traces"]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["datasource"],
+            "properties": {
+              "datasource": {
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "const": "prometheus"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": ["expr"],
+            "properties": {
+              "format": {
+                "enum": ["time_series", "table", "heatmap"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["datasource"],
+            "properties": {
+              "datasource": {
+                "required": ["type"],
+                "properties": {
+                  "type": {
+                    "const": "grafana-clickhouse-datasource"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": ["rawSql", "editorType", "format", "queryType"],
+            "properties": {
+              "format": {
+                "description": "The ClickHouse plugin's numeric result-format enum: 0 time series, 1 table, 2 logs, 3 trace. It is redundant with `queryType` in current plugin versions and both are written, so an import against a plugin that honours only one of them still reads the query the same way.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              }
+            }
+          }
+        }
+      ]
     },
     "panel": {
       "type": "object",
