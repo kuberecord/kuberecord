@@ -531,6 +531,31 @@ func (c *WarmCoordinator) warm(ctx context.Context, ref scopeRef, epochStart tim
 	c.p.MarkScopeWarm(ref.sink, ref.scope)
 	log.Info("🔓 Scope warm-up complete, leaving Snapshot mode", "objects_loaded", len(seeded))
 
+	if ref.scope.ephemeral() {
+		// A Kubernetes Events scope takes steps 1 and 2 above and none of step 3.
+		// The seed *runs* — that is the whole point, since a restart must not
+		// re-emit every live, unchanged Event as an Added — but nothing is ever
+		// reconciled *away* from history.
+		//
+		// Everything below rests on one assumption: that the sink's history
+		// describes objects which ought to still exist, so an object history knows
+		// and reality does not is a deletion nobody recorded. For an Event the same
+		// observation means the opposite — it expired, which is not a deletion and
+		// is never recorded as one (see ephemeralKind). Running the pass anyway
+		// would emit a Deleted row for every Event that aged out while this process
+		// was down: the largest single source of false deletions the design could
+		// have, at the volume of the Event stream itself.
+		//
+		// Close-out recovery goes with it for the same reason: a close-out is a
+		// Deleted row, and an Event whose name was taken over by a newer Event is
+		// not an unrecorded death. And with no claims to make, the informer-sync
+		// wait and the epoch probe have nothing left to gate, so both are skipped
+		// rather than paid for.
+		log.V(1).Info("Events scope: seeded for dedup only, skipping zombie GC and close-out recovery",
+			"seeded", len(seeded), "unclosed_priors", len(priors))
+		return
+	}
+
 	if len(seeded) == 0 && len(priors) == 0 {
 		// Nothing was seeded and history shows no unclosed incarnation, so there
 		// is nothing a zombie could be hiding among and nothing to close out — no

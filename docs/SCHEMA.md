@@ -490,6 +490,64 @@ Typical lifecycle for one object:
 At startup before warm-up completes, first sightings are `Snapshot` instead of
 `Added`; once warm, normal `Added`/`Modified` resumes.
 
+## Kubernetes Events
+
+`v1/Event` and `events.k8s.io/v1/Event` are streamed in a **built-in Events
+mode**. Name either one in a rule's `resources:` and it applies; there is no
+switch, and no way to turn it off. Everything below is a property of the *kind*,
+so a query does not have to know which rule produced a row — it only has to know
+that `kind = 'Event'` in one of those two groups.
+
+An Event is append-only ephemera, not durable cluster state: the API server
+creates one, **updates it in place** to bump `count` when the same thing happens
+again, and lets it expire after roughly an hour. Three schema-visible
+consequences follow.
+
+**Every Event row carries full `data`, and `diff` is always empty.** The
+interesting row is the Event as it stood when its count changed, and a reader
+should be able to take a `count`, a `message` or an `involvedObject` straight off
+it. Hash dedup still runs, so a resync that re-delivers an unchanged Event writes
+nothing. `Checkpoint` rows therefore never appear for Events — there is no
+diff-only run for one to interrupt.
+
+**An Event's expiry is recorded as nothing at all.** There is no `Deleted` row
+for a `v1/Event` or an `events.k8s.io/v1/Event`, ever — not for TTL expiry, not
+for a `kubectl delete event`, and not as a reincarnation close-out when a newer
+Event takes over an older one's name. An Event vanishing is its retention window
+closing, not a change to the cluster, and recording it as a deletion would put
+one false deletion in the audit trail per Event the cluster ever emitted. The
+practical consequence for a query: **an Event's history simply stops**. Do not
+read "no `Deleted` row" as "still live" for `kind = 'Event'` the way you would
+for a Deployment; read the Event's own `lastTimestamp` (or
+`series.lastObservedTime`) out of `data` instead.
+
+**`Snapshot` does not appear either.** Snapshot hedges "genuinely new, or merely
+unseen by this process?", and for an Event the answer is always the former: a
+first sighting is `Added` even during warm-up. Warm-up still runs for an Events
+scope — it primes the dedup hashes so a restart does not re-record every Event
+still inside its TTL — but it never reconciles anything *away* from history, so
+it cannot manufacture the deletions the previous paragraph rules out.
+
+`watch_scopes` is unaffected: an Events scope writes ordinary `Started` and
+`Stopped` rows like any other, so "when was this cluster's Event stream being
+captured?" is answerable exactly as it is for every other kind.
+
+Two operational notes:
+
+- **Volume.** Events are typically the highest-cardinality, highest-churn kind in
+  a cluster. Enable them per namespace with a `StreamRule` before reaching for a
+  cluster-wide `ClusterStreamRule`, and size retention accordingly — this is why
+  the `events` watch preset does not ship enabled (see
+  [`docs/RBAC.md`](RBAC.md)).
+- **Warm-up cost.** Because Events never get a `Deleted` row, nothing tombstones
+  them in `resource_states`, so the warm-up query for an Events scope returns
+  every Event still in ClickHouse for that scope. A retention TTL on
+  `resource_states` (see [Suggested TTL](#suggested-ttl-optional-non-mandatory))
+  is what bounds both that query and the memory its result seeds.
+
+Query recipes for Events — including "everything that happened to object X around
+time T" — are in [`docs/QUERIES.md`](QUERIES.md).
+
 ## Diff format
 
 `Modified` rows store an **RFC 6902 JSON Patch** in the `diff` column, produced
@@ -501,6 +559,9 @@ before hashing and diffing, so cosmetic churn does not generate rows.
 **Graceful degradation:** if no prior JSON baseline exists, or the diff/marshal
 fails, the operator writes the full current state to `data` and leaves `diff`
 empty — a full-state row is always correct, merely larger than a diff.
+
+**Kubernetes Events are never diffed** — every one of their rows is full state
+by design, not by degradation. See [Kubernetes Events](#kubernetes-events).
 
 ## Checkpoint rows
 

@@ -46,6 +46,15 @@ spec:
       version: v1
       kinds:
       - Node
+      # Both Event spellings, because the Task 3.1 scenario runs its assertions
+      # against each: they are two resources over one storage, and the sink
+      # policy gate matches on the group, so admitting one would not admit the
+      # other.
+      - Event
+    - group: events.k8s.io
+      version: v1
+      kinds:
+      - Event
     - group: networking.k8s.io
       version: v1
       kinds:

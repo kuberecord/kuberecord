@@ -41,7 +41,7 @@ own queue is a client-go workqueue.
 | `kubestream_dedup_skips_total` | counter | — | Work items short-circuited by an unchanged hash. |
 | `kubestream_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
 | `kubestream_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. |
-| `kubestream_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded — today only `scope_stopped`. |
+| `kubestream_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
 | `kubestream_rules` | gauge | `condition`, `status` | How many rules hold each condition at each status. |
 
 `kubestream_rules` is the control plane's only metric, and it is deliberately

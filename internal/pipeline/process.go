@@ -356,6 +356,20 @@ func (p *Pipeline) Process(ctx context.Context, key Key) error {
 		return nil
 	}
 
+	// An Event that has left the watch cache has expired, not been deleted: its
+	// ~1h TTL came round (see ephemeralKind). Suppressing the row here rather
+	// than in emitDelete is what keeps the suppression free of every dependency a
+	// real deletion needs — no sink to resolve, no claim to retry, no re-queue —
+	// because there is nothing to write and never will be. The cache entry does
+	// have to go, though: Events are the highest-churn kind in a cluster, so an
+	// entry left behind per expired Event is an unbounded leak.
+	if !found && key.ephemeral() {
+		p.metrics.dropped.WithLabelValues(DropReasonEphemeralDelete).Inc()
+		log.V(1).Info("Dropping work item: an Event left the watch cache, which is TTL expiry rather than a deletion")
+		p.forgetEphemeral(key, p.sinks.get(key.Sink))
+		return nil
+	}
+
 	// Resolve the sink per item rather than capturing a Writer at wiring time, so
 	// a sink recycled after a credential rotation is picked up without holding a
 	// stale instance. A missing sink is transient (deleted CR, mid-recycle), so
@@ -407,6 +421,11 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 		return err
 	}
 
+	// ephemeral is Kubernetes-Event mode (see ephemeralKind): full state instead
+	// of a diff, no close-out row for a superseded name, no Snapshot tagging. It
+	// is resolved once because three separate branches below consult it.
+	ephemeral := key.ephemeral()
+
 	var eventType = "Added"
 	var diffString = ""
 
@@ -449,18 +468,20 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	if cachedEntry, exists := st.cache.Load(objectKey); exists {
 		// 🚨 ANTI-ZOMBIE MAGIC: check the UID!
 		if cachedEntry.UID != "" && cachedEntry.UID != norm.UID {
-			log.Info("🧟 Reincarnation! Old object died while unobserved — closing its history and treating the current one as Added")
-
-			// Claim the old incarnation's delete atomically via ReserveDelete
-			// instead of trusting the cachedEntry.PendingDelete value
-			// snapshotted by the Load above — that read and this branch are not
-			// atomic with respect to a concurrent claim by the per-scope GC
-			// pass, which claims through this exact same primitive (via
-			// emitDelete) for the very same key. Without this, both this branch
-			// and a concurrent emitDelete call could each observe "not yet
-			// claimed" and independently enqueue their own "Deleted" row for the
-			// same old UID.
-			if claimedEntry, _, outcome := st.cache.ReserveDelete(objectKey, cachedEntry.UID); outcome == deleteClaimed {
+			if ephemeral {
+				// A different Event now answers to this name. Nothing is closed
+				// out: an Event never gets a Deleted row (see ephemeralKind), and
+				// the close-out is a Deleted row like any other, so emitting one
+				// here would reintroduce through the back door precisely what the
+				// TTL suppression keeps out. Nor is anything lost by declining —
+				// the predecessor's own history stands untouched under its own UID,
+				// and its absence of a Deleted row is the honest record of an Event
+				// that expired rather than one that was deleted. The stale entry is
+				// superseded by the Reserve below.
+				log.Info("♻️ A new Event took this name over from an expired one, recording it as Added",
+					"old_uid", cachedEntry.UID)
+			} else if claimedEntry, _, outcome := st.cache.ReserveDelete(objectKey, cachedEntry.UID); outcome == deleteClaimed {
+				log.Info("🧟 Reincarnation! Old object died while unobserved — closing its history and treating the current one as Added")
 				// Deleted rows carry empty data/diff/sha256 in schema v1 —
 				// event_type alone marks the deletion (see docs/SCHEMA.md).
 				closeRecord := sink.Record{
@@ -511,7 +532,23 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 
 			eventType = "Modified"
 			baseline, decodeErr := cachedEntry.decodeBaseline()
-			if cachedEntry.JSON == nil {
+			if ephemeral {
+				// The count bump. An Event is updated in place to say "this
+				// happened again", and a reader of that row wants the Event as it
+				// stood at that moment — the whole thing, self-contained, so the
+				// "events for object X around time T" recipe in docs/QUERIES.md
+				// never has to replay a diff chain to read a `count` or a
+				// `message`. A patch would save bytes on an object that is small to
+				// begin with and gone within the hour, and would cost every reader
+				// a replay step to recover it. Dedup has already run above, so a
+				// no-op resync still writes nothing.
+				//
+				// This branch comes first deliberately: an Events entry stores no
+				// baseline at all (see below), so without it every count bump would
+				// take the "restored from sink history" path and log as if it were
+				// recovering from a cold cache.
+				switchToFullState()
+			} else if cachedEntry.JSON == nil {
 				log.Info("🔄 Restored from sink history (Full State)")
 				switchToFullState()
 			} else if decodeErr != nil {
@@ -566,7 +603,16 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	// "Added" duplicate-write storm. This intentionally does not cover the
 	// reincarnation branch above, which also reaches this point with eventType
 	// == "Added" but is never ambiguous — see cacheMiss's doc comment.
-	if cacheMiss && !st.scopeWarm(key) {
+	//
+	// Nor does it cover Events. Snapshot exists to hedge the one question a cold
+	// cache cannot answer — "is this object new, or merely unseen by *this*
+	// process?" — and for an Event the hedge buys nothing: an Event is created
+	// once, never updated except to bump `count`, and is gone within the hour, so
+	// a miss is a new Event with overwhelming probability and the harm Snapshot
+	// guards against (a duplicate-write storm over a large standing population)
+	// has no standing population to storm over. Warm-up still primes the hashes,
+	// which is what actually suppresses the re-emission (see WarmCoordinator.warm).
+	if cacheMiss && !ephemeral && !st.scopeWarm(key) {
 		eventType = "Snapshot"
 		p.recordScopeUnwarmed(key)
 		log.Info("🌱 Scope not yet warmed, tagging as Snapshot")
@@ -579,9 +625,22 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	// degrades to storing raw bytes and is logged at Error level (Invariant
 	// 5); the diff path handles either encoding transparently via
 	// decodeBaseline.
-	baselineData, baselineEnc, compressed := compressBaseline(norm.JSON)
-	if !compressed {
-		log.Error(errBaselineCompression, "⚠️ Storing uncompressed baseline")
+	//
+	// Events store no baseline at all. They are never diffed, so the bytes would
+	// be written and compressed on every count bump and read by nobody — and this
+	// is the kind that produces the most cache entries per cluster, so the entry
+	// is kept down to its hash and UID. Nothing downstream has to know: a nil
+	// baseline is already the ordinary "no prior state to diff against" case (it
+	// is exactly what warm-up seeds), and the Events branch above short-circuits
+	// before the path that would act on it.
+	var baselineData []byte
+	var baselineEnc entryEncoding
+	if !ephemeral {
+		var compressed bool
+		baselineData, baselineEnc, compressed = compressBaseline(norm.JSON)
+		if !compressed {
+			log.Error(errBaselineCompression, "⚠️ Storing uncompressed baseline")
+		}
 	}
 
 	confirmedEntry := CacheEntry{
@@ -691,6 +750,14 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 // redelivered delete can easily run before the first one's commit fires. A
 // second call for the same key returns deleteClaimInFlight and does nothing.
 //
+// Neither caller ever reaches it for a Kubernetes Event: the live path suppresses
+// the write in Process and forgets the entry instead (see forgetEphemeral), and
+// the GC pass never runs over an Events scope at all (see WarmCoordinator.warm).
+// So "there is no Deleted row for an Event, ever" is a property of the two call
+// sites rather than a check inside this function — which is deliberate, because
+// this function's job is to make a deletion exactly-once, not to decide whether
+// the deletion happened.
+//
 // expectedUID lets a caller whose belief that the object is gone comes from a
 // stale, point-in-time snapshot (the GC pass) assert it still matches the cache's
 // current UID before claiming — otherwise a live reincarnation that happened
@@ -759,6 +826,33 @@ func (p *Pipeline) emitDelete(ctx context.Context, log logr.Logger, key Key, st 
 		return deleteClaimed, enqueueErr
 	}
 	return deleteClaimed, nil
+}
+
+// forgetEphemeral removes the dedup baseline of an Event that has left the watch
+// cache, writing nothing at all.
+//
+// It is the counterpart of emitDelete for a kind that never gets a Deleted row,
+// and it settles through the very same claim primitive rather than a bare map
+// delete. That is not ceremony: ReserveDelete bumps the entry's version, so a
+// write already in flight for this key (its commit runs in a sink worker, long
+// after Process returned) finds itself superseded and its CommitIfCurrent becomes
+// a safe no-op — exactly the version gating Invariant 3 requires. A plain delete
+// would let that in-flight commit resurrect the entry it just removed.
+//
+// Unlike emitDelete there is no failure to recover from — nothing is enqueued —
+// so the claim and its settlement happen back to back. A refusal means there is
+// nothing to forget: deleteClaimAbsent (the Event was never seeded, or an earlier
+// expiry already forgot it) is the only reachable one, since no ephemeral
+// deletion is ever claimed for a write and no GC pass runs over an Events scope.
+func (p *Pipeline) forgetEphemeral(key Key, st *sinkState) {
+	objectKey := key.cacheKey()
+	_, version, outcome := st.cache.ReserveDelete(objectKey, "")
+	if outcome != deleteClaimed {
+		return
+	}
+	if st.cache.DeleteIfCurrent(objectKey, version) {
+		p.recordCacheEntries(key.Sink, st)
+	}
 }
 
 // enqueueCloseOut submits a reincarnation close-out write (a "Deleted" row for a

@@ -36,7 +36,7 @@ control-plane reconcilers, so it cannot drift from what the code actually calls:
 | the same three `/status` — `get,update,patch` | Report conditions back |
 | `namespaces` — `get,list,watch` | `ClusterStreamRule.spec.namespaceSelector` expansion |
 | `authorization.k8s.io/selfsubjectaccessreviews` — `create` | The per-target RBAC check behind `RBACGranted` |
-| `events` — `create,patch` | Surface degradation to `kubectl describe` |
+| `events` — `create,patch` | Surface degradation to `kubectl describe`. Write-only, and unrelated to *watching* Events — that is the [`events` preset](#watch-rights-the-aggregated-role) and needs `get,list,watch` |
 
 Two absences are load-bearing:
 
@@ -92,7 +92,7 @@ therefore the entire grant mechanism: the aggregated role's contents change
 in-cluster, the binding to the operator's ServiceAccount never changes, and the
 operator deployment is not touched.
 
-Five presets ship in-repo, each `get,list,watch` only:
+Six presets ship in-repo, each `get,list,watch` only:
 
 | Preset | Covers |
 |---|---|
@@ -101,12 +101,20 @@ Five presets ship in-repo, each `get,list,watch` only:
 | [`batch`](../config/rbac/presets/batch.yaml) | `jobs`, `cronjobs` |
 | [`storage`](../config/rbac/presets/storage.yaml) | `persistentvolumes`, `persistentvolumeclaims`, and the `storage.k8s.io` kinds |
 | [`rbac-read`](../config/rbac/presets/rbac-read.yaml) | `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings` |
+| [`events`](../config/rbac/presets/events.yaml) | `events` in **both** API groups (`""` and `events.k8s.io`), so a rule may name either spelling |
 
 Only `core-workloads` is included in
 [`config/rbac/kustomization.yaml`](../config/rbac/kustomization.yaml) by default;
 that file's comments say how to drop it or add the others. Commenting it out is
 supported and safe: the operator boots healthy with no watch rights at all and
 every rule reports `RBACGranted=False` until a preset arrives.
+
+`events` is worth a deliberate decision rather than a reflex: Events are usually
+the highest-volume kind in a cluster, and kubestream streams them in a mode that
+writes the full Event on every occurrence count bump (see
+[SCHEMA.md](SCHEMA.md#kubernetes-events)). Grant it when you want the Event
+stream persisted, and prefer a namespaced `StreamRule` over a cluster-wide one
+until you have measured what it costs.
 
 A Helm install selects the same presets by value, one boolean each, with the same
 default:

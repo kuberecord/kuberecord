@@ -110,18 +110,34 @@ type PipelineMetrics struct {
 	safeMode *prometheus.GaugeVec
 
 	// dropped counts work items the pipeline deliberately discarded, by reason.
-	// A drop is not an error — the only reason today is scope_stopped, i.e. the
-	// item's watch target was deactivated while the item sat in the queue, so
-	// there is nothing meaningful left to record for it (and emitting a Deleted
-	// row would be an outright lie; see the scope-epoch design). It is a counter
-	// rather than a log-only event because a persistently nonzero rate means
-	// rules are churning faster than the pipeline drains.
+	// A drop is never an error, and never a deletion — both reasons are cases
+	// where recording anything would be an outright lie:
+	//
+	//   - scope_stopped: the item's watch target was deactivated while the item
+	//     sat in the queue, so there is nothing left to observe it through and a
+	//     Deleted row would say "it was deleted" (see the scope-epoch design). A
+	//     persistently nonzero rate means rules are churning faster than the
+	//     pipeline drains.
+	//   - ephemeral_delete: a Kubernetes Event's TTL expired (see
+	//     DropReasonEphemeralDelete). Unlike the first, a steady rate here is the
+	//     healthy state wherever Events are streamed.
 	dropped *prometheus.CounterVec
 }
 
 // DropReasonScopeStopped labels a work item discarded because its watch scope
 // was no longer active by the time a worker picked the item up.
 const DropReasonScopeStopped = "scope_stopped"
+
+// DropReasonEphemeralDelete labels a work item for a Kubernetes Event that has
+// left the watch cache — its ~1h TTL expired — which is deliberately recorded as
+// nothing at all rather than as a Deleted row (see ephemeralKind).
+//
+// It is a counter and not merely a log line because this is the one drop reason
+// with a *healthy* nonzero rate: on a cluster streaming Events it ticks
+// continuously, and its shape is the cheapest available proxy for the Event
+// churn the operator is absorbing. A rate of zero on a scope that is streaming
+// Events, on the other hand, means expiries are not being observed at all.
+const DropReasonEphemeralDelete = "ephemeral_delete"
 
 // NewPipelineMetrics constructs every collector and registers it on reg.
 // Registration uses MustRegister, so passing a registry that already holds
@@ -206,6 +222,7 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 	// The drop reasons still seed here: that set is a fixed enum with no sink
 	// dimension, so the series exists (at 0) before the first drop ever happens.
 	m.dropped.WithLabelValues(DropReasonScopeStopped)
+	m.dropped.WithLabelValues(DropReasonEphemeralDelete)
 
 	reg.MustRegister(
 		m.writeQueueDepth,
