@@ -284,6 +284,11 @@ in [`deploy/grafana/`](deploy/grafana/) and [`deploy/prometheus/`](deploy/promet
 [`docs/OPERATING.md`](docs/OPERATING.md) explains what each panel is for, what each
 alert threshold is argued from, and what to do when one fires.
 
+Those watch the operator. Four more dashboards in the same directory read the
+history it records — object timelines, GitOps drift, flapping objects, namespace
+activity — against ClickHouse rather than Prometheus; see
+[`docs/DASHBOARDS.md`](docs/DASHBOARDS.md).
+
 ## Getting Started
 
 ### Prerequisites
@@ -425,7 +430,7 @@ ORDER BY ts DESC
 LIMIT 20;
 ```
 
-More query recipes are in [`docs/QUERIES.md`](docs/QUERIES.md), and the meaning of every column is in [`docs/SCHEMA.md`](docs/SCHEMA.md).
+More query recipes are in [`docs/QUERIES.md`](docs/QUERIES.md) — incident windows, non-GitOps drift, top flappers, state reconstruction, Events for an object, and what a deleted object last looked like — and the same questions come pre-built as Grafana dashboards in [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md). The meaning of every column is in [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ### Uninstalling
 

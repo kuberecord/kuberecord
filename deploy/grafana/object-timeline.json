@@ -1,0 +1,380 @@
+{
+  "uid": "kubestream-object-timeline",
+  "title": "kubestream — Object Timeline",
+  "description": "The life of one Kubernetes object as kubestream recorded it: every row it wrote, the diff each row carried, who the field managers were, and what Kubernetes itself was saying about the object at the same moments. This is the post-mortem view — pick the object, set the time range to the incident, and read down. Reads the ClickHouse the operator writes to; see docs/QUERIES.md for the same questions as copy-paste SQL.",
+  "tags": ["kubestream", "clickhouse", "audit"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "grafana-clickhouse-datasource",
+        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "hide": 0,
+        "regex": "",
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Cluster",
+        "description": "cluster_id is the leading column of the sort key, so every panel filters on it. Selecting one is not optional: without it a query both scans the whole table and silently mixes clusters.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
+        "query": {
+          "refId": "kubestream-variable-cluster",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "kind",
+        "label": "Kind",
+        "description": "Kind alone, not group/kind: kubestream's identity key is version-agnostic and a kind name is unique in practice within a cluster. If you do run two same-named kinds from different API groups, add an api_group filter to the panels.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind",
+        "query": {
+          "refId": "kubestream-variable-kind",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "namespace",
+        "label": "Namespace",
+        "description": "Empty string for cluster-scoped objects — it is a real value in this column, not a null, so it appears in the list as a blank option.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} AND kind = ${kind:sqlstring} ORDER BY namespace",
+        "query": {
+          "refId": "kubestream-variable-namespace",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} AND kind = ${kind:sqlstring} ORDER BY namespace"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "name",
+        "label": "Name",
+        "description": "The object. Names are reused across delete-and-recreate cycles, so a single name can cover several incarnations; the Latest recorded state panel shows which uid is current, and the rows table shows where one incarnation ends and the next begins.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT name FROM resource_states WHERE cluster_id = ${cluster:sqlstring} AND kind = ${kind:sqlstring} AND namespace = ${namespace:sqlstring} ORDER BY name",
+        "query": {
+          "refId": "kubestream-variable-name",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT name FROM resource_states WHERE cluster_id = ${cluster:sqlstring} AND kind = ${kind:sqlstring} AND namespace = ${namespace:sqlstring} ORDER BY name"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Changes over time",
+      "description": "One series per event_type, bucketed to the dashboard's interval. This is the shape of the object's life: a flat line of nothing, then a cluster of Modified rows around a deploy, then whatever happened next. Checkpoint counts as a change because it is one — a Checkpoint is a Modified that also carries full state.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    event_type,\n    count() AS changes\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind = ${kind:sqlstring}\n  AND namespace = ${namespace:sqlstring}\n  AND name = ${name:sqlstring}\n  AND $__timeFilter(ts)\nGROUP BY time, event_type\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Field managers",
+      "description": "Who touched this object in the window, by number of rows their manager name appears on. actors is harvested from metadata.managedFields, so it is 'who probably changed this' rather than an audit-grade attribution — several managers own different parts of the same object and all of them are credited on every row. Deleted rows carry no actors by design and so never appear here.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    actor,\n    count() AS rows_touched\nFROM\n(\n    SELECT arrayJoin(actors) AS actor\n    FROM resource_states FINAL\n    WHERE cluster_id = ${cluster:sqlstring}\n      AND kind = ${kind:sqlstring}\n      AND namespace = ${namespace:sqlstring}\n      AND name = ${name:sqlstring}\n      AND $__timeFilter(ts)\n)\nGROUP BY actor\nORDER BY rows_touched DESC\nLIMIT 20"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Latest recorded state",
+      "description": "The object's newest row by event time, read as an argMax aggregate over its whole history so the result does not depend on the order rows were inserted in. sha256 is the digest of the operator's normalized JSON and is what a reconstruction should be checked against; incarnations above 1 means this name has been deleted and recreated, and everything here describes the newest incarnation only.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    argMax(event_type, ts)       AS last_event,\n    max(ts)                      AS last_seen,\n    argMax(uid, ts)              AS current_uid,\n    argMax(resource_version, ts) AS resource_version,\n    argMax(sha256, ts)           AS sha256,\n    count()                      AS rows_recorded,\n    uniqExact(uid)               AS incarnations\nFROM resource_states\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind = ${kind:sqlstring}\n  AND namespace = ${namespace:sqlstring}\n  AND name = ${name:sqlstring}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Rows and diffs",
+      "description": "Every row kubestream wrote for this object, newest first, with the change each one carried. Modified rows carry an RFC 6902 patch in diff; Added, Snapshot and Checkpoint rows carry full state in data instead, and are shown as a byte count because the whole object is too large to read in a table cell — click through to the query in docs/QUERIES.md to read one. Deleted rows carry neither.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "change"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 700
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    ts,\n    event_type,\n    uid,\n    resource_version,\n    arrayStringConcat(arraySort(actors), ', ') AS field_managers,\n    multiIf(\n        diff != '', diff,\n        data != '', concat('(full state, ', toString(length(data)), ' bytes)'),\n        ''\n    ) AS change,\n    sha256\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind = ${kind:sqlstring}\n  AND namespace = ${namespace:sqlstring}\n  AND name = ${name:sqlstring}\n  AND $__timeFilter(ts)\nORDER BY ts DESC\nLIMIT 500"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Kubernetes Events for this object",
+      "description": "What the cluster was saying about the object over the same window, for the case where the change rows alone do not explain the incident. Requires a rule streaming v1/Event or events.k8s.io/v1/Event; the panel is empty otherwise. Matched on the Event's subject name and kind rather than its uid, so Events for an earlier incarnation of this name still show up — that is usually what you want in a post-mortem.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "message"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 700
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    ts,\n    JSONExtractString(data, 'type')    AS severity,\n    JSONExtractString(data, 'reason')  AS reason,\n    JSONExtractString(data, 'message') AS message,\n    greatest(\n        JSONExtractUInt(data, 'count'),\n        JSONExtractUInt(data, 'deprecatedCount'),\n        JSONExtractUInt(data, 'series', 'count')\n    ) AS occurrences\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind = 'Event'\n  AND namespace = ${namespace:sqlstring}\n  AND $__timeFilter(ts)\n  AND coalesce(\n        nullIf(JSONExtractString(data, 'involvedObject', 'name'), ''),\n        nullIf(JSONExtractString(data, 'regarding',      'name'), '')\n      ) = ${name:sqlstring}\n  AND coalesce(\n        nullIf(JSONExtractString(data, 'involvedObject', 'kind'), ''),\n        nullIf(JSONExtractString(data, 'regarding',      'kind'), '')\n      ) = ${kind:sqlstring}\nORDER BY ts DESC\nLIMIT 200"
+        }
+      ]
+    }
+  ]
+}

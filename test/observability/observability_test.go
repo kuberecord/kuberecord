@@ -52,11 +52,43 @@ import (
 // so the suite behaves the same under `go test ./...` from the repo root and under
 // an editor that runs one test from the package directory.
 var (
-	dashboardPath       = repoPath("deploy", "grafana", "operator-health.json")
 	dashboardSchemaPath = repoPath("deploy", "grafana", "dashboard.schema.json")
 	alertsPath          = repoPath("deploy", "prometheus", "alerts.yaml")
 	alertsSchemaPath    = repoPath("deploy", "prometheus", "prometheusrule.schema.json")
+
+	// operatorHealthPath is the dashboard for operators of kubestream (Task 2.5).
+	// It is the only one backed by Prometheus, and therefore the only one the
+	// metric cross-check below has anything to say about.
+	operatorHealthPath = repoPath("deploy", "grafana", "operator-health.json")
 )
+
+// datasource types, spelled once. The product dashboards read the ClickHouse the
+// operator writes to; the operator-health dashboard reads the Prometheus that
+// scrapes it.
+const (
+	prometheusDatasource = "prometheus"
+	clickhouseDatasource = "grafana-clickhouse-datasource"
+)
+
+// shippedDashboard is one dashboard under deploy/grafana and the datasource it is
+// built against. Every dashboard is checked structurally; what differs is which
+// query language its targets are expected to carry.
+type shippedDashboard struct {
+	name           string
+	path           string
+	datasourceType string
+}
+
+// allDashboards is the full shipped set. A new dashboard added to deploy/grafana
+// without an entry here is caught by TestEveryShippedDashboardIsChecked, which
+// exists because a dashboard nobody validates is exactly the one that rots.
+var allDashboards = []shippedDashboard{
+	{"operator-health", operatorHealthPath, prometheusDatasource},
+	{"object-timeline", repoPath("deploy", "grafana", "object-timeline.json"), clickhouseDatasource},
+	{"drift-by-actor", repoPath("deploy", "grafana", "drift-by-actor.json"), clickhouseDatasource},
+	{"flap-report", repoPath("deploy", "grafana", "flap-report.json"), clickhouseDatasource},
+	{"namespace-activity", repoPath("deploy", "grafana", "namespace-activity.json"), clickhouseDatasource},
+}
 
 func repoPath(elems ...string) string {
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -70,7 +102,7 @@ func repoPath(elems ...string) string {
 // TestArtifactsMatchTheirSchemas is the acceptance criteria's JSON-schema check.
 // It runs in `make test`, and therefore in CI, on every push.
 func TestArtifactsMatchTheirSchemas(t *testing.T) {
-	tests := []struct {
+	type schemaCase struct {
 		name       string
 		schemaPath string
 		docPath    string
@@ -79,19 +111,22 @@ func TestArtifactsMatchTheirSchemas(t *testing.T) {
 		// validated by decoding it through the same YAML-to-JSON path the
 		// Kubernetes API server uses.
 		yamlDoc bool
-	}{
-		{
-			name:       "grafana dashboard",
-			schemaPath: dashboardSchemaPath,
-			docPath:    dashboardPath,
-		},
-		{
-			name:       "prometheus alert rules",
-			schemaPath: alertsSchemaPath,
-			docPath:    alertsPath,
-			yamlDoc:    true,
-		},
 	}
+
+	tests := make([]schemaCase, 0, len(allDashboards)+1)
+	for _, dash := range allDashboards {
+		tests = append(tests, schemaCase{
+			name:       "grafana dashboard: " + dash.name,
+			schemaPath: dashboardSchemaPath,
+			docPath:    dash.path,
+		})
+	}
+	tests = append(tests, schemaCase{
+		name:       "prometheus alert rules",
+		schemaPath: alertsSchemaPath,
+		docPath:    alertsPath,
+		yamlDoc:    true,
+	})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,13 +143,14 @@ func TestArtifactsMatchTheirSchemas(t *testing.T) {
 	}
 }
 
-// TestDashboardHasTheRequiredPanels pins the panel set to the acceptance criteria.
+// TestOperatorHealthDashboardHasTheRequiredPanels pins the panel set to Task
+// 2.5's acceptance criteria.
 //
 // It matches on the query rather than on the title: a title is a label somebody
 // may reword, while the query is the panel. A panel that stops asking the
 // question it was added for is the failure this catches, whatever it is called.
-func TestDashboardHasTheRequiredPanels(t *testing.T) {
-	dash := decodeDashboard(t)
+func TestOperatorHealthDashboardHasTheRequiredPanels(t *testing.T) {
+	dash := decodeDashboard(t, operatorHealthPath)
 
 	tests := []struct {
 		// panel is the criterion, named as the acceptance criteria name it.
@@ -176,51 +212,248 @@ func TestDashboardHasTheRequiredPanels(t *testing.T) {
 	}
 }
 
+// TestProductDashboardsHaveTheRequiredPanels pins Task 3.2's four dashboards to
+// their acceptance criteria, the same way and for the same reason as the
+// operator-health test above: by the query, not the title.
+//
+// The variable list is pinned alongside the panels because the criteria name
+// specific variables — an object timeline that cannot be pointed at an object,
+// or a drift report with no way to name the GitOps controller, is not the
+// dashboard that was asked for even if every panel renders.
+func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
+	type panelCriterion struct {
+		// panel is the criterion, named as the acceptance criteria name it.
+		panel string
+		// wantSQL are substrings that must all appear in the SQL of one single
+		// panel — the panel must ask all of them, not the dashboard.
+		wantSQL []string
+	}
+
+	tests := []struct {
+		file          string
+		wantUID       string
+		wantVariables []string
+		wantPanels    []panelCriterion
+	}{
+		{
+			file:          "object-timeline",
+			wantUID:       "kubestream-object-timeline",
+			wantVariables: []string{"cluster", "datasource", "kind", "name", "namespace"},
+			wantPanels: []panelCriterion{
+				{
+					panel:   "one object's rows and diffs",
+					wantSQL: []string{"FROM resource_states FINAL", "diff", "ORDER BY ts DESC"},
+				},
+				{
+					panel:   "the object's changes over time",
+					wantSQL: []string{"$__timeInterval(ts)", "event_type", "count()"},
+				},
+				{
+					// Task 3.1's contribution: the Events panel this dashboard
+					// depends on. Matched on the join key rather than on the word
+					// "Event", because the join is what makes it correct.
+					panel:   "Kubernetes Events for the object",
+					wantSQL: []string{"kind = 'Event'", "involvedObject", "regarding"},
+				},
+			},
+		},
+		{
+			file:          "drift-by-actor",
+			wantUID:       "kubestream-drift-by-actor",
+			wantVariables: []string{"cluster", "datasource", "gitops_manager", "namespace"},
+			wantPanels: []panelCriterion{
+				{
+					panel:   "Modified rows grouped by actors",
+					wantSQL: []string{"arrayJoin(actors)", "'Modified'", "GROUP BY"},
+				},
+				{
+					// The exclusion is the whole point of the dashboard, so it is
+					// asserted to be wired to the variable and not to a constant.
+					panel:   "GitOps controller excluded by variable",
+					wantSQL: []string{"has(actors, ${gitops_manager:sqlstring})", "NOT"},
+				},
+			},
+		},
+		{
+			file:          "flap-report",
+			wantUID:       "kubestream-flap-report",
+			wantVariables: []string{"cluster", "datasource", "kind", "namespace", "threshold"},
+			wantPanels: []panelCriterion{
+				{
+					panel:   "objects by Modified-count per window",
+					wantSQL: []string{"count()", "'Modified'", "$__timeFilter(ts)", "ORDER BY modifications DESC"},
+				},
+				{
+					// The threshold line is a query result rather than a panel
+					// setting, because Grafana cannot interpolate a variable into
+					// fieldConfig. Asserting the SQL is therefore the only way to
+					// assert the line tracks the variable.
+					panel:   "threshold line driven by the threshold variable",
+					wantSQL: []string{"toUInt32(${threshold}) AS threshold"},
+				},
+			},
+		},
+		{
+			file:          "namespace-activity",
+			wantUID:       "kubestream-namespace-activity",
+			wantVariables: []string{"cluster", "datasource", "event_type", "kind"},
+			wantPanels: []panelCriterion{
+				{
+					panel:   "change volume heatmap",
+					wantSQL: []string{"$__timeInterval(ts)", "namespace", "count()"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			path := repoPath("deploy", "grafana", tt.file+".json")
+			dash := decodeDashboard(t, path)
+
+			if dash.UID != tt.wantUID {
+				t.Errorf("uid is %q, want %q — the uid is what makes a re-import replace "+
+					"the dashboard instead of duplicating it", dash.UID, tt.wantUID)
+			}
+
+			var declared []string
+			for _, v := range dash.Templating.List {
+				declared = append(declared, v.Name)
+			}
+			sort.Strings(declared)
+			if !slices.Equal(declared, tt.wantVariables) {
+				t.Errorf("declares variables %v, want %v", declared, tt.wantVariables)
+			}
+
+			for _, criterion := range tt.wantPanels {
+				matched := false
+				for _, panel := range dash.Panels {
+					if containsAll(strings.Join(panel.sqls(), "\n"), criterion.wantSQL) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					t.Errorf("no panel queries all of %q; the %q criterion is not covered",
+						criterion.wantSQL, criterion.panel)
+				}
+			}
+
+			// The heatmap criterion is about the visualisation, not only the query,
+			// so it is the one place a panel type is asserted.
+			if tt.file == "namespace-activity" {
+				hasHeatmap := slices.ContainsFunc(dash.Panels, func(p panel) bool { return p.Type == "heatmap" })
+				if !hasHeatmap {
+					t.Error("no heatmap panel; the criterion asks for a change-volume heatmap")
+				}
+			}
+		})
+	}
+}
+
 // TestDashboardPanelsAreWellFormed covers the mistakes a schema cannot see:
 // duplicate ids (Grafana silently drops the second), panels that overlap on the
 // grid, and datasources that do not go through the dashboard's variable.
 func TestDashboardPanelsAreWellFormed(t *testing.T) {
-	dash := decodeDashboard(t)
+	for _, shipped := range allDashboards {
+		t.Run(shipped.name, func(t *testing.T) {
+			dash := decodeDashboard(t, shipped.path)
 
-	const wantDatasourceUID = "${datasource}"
-	seenIDs := map[int]string{}
-	seenTitles := map[string]bool{}
-	occupied := map[[2]int]string{}
+			const wantDatasourceUID = "${datasource}"
+			seenIDs := map[int]string{}
+			seenTitles := map[string]bool{}
+			occupied := map[[2]int]string{}
 
-	for _, panel := range dash.Panels {
-		if other, dup := seenIDs[panel.ID]; dup {
-			t.Errorf("panel %q reuses id %d, already held by %q", panel.Title, panel.ID, other)
-		}
-		seenIDs[panel.ID] = panel.Title
+			if len(dash.Panels) == 0 {
+				t.Fatal("dashboard has no panels")
+			}
 
-		if seenTitles[panel.Title] {
-			t.Errorf("panel title %q appears twice; titles are how the docs refer to panels", panel.Title)
-		}
-		seenTitles[panel.Title] = true
-
-		if panel.Datasource.UID != wantDatasourceUID {
-			t.Errorf("panel %q reads datasource uid %q, want %q — a pinned uid imports as a broken panel",
-				panel.Title, panel.Datasource.UID, wantDatasourceUID)
-		}
-		if panel.GridPos.X+panel.GridPos.W > 24 {
-			t.Errorf("panel %q runs past the 24-column grid (x=%d w=%d)",
-				panel.Title, panel.GridPos.X, panel.GridPos.W)
-		}
-		for x := panel.GridPos.X; x < panel.GridPos.X+panel.GridPos.W; x++ {
-			for y := panel.GridPos.Y; y < panel.GridPos.Y+panel.GridPos.H; y++ {
-				if other, taken := occupied[[2]int{x, y}]; taken {
-					t.Errorf("panel %q overlaps %q at (%d,%d)", panel.Title, other, x, y)
+			for _, panel := range dash.Panels {
+				if other, dup := seenIDs[panel.ID]; dup {
+					t.Errorf("panel %q reuses id %d, already held by %q", panel.Title, panel.ID, other)
 				}
-				occupied[[2]int{x, y}] = panel.Title
-			}
-		}
+				seenIDs[panel.ID] = panel.Title
 
-		for _, target := range panel.Targets {
-			if target.Datasource.UID != wantDatasourceUID {
-				t.Errorf("panel %q target %s reads datasource uid %q, want %q",
-					panel.Title, target.RefID, target.Datasource.UID, wantDatasourceUID)
+				if seenTitles[panel.Title] {
+					t.Errorf("panel title %q appears twice; titles are how the docs refer to panels", panel.Title)
+				}
+				seenTitles[panel.Title] = true
+
+				if panel.Datasource.UID != wantDatasourceUID {
+					t.Errorf("panel %q reads datasource uid %q, want %q — a pinned uid imports as a broken panel",
+						panel.Title, panel.Datasource.UID, wantDatasourceUID)
+				}
+				if panel.Datasource.Type != shipped.datasourceType {
+					t.Errorf("panel %q reads datasource type %q, want %q",
+						panel.Title, panel.Datasource.Type, shipped.datasourceType)
+				}
+				if panel.GridPos.X+panel.GridPos.W > 24 {
+					t.Errorf("panel %q runs past the 24-column grid (x=%d w=%d)",
+						panel.Title, panel.GridPos.X, panel.GridPos.W)
+				}
+				for x := panel.GridPos.X; x < panel.GridPos.X+panel.GridPos.W; x++ {
+					for y := panel.GridPos.Y; y < panel.GridPos.Y+panel.GridPos.H; y++ {
+						if other, taken := occupied[[2]int{x, y}]; taken {
+							t.Errorf("panel %q overlaps %q at (%d,%d)", panel.Title, other, x, y)
+						}
+						occupied[[2]int{x, y}] = panel.Title
+					}
+				}
+
+				for _, target := range panel.Targets {
+					if target.Datasource.UID != wantDatasourceUID {
+						t.Errorf("panel %q target %s reads datasource uid %q, want %q",
+							panel.Title, target.RefID, target.Datasource.UID, wantDatasourceUID)
+					}
+					if target.Datasource.Type != shipped.datasourceType {
+						t.Errorf("panel %q target %s reads datasource type %q, want %q",
+							panel.Title, target.RefID, target.Datasource.Type, shipped.datasourceType)
+					}
+				}
 			}
+		})
+	}
+}
+
+// TestEveryShippedDashboardIsChecked fails when a dashboard is added to
+// deploy/grafana without being registered above. Every other test in this file
+// iterates allDashboards, so an unregistered dashboard is not partially checked —
+// it is not checked at all, which is the worse failure and the silent one.
+func TestEveryShippedDashboardIsChecked(t *testing.T) {
+	found, err := filepath.Glob(repoPath("deploy", "grafana", "*.json"))
+	if err != nil {
+		t.Fatalf("list deploy/grafana: %v", err)
+	}
+
+	registered := map[string]bool{}
+	for _, dash := range allDashboards {
+		registered[dash.path] = true
+	}
+	for _, path := range found {
+		// The schema is not a dashboard; it is what dashboards are checked against.
+		if filepath.Base(path) == "dashboard.schema.json" {
+			continue
 		}
+		if !registered[path] {
+			t.Errorf("%s is shipped but not registered in allDashboards, so nothing validates it", rel(path))
+		}
+	}
+}
+
+// TestDashboardUIDsAreUnique guards a failure that is invisible until it bites:
+// importing two dashboards that share a uid replaces the first with the second.
+func TestDashboardUIDsAreUnique(t *testing.T) {
+	seen := map[string]string{}
+	for _, shipped := range allDashboards {
+		dash := decodeDashboard(t, shipped.path)
+		if dash.UID == "" {
+			t.Errorf("%s declares no uid", shipped.name)
+			continue
+		}
+		if other, dup := seen[dash.UID]; dup {
+			t.Errorf("%s and %s share uid %q; importing both keeps only one", shipped.name, other, dash.UID)
+		}
+		seen[dash.UID] = shipped.name
 	}
 }
 
@@ -301,11 +534,16 @@ func TestAlertRulesMatchTheAcceptanceCriteria(t *testing.T) {
 // not from a Gather, so a metric whose series have no label values yet (safe_mode
 // before the first warming scope) still counts as exported. A renamed or deleted
 // metric fails here, at build time, instead of showing up as an empty panel.
+//
+// Scoped to the operator-health dashboard: it is the only one that queries
+// Prometheus. The product dashboards read ClickHouse, and the equivalent guard
+// for them — that every column they name is a frozen-schema column — is
+// test/queries, which executes them against a real database.
 func TestQueriesOnlyUseExportedMetrics(t *testing.T) {
 	exported := declaredMetricNames(t)
 
 	queries := map[string][]string{}
-	for _, panel := range decodeDashboard(t).Panels {
+	for _, panel := range decodeDashboard(t, operatorHealthPath).Panels {
 		queries["panel "+panel.Title] = panel.exprs()
 	}
 	for _, rule := range decodeAlertRules(t) {
@@ -398,9 +636,15 @@ func findPromtool() (path string, fromEnv bool) {
 // --- artifact decoding -------------------------------------------------------
 
 type dashboard struct {
-	UID    string  `json:"uid"`
-	Title  string  `json:"title"`
-	Panels []panel `json:"panels"`
+	UID        string  `json:"uid"`
+	Title      string  `json:"title"`
+	Panels     []panel `json:"panels"`
+	Templating struct {
+		List []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"list"`
+	} `json:"templating"`
 }
 
 type panel struct {
@@ -412,10 +656,26 @@ type panel struct {
 	Targets    []target      `json:"targets"`
 }
 
+// exprs returns the panel's PromQL. A ClickHouse panel has none, and returning
+// its SQL here would feed it to the metric cross-check, which would then complain
+// about every identifier that happens to look like a metric name.
 func (p panel) exprs() []string {
 	out := make([]string, 0, len(p.Targets))
 	for _, t := range p.Targets {
-		out = append(out, t.Expr)
+		if t.Expr != "" {
+			out = append(out, t.Expr)
+		}
+	}
+	return out
+}
+
+// sqls returns the panel's SQL, the ClickHouse counterpart of exprs.
+func (p panel) sqls() []string {
+	out := make([]string, 0, len(p.Targets))
+	for _, t := range p.Targets {
+		if t.RawSQL != "" {
+			out = append(out, t.RawSQL)
+		}
 	}
 	return out
 }
@@ -435,6 +695,7 @@ type gridPos struct {
 type target struct {
 	RefID      string        `json:"refId"`
 	Expr       string        `json:"expr"`
+	RawSQL     string        `json:"rawSql"`
 	Datasource datasourceRef `json:"datasource"`
 }
 
@@ -455,15 +716,15 @@ type alertRule struct {
 	Annotations map[string]string `json:"annotations"`
 }
 
-func decodeDashboard(t *testing.T) dashboard {
+func decodeDashboard(t *testing.T, path string) dashboard {
 	t.Helper()
-	raw, err := os.ReadFile(dashboardPath)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read %s: %v", rel(dashboardPath), err)
+		t.Fatalf("read %s: %v", rel(path), err)
 	}
 	var dash dashboard
 	if err := json.Unmarshal(raw, &dash); err != nil {
-		t.Fatalf("decode %s: %v", rel(dashboardPath), err)
+		t.Fatalf("decode %s: %v", rel(path), err)
 	}
 	return dash
 }

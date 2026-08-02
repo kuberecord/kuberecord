@@ -1,0 +1,407 @@
+{
+  "uid": "kubestream-flap-report",
+  "title": "kubestream — Flap Report",
+  "description": "Objects that will not hold still. Ranks every watched object by how many Modified rows it produced in the selected window and compares that against a threshold you set, so 'this controller is fighting another one' becomes a number instead of a hunch. Flapping is expensive twice over — it burns apiserver and it fills this table — so the objects at the top are usually both a correctness bug and a cost line.",
+  "tags": ["kubestream", "clickhouse", "churn"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "grafana-clickhouse-datasource",
+        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "hide": 0,
+        "regex": "",
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Cluster",
+        "description": "cluster_id is the leading column of the sort key, so every panel filters on it.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
+        "query": {
+          "refId": "kubestream-variable-cluster",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "namespace",
+        "label": "Namespace",
+        "description": "Multi-select, All by default. Flapping is often confined to one namespace's operator, so narrowing here is the first bisect.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace",
+        "query": {
+          "refId": "kubestream-variable-namespace",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "query",
+        "name": "kind",
+        "label": "Kind",
+        "description": "Multi-select, All by default. Status-heavy kinds flap by nature; excluding them is how the list becomes actionable.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind",
+        "query": {
+          "refId": "kubestream-variable-kind",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "textbox",
+        "name": "threshold",
+        "label": "Flap threshold (changes per window)",
+        "description": "How many Modified rows in the dashboard's time range make an object a flapper. It is a plain number, and it is read by the SQL rather than by a panel setting — Grafana cannot interpolate a variable into a panel's threshold configuration, so the threshold line on the timeline is a series the query returns rather than a static line that would silently disagree with this box.",
+        "query": "10",
+        "hide": 0,
+        "current": {
+          "text": "10",
+          "value": "10"
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Objects over the flap threshold",
+      "description": "How many distinct objects exceeded the threshold in this window. Zero is the healthy reading. Watch this after changing a controller: a fix that stops a fight shows up here within one window, long before it is visible in the ranking table.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT count() AS objects_over_threshold\nFROM\n(\n    SELECT namespace, kind, name\n    FROM resource_states FINAL\n    WHERE cluster_id = ${cluster:sqlstring}\n      AND namespace IN (${namespace:sqlstring})\n      AND kind IN (${kind:sqlstring})\n      AND event_type IN ('Modified', 'Checkpoint')\n      AND $__timeFilter(ts)\n    GROUP BY namespace, kind, name\n    HAVING count() >= ${threshold}\n)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Modified rows in window",
+      "description": "Total change volume behind the ranking, for scale. A high flapper count against a low total means a few objects churning in an otherwise quiet cluster; a high total means the whole cluster is moving and the threshold probably needs raising for this window length.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT count() AS modified_rows\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND kind IN (${kind:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Flapping objects over time, against the threshold",
+      "description": "One series per object that cleared the threshold over the whole window, bucketed to the dashboard interval, plus a dashed threshold line. Query B exists only to draw that line: it returns the threshold variable as a constant series, because a panel-level threshold cannot read a dashboard variable and a hard-coded one would drift away from the box above. Series that cross the line in bursts are fights; series that sit on it are steady-state churn.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "threshold"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [10, 10]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    concat(namespace, '/', kind, '/', name) AS object,\n    count() AS modifications\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND kind IN (${kind:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)\n  AND (namespace, kind, name) IN\n  (\n      SELECT namespace, kind, name\n      FROM resource_states FINAL\n      WHERE cluster_id = ${cluster:sqlstring}\n        AND namespace IN (${namespace:sqlstring})\n        AND kind IN (${kind:sqlstring})\n        AND event_type IN ('Modified', 'Checkpoint')\n        AND $__timeFilter(ts)\n      GROUP BY namespace, kind, name\n      HAVING count() >= ${threshold}\n  )\nGROUP BY time, object\nORDER BY time"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    toUInt32(${threshold}) AS threshold\nFROM resource_states\nWHERE cluster_id = ${cluster:sqlstring}\n  AND $__timeFilter(ts)\nGROUP BY time\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Objects by change count",
+      "description": "The ranking, threshold included as a column so a row can be read against it without leaving the table. field_managers is the union of every field manager seen on those rows — two or more controller names on a high-count row is the signature of a fight, where one name repeated is usually a controller re-reconciling its own status. Take namespace, kind and name to the Object Timeline dashboard to read the individual diffs.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "modifications"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10
+                    },
+                    {
+                      "color": "red",
+                      "value": 50
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "modifications",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    namespace,\n    kind,\n    name,\n    count()                AS modifications,\n    toUInt32(${threshold}) AS threshold,\n    max(ts)                AS last_change,\n    arrayStringConcat(arraySort(groupUniqArrayArray(actors)), ', ') AS field_managers\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND kind IN (${kind:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)\nGROUP BY namespace, kind, name\nORDER BY modifications DESC\nLIMIT 100"
+        }
+      ]
+    }
+  ]
+}

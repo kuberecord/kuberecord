@@ -14,6 +14,12 @@ Two artifacts ship with the operator:
 Both are built entirely on the metrics the operator already exports. Neither
 requires anything but a Prometheus that scrapes the operator.
 
+This page is about watching **the operator**. For reading the cluster history it
+records — object timelines, GitOps drift, flapping objects, namespace activity —
+see [`docs/DASHBOARDS.md`](DASHBOARDS.md) and the SQL behind it in
+[`docs/QUERIES.md`](QUERIES.md). Those dashboards read ClickHouse, not Prometheus,
+and need the ClickHouse data source plugin rather than this page's setup.
+
 ## Getting the metrics
 
 The metrics endpoint is off unless you ask for it: `--metrics-bind-address`

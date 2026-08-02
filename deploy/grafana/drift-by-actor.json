@@ -1,0 +1,374 @@
+{
+  "uid": "kubestream-drift-by-actor",
+  "title": "kubestream — Drift by Actor",
+  "description": "Who is changing the cluster, and how much of it your GitOps controller is not responsible for. Every panel here reads Modified rows grouped by the field-manager names in actors, with one variable naming the GitOps controller's manager so its changes can be told apart from everything else. The changes that remain are the drift: kubectl edits, mutating webhooks, other operators, and controllers reacting to them.",
+  "tags": ["kubestream", "clickhouse", "gitops", "drift"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "grafana-clickhouse-datasource",
+        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "hide": 0,
+        "regex": "",
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Cluster",
+        "description": "cluster_id is the leading column of the sort key, so every panel filters on it.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
+        "query": {
+          "refId": "kubestream-variable-cluster",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "namespace",
+        "label": "Namespace",
+        "description": "Multi-select. Leave on All to see the whole cluster; narrow it when one team's namespaces are the question.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace",
+        "query": {
+          "refId": "kubestream-variable-namespace",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "textbox",
+        "name": "gitops_manager",
+        "label": "GitOps manager name",
+        "description": "The field-manager name your GitOps controller applies under, exactly as it appears in metadata.managedFields — Argo CD uses argocd-controller (older releases: argocd-application-controller), Flux uses the name of the applying kustomize-controller. Set it once and the exclusion panels become 'everything my GitOps controller did not do'. A name that matches nothing simply excludes nothing, so a wrong value shows up as a suspiciously high non-GitOps share rather than as an error.",
+        "query": "argocd-controller",
+        "hide": 0,
+        "current": {
+          "text": "argocd-controller",
+          "value": "argocd-controller"
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Share of changes the GitOps controller touched",
+      "description": "The percentage of Modified rows in the window whose actors include the GitOps manager name. A cluster reconciled entirely from Git sits near 100%; the gap below it is the drift the other panels break down. Note that a row is counted as GitOps-touched if the manager appears at all — a hand-edit to an object the controller also manages credits both, which is why this is a share rather than a verdict.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    round(100 * countIf(has(actors, ${gitops_manager:sqlstring})) / greatest(count(), 1), 1) AS gitops_share_pct\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Objects with non-GitOps drift",
+      "description": "Distinct objects that were modified at least once in the window without the GitOps manager among the actors. This is the number to watch after a freeze or during an incident: it counts objects, not rows, so one object edited fifty times does not drown out fifty objects edited once.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    uniqExact((api_group, kind, namespace, name)) AS objects_with_drift\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)\n  AND NOT has(actors, ${gitops_manager:sqlstring})"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "barchart",
+      "title": "Top actors, GitOps excluded",
+      "description": "The ranking that answers 'so who is it, then'. Each bar is one field-manager name and the number of Modified rows it appears on, with the GitOps manager filtered out. Expect controllers you did not think about — status writers, HPAs, and mutating webhooks all hold field ownership and all show up here.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    actor,\n    count() AS modifications\nFROM\n(\n    SELECT arrayJoin(actors) AS actor\n    FROM resource_states FINAL\n    WHERE cluster_id = ${cluster:sqlstring}\n      AND namespace IN (${namespace:sqlstring})\n      AND event_type IN ('Modified', 'Checkpoint')\n      AND $__timeFilter(ts)\n)\nWHERE actor != ${gitops_manager:sqlstring}\nGROUP BY actor\nORDER BY modifications DESC\nLIMIT 20"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Modified rows by actor over time",
+      "description": "The same grouping as the ranking, spread over time and including the GitOps manager so its reconcile cadence is visible as the baseline. Drift reads as a series that appears where the GitOps series is quiet — a burst of one manager's changes outside a deploy window is the thing to click into on the table below.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    actor,\n    count() AS modifications\nFROM\n(\n    SELECT ts, arrayJoin(actors) AS actor\n    FROM resource_states FINAL\n    WHERE cluster_id = ${cluster:sqlstring}\n      AND namespace IN (${namespace:sqlstring})\n      AND event_type IN ('Modified', 'Checkpoint')\n      AND $__timeFilter(ts)\n)\nGROUP BY time, actor\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Objects changed without the GitOps controller",
+      "description": "The drift itself, one row per object: how often it changed, who changed it, and when it last moved. Copy an object's namespace, kind and name into the Object Timeline dashboard to see the individual diffs. An object whose only actor is a status writer is usually noise; an object with a human's kubectl manager on it is usually the finding.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "modifications",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    namespace,\n    kind,\n    name,\n    count()  AS modifications,\n    max(ts)  AS last_change,\n    arrayStringConcat(arraySort(groupUniqArrayArray(actors)), ', ') AS field_managers\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND namespace IN (${namespace:sqlstring})\n  AND event_type IN ('Modified', 'Checkpoint')\n  AND $__timeFilter(ts)\n  AND NOT has(actors, ${gitops_manager:sqlstring})\nGROUP BY namespace, kind, name\nORDER BY modifications DESC\nLIMIT 100"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,325 @@
+{
+  "uid": "kubestream-namespace-activity",
+  "title": "kubestream — Namespace Activity",
+  "description": "Where the cluster is moving. A heatmap of change volume by namespace over time, with the breakdowns needed to explain a hot cell: which event types, which kinds, and which namespaces carry the volume. Use it to spot the deploy nobody announced, the namespace that never goes quiet, and the retention cost you are about to pay.",
+  "tags": ["kubestream", "clickhouse", "activity"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "grafana-clickhouse-datasource",
+        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "hide": 0,
+        "regex": "",
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "cluster",
+        "label": "Cluster",
+        "description": "cluster_id is the leading column of the sort key, so every panel filters on it.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
+        "query": {
+          "refId": "kubestream-variable-cluster",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {}
+      },
+      {
+        "type": "query",
+        "name": "kind",
+        "label": "Kind",
+        "description": "Multi-select, All by default. Restricting to the kinds you deploy — Deployment, ConfigMap, Ingress — turns 'activity' into 'deploys' by filtering out the status churn of controller-owned kinds.",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind",
+        "query": {
+          "refId": "kubestream-variable-kind",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind"
+        },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      },
+      {
+        "type": "custom",
+        "name": "event_type",
+        "label": "Event type",
+        "description": "The event types to count. The list is the frozen schema's state machine, written out rather than queried, so the options stay stable even in a window where one of them happens not to occur. Snapshot marks a row written while the operator was still warming and could not know whether the object was new; Checkpoint is a Modified that also carries full state.",
+        "query": "Added,Modified,Deleted,Snapshot,Checkpoint",
+        "options": [],
+        "includeAll": true,
+        "multi": true,
+        "hide": 0,
+        "current": {
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "heatmap",
+      "title": "Change volume by namespace",
+      "description": "One row per namespace, one cell per time bucket, coloured by how many rows kubestream wrote. Cluster-scoped objects have an empty namespace in the schema and are shown as (cluster-scoped) so they do not render as a nameless row. Bucketing follows the dashboard's interval, so widening the time range coarsens the cells rather than dropping data.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "steps": 64,
+          "reverse": false,
+          "exponent": 0.5,
+          "fill": "dark-orange"
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "reverse": false
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "cellGap": 1,
+        "legend": {
+          "show": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": true,
+          "yHistogram": false
+        },
+        "exemplars": {
+          "color": "rgba(255,0,255,0.7)"
+        },
+        "filterValues": {
+          "le": 1e-9
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    if(namespace = '', '(cluster-scoped)', namespace) AS ns,\n    count() AS changes\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind IN (${kind:sqlstring})\n  AND event_type IN (${event_type:sqlstring})\n  AND $__timeFilter(ts)\nGROUP BY time, ns\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Change volume by event type",
+      "description": "The same volume, split by what kind of change it was. The mix is the diagnosis: a wall of Modified is churn, a step of Added is a rollout, a burst of Deleted is a teardown, and a spike of Snapshot means the operator restarted and re-baselined rather than that anything happened in the cluster.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    $__timeInterval(ts) AS time,\n    event_type,\n    count() AS changes\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind IN (${kind:sqlstring})\n  AND $__timeFilter(ts)\nGROUP BY time, event_type\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Kinds by volume",
+      "description": "Which kinds are producing the rows, group-qualified because a kind name alone is ambiguous once CRDs are in play. This is the panel to read before widening a rule: a kind near the top of this list will dominate storage, and a kind absent from it is being watched for nothing.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "changes",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    concat(if(api_group = '', 'core', api_group), '/', kind) AS gvk,\n    count()                        AS changes,\n    uniqExact((namespace, name))   AS objects,\n    max(ts)                        AS last_change\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND event_type IN (${event_type:sqlstring})\n  AND $__timeFilter(ts)\nGROUP BY gvk\nORDER BY changes DESC\nLIMIT 50"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Busiest namespaces",
+      "description": "The heatmap as numbers, with the event-type split per namespace and the number of distinct objects behind the volume. The ratio of the two is the useful bit: many rows over few objects is churn to investigate on the Flap Report, while many rows over many objects is simply a busy namespace.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "total",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${datasource}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    if(namespace = '', '(cluster-scoped)', namespace) AS ns,\n    countIf(event_type = 'Added')                    AS added,\n    countIf(event_type IN ('Modified', 'Checkpoint')) AS modified,\n    countIf(event_type = 'Deleted')                  AS deleted,\n    countIf(event_type = 'Snapshot')                 AS snapshot,\n    count()                                          AS total,\n    uniqExact((api_group, kind, name))               AS objects\nFROM resource_states FINAL\nWHERE cluster_id = ${cluster:sqlstring}\n  AND kind IN (${kind:sqlstring})\n  AND $__timeFilter(ts)\nGROUP BY ns\nORDER BY total DESC\nLIMIT 50"
+        }
+      ]
+    }
+  ]
+}
