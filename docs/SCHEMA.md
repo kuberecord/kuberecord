@@ -20,6 +20,13 @@ schema. The DDL is shipped in-repo under
 downstream pipelines against everything in this document and expect it to keep
 working for the life of `v1`.
 
+> One property to read before building an incremental pipeline: `ts` is **event
+> time, not ingestion time**, so rows can be inserted out of `ts` order and a
+> `WHERE ts > :watermark` cursor can skip them permanently. See [`ts`
+> ordering](#ts-ordering-event-time-not-ingestion-time) for the case that produces
+> such a row and the three ways to consume around it. Snapshot and reconstruction
+> reads are unaffected.
+
 ### What the freeze covers
 
 - The **table names** `resource_states` and `watch_scopes`.
@@ -64,6 +71,22 @@ Any `v1` schema change must be **purely additive**, and must satisfy all of:
    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so the auto-create path stays
    idempotent and an existing table is migrated in place.
 5. It is documented in the column tables above in the same change.
+
+**One such change is designed but deliberately not taken: `ingested_at
+DateTime64(9) DEFAULT now64(9)`.** Because `ts` is event time, it does not
+increase monotonically with insertion (see [`ts`
+ordering](#ts-ordering-event-time-not-ingestion-time)); a server-defaulted
+`ingested_at` would, and would hand incremental consumers a cursor that cannot
+skip a late-arriving row. It satisfies every rule above — appended, `DEFAULT`-ed,
+outside `ORDER BY` and `PARTITION BY` — so it remains available at any time
+without a freeze violation, and this paragraph exists so a consumer who needs it
+knows the door is open.
+
+It is not being added now for two reasons: no consumer has asked for it, and an
+unused column costs storage on every row of an append-only audit table forever.
+The lookback and re-reconciliation patterns above solve the same problem for free
+on the read side. Spending the freeze's additive budget speculatively is the one
+thing a frozen schema cannot undo.
 
 This is what makes both directions of operator/table version skew safe:
 
@@ -149,7 +172,7 @@ One row per observed state transition of a watched object.
 
 | Column | Type | Semantics |
 |---|---|---|
-| `ts` | `DateTime64(9, 'UTC')` | Event timestamp (nanosecond precision, UTC). `Delta, ZSTD(1)` codec — monotonic-ish timestamps compress extremely well under delta coding. |
+| `ts` | `DateTime64(9, 'UTC')` | Event timestamp (nanosecond precision, UTC). `Delta, ZSTD(1)` codec — monotonic-ish timestamps compress extremely well under delta coding. (Event time, **not** insert time: rows can arrive out of `ts` order, which matters if you tail this table — see [`ts` ordering](#ts-ordering-event-time-not-ingestion-time).) |
 | `cluster_id` | `LowCardinality(String)` | Identifies the cluster this operator instance serves. Explicit in the schema (a future multi-cluster reader distinguishes rows by it); implicit in-process (one operator serves one cluster). |
 | `event_type` | `LowCardinality(String)` | The state-machine label — see [Event-type state machine](#event-type-state-machine). |
 | `api_group` | `LowCardinality(String)` | API group (e.g. `apps`; empty `""` for the core group). Part of the canonical identity. |
@@ -232,6 +255,81 @@ row of its own is a death nobody recorded — a delete-and-recreate that happene
 while the operator was down — and grouping per identity would hide it behind the
 successor's `argMax(uid, ts)`. The warm-up seeds the newest incarnation and closes
 out the others (see "Deletion semantics" below).
+
+#### `ts` ordering: event time, not ingestion time
+
+**`ts` is the instant the event occurred, not the instant the row was inserted.**
+For an ordinary write the two are the same to within the pipeline's own latency:
+the timestamp is stamped when the event is processed and the row follows within
+milliseconds. For *recovered* rows they differ, deliberately — and that difference
+is a property of the frozen contract, not an implementation detail that might go
+away.
+
+**Rows may therefore be inserted carrying a `ts` earlier than rows already
+present in the table.** The concrete case is the one [Deletion
+semantics](#deletion-semantics--no-sentinels) describes: a close-out `Deleted` row
+for an incarnation whose death went unrecorded, dated from **that incarnation's
+own last recorded `ts`** rather than from the moment of recovery. Both reasons for
+that dating are load-bearing — it keeps a reconstruction in the order events
+actually happened, and it is what makes a re-emitted close-out byte-identical and
+therefore collapsible by `ReplacingMergeTree`.
+
+The lag between such a row's `ts` and its insertion is **unbounded in principle**.
+It is however long the operator was down or otherwise failed to observe the death,
+*plus* however long the object had been stable before that: the close-out is dated
+from the incarnation's last recorded event, so an object that sat unchanged for six
+months before being deleted during an outage produces a close-out dated six months
+back, inserted today.
+
+**What this breaks.** Incremental tailing with a high-water-mark cursor —
+
+```sql
+-- Do not tail the table this way.
+SELECT … FROM resource_states WHERE ts > {watermark:DateTime64(9, 'UTC')};
+```
+
+— will **skip such a row permanently**. Once the successor's rows land and advance
+the cursor past their (later) `ts`, the close-out at the earlier `ts` arrives
+behind the watermark and is never selected again. That is precisely the row the
+close-out mechanism exists to produce, so a naive tail loses exactly the evidence
+it would most want.
+
+**What to do instead**, as options rather than a mandate — pick whichever fits how
+much staleness the consumer tolerates:
+
+- **Apply a lookback (grace) window to the watermark.** Advance the cursor to
+  `max(ts) - lookback` rather than to `max(ts)`, sized to the operator's expected
+  downtime. Cheap, and sufficient when downtime is bounded by an SLO. Rows are
+  re-read within the window, so the consumer must be idempotent on
+  `(identity, uid, ts, event_type)` — which it should be anyway, since the write
+  path is at-least-once.
+- **Periodically re-reconcile a window rather than tailing it once.** Keep the
+  tail for latency and run a slower sweep that re-reads, say, the last 24 hours (or
+  the whole retention window) and reconciles what it finds. This catches
+  arbitrarily late arrivals without paying for a large lookback on every poll.
+- **Read snapshots with `FINAL` instead of tailing at all.** A consumer that wants
+  "what is the current state of everything" is better served by the aggregate
+  recipes in this document than by a change feed; they are order-insensitive by
+  construction (below).
+
+**What this does *not* affect.** The warning is narrow, and worth scoping
+explicitly so it does not read as a general caveat on the table:
+
+- **Point-in-time reconstruction** ([Reconstructing state at an
+  instant](#reconstructing-state-at-an-instant)) reads an object's whole history up
+  to the target instant and orders it by `ts`. A late arrival is simply present or
+  absent from that read; it is never skipped by a cursor, because there is no
+  cursor.
+- **The `argMax` recipes in this document** aggregate over full history and are
+  order-insensitive by construction.
+- **The operator's own reads.** This was verified, not assumed:
+  `lastKnownStatesQuery` and `activeScopesQuery` (`statereader.go`) are full-history
+  aggregates — `GROUP BY` plus `argMax`/`max`, with no `ts` cursor anywhere — so an
+  out-of-order insert cannot hide a row from either. `scopeWasActiveQuery` does
+  carry a `ts < ?` cutoff, but it reads `watch_scopes`, whose rows are always
+  stamped at the moment of the transition and are **never** history-dated (see
+  `watch_scopes`' `ts` column below). Warm-up and boot reconciliation are therefore
+  unaffected.
 
 ### Deletion semantics — no sentinels
 
@@ -541,6 +639,17 @@ PARTITION BY toYYYYMM(ts)
 ORDER BY (cluster_id, api_group, kind, namespace, name, ts)
 TTL toDateTime(ts) + INTERVAL 1 YEAR;
 ```
+
+> **Size a TTL with history-dated rows in mind.** `PARTITION BY toYYYYMM(ts)`
+> partitions on **event time**, and a close-out `Deleted` row is dated from the
+> incarnation it closes — which may be months back for an object that had been
+> stable a long time before it died (see [`ts`
+> ordering](#ts-ordering-event-time-not-ingestion-time)). Such a row lands in an
+> *older* partition than the one currently being written, so a tight TTL can expire
+> it on or shortly after arrival, and the object's history then ends without its
+> deletion ever being visible. A retention window comfortably longer than the
+> longest plausible operator outage plus the longest plausible object lifetime is
+> what keeps that from happening; the 1-year example above is sized that way.
 
 This is a suggestion only; the operator neither sets nor requires a TTL, and
 schema validation ignores TTL clauses (it checks column names/types
