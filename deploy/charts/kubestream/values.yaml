@@ -75,6 +75,7 @@ rbac:
   presets:
     core-workloads: true
     batch: false
+    events: false
     networking: false
     rbac-read: false
     storage: false

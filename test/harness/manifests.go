@@ -122,6 +122,36 @@ spec:
 `, name, namespace, name, name)
 }
 
+// CrashLoopPodYAML renders a Pod that is guaranteed to enter CrashLoopBackOff:
+// the container exits non-zero immediately and the default restartPolicy brings
+// it straight back.
+//
+// It exists to *manufacture Events*, which is the only way to test the count-bump
+// case honestly. The kubelet emits a `BackOff` Event for a crash-looping
+// container and then updates that same Event in place — same name, same UID, a
+// higher `count` — every time it backs off again. That in-place update is the
+// case naive Event exporters drop, so the fixture has to produce a real one
+// rather than a Event authored by the test.
+//
+// The pause image is used with an argument it does not understand so the
+// container fails without any registry pull: kind nodes already have it cached.
+func CrashLoopPodYAML(namespace, name string) string {
+	return fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 1
+  containers:
+  - name: crasher
+    image: registry.k8s.io/pause:3.10
+    imagePullPolicy: IfNotPresent
+    command: ["/no-such-binary"]
+`, name, namespace)
+}
+
 // ConfigMapYAML renders a ConfigMap carrying data.
 //
 // It is the chaos suite's workhorse object: nothing schedules for it, so a

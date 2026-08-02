@@ -38,6 +38,7 @@ RBAC has already moved to the aggregated-ClusterRole model: the base role holds 
 - **Duplicate-write-safe delete handling** — the live delete path, the reincarnation (delete-then-recreate) close-out path, and the startup zombie-GC pass all claim through the same `ReserveDelete` primitive (with UID verification), so the same disappearance can never produce two `Deleted` rows.
 - **Robust zombie-resource garbage collection** — on startup, a background pass compares ClickHouse's last-known state per object against the live (cache-backed) cluster and emits a `Deleted` row for anything that vanished (or was recreated under a new UID) while the operator was down.
 - **Crash/restart resilient, non-blocking startup** — cache warm-up and GC run as a `manager.Runnable` in the background; `mgr.Start()` is never gated on ClickHouse being reachable. While the cache is still warming, cache-miss events are tagged `Snapshot` instead of `Added`, so a slow ClickHouse at boot degrades gracefully instead of re-emitting the whole cluster as a flood of duplicate `Added` rows.
+- **Kubernetes Events, persisted** — name `v1/Event` or `events.k8s.io/v1/Event` in a rule's `resources:` and the cluster's Event stream outlives its ~1h TTL. Events get a built-in mode rather than the ordinary object treatment, because an Event is append-only ephemera: every row carries the full Event so an in-place `count` bump is readable on its own (the case naive exporters drop), and an Event ageing out is recorded as **nothing** rather than as a `Deleted` row (the deletion naive exporters invent). Restart-safe either way — warm-up primes the dedup hashes so a restarting operator does not re-record every Event still inside its TTL. See [`docs/SCHEMA.md`](docs/SCHEMA.md#kubernetes-events) and [`docs/QUERIES.md`](docs/QUERIES.md).
 - **Self-healing on write failure** — a terminally-failed async write reverts its optimistic cache entry and re-queues the object's key on the workqueue's rate limiter, rather than silently vanishing until an unrelated future change happens to touch the same object.
 - **No hardcoded configuration, and none on the process either** — where state goes (address, credentials, timeouts, write-path sizing) is a `ClickHouseSink` CR plus a Secret, and what is streamed there is a `StreamRule` / `ClusterStreamRule`. The password is never a flag and never an operator environment variable: the operator reads it from a Secret in its own namespace, so it cannot show up in a process listing. The only operator-level settings left are the ones that describe *this instance* — its cluster identifier, its namespace, and fleet-wide fallbacks for anything a sink leaves unset (see [Configuration](#configuration)).
 
@@ -131,8 +132,8 @@ changes after install:
   ClusterRole labelled `kubestream.io/aggregate-to-watcher: "true"`. Platform
   admins extend coverage by applying a small labelled role from
   [`config/rbac/presets/`](config/rbac/presets/) — `core-workloads` (on by
-  default), `networking`, `batch`, `storage`, `rbac-read` — or a copy of one. **No
-  operator redeploy and no restart:** a rule parked on
+  default), `networking`, `batch`, `storage`, `rbac-read`, `events` — or a copy
+  of one. **No operator redeploy and no restart:** a rule parked on
   `RBACGranted=False/MissingPermissions` flips to `True` on its own within one
   resync once the grant appears, and the operator can never grant it to itself
   (it holds no write access to RBAC objects, and Kubernetes forbids granting what
@@ -270,7 +271,7 @@ is deleted, so an absent backend does not linger as a live-but-idle one.
 | `kubestream_dedup_skips_total` | Counter | — | Pipeline work items short-circuited because the object's hash was unchanged. |
 | `kubestream_hashcache_entries` | Gauge | `sink` | Live `hashCache` entries, per sink (one cache per sink, spanning all kinds). |
 | `kubestream_safe_mode` | Gauge (0/1) | `sink`, `group`, `kind`, `namespace` | `1` while a `(sink, scope)` pair's cache is still warming (Snapshot mode), `0` once warm. |
-| `kubestream_pipeline_dropped_total` | Counter | `reason="scope_stopped"` | Work items deliberately discarded — today only because the item's watch scope was deactivated before a worker picked it up. Never a deletion. |
+| `kubestream_pipeline_dropped_total` | Counter | `reason="scope_stopped"\|"ephemeral_delete"` | Work items deliberately discarded, never as a deletion. `scope_stopped`: the item's watch scope was deactivated before a worker picked it up. `ephemeral_delete`: a Kubernetes Event left the watch cache, i.e. its TTL expired — the one reason with a healthy nonzero rate. |
 
 The control plane adds one gauge of its own, counting rules rather than writes:
 
@@ -424,7 +425,7 @@ ORDER BY ts DESC
 LIMIT 20;
 ```
 
-More query recipes, and the meaning of every column, are in [`docs/SCHEMA.md`](docs/SCHEMA.md).
+More query recipes are in [`docs/QUERIES.md`](docs/QUERIES.md), and the meaning of every column is in [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ### Uninstalling
 

@@ -4,6 +4,56 @@ All notable changes to kubestream are recorded here. The project is pre-1.0 and
 follows [Semantic Versioning](https://semver.org/) loosely: while the API group
 is `v1alpha1`, breaking changes are allowed and are always spelled out below.
 
+## Unreleased — Phase 3: closing the product gaps
+
+### Added
+
+- **Kubernetes Events ingestion.** Naming `v1/Event` or `events.k8s.io/v1/Event`
+  in a rule's `resources:` now persists the cluster's Event stream past its ~1h
+  TTL. Either spelling works — the two APIs are one storage — and there is no new
+  CRD field, because every difference is a property of the kind rather than a
+  preference: a knob here could only ever configure the operator into recording
+  something untrue about Events. Three behaviours differ from an ordinary watched
+  kind, and each exists to keep one specific falsehood out of the audit trail:
+  - **Full state on every row, never a diff.** The API server *updates* an Event
+    in place to bump `count`, and that update is an ordinary `Modified` for
+    kubestream — the case naive exporters drop, because they treat an Event as
+    write-once. Carrying the whole Event means a `count`, a `message` or an
+    `involvedObject` is readable straight off a row with no diff chain to replay.
+    Hash dedup still runs, so a resync that changes nothing writes nothing, and
+    `Checkpoint` rows never appear for Events (there is no diff run to interrupt).
+  - **An expiry is recorded as nothing at all.** There is no `Deleted` row for an
+    Event — not for TTL expiry, not for a forced delete, and not as a
+    reincarnation close-out when a newer Event takes over an older one's name. An
+    Event vanishing is its retention window closing, not a change to the cluster,
+    and recording it as a deletion would put one false deletion in the trail per
+    Event the cluster ever emitted. The dedup entry is still dropped, so the
+    highest-churn kind in a cluster does not leak one cache entry per expiry.
+  - **Warm-up seeds, and stops there.** Cache warm-up runs for an Events scope —
+    that is what stops a restarting operator re-recording every Event still
+    inside its TTL — but the zombie-GC pass, the close-out recovery, the epoch
+    probe and the informer-sync wait are all skipped, so the pass can never
+    manufacture the deletions the point above rules out. With no deletions to be
+    ambiguous about, an Events scope never `Snapshot`-tags either: a cache miss on
+    an Event is a new Event.
+
+  `watch_scopes` is unaffected — an Events scope writes ordinary `Started` and
+  `Stopped` rows — and the ClickHouse schema is untouched (v1 stays frozen).
+- **An `events` watch preset** ([`config/rbac/presets/events.yaml`](config/rbac/presets/events.yaml),
+  Helm value `rbac.presets.events`) granting `get,list,watch` on `events` in
+  **both** API groups, so a rule may name either spelling without a partial grant.
+  It is **not** enabled by default: Events are usually the highest-volume kind in
+  a cluster, so the storage bill belongs to somebody who asked for it.
+- **`kubestream_pipeline_dropped_total{reason="ephemeral_delete"}`** — the new
+  drop reason, counting Events whose TTL expired. It is the one drop reason with
+  a healthy nonzero rate, and its shape is the cheapest available proxy for the
+  Event churn the operator is absorbing.
+- **[`docs/QUERIES.md`](docs/QUERIES.md)** — seeded with the Events recipes:
+  "everything Kubernetes said about object X around time T" (joined by
+  `involvedObject`/`regarding` UID or name out of `data`), the interleaved
+  changes-and-Events timeline for a post-mortem, and a noisiest-reasons triage
+  query. The remaining flagship queries arrive with the dashboards in Task 3.2.
+
 ## Unreleased — Phase 2: proving the foundation at both extremes
 
 ### Added

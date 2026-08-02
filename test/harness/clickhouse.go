@@ -70,11 +70,16 @@ const (
 	GroupCore       = ""
 	GroupApps       = "apps"
 	GroupNetworking = "networking.k8s.io"
+	// GroupEvents is the modern Events API group. Both it and GroupCore serve
+	// KindEvent off the same storage, which is why the Events scenarios run the
+	// same assertions twice, once per spelling.
+	GroupEvents = "events.k8s.io"
 
 	KindDeployment = "Deployment"
 	KindNode       = "Node"
 	KindIngress    = "Ingress"
 	KindConfigMap  = "ConfigMap"
+	KindEvent      = "Event"
 )
 
 // ClickHouse addresses one suite's backend: which pod to exec into, which

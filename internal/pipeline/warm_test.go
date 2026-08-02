@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -1328,4 +1329,149 @@ func TestWarmCoordinatorStopsCleanly(t *testing.T) {
 	// after this check), so it is retired explicitly before the snapshot comparison.
 	h.pipeline.queue.ShutDown()
 	goleak.VerifyNone(t, snapshot)
+}
+
+// --- Events mode (Task 3.1) ---
+//
+// An Events scope takes exactly step 1 of the warm and none of the rest: the seed
+// runs, so a restart deduplicates against Events already on record, but nothing is
+// ever reconciled *away* from history. The two specs below are the two halves of
+// that claim — no claims made, and the seed actually suppressing re-emission.
+
+// eventScopeFor renders an Events watch scope in one of the two accepted groups.
+func eventScopeFor(group string) ScopeKey {
+	return ScopeKey{Group: group, Kind: "Event", Namespace: "default"}
+}
+
+// restartWarm stands in for an operator restart for a test that needs the warm
+// coordinator on the other side of it. testHarness.restart alone is not enough: the
+// coordinator holds its Pipeline by reference, so a restart that replaced only the
+// pipeline would leave the old coordinator seeding a dead process's caches. The
+// doubles (lister, sink history, scope desire) survive, exactly as the API server
+// and ClickHouse do.
+func (h *warmHarness) restartWarm(t *testing.T) {
+	t.Helper()
+	h.restart(t)
+	coord, err := NewWarmCoordinator(WarmOptions{
+		Pipeline:         h.pipeline,
+		Scopes:           h.scopes,
+		Readers:          h.backends,
+		ScopeEvents:      h.backends,
+		RetryMaxInterval: 5 * time.Millisecond,
+		SyncPollInterval: time.Millisecond,
+		BootInterval:     5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewWarmCoordinator after restart: %v", err)
+	}
+	h.coord = coord
+}
+
+// TestWarmEventsScopeSeedsButClaimsNoDeletes is the GC half. The fixture is
+// deliberately the one that makes a Pod scope emit a Deleted row — history holds an
+// object reality does not, the epoch says the scope was watched before, the informer
+// reports synced — and for Events it must produce nothing at all: that object is an
+// Event that aged out, which is not a deletion and is never recorded as one.
+func TestWarmEventsScopeSeedsButClaimsNoDeletes(t *testing.T) {
+	for _, gvk := range eventGVKs {
+		t.Run(gvk.name, func(t *testing.T) {
+			h := newWarmHarness(t)
+			scope := eventScopeFor(gvk.group)
+			filter := scopeFilterFor(scope)
+
+			// History knows two Events; only one is still live. Under Pod semantics
+			// "expired" is a textbook zombie.
+			h.reader.setStates(filter,
+				knownState("expired.17aaa", "uid-expired", "hash-expired"),
+				knownState("alive.17bbb", "uid-alive", "hash-alive"))
+			h.reader.setWasActive(filter, true)
+			h.scopes.markSynced(scope)
+			aliveKey := eventKey(gvk.group, "alive.17bbb")
+			h.lister.set(aliveKey, newEvent(gvk.group, aliveKey.Name, "uid-alive", "7", 1))
+
+			h.run(t)
+			h.warmNow(scope)
+			h.awaitWarm(t, scope)
+
+			// Both baselines are seeded — that is the whole purpose of warming an
+			// Events scope.
+			st := h.pipeline.sinks.get(testSink)
+			for _, want := range []struct{ key, hash string }{
+				{eventKey(gvk.group, "alive.17bbb").cacheKey(), "hash-alive"},
+				{eventKey(gvk.group, "expired.17aaa").cacheKey(), "hash-expired"},
+			} {
+				entry, ok := st.cache.Load(want.key)
+				if !ok || entry.Hash != want.hash {
+					t.Errorf("seeded entry for %s = %+v (present %v), want hash %s",
+						want.key, entry, ok, want.hash)
+				}
+			}
+
+			// And nothing was reconciled away: no Deleted row, and in fact no row.
+			stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
+				"an Events scope wrote rows during warm-up; an expired Event is not a deletion")
+
+			// The two gates the GC pass needs are never consulted, because the pass
+			// never runs — which is what "zero delete claims" means structurally
+			// rather than merely by outcome.
+			if probes := h.reader.epochProbes(); len(probes) != 0 {
+				t.Errorf("an Events scope probed the scope epoch %d times, want 0: %+v", len(probes), probes)
+			}
+			if n := h.scopes.syncChecked(); n != 0 {
+				t.Errorf("an Events scope waited on informer sync %d times, want 0", n)
+			}
+		})
+	}
+}
+
+// TestWarmEventsRestartDoesNotReEmitUnchangedEvents is the seeding half, and the
+// reason warm-up runs for Events at all: after a restart, every live Event is a
+// cache miss, and an Events scope never Snapshot-tags — so without the primed hashes
+// the operator would re-emit an Added row for every Event still inside its TTL.
+func TestWarmEventsRestartDoesNotReEmitUnchangedEvents(t *testing.T) {
+	h := newWarmHarness(t)
+	scope := eventScopeFor("")
+	filter := scopeFilterFor(scope)
+	key := eventKey("", "crasher.17abc")
+	event := newEvent("", key.Name, "event-uid", "3", 2)
+
+	h.scopes.markSynced(scope)
+	h.reader.setWasActive(filter, true)
+	h.lister.set(key, event)
+
+	// Before the restart: the Event is observed once and recorded once.
+	h.pipeline.MarkScopeWarm(testSink, scope)
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(pre-restart): %v", err)
+	}
+	if got, want := h.writer.eventTypes(), []string{"Added"}; !slices.Equal(got, want) {
+		t.Fatalf("pre-restart event types = %v, want %v", got, want)
+	}
+
+	// The sink's history now holds that row. Its hash is computed through the same
+	// function the write path used, so the seeded baseline is the real one rather
+	// than a literal that would stop matching the first time normalization changed.
+	hash, err := ObjectHash(event)
+	if err != nil {
+		t.Fatalf("ObjectHash: %v", err)
+	}
+	h.reader.setStates(filter, knownState(key.Name, "event-uid", hash))
+
+	// The operator restarts. Every in-memory cache is gone; the Event is still live
+	// and still unchanged.
+	h.restartWarm(t)
+	h.run(t)
+	h.warmNow(scope)
+	h.awaitWarm(t, scope)
+
+	// The informer's initial list re-delivers it.
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(post-restart): %v", err)
+	}
+
+	if got, want := h.writer.eventTypes(), []string{"Added"}; !slices.Equal(got, want) {
+		t.Fatalf("event types = %v, want %v — the seeded hash must deduplicate the re-delivery", got, want)
+	}
+	stayFalse(t, func() bool { return len(h.writer.recorded()) > 1 },
+		"a restart re-emitted a row for a live, unchanged Event")
 }

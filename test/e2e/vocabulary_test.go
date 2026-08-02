@@ -84,10 +84,12 @@ const (
 	groupCore       = harness.GroupCore
 	groupApps       = harness.GroupApps
 	groupNetworking = harness.GroupNetworking
+	groupEvents     = harness.GroupEvents
 
 	kindDeployment = harness.KindDeployment
 	kindNode       = harness.KindNode
 	kindIngress    = harness.KindIngress
+	kindEvent      = harness.KindEvent
 )
 
 // creationEvents are the two tags an object's first appearance can carry — see
@@ -154,3 +156,7 @@ func deploymentYAML(namespace, name string, replicas int) string {
 }
 
 func ingressYAML(namespace, name string) string { return harness.IngressYAML(namespace, name) }
+
+func crashLoopPodYAML(namespace, name string) string {
+	return harness.CrashLoopPodYAML(namespace, name)
+}

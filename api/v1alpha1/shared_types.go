@@ -222,6 +222,21 @@ type StreamRuleSpec struct {
 	// required — an empty rule is always an authoring mistake, and rejecting it
 	// at admission is far kinder than a rule that reconciles green while
 	// streaming nothing.
+	//
+	// Kubernetes Events (`v1/Event` or `events.k8s.io/v1/Event`, whichever you
+	// name) are streamed in a built-in Events mode, because an Event is
+	// append-only ephemera rather than durable cluster state. Naming one is the
+	// only thing you do — there is no switch, and no way to opt out, since every
+	// difference exists to stop kubestream recording something untrue:
+	//
+	//   - every row carries the full Event, never a diff, so a count bump is
+	//     readable on its own;
+	//   - an Event's ~1h TTL expiry is recorded as nothing at all, never as a
+	//     Deleted row;
+	//   - watch scopes still open and close normally, and a restart still
+	//     deduplicates against already-recorded Events.
+	//
+	// See docs/SCHEMA.md ("Kubernetes Events") and docs/QUERIES.md.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	Resources []WatchedResource `json:"resources"`

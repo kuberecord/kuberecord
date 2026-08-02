@@ -1,5 +1,5 @@
 # The opposite extreme: every optional object the chart can render, at once —
-# all five watch presets, the metrics endpoint, two replicas behind leader
+# all six watch presets, the metrics endpoint, two replicas behind leader
 # election, the starter sink, and every pod-placement and pass-through value
 # populated. This is the rendering kubeconform validates most, because it is the
 # only one in which some templates produce output at all.
@@ -34,6 +34,7 @@ rbac:
   presets:
     core-workloads: true
     batch: true
+    events: true
     networking: true
     rbac-read: true
     storage: true
