@@ -8,8 +8,8 @@ not get — permission to read your cluster. The manifests live under
 - [`watcher_role.yaml`](../config/rbac/watcher_role.yaml) — the aggregated watch role.
 - [`presets/`](../config/rbac/presets/) — small labelled ClusterRoles that fill it.
 
-> **Design constraint.** Under [D7] watch rights are administrator-granted data,
-> not operator-owned configuration. Every design choice below follows from one
+> **Design constraint.** Watch rights are administrator-granted data, not
+> operator-owned configuration. Every design choice below follows from one
 > rule: the operator must never be able to widen its own reach, and a grant that
 > is missing must cost one degraded rule rather than an outage.
 
@@ -69,10 +69,10 @@ cluster-scoped `ClickHouseSink` pointed at a Secret in `kube-system` cannot make
 the operator read it, because the operator holds no Secret rights there. The sink
 reports `CredentialsResolved=False/SecretNotFound` and stops.
 
-This is distinct from, and unrelated to, [D8]: `v1/Secret` is also hard-denied as
-a *watchable* kind, in code, in the rule reconciler's policy gate. A rule naming
-`v1/Secret` gets `PolicyAllowed=False/SecretsDenied` and contributes nothing to
-the watch plan — no preset, and no sink policy, can admit it. **Never add
+This is distinct from, and unrelated to, the deny-list: `v1/Secret` is also
+hard-denied as a *watchable* kind, in code, in the rule reconciler's policy gate.
+A rule naming `v1/Secret` gets `PolicyAllowed=False/SecretsDenied` and
+contributes nothing to the watch plan — no preset, and no sink policy, can admit it. **Never add
 `secrets` to a watch preset**: it would be dead privilege, granted but
 unreachable.
 
@@ -277,9 +277,9 @@ unaffected: the process never exits over one bad rule (Invariant 5).
 > Per-namespace ClickHouse views and row-level security policies would fix this;
 > they are **not shipped** in v1alpha1.
 
-This is [D1] taken at face value: only the platform team queries ClickHouse for
-now, so the flattening is a documented, accepted limitation rather than a solved
-problem.
+This is the project's stated scope taken at face value: only the platform team
+queries ClickHouse for now, so the flattening is a documented, accepted
+limitation rather than a solved problem.
 
 Treat a ClickHouse credential for the kubestream tables as approximately
 equivalent to cluster-wide read access on every kind any active preset grants,
@@ -325,7 +325,3 @@ test-e2e`, `test/e2e/scenarios_test.go`): it creates a rule for
 throughout, applies `config/rbac/presets/networking.yaml`, and then requires the
 condition to flip and Ingress rows to reach ClickHouse with the operator pod
 neither replaced nor restarted.
-
-[D1]: ../kubestream-backlog.md
-[D7]: ../kubestream-backlog.md
-[D8]: ../kubestream-backlog.md
