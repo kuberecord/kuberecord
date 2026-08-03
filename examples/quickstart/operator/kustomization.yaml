@@ -1,0 +1,81 @@
+# The operator install the quickstart deploys.
+#
+# It is `config/default` — the same CRDs, the same RBAC, the same Deployment a
+# `make deploy` produces — plus exactly four deltas, so the quickstart evaluates
+# the shipped install rather than a parallel one that could drift from it:
+#
+#   1. the image is pinned to the tag `make quickstart` builds from your clone
+#      and side-loads into the kind node. The tag is fixed rather than
+#      parameterised because kustomize cannot read an environment variable, and
+#      an overlay that had to be rewritten before every run would be a file the
+#      script mutates rather than a file you can read;
+#   2. `--ch-auto-create-schema` is appended, so each sink applies the shipped
+#      DDL (deploy/clickhouse/schema/) idempotently before its first write. The
+#      flag is off by default — the operator runs no DDL uninvited — and turning
+#      it on is what saves the quickstart a separate schema step;
+#   3. CLUSTER_ID becomes `kubestream-quickstart`. It is stamped on every row and
+#      every scope event this operator writes and is part of an object's identity
+#      in the schema, so every query in the README and in the script can name it;
+#   4. the operator's namespace is labelled for the `restricted` Pod Security
+#      Standard. Labelling it here rather than after the apply makes it a real
+#      check: the namespace exists as restricted before the manager pod is ever
+#      admitted, so a manifest that violated the standard would fail this deploy
+#      instead of slipping in ahead of the label.
+#
+# What is *not* changed is worth as much: leader election stays on, the metrics
+# endpoint stays authenticated, and the RBAC is the shipped aggregated-ClusterRole
+# model with only the `core-workloads` preset enabled — which is what grants the
+# Deployment and ConfigMap reads examples/quickstart/rule.yaml needs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../../../config/default
+
+images:
+- name: controller
+  newName: kubestream/quickstart
+  newTag: local
+
+patches:
+# The base applies a `kubestream-` name prefix, so the target is matched by
+# regex: the patch must keep working whether or not that prefix changes.
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: .*controller-manager
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --ch-auto-create-schema
+# A strategic-merge patch rather than a JSON pointer: `env` merges by the `name`
+# key, so this replaces CLUSTER_ID wherever it sits in the list instead of
+# depending on it staying at index 0.
+- target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: .*controller-manager
+  patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: controller-manager
+    spec:
+      template:
+        spec:
+          containers:
+          - name: manager
+            env:
+            - name: CLUSTER_ID
+              value: kubestream-quickstart
+# `/` inside a JSON Pointer segment is escaped as `~1`.
+- target:
+    version: v1
+    kind: Namespace
+    name: kubestream-system
+  patch: |
+    - op: add
+      path: /metadata/labels/pod-security.kubernetes.io~1enforce
+      value: restricted

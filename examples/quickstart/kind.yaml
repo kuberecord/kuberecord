@@ -1,0 +1,16 @@
+# The kind cluster the quickstart runs on.
+#
+# One control-plane node and nothing else. kubestream watches the API server and
+# writes to a ClickHouse that runs on the same node, so a multi-node cluster
+# would add minutes of start-up time to the ten-minute budget and prove nothing
+# the single node does not.
+#
+# The node image is deliberately not pinned. kind's default node image is the one
+# built for the kind binary you have; pinning one here would break the quickstart
+# for anyone whose kind is older or newer than whatever was current when this
+# file was last touched — the opposite of what an evaluation path needs.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kubestream-quickstart
+nodes:
+- role: control-plane

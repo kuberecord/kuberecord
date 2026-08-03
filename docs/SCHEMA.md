@@ -165,7 +165,7 @@ with the offending table/column in the condition message. It degrades that sink
 alone: the process does not crash-loop, its readiness probe stays healthy (a
 readiness flip would take every *other* sink out of service too), and the rules
 streaming to the sink report `Ready=False/SinkNotReady` while keeping their
-watches — see the README's [status conditions](../README.md#status-conditions).
+watches — see [status conditions](CRDS.md#status-conditions).
 
 ---
 

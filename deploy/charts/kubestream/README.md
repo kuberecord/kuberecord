@@ -27,7 +27,9 @@ a scrape config, a ClusterRoleBinding for metrics readers — has to follow.
 The operator boots healthy and **idle**: it streams nothing until a
 `ClickHouseSink` and at least one `StreamRule` or `ClusterStreamRule` exist. The
 post-install notes walk through those three steps; the project
-[README](../../../README.md#getting-started) covers them in full.
+[README](../../../README.md#installing) covers them in full, and
+[`examples/quickstart/`](../../../examples/quickstart/) runs the whole sequence
+end to end on a kind cluster.
 
 ### Credentials are yours to create
 
@@ -173,8 +175,9 @@ extraArgs:
   - --writer-batch-max-rows=5000   # fleet-wide default for sinks that omit it
 ```
 
-The full flag list is in the project
-[README](../../../README.md#configuration); `--ch-auto-create-schema` is the one
+The full flag list is in
+[`docs/CONFIGURATION.md`](../../../docs/CONFIGURATION.md);
+`--ch-auto-create-schema` is the one
 most installs want to decide about explicitly, since it is what lets the operator
 create the schema v1 tables itself instead of you applying the DDL.
 

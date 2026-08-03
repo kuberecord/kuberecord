@@ -126,8 +126,56 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
     is true whenever a redaction path is added later. Rows written earlier keep
     whatever they recorded; redaction is not retroactive.
 
+- **A quickstart that is tested, not claimed
+  ([`examples/quickstart/`](examples/quickstart/)).** `make quickstart` takes a
+  fresh clone to rows in ClickHouse on a kind cluster: it builds the operator
+  from the working tree, side-loads it, installs `config/default` plus four
+  documented deltas, stands up a single-node ClickHouse, applies a Secret, a
+  `ClickHouseSink` and a `ClusterStreamRule`, creates and then changes a demo
+  workload, and finishes by **querying the rows it recorded** — the change stream,
+  the diff behind a scale-up, a redacted value that never arrived, and the
+  `watch_scopes` epoch. `make quickstart-down` removes all of it.
+  - The script exits non-zero if no rows arrive, so "it works" is an assertion
+    rather than a screenshot, and every file it applies is an ordinary manifest
+    the directory's README walks through by hand.
+  - A new `quickstart.yml` CI job runs the same script on every push with
+    `QUICKSTART_BUDGET_SECONDS=600`. The ten-minute claim in the README is
+    therefore tested on a runner slower than most laptops; the budget is enforced
+    only in CI, because a busy laptop is not a failed install.
+  - Which parts are evaluation shortcuts (`emptyDir` storage, a committed demo
+    password, `--ch-auto-create-schema`) and which are identical to a production
+    install (all of the RBAC, the namespaced Secret grant, leader election, the
+    authenticated metrics endpoint, the `restricted` Pod Security Standard) is
+    spelled out rather than left for the reader to discover.
+
 ### Changed
 
+- **The README is now an adoption page, and the reference material moved into
+  `docs/`.** It opens with the positioning and the honest paragraph on how this
+  relates to — and does not replace — the Kubernetes audit log, then the
+  quickstart, five copy-pasteable queries, and an architecture diagram redrawn to
+  show the control plane and the data plane as the two tiers they are. Three new
+  pages hold what came out of it, so nothing was lost:
+  [`docs/CRDS.md`](docs/CRDS.md) (every field of the three custom resources and
+  every status condition they report), [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+  (operator flags and environment variables) and
+  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (the make targets and what each
+  test suite proves). The metrics reference now lives with the runbook that
+  interprets it, in [`docs/OPERATING.md`](docs/OPERATING.md).
+- **The README's five queries are executed in CI.** `test/queries` already ran
+  every statement in `docs/QUERIES.md` and in the shipped dashboards against a
+  ClickHouse built from the frozen DDL alone; the README is now in that list,
+  because its queries are the first SQL anyone runs and the ones least likely to
+  be noticed rotting.
+- **New `test/docs` package**, running under `make test`: the quickstart's files
+  exist, are executable, and agree with each other on the demo password and the
+  image tag; the Makefile and the CI job still point at the script; the README
+  still carries its required sections and links; every relative link and heading
+  anchor in every published page resolves; and none of the environment-variable
+  configuration Phase 1 removed has reappeared in an instruction anywhere in the
+  repository. `CHANGELOG.md` is exempt from that last check — and has its own
+  test requiring it to keep naming them, since its migration table is how an
+  upgrader finds out what each became.
 - **[`deploy/grafana/dashboard.schema.json`](deploy/grafana/dashboard.schema.json)
   now covers ClickHouse-backed dashboards.** A target's datasource type decides
   what it must carry: PromQL in `expr` for Prometheus, SQL in `rawSql` plus
@@ -432,5 +480,6 @@ unreadiness that would have taken every other sink out of service with it.
    `ClusterStreamRule` resources, and apply the matching RBAC preset from
    `config/rbac/presets/` so the operator is allowed to watch those kinds.
 
-The full walkthrough is the README's
-[Getting Started](README.md#getting-started).
+The full walkthrough is the README's [Installing](README.md#installing)
+section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
+as a runnable ten-minute path on a throwaway cluster.

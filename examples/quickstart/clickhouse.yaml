@@ -1,0 +1,157 @@
+# A single-node ClickHouse for the quickstart, and the smallest thing that can
+# honestly be called one.
+#
+# This is an evaluation backend, not a deployment recipe. Three choices are
+# deliberate and all three are wrong for production:
+#
+#   - Storage is an `emptyDir`. Deleting the pod deletes every row you recorded.
+#     A real install gives ClickHouse a PersistentVolumeClaim (the chaos suite's
+#     fixture, test/chaos/manifests/, is the in-repo example of that shape).
+#   - There is one replica and no replication. ClickHouse's own clustering is out
+#     of scope here; kubestream talks to whatever address you give the sink.
+#   - The password is committed in plain text below. It is `quickstart`, it is
+#     reachable only from inside this throwaway kind cluster, and
+#     `examples/quickstart/secret.yaml` carries the same value for the operator's
+#     side of the connection. For anything real, see the credentials section of
+#     `docs/RBAC.md` and use a secret manager.
+#
+# The database and the user are created by the image's own entrypoint from the
+# CLICKHOUSE_* environment variables. The *tables* are not: the operator creates
+# those, because the quickstart overlay runs it with `--ch-auto-create-schema`,
+# which makes each sink apply the shipped DDL (deploy/clickhouse/schema/)
+# idempotently before its first write. That flag is off by default — the operator
+# never runs DDL uninvited — so turning it on here is part of what the quickstart
+# demonstrates.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubestream-quickstart
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: quickstart
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-credentials
+  namespace: kubestream-quickstart
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: quickstart
+type: Opaque
+stringData:
+  # The server side of the connection. examples/quickstart/secret.yaml carries
+  # the same value for the operator side; a test in test/docs fails if the two
+  # ever drift apart, because a quickstart that ends in an authentication error
+  # is worse than no quickstart.
+  password: "quickstart"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: kubestream-quickstart
+  labels:
+    app: clickhouse
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two servers must never share the emptyDir, and
+  # there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # 101 is the `clickhouse` user baked into the official image. fsGroup
+        # makes the emptyDir volumes writable for it without a root init
+        # container.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: clickhouse
+        image: clickhouse/clickhouse-server:24.8
+        # The quickstart script side-loads this image into the kind node, so a
+        # slow or rate-limited registry cannot eat the time budget mid-run.
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: CLICKHOUSE_DB
+          value: kubestream
+        - name: CLICKHOUSE_USER
+          value: kubestream
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: clickhouse-credentials
+              key: password
+        ports:
+        - name: native
+          containerPort: 9000
+        - name: http
+          containerPort: 8123
+        # /ping over the HTTP port is the only endpoint that answers before the
+        # server is fully open for queries, which is exactly the edge the script
+        # must not race against.
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: http
+          initialDelaySeconds: 3
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/clickhouse
+        - name: logs
+          mountPath: /var/log/clickhouse-server
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: kubestream-quickstart
+  labels:
+    app: clickhouse
+spec:
+  # ClusterIP: the quickstart reaches ClickHouse with `kubectl port-forward`
+  # rather than by exposing it on the node, so nothing is published outside the
+  # cluster by installing this file.
+  selector:
+    app: clickhouse
+  ports:
+  - name: native
+    port: 9000
+    targetPort: native
+  - name: http
+    port: 8123
+    targetPort: http

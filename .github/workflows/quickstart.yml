@@ -1,0 +1,67 @@
+# The ten-minute claim, tested (Task 3.4).
+#
+# README.md tells a stranger they can go from a fresh clone to rows in ClickHouse
+# in under ten minutes. This job is what stops that from being marketing: it runs
+# examples/quickstart/quickstart.sh exactly as a user would, on a runner that is
+# slower than most laptops, and the run fails if either half of the claim breaks —
+# the script exits non-zero when no rows reach ClickHouse, and
+# QUICKSTART_BUDGET_SECONDS=600 fails it when the whole thing overruns ten
+# minutes.
+#
+# The budget is enforced here and not in the Makefile on purpose: a developer
+# whose laptop is busy compiling something else should not be told their install
+# failed. CI has no such excuse.
+name: Quickstart
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  quickstart:
+    permissions:
+      contents: read
+    name: git clone to rows in under 10 minutes
+    runs-on: ubuntu-latest
+    # A ceiling well above the budget: if the script hangs somewhere it does not
+    # measure — a kind cluster that never comes up, a registry that never answers
+    # — the job should still end, and end as a failure rather than as a runner
+    # timeout with no output.
+    timeout-minutes: 25
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      # Bootstrapping kustomize into bin/ is a prerequisite, not part of the
+      # quickstart, so it runs as its own step and outside the measured window.
+      # Everything the budget covers — the operator image build included — is in
+      # the step below.
+      - name: Bootstrap kustomize
+        run: make kustomize
+
+      - name: Run the quickstart and assert rows exist
+        env:
+          QUICKSTART_BUDGET_SECONDS: "600"
+        run: make quickstart
+
+      # Unconditional: a failed run leaves a kind cluster behind, and a runner is
+      # cheaper to hand back clean than to debug. The script's own failure path
+      # has already dumped the operator log and the CRs into the step above.
+      - name: Tear the cluster down
+        if: always()
+        run: make quickstart-down

@@ -34,6 +34,14 @@ Everything kubestream exports is prefixed `kubestream_`, alongside the standard
 its own — the two `workqueue_*` families are worth a look too, since the pipeline's
 own queue is a client-go workqueue.
 
+Every metric a single sink instance reports carries a `sink=<name>` label naming
+the `ClickHouseSink` it belongs to: one operator can run several sinks at once,
+and without the label two writers would overwrite each other's series. Metrics
+the shared pipeline owns (`dedup_skips_total`, `pipeline_dropped_total`) carry no
+`sink` label, because they describe the workqueue rather than any one backend. A
+sink's series are deleted when the sink is deleted, so an absent backend does not
+linger as a live-but-idle one.
+
 | Metric | Type | Labels | What it tells you |
 |---|---|---|---|
 | `kubestream_write_queue_depth` | gauge | `sink` | Jobs buffered in a sink's hand-off queue right now. |

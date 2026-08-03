@@ -315,6 +315,37 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+##@ Quickstart
+
+# The evaluation path (Task 3.4): a kind cluster, a single-node ClickHouse, the
+# operator built from this clone, and rows to query — in under ten minutes.
+#
+# The whole recipe lives in examples/quickstart/, script included, so it can be
+# read as documentation and run by hand step by step. This target only supplies
+# the tool paths the script would otherwise have to guess at, and bootstraps
+# kustomize into bin/ the same way every other target does.
+#
+# The script asserts that rows exist and exits non-zero if none arrive, which is
+# what makes .github/workflows/quickstart.yml a test of the ten-minute claim
+# rather than a restatement of it. QUICKSTART_BUDGET_SECONDS is what CI sets to
+# enforce the time half of it; it is unset here on purpose, because a slow laptop
+# is not a failed install.
+QUICKSTART_CLUSTER ?= kubestream-quickstart
+QUICKSTART_BUDGET_SECONDS ?=
+QUICKSTART_SCRIPT := examples/quickstart/quickstart.sh
+
+.PHONY: quickstart
+quickstart: kustomize ## Stand up kind + ClickHouse + the operator and query the rows it records.
+	@KIND=$(KIND) KUBECTL=$(KUBECTL) KUSTOMIZE="$(KUSTOMIZE)" \
+		CONTAINER_TOOL=$(CONTAINER_TOOL) MAKE="$(MAKE)" \
+		QUICKSTART_CLUSTER=$(QUICKSTART_CLUSTER) \
+		QUICKSTART_BUDGET_SECONDS=$(QUICKSTART_BUDGET_SECONDS) \
+		./$(QUICKSTART_SCRIPT)
+
+.PHONY: quickstart-down
+quickstart-down: ## Delete the quickstart kind cluster and everything in it.
+	@KIND=$(KIND) QUICKSTART_CLUSTER=$(QUICKSTART_CLUSTER) ./$(QUICKSTART_SCRIPT) down
+
 ##@ Build
 
 .PHONY: build
