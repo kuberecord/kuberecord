@@ -7,10 +7,11 @@ schema. The DDL is shipped in-repo under
 - [`001_resource_states.sql`](../deploy/clickhouse/schema/001_resource_states.sql) — the per-object change stream.
 - [`002_watch_scopes.sql`](../deploy/clickhouse/schema/002_watch_scopes.sql) — the watch-scope epoch log.
 
-> **Schema v1 is frozen.** Under [D5] the schema got exactly one free redesign
-> window, and that window is now **closed**: as of Task 2.6 these two tables are
-> a **public API** with an additive-only change policy. Every column below is
-> deliberate, and none of them will change meaning, name, or type under `v1`.
+> **Schema v1 is frozen.** Because kubestream had no users to keep compatibility
+> with, the schema got exactly one free redesign window, and that window is now
+> **closed**: as of Task 2.6 these two tables are a **public API** with an
+> additive-only change policy. Every column below is deliberate, and none of them
+> will change meaning, name, or type under `v1`.
 > See [Stability & Versioning](#stability--versioning) for what that guarantees
 > you and what it costs us.
 
@@ -838,5 +839,3 @@ TTL toDateTime(ts) + INTERVAL 1 YEAR;
 This is a suggestion only; the operator neither sets nor requires a TTL, and
 schema validation ignores TTL clauses (it checks column names/types
 only).
-
-[D5]: ../kubestream-backlog.md
