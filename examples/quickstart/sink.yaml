@@ -1,0 +1,61 @@
+# Where the quickstart's state history goes.
+#
+# The name `default` is what a rule's `spec.sinkRef` defaults to, so
+# examples/quickstart/rule.yaml carries no sinkRef at all — the shape a
+# single-backend install actually has.
+#
+# `credentialsSecretRef` names no namespace on purpose: it resolves to the
+# operator's own, the only namespace the operator can read Secrets in. That is
+# the file next to this one, examples/quickstart/secret.yaml.
+apiVersion: kubestream.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: quickstart
+spec:
+  connection:
+    addr: clickhouse.kubestream-quickstart.svc:9000
+    database: kubestream
+    username: kubestream
+    credentialsSecretRef:
+      name: kubestream-clickhouse-credentials
+  writer:
+    # Small and eager compared with the shipped defaults. Nothing about the write
+    # path changes — only how long a partial batch waits before it flushes. At
+    # the defaults (1000 rows or 1s) a quickstart's handful of rows would still
+    # land in about a second; at these values you do not have to wonder whether
+    # you are looking at an empty table or an unflushed batch.
+    queueSize: 1000
+    workers: 2
+    batchMaxRows: 100
+    batchMaxWait: 200ms
+    # Every 50th consecutive diff-only Modified row for an object is written as a
+    # Checkpoint instead — the full state as well as the diff — so reconstructing
+    # "state at time T" replays at most 50 diffs. Left at the CRD default here
+    # because the quickstart never generates enough churn to reach one; see
+    # docs/SCHEMA.md#checkpoint-rows.
+    checkpointEvery: 50
+  policy:
+    # Exactly the two kinds the quickstart rule streams. Omitting `allowedGVKs`
+    # entirely would admit everything except the hard deny-list (v1/Secret is
+    # never watchable, and no policy can re-enable it), but naming them means a
+    # rule that asks for anything else fails loudly as PolicyAllowed=False
+    # instead of quietly writing rows you did not expect.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+    # The redaction floor for everything written to this sink. Values on these
+    # paths are replaced with "[REDACTED]" after normalization and *before*
+    # hashing, so a redacted value reaches neither the payload, nor a diff, nor
+    # the sha256 column. The quickstart's demo ConfigMap carries a
+    # `data.password` for exactly this reason — see step 5 of the README.
+    redaction:
+    - fieldPath: data.password

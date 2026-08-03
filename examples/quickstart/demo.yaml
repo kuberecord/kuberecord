@@ -1,0 +1,77 @@
+# Something for the quickstart to record.
+#
+# A cluster you just created has no history, so the quickstart makes some: this
+# namespace is what examples/quickstart/rule.yaml selects, and the script changes
+# both objects below after they are streamed so you see `Added` rows *and* a
+# `Modified` row carrying an RFC 6902 diff of the change — which is the part that
+# distinguishes kubestream from a snapshot exporter.
+#
+# Nothing here is kubestream-specific. Point the rule at your own namespace and
+# your own workloads and the result is the same.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quickstart-demo
+  labels:
+    # The label examples/quickstart/rule.yaml's namespaceSelector matches.
+    kubestream.io/quickstart: "true"
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: quickstart
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: quickstart-demo
+  labels:
+    app: checkout-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+    spec:
+      containers:
+      - name: app
+        # `pause` does nothing, which is the point: the quickstart is about
+        # recording a Deployment's spec and status changing, not about running an
+        # application. Every kind node already has this image, and the script
+        # side-loads it anyway, so no registry is on the critical path.
+        image: registry.k8s.io/pause:3.10
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            cpu: 10m
+            memory: 16Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65535
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkout-config
+  namespace: quickstart-demo
+data:
+  feature_flags: "new-checkout=off"
+  # Deliberately named `password`, because examples/quickstart/sink.yaml sets
+  # `data.password` as the sink's redaction floor. Query this ConfigMap's rows
+  # afterwards and the value is `[REDACTED]` — scrubbed after normalization and
+  # before hashing, so it is absent from the payload, absent from every diff, and
+  # not recoverable from the sha256 column either. See docs/SCHEMA.md#redaction.
+  password: "hunter2"

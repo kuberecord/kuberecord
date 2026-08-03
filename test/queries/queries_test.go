@@ -37,11 +37,20 @@ func repoPath(elems ...string) string {
 	return filepath.Join(append([]string{root}, elems...)...)
 }
 
-// queryLibraryPath is the published query library, and productDashboards are the
-// four ClickHouse-reading dashboards Task 3.2 ships. operator-health.json is
-// deliberately absent: it queries Prometheus and carries no SQL.
+// queryLibraries are the Markdown documents that publish runnable SQL, and
+// productDashboards are the four ClickHouse-reading dashboards Task 3.2 ships.
+// operator-health.json is deliberately absent: it queries Prometheus and carries
+// no SQL.
+//
+// The README is in the list because its "first five queries" are the first SQL
+// anyone runs — copy-pasted before they have read the library, the schema or
+// anything else — so they are exactly the statements that must not rot. Every
+// check the library gets, they get.
 var (
-	queryLibraryPath  = repoPath("docs", "QUERIES.md")
+	queryLibraries = []string{
+		repoPath("docs", "QUERIES.md"),
+		repoPath("README.md"),
+	}
 	productDashboards = []string{
 		repoPath("deploy", "grafana", "object-timeline.json"),
 		repoPath("deploy", "grafana", "drift-by-actor.json"),
@@ -358,32 +367,34 @@ func TestDemoValuesCoverEveryDashboardVariable(t *testing.T) {
 // fails here — the mistake that is invisible in Grafana, where the reference just
 // renders as empty text.
 func TestShippedQueriesInterpolate(t *testing.T) {
-	t.Run("docs/QUERIES.md", func(t *testing.T) {
-		library, err := FromMarkdown(queryLibraryPath)
-		if err != nil {
-			t.Fatalf("FromMarkdown: %v", err)
-		}
-		if len(library) == 0 {
-			t.Fatal("the query library holds no SQL blocks; this check would pass vacuously")
-		}
-		for _, q := range library {
-			// The library uses ClickHouse-native {name:Type} parameters rather than
-			// Grafana variables, so interpolation is a no-op that must still leave
-			// the statement untouched — and must not mistake a parameter for a
-			// variable reference.
-			got, err := Interpolate(q.SQL, nil)
+	for _, path := range queryLibraries {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			library, err := FromMarkdown(path)
 			if err != nil {
-				t.Errorf("%s: %v", q.Source, err)
-				continue
+				t.Fatalf("FromMarkdown: %v", err)
 			}
-			if got != q.SQL {
-				t.Errorf("%s: interpolation rewrote a parameterised library query:\n%s", q.Source, got)
+			if len(library) == 0 {
+				t.Fatal("this document holds no SQL blocks; the check would pass vacuously")
 			}
-			if len(Parameters(q.SQL)) == 0 && strings.Contains(q.SQL, "{") {
-				t.Errorf("%s: statement contains a brace but declares no parameters; check the spelling", q.Source)
+			for _, q := range library {
+				// The libraries use ClickHouse-native {name:Type} parameters rather
+				// than Grafana variables, so interpolation is a no-op that must still
+				// leave the statement untouched — and must not mistake a parameter for
+				// a variable reference.
+				got, err := Interpolate(q.SQL, nil)
+				if err != nil {
+					t.Errorf("%s: %v", q.Source, err)
+					continue
+				}
+				if got != q.SQL {
+					t.Errorf("%s: interpolation rewrote a parameterised library query:\n%s", q.Source, got)
+				}
+				if len(Parameters(q.SQL)) == 0 && strings.Contains(q.SQL, "{") {
+					t.Errorf("%s: statement contains a brace but declares no parameters; check the spelling", q.Source)
+				}
 			}
-		}
-	})
+		})
+	}
 
 	for _, path := range productDashboards {
 		t.Run(filepath.Base(path), func(t *testing.T) {

@@ -1,0 +1,38 @@
+# What the quickstart streams.
+#
+# A ClusterStreamRule rather than a namespaced StreamRule, because that is the
+# type an operator's owner writes: it can name cluster-scoped kinds and it can
+# select namespaces. A team that wants to opt only its own namespace in — without
+# holding cluster-level privileges — writes a StreamRule instead; see
+# config/samples/kubestream.io_v1alpha1_streamrule.yaml.
+#
+# `sinkRef` is omitted: it defaults to `default`, which is the sink next to this
+# file. It is also immutable — moving a rule to another sink is delete and
+# recreate, because re-pointing a live rule would strand the dedup and diff
+# baselines the pipeline built for every object in scope.
+apiVersion: kubestream.io/v1alpha1
+kind: ClusterStreamRule
+metadata:
+  name: quickstart
+  labels:
+    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/component: quickstart
+spec:
+  resources:
+  # `kind` is the Kind, not the plural resource: Deployment, not deployments.
+  - group: apps
+    version: v1
+    kind: Deployment
+  - group: ""
+    version: v1
+    kind: ConfigMap
+  # Namespace *labels*, not object labels. This one narrows the quickstart to the
+  # demo namespace (examples/quickstart/demo.yaml carries the label) so the first
+  # query returns a handful of rows you can read at a glance rather than every
+  # ConfigMap in kube-system.
+  #
+  # Delete the whole `namespaceSelector` block to stream every namespace,
+  # including ones created later — no restart, the watch pool follows the rule.
+  namespaceSelector:
+    matchLabels:
+      kubestream.io/quickstart: "true"

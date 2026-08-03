@@ -72,32 +72,34 @@ func TestPublishedQueriesRunAgainstFrozenSchemaIntegration(t *testing.T) {
 	assertOnlyFrozenColumns(ctx, t, conn)
 	fixture := seedDemoData(ctx, t, conn)
 
-	t.Run("docs/QUERIES.md", func(t *testing.T) {
-		library, err := FromMarkdown(queryLibraryPath)
-		if err != nil {
-			t.Fatalf("FromMarkdown: %v", err)
-		}
-		if len(library) == 0 {
-			t.Fatal("the query library holds no SQL blocks; this check would pass vacuously")
-		}
-		for _, q := range library {
-			t.Run(shortSource(q.Source), func(t *testing.T) {
-				params := Parameters(q.SQL)
-				for name := range params {
-					if _, ok := fixture.params[name]; !ok {
-						t.Fatalf("query declares parameter {%s}, which the demo fixture has no value for; "+
-							"add one to the fixture in seedDemoData so this query is exercised on real data", name)
+	for _, path := range queryLibraries {
+		t.Run(shortSource(path), func(t *testing.T) {
+			library, err := FromMarkdown(path)
+			if err != nil {
+				t.Fatalf("FromMarkdown: %v", err)
+			}
+			if len(library) == 0 {
+				t.Fatal("this document holds no SQL blocks; the check would pass vacuously")
+			}
+			for _, q := range library {
+				t.Run(shortSource(q.Source), func(t *testing.T) {
+					params := Parameters(q.SQL)
+					for name := range params {
+						if _, ok := fixture.params[name]; !ok {
+							t.Fatalf("query declares parameter {%s}, which the demo fixture has no value for; "+
+								"add one to the fixture in seedDemoData so this query is exercised on real data", name)
+						}
 					}
-				}
-				bound, err := BindValues(params, fixture.params)
-				if err != nil {
-					t.Fatalf("bind parameters: %v", err)
-				}
-				queryCtx := chdriver.Context(ctx, chdriver.WithParameters(chdriver.Parameters(bound)))
-				assertReturnsRows(queryCtx, t, conn, q.SQL)
-			})
-		}
-	})
+					bound, err := BindValues(params, fixture.params)
+					if err != nil {
+						t.Fatalf("bind parameters: %v", err)
+					}
+					queryCtx := chdriver.Context(ctx, chdriver.WithParameters(chdriver.Parameters(bound)))
+					assertReturnsRows(queryCtx, t, conn, q.SQL)
+				})
+			}
+		})
+	}
 
 	for _, path := range productDashboards {
 		t.Run(shortSource(path), func(t *testing.T) {

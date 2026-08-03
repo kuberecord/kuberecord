@@ -2,7 +2,7 @@
 #
 # Every value below is documented — with its type, default and effect — in
 # README.md next to this file. The comments here explain *why* a default is what
-# it is; the README is the reference table.
+# it is; the chart README next to this file is the reference table.
 
 # -- Operator image. tag defaults to the chart's appVersion; digest, when set,
 # wins over tag so an install can be pinned by content rather than by name.
@@ -32,7 +32,7 @@ clusterID: local-kind-cluster
 leaderElection:
   enabled: true
 
-# The metrics endpoint (see the Metrics table in the project README). Disabling
+# The metrics endpoint (every metric is listed in docs/OPERATING.md). Disabling
 # it removes the Service, the endpoint's authn/authz ClusterRoles and the
 # --metrics-bind-address argument, leaving the operator with no listener but its
 # health probes.
@@ -98,7 +98,7 @@ podAnnotations: {}
 # Extra arguments and environment for the manager container. This is how the
 # operator's remaining flags are set — they are process-level tuning, not
 # packaging, so the chart passes them through rather than growing a value per
-# flag. `<binary> --help` lists them all; the project README documents each.
+# flag. `<binary> --help` lists them all; docs/CONFIGURATION.md documents each.
 #
 #   extraArgs:
 #     - --ch-auto-create-schema      # let the operator apply the shipped DDL
@@ -171,7 +171,7 @@ defaultSink:
     dialTimeout: ""
     readTimeout: ""
   # Passed through verbatim; anything omitted keeps its CRD default. See the
-  # ClickHouseSink reference in the project README for every field.
+  # ClickHouseSink reference in docs/CRDS.md for every field.
   writer: {}
   policy: {}
 
