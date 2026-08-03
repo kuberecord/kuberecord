@@ -108,6 +108,18 @@ var skippedDirs = map[string]bool{
 	".git": true, "bin": true, "node_modules": true, "testbin": true,
 }
 
+// skippedPaths are directories skipped by repository-relative path rather than by
+// name, because their name is not distinctive enough to skip everywhere.
+//
+// dist/release/ is what `make release-artifacts` fills for one tag. Its
+// RELEASE_NOTES.md is a verbatim copy of a CHANGELOG.md section, and CHANGELOG.md
+// is exempt from the check below by name — so scanning the copy would fail the
+// build for the migration table the original is required to keep. The rest of
+// dist/ is *not* skipped: dist/install.yaml is committed and user-facing.
+var skippedPaths = map[string]bool{
+	"dist/release": true,
+}
+
 // TestNoEnvVarEraConfiguration is the grep check Task 3.4 asks for, as a test
 // rather than as a command somebody has to remember to run.
 func TestNoEnvVarEraConfiguration(t *testing.T) {
@@ -117,18 +129,18 @@ func TestNoEnvVarEraConfiguration(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			if skippedDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
 			return relErr
 		}
 		rel = filepath.ToSlash(rel)
+
+		if d.IsDir() {
+			if skippedDirs[d.Name()] || skippedPaths[rel] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if _, exempt := allowedToNameBannedConfig[rel]; exempt {
 			return nil
 		}

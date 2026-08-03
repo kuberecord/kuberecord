@@ -287,6 +287,18 @@ kubectl apply -f dist/install.yaml
 make deploy IMG=<some-registry>/kubestream:tag
 ```
 
+Both artifacts are also attached to every [release](https://github.com/yelzhy/kubestream/releases),
+with checksums, if you would rather install a tag than a checkout:
+
+```sh
+kubectl apply -f https://github.com/yelzhy/kubestream/releases/download/v0.1.0/install.yaml
+```
+
+The operator is pre-1.0 — while it is `v0.x` a minor bump may break, and every
+break is spelled out in [`CHANGELOG.md`](CHANGELOG.md). The ClickHouse schema
+carries no such caveat: it is frozen at `v1`. The three version numbers and what
+each promises are in [`docs/RELEASING.md`](docs/RELEASING.md).
+
 Set the cluster identifier — `clusterID` for Helm, `CLUSTER_ID` on the Deployment
 otherwise. It is stamped on every row, and rows already written keep the old
 value.
@@ -349,6 +361,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/OPERATING.md`](docs/OPERATING.md) | Watching the operator: every exported metric, the shipped dashboard and alerts, and a runbook per alert. |
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Building, the make targets, and what each test suite proves. |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | What a version number promises: the operator's `v0.x` (pre-1.0, a minor may break), the CRDs' `v1alpha1`, and the frozen schema `v1` — three numbers that move independently. Plus what a tagged release publishes and how to cut one. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Including the migration table from the removed environment-variable configuration to the custom resources that replaced it. |
 
 ## Use cases

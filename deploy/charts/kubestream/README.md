@@ -18,6 +18,14 @@ helm install kubestream deploy/charts/kubestream \
   --namespace kubestream-system --create-namespace
 ```
 
+The chart is packaged and attached to every tagged
+[release](https://github.com/yelzhy/kubestream/releases) alongside a
+`checksums.txt`, so a `kubestream-X.Y.Z.tgz` can be installed directly without a
+checkout. There is no chart repository. The chart is **not** versioned
+independently of the operator: `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
+both equal to the operator release it installs — see
+[`docs/RELEASING.md`](../../../docs/RELEASING.md).
+
 Use the release name `kubestream`: it matches the chart name, so every object
 comes out named exactly as the kustomize install names it
 (`kubestream-controller-manager`, `kubestream-metrics-reader`, …). Any other

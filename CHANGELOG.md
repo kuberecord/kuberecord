@@ -1,10 +1,33 @@
 # Changelog
 
-All notable changes to kubestream are recorded here. The project is pre-1.0 and
-follows [Semantic Versioning](https://semver.org/) loosely: while the API group
-is `v1alpha1`, breaking changes are allowed and are always spelled out below.
+All notable changes to kubestream are recorded here. The format is
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased — Phase 3: closing the product gaps
+The project carries three version numbers that move independently — the
+operator's, the CRDs' (`v1alpha1`) and the ClickHouse schema's (`v1`, frozen) —
+and [`docs/RELEASING.md`](docs/RELEASING.md) is the policy for all three. The
+short version: the operator is pre-1.0, so while it is `v0.x` a **minor bump may
+break**, and every break is spelled out below.
+
+Every tagged release must have a section here. `hack/changelog-section.sh` reads
+it, the release workflow refuses to publish a tag that lacks one, and what it
+reads becomes the GitHub Release body — so this file *is* the release notes rather
+than a summary of them.
+
+## [Unreleased]
+
+_Nothing yet._
+
+## [0.1.0] - 2026-08-03
+
+The first tagged release, and the one that sets the shape of the project. Phase 1
+replaced the environment-variable global controller with the two-tier CRD
+architecture, Phase 2 proved it at both extremes and froze the ClickHouse schema
+at `v1`, and Phase 3 closed the product gaps that stop a stranger adopting it.
+
+There is no upgrade path *to* this release, because there is nothing released to
+upgrade from (D5). The **Removed** and **Migration** notes below are for anyone
+who ran the pre-CRD code out of `main`.
 
 ### Added
 
@@ -148,52 +171,28 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
     authenticated metrics endpoint, the `restricted` Pod Security Standard) is
     spelled out rather than left for the reader to discover.
 
-### Changed
-
-- **The README is now an adoption page, and the reference material moved into
-  `docs/`.** It opens with the positioning and the honest paragraph on how this
-  relates to — and does not replace — the Kubernetes audit log, then the
-  quickstart, five copy-pasteable queries, and an architecture diagram redrawn to
-  show the control plane and the data plane as the two tiers they are. Three new
-  pages hold what came out of it, so nothing was lost:
-  [`docs/CRDS.md`](docs/CRDS.md) (every field of the three custom resources and
-  every status condition they report), [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
-  (operator flags and environment variables) and
-  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (the make targets and what each
-  test suite proves). The metrics reference now lives with the runbook that
-  interprets it, in [`docs/OPERATING.md`](docs/OPERATING.md).
-- **The README's five queries are executed in CI.** `test/queries` already ran
-  every statement in `docs/QUERIES.md` and in the shipped dashboards against a
-  ClickHouse built from the frozen DDL alone; the README is now in that list,
-  because its queries are the first SQL anyone runs and the ones least likely to
-  be noticed rotting.
-- **New `test/docs` package**, running under `make test`: the quickstart's files
-  exist, are executable, and agree with each other on the demo password and the
-  image tag; the Makefile and the CI job still point at the script; the README
-  still carries its required sections and links; every relative link and heading
-  anchor in every published page resolves; and none of the environment-variable
-  configuration Phase 1 removed has reappeared in an instruction anywhere in the
-  repository. `CHANGELOG.md` is exempt from that last check — and has its own
-  test requiring it to keep naming them, since its migration table is how an
-  upgrader finds out what each became.
-- **[`deploy/grafana/dashboard.schema.json`](deploy/grafana/dashboard.schema.json)
-  now covers ClickHouse-backed dashboards.** A target's datasource type decides
-  what it must carry: PromQL in `expr` for Prometheus, SQL in `rawSql` plus
-  `editorType`/`format`/`queryType` for ClickHouse. Requiring both would reject
-  every dashboard and requiring neither would let a target that queries nothing
-  validate, so the requirement is conditional. `test/observability` validates all
-  five shipped dashboards against it, and fails if a sixth is added without being
-  registered for checking.
-- **`pipeline.ObjectHash` and `pipeline.NormalizedJSON` now take a
-  `*pipeline.RedactionPolicy`** (`nil` = the built-in scrubs only). They exist so
-  an acceptance suite can recompute what the write path stored instead of
-  reimplementing normalization; redaction happens before hashing, so a recompute
-  that did not know the stream's policy would silently stop comparing the real
-  thing — exactly the drift those functions were exported to prevent.
-
-## Unreleased — Phase 2: proving the foundation at both extremes
-
-### Added
+- **Tag-triggered releases ([`.github/workflows/release.yml`](.github/workflows/release.yml),
+  [`docs/RELEASING.md`](docs/RELEASING.md)).** Strangers install tags, not `main`.
+  Pushing `vX.Y.Z` builds and pushes the multi-arch image, then attaches
+  `install.yaml`, the packaged Helm chart and `checksums.txt` to a GitHub Release
+  whose body is this file's section for that version. Three properties are worth
+  stating rather than leaving to be discovered:
+  - **The release gate runs before anything is published.** A tag that disagrees
+    with the committed `VERSION` and the chart's `version`/`appVersion`, or that
+    has no section in this file, fails the release instead of publishing an empty
+    one. `hack/changelog-section.sh` is the same script the gate and a maintainer
+    run, so "will this tag release?" is answerable before tagging.
+  - **One immutable image tag, and no floating `latest`.** Both install artifacts
+    pin `ghcr.io/yelzhy/kubestream:vX.Y.Z` exactly, so what a cluster runs is
+    decided by the tag somebody chose rather than by whatever moved last. For a
+    non-prerelease tag the attached `install.yaml` is byte-identical to the
+    committed `dist/install.yaml`, which makes the artifact a stranger downloads
+    the file that was reviewed.
+  - **`make release-dry-run` is the whole release with nothing published** —
+    notes, both install artifacts, checksums, `verify-packaging`, and the full
+    multi-arch image build with no registry to push to. The same rehearsal runs
+    in CI from a `workflow_dispatch`, and `test/release` covers the extractor and
+    the wiring under `make test`.
 
 - **An operator-health dashboard and sample alert rules.**
   [`deploy/grafana/operator-health.json`](deploy/grafana/operator-health.json) is a
@@ -303,7 +302,62 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   parsing) now shared by `test/e2e` and `test/chaos`, so both suites read the
   sink through one definition of what a row means.
 
+- `--operator-namespace` (env `POD_NAMESPACE`, supplied from the downward API in
+  the shipped Deployment). **Required**: it is the namespace a sink's
+  `credentialsSecretRef` defaults to and the only namespace the operator reads
+  Secrets in, so the operator refuses to guess it.
+- `--pipeline-workers` (env `PIPELINE_WORKERS`, default 8) — goroutines draining
+  the shared data-plane workqueue.
+- An end-to-end acceptance suite (`make test-e2e`) that runs the operator on a
+  real Kind cluster against a real in-cluster ClickHouse and asserts by querying
+  the sink directly: the full create/scale/delete lifecycle of a watched object,
+  scope epochs across a rule being deleted and re-created, RBAC degrade and
+  self-heal, offline deletions and reincarnations across an operator restart, and
+  cluster-scoped kinds. `make deploy-e2e` / `make undeploy-e2e` install the
+  operator with the suite's overlay.
+
 ### Changed
+
+- **The README is now an adoption page, and the reference material moved into
+  `docs/`.** It opens with the positioning and the honest paragraph on how this
+  relates to — and does not replace — the Kubernetes audit log, then the
+  quickstart, five copy-pasteable queries, and an architecture diagram redrawn to
+  show the control plane and the data plane as the two tiers they are. Three new
+  pages hold what came out of it, so nothing was lost:
+  [`docs/CRDS.md`](docs/CRDS.md) (every field of the three custom resources and
+  every status condition they report), [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+  (operator flags and environment variables) and
+  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (the make targets and what each
+  test suite proves). The metrics reference now lives with the runbook that
+  interprets it, in [`docs/OPERATING.md`](docs/OPERATING.md).
+- **The README's five queries are executed in CI.** `test/queries` already ran
+  every statement in `docs/QUERIES.md` and in the shipped dashboards against a
+  ClickHouse built from the frozen DDL alone; the README is now in that list,
+  because its queries are the first SQL anyone runs and the ones least likely to
+  be noticed rotting.
+- **New `test/docs` package**, running under `make test`: the quickstart's files
+  exist, are executable, and agree with each other on the demo password and the
+  image tag; the Makefile and the CI job still point at the script; the README
+  still carries its required sections and links; every relative link and heading
+  anchor in every published page resolves; and none of the environment-variable
+  configuration Phase 1 removed has reappeared in an instruction anywhere in the
+  repository. `CHANGELOG.md` is exempt from that last check — and has its own
+  test requiring it to keep naming them, since its migration table is how an
+  upgrader finds out what each became.
+- **[`deploy/grafana/dashboard.schema.json`](deploy/grafana/dashboard.schema.json)
+  now covers ClickHouse-backed dashboards.** A target's datasource type decides
+  what it must carry: PromQL in `expr` for Prometheus, SQL in `rawSql` plus
+  `editorType`/`format`/`queryType` for ClickHouse. Requiring both would reject
+  every dashboard and requiring neither would let a target that queries nothing
+  validate, so the requirement is conditional. `test/observability` validates all
+  five shipped dashboards against it, and fails if a sixth is added without being
+  registered for checking.
+- **`pipeline.ObjectHash` and `pipeline.NormalizedJSON` now take a
+  `*pipeline.RedactionPolicy`** (`nil` = the built-in scrubs only). They exist so
+  an acceptance suite can recompute what the write path stored instead of
+  reimplementing normalization; redaction happens before hashing, so a recompute
+  that did not know the stream's policy would silently stop comparing the real
+  thing — exactly the drift those functions were exported to prevent.
 
 - **The ClickHouse schema is frozen at `v1`.** D5's one free redesign window is
   now closed: `resource_states` and `watch_scopes` are a public API. Within `v1`
@@ -335,26 +389,24 @@ is `v1alpha1`, breaking changes are allowed and are always spelled out below.
   the chaos overlays select that image by the name `controller` — so building an
   installer for a real registry would have silently stopped those overlays from
   matching, leaving each suite to run whatever image the base then pinned. The
-  target's output is unchanged, and it no longer dirties the working tree.
+  target's output is unchanged, and it no longer dirties the working tree. It now
+  also takes `INSTALLER_OUT`, so a release can render the manifest into
+  `dist/release/` without touching the committed one.
+- `make docker-buildx` takes `BUILDX_OUTPUT` (default `--push`). Setting it empty
+  builds every platform and pushes nothing, which is how a release rehearsal
+  proves the multi-arch build without a registry to write to.
 
-### Fixed
-
-- **The `helm` and `kubeconform` pins no longer break every CI job that needs
-  them.** `helm.sh/helm/v3@v3.21.3` and `github.com/yannh/kubeconform@v0.8.0` both
-  declare `go 1.26`, one minor ahead of this module's own `go` directive. That is
-  normally invisible — Go just downloads a newer toolchain — but CI runs
-  `actions/setup-go` with `go-version-file: go.mod`, and that action also exports
-  `GOTOOLCHAIN=local`, which switches the automatic download off. `go install` then
-  refused outright, and the failure landed on the *bootstrap*, so it took down every
-  target that depends on either binary before a single test ran: `make test` (whose
-  prerequisites now include `helm`), `make verify-packaging`, and `make
-  test-e2e-helm`. The pins move back to `helm v3.21.0` and `kubeconform v0.7.0`, the
-  newest releases of each that still build under this module's Go version. The
-  ceiling is now written down beside the pins, because the failure cannot reproduce
-  on a machine that already has `bin/` populated or a newer Go on `$PATH` — which is
-  every developer machine, and is why it reached `main`.
-
-## Unreleased — Phase 1: the two-tier CRD architecture
+- `--cluster-id` (env `CLUSTER_ID`) survives unchanged: it identifies *this
+  operator instance's* cluster and is stamped on every row and scope event, so it
+  is not a property of any one sink.
+- The six `--writer-*` flags (env `WRITER_*`) are now **fallbacks**, applied per
+  field: a `ClickHouseSink` that sets `spec.writer.<field>` uses its own value,
+  one that omits it uses the flag.
+- `--ch-auto-create-schema` (env `CH_AUTO_CREATE_SCHEMA`) survives as an
+  operator-level setting and now applies to every sink instance, which executes
+  the shipped DDL in the background before its first write.
+- The e2e suite no longer installs cert-manager. Validation is CEL-only and there
+  are no webhooks (D4), so nothing in the suite ever needed it.
 
 ### Removed — BREAKING: all environment-variable configuration of *what* and *where*
 
@@ -382,37 +434,30 @@ is a valid, healthy state, and a schema mismatch is now reported as
 unreadiness that would have taken every other sink out of service with it.
 `/healthz` and `/readyz` are plain pings.
 
-### Added
-
-- `--operator-namespace` (env `POD_NAMESPACE`, supplied from the downward API in
-  the shipped Deployment). **Required**: it is the namespace a sink's
-  `credentialsSecretRef` defaults to and the only namespace the operator reads
-  Secrets in, so the operator refuses to guess it.
-- `--pipeline-workers` (env `PIPELINE_WORKERS`, default 8) — goroutines draining
-  the shared data-plane workqueue.
-- An end-to-end acceptance suite (`make test-e2e`) that runs the operator on a
-  real Kind cluster against a real in-cluster ClickHouse and asserts by querying
-  the sink directly: the full create/scale/delete lifecycle of a watched object,
-  scope epochs across a rule being deleted and re-created, RBAC degrade and
-  self-heal, offline deletions and reincarnations across an operator restart, and
-  cluster-scoped kinds. `make deploy-e2e` / `make undeploy-e2e` install the
-  operator with the suite's overlay.
-
-### Changed
-
-- `--cluster-id` (env `CLUSTER_ID`) survives unchanged: it identifies *this
-  operator instance's* cluster and is stamped on every row and scope event, so it
-  is not a property of any one sink.
-- The six `--writer-*` flags (env `WRITER_*`) are now **fallbacks**, applied per
-  field: a `ClickHouseSink` that sets `spec.writer.<field>` uses its own value,
-  one that omits it uses the flag.
-- `--ch-auto-create-schema` (env `CH_AUTO_CREATE_SCHEMA`) survives as an
-  operator-level setting and now applies to every sink instance, which executes
-  the shipped DDL in the background before its first write.
-- The e2e suite no longer installs cert-manager. Validation is CEL-only and there
-  are no webhooks (D4), so nothing in the suite ever needed it.
-
 ### Fixed
+
+- **`make docker-buildx` swallowed its own failures.** The build line was prefixed
+  with `-`, so make ignored a non-zero exit: a cross-compilation error or a
+  registry that refused the push reported as a successful target. That is
+  survivable for a developer's scratch build and not survivable for a release, so
+  the `-` is gone from the build itself (it stays on the builder create/remove
+  lines, which are allowed to be no-ops), and the builder and `Dockerfile.cross`
+  are now cleaned up through a trap rather than by two lines that never run when
+  the build fails.
+- **The `helm` and `kubeconform` pins no longer break every CI job that needs
+  them.** `helm.sh/helm/v3@v3.21.3` and `github.com/yannh/kubeconform@v0.8.0` both
+  declare `go 1.26`, one minor ahead of this module's own `go` directive. That is
+  normally invisible — Go just downloads a newer toolchain — but CI runs
+  `actions/setup-go` with `go-version-file: go.mod`, and that action also exports
+  `GOTOOLCHAIN=local`, which switches the automatic download off. `go install` then
+  refused outright, and the failure landed on the *bootstrap*, so it took down every
+  target that depends on either binary before a single test ran: `make test` (whose
+  prerequisites now include `helm`), `make verify-packaging`, and `make
+  test-e2e-helm`. The pins move back to `helm v3.21.0` and `kubeconform v0.7.0`, the
+  newest releases of each that still build under this module's Go version. The
+  ceiling is now written down beside the pins, because the failure cannot reproduce
+  on a machine that already has `bin/` populated or a newer Go on `$PATH` — which is
+  every developer machine, and is why it reached `main`.
 
 - The operator could not reconcile any `ClickHouseSink` under its own shipped
   RBAC. The `SinkReconciler` watches Secrets to close the credential-rotation
@@ -471,6 +516,8 @@ unreadiness that would have taken every other sink out of service with it.
 
 ### Migration
 
+For anyone who ran the pre-CRD code out of `main`:
+
 1. `make install` (or `make deploy`) to install the `kubestream.io/v1alpha1` CRDs.
 2. Create the credentials Secret in the operator's namespace
    (`kubectl create secret generic clickhouse-credentials --from-literal=password=…`).
@@ -483,3 +530,6 @@ unreadiness that would have taken every other sink out of service with it.
 The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
+
+[Unreleased]: https://github.com/yelzhy/kubestream/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yelzhy/kubestream/releases/tag/v0.1.0
