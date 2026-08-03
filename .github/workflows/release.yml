@@ -1,0 +1,186 @@
+# Tag-triggered releases (Task 3.5). Strangers install tags, not `main`.
+#
+# Pushing `vX.Y.Z` publishes three things: a multi-arch image at
+# ghcr.io/<owner>/kubestream:vX.Y.Z, a GitHub Release whose body is that version's
+# CHANGELOG.md section, and the two install artifacts plus their checksums
+# attached to it. `workflow_dispatch` runs the identical sequence with nothing
+# pushed and nothing published, which is what makes a rehearsal meaningful.
+#
+# Every step is `make <target>`, and the targets are the ones a maintainer runs by
+# hand (see the Release section of the Makefile and docs/RELEASING.md). This file
+# decides *when* a release happens and *whether it is real* — it does not decide
+# what a release is.
+#
+# The gate job runs first and everything else needs it: a tag that disagrees with
+# the committed VERSION, or that has no changelog section, fails before an image
+# is pushed. Publishing is not undoable — a pushed tag in a registry is visible to
+# everyone immediately — so the ordering is the point, not an optimisation.
+name: Release
+
+on:
+  push:
+    tags:
+      # Plain releases and prereleases, spelled out rather than `v*` so a stray
+      # tag (`v1-old-branch`, `vendor-sync`) cannot start a release.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to rehearse, e.g. v0.1.0-rc.1. Nothing is pushed or published.'
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  # One place decides what is being released and whether it is real. A dry run is
+  # anything that is not a tag push, so a rehearsal cannot become a release by
+  # forgetting to set a flag — it has to be triggered as one.
+  RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+  DRY_RUN: ${{ github.event_name != 'push' }}
+
+jobs:
+  gate:
+    name: Version and changelog gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # No Go toolchain: this job reads the Makefile, Chart.yaml and CHANGELOG.md
+      # and nothing else, and it is the job that must not be slow — it is what
+      # stands between a mistyped tag and a published one.
+      - name: The tag agrees with the tree it points at
+        run: make release-verify-version RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: The tag has release notes
+        run: make release-notes RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Show the notes that will be published
+        run: |
+          {
+            echo "## Release notes for $RELEASE_VERSION"
+            echo
+            echo "Dry run: \`$DRY_RUN\`"
+            echo
+            cat dist/release/RELEASE_NOTES.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Multi-arch image
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only needed for the push, and granted unconditionally because a job's
+      # permissions cannot depend on an env value. The login step is what is
+      # actually skipped on a dry run, so an unpushed rehearsal never authenticates.
+      packages: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # The image is cross-compiled inside the builder stage (the Dockerfile takes
+      # GOARCH from TARGETARCH with CGO disabled), so every platform builds
+      # natively on the runner and no QEMU is involved. Nothing needs a Go
+      # toolchain out here.
+      - name: Log in to ghcr.io
+        if: env.DRY_RUN == 'false'
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
+
+      - name: Build the image for every supported platform
+        run: |
+          # Empty BUILDX_OUTPUT builds and discards; --push is the Makefile default.
+          if [ "$DRY_RUN" = "true" ]; then
+            make release-image RELEASE_VERSION="$RELEASE_VERSION" BUILDX_OUTPUT=
+          else
+            make release-image RELEASE_VERSION="$RELEASE_VERSION"
+          fi
+
+  publish:
+    name: Artifacts and GitHub Release
+    # Both, not just the gate: an image that failed to build must not get a
+    # release pointing at it, because the manifests attached below pin that exact
+    # tag and a cluster applying them would sit in ImagePullBackOff.
+    needs: [gate, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # kustomize, controller-gen, helm and kubeconform are all bootstrapped into
+      # bin/ by the Makefile, so a Go toolchain is the only prerequisite.
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build the release artifacts
+        run: make release-artifacts RELEASE_VERSION="$RELEASE_VERSION"
+
+      # Uploaded on every run, dry or not. On a rehearsal this is the *only* place
+      # the artifacts exist, and being able to diff a candidate's install.yaml
+      # against the previous release's is most of the value of rehearsing.
+      - name: Upload the artifacts to the workflow run
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: kubestream-${{ env.RELEASE_VERSION }}
+          path: |
+            dist/release/install.yaml
+            dist/release/*.tgz
+            dist/release/checksums.txt
+            dist/release/RELEASE_NOTES.md
+          if-no-files-found: error
+
+      - name: Publish the GitHub Release
+        if: env.DRY_RUN == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A tag with a prerelease suffix is marked as one, so it stays out of
+          # "latest release" for anyone reading the repository's front page.
+          prerelease=""
+          case "$RELEASE_VERSION" in *-*) prerelease="--prerelease" ;; esac
+
+          # shellcheck disable=SC2086  # $prerelease is a flag or nothing
+          gh release create "$RELEASE_VERSION" \
+            --title "kubestream $RELEASE_VERSION" \
+            --notes-file dist/release/RELEASE_NOTES.md \
+            --verify-tag \
+            $prerelease \
+            dist/release/install.yaml \
+            dist/release/kubestream-*.tgz \
+            dist/release/checksums.txt
+
+      - name: Summarise
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "## Dry run for $RELEASE_VERSION — nothing pushed, nothing published"
+              echo
+              echo "The artifacts are attached to this workflow run."
+            else
+              echo "## Released $RELEASE_VERSION"
+              echo
+              # Read the image back out of the manifest rather than restating it:
+              # what the release actually pins is what install.yaml says it pins.
+              echo "Image: \`$(grep -o 'image: [^ ]*kubestream:[^ ]*' dist/release/install.yaml | head -1 | cut -d' ' -f2)\`"
+            fi
+            echo
+            echo '```'
+            cat dist/release/checksums.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

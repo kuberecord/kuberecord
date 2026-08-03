@@ -152,6 +152,24 @@ make build-installer       # regenerate dist/install.yaml — CI fails if the co
 Chart-vs-kustomize parity is asserted object by object in `test/chart`, which
 runs under `make test`.
 
+## Releasing — `make release-dry-run`
+
+A release is a tag, and the tag-triggered workflow is a thin caller of make
+targets you can run yourself:
+
+```sh
+make release-dry-run                              # the whole release, nothing published
+make release-dry-run RELEASE_VERSION=v0.2.0-rc.1  # rehearse a candidate
+make release-notes RELEASE_VERSION=v0.2.0         # the gate, on its own
+```
+
+The dry run writes `dist/release/` (git-ignored): the notes extracted from
+`CHANGELOG.md`, `install.yaml`, the packaged chart, and `checksums.txt` — and it
+builds the image for every supported platform without a registry to push to.
+`test/release` covers the extractor and the wiring under `make test`.
+[`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
+cutting one.
+
 ## Documentation checks
 
 `test/docs` runs under `make test` and guards the things prose cannot guard
@@ -175,5 +193,6 @@ finds out what each became.
 | `install-paths.yml` | `make verify-packaging`, the chart tests, a `dist/install.yaml` staleness check, and the Helm and installer smokes on Kind |
 | `observability.yml` | `make verify-observability` |
 | `quickstart.yml` | `make quickstart` with `QUICKSTART_BUDGET_SECONDS=600` — the ten-minute claim, tested |
+| `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, then the artifacts and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed or published |
 
 [kind]: https://kind.sigs.k8s.io/
