@@ -50,9 +50,9 @@ spec:
         - alert: KubestreamWriteQueueSaturated
           expr: |
             (
-              kubestream_write_queue_depth / kubestream_write_queue_capacity > 0.8
+              kuberecord_write_queue_depth / kuberecord_write_queue_capacity > 0.8
             )
-            and kubestream_write_queue_capacity > 0
+            and kuberecord_write_queue_capacity > 0
           for: 5m
           labels:
             severity: warning
@@ -78,7 +78,7 @@ spec:
         # not going to resolve on its own. Alerting on the first failed write would
         # page for every routine ClickHouse upgrade.
         - alert: KubestreamWriteFailures
-          expr: sum by (sink) (rate(kubestream_writes_total{outcome="failed"}[5m])) > 0
+          expr: sum by (sink) (rate(kuberecord_writes_total{outcome="failed"}[5m])) > 0
           for: 10m
           labels:
             severity: critical
@@ -107,7 +107,7 @@ spec:
         # comparison keeps whatever job/instance labels the scrape added, and an
         # operator running two replicas sees which one is reporting.
         - alert: KubestreamRuleNotReady
-          expr: kubestream_rules{condition="Ready",status="false"} > 0
+          expr: kuberecord_rules{condition="Ready",status="false"} > 0
           for: 15m
           labels:
             severity: warning
@@ -135,7 +135,7 @@ spec:
         # precursor: seeing both is the unambiguous signal that the sink is
         # undersized rather than briefly slow.
         - alert: KubestreamEnqueueTimeouts
-          expr: sum by (sink) (rate(kubestream_enqueue_timeouts_total[5m])) > 0
+          expr: sum by (sink) (rate(kuberecord_enqueue_timeouts_total[5m])) > 0
           for: 5m
           labels:
             severity: critical

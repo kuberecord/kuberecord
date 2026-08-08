@@ -782,10 +782,10 @@ func TestIsolationPhaseDoesNotTruncateSlowBackend(t *testing.T) {
 }
 
 // writesTotalValue gathers reg and returns the value of
-// kubestream_writes_total{outcome=outcome}, or fails the test if absent.
+// kuberecord_writes_total{outcome=outcome}, or fails the test if absent.
 func writesTotalValue(t *testing.T, reg prometheus.Gatherer, outcome string) float64 {
 	t.Helper()
-	const metric, label = "kubestream_writes_total", "outcome"
+	const metric, label = "kuberecord_writes_total", "outcome"
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)

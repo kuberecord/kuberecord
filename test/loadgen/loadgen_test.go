@@ -508,9 +508,9 @@ func TestLoadGenChurn(t *testing.T) {
 		peakRSSBytes:   peakRSSBytes(),
 		heapInUse:      mem.HeapInuse,
 		sys:            mem.Sys,
-		cacheEntries:   gatherGauge(t, registry, "kubestream_hashcache_entries"),
-		dedupSkips:     gatherCounter(t, registry, "kubestream_dedup_skips_total"),
-		dropped:        gatherCounter(t, registry, "kubestream_dropped_total"),
+		cacheEntries:   gatherGauge(t, registry, "kuberecord_hashcache_entries"),
+		dedupSkips:     gatherCounter(t, registry, "kuberecord_dedup_skips_total"),
+		dropped:        gatherCounter(t, registry, "kuberecord_dropped_total"),
 	})
 
 	// Report to stdout so `make bench-load` surfaces it directly.

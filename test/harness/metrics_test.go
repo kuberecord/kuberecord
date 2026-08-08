@@ -36,44 +36,44 @@ func TestParseMetrics(t *testing.T) {
 	}{
 		{
 			name: "comments and blank lines are skipped",
-			body: "# HELP kubestream_dedup_skips_total Count.\n" +
-				"# TYPE kubestream_dedup_skips_total counter\n" +
+			body: "# HELP kuberecord_dedup_skips_total Count.\n" +
+				"# TYPE kuberecord_dedup_skips_total counter\n" +
 				"\n" +
-				"kubestream_dedup_skips_total 12\n",
-			want: []Sample{{Name: "kubestream_dedup_skips_total", Labels: map[string]string{}, Value: 12}},
+				"kuberecord_dedup_skips_total 12\n",
+			want: []Sample{{Name: "kuberecord_dedup_skips_total", Labels: map[string]string{}, Value: 12}},
 		},
 		{
 			name: "labelled counter",
-			body: `kubestream_writes_total{sink="default",outcome="failed"} 3`,
+			body: `kuberecord_writes_total{sink="default",outcome="failed"} 3`,
 			want: []Sample{{
-				Name:   "kubestream_writes_total",
+				Name:   "kuberecord_writes_total",
 				Labels: map[string]string{"sink": "default", "outcome": "failed"},
 				Value:  3,
 			}},
 		},
 		{
 			name: "histogram bucket keeps its le label",
-			body: `kubestream_enqueue_block_seconds_bucket{sink="default",le="2.5"} 41`,
+			body: `kuberecord_enqueue_block_seconds_bucket{sink="default",le="2.5"} 41`,
 			want: []Sample{{
-				Name:   "kubestream_enqueue_block_seconds_bucket",
+				Name:   "kuberecord_enqueue_block_seconds_bucket",
 				Labels: map[string]string{"sink": "default", "le": "2.5"},
 				Value:  41,
 			}},
 		},
 		{
 			name: "the +Inf bucket parses as an infinite value, not an error",
-			body: `kubestream_enqueue_block_seconds_bucket{le="+Inf"} 41`,
+			body: `kuberecord_enqueue_block_seconds_bucket{le="+Inf"} 41`,
 			want: []Sample{{
-				Name:   "kubestream_enqueue_block_seconds_bucket",
+				Name:   "kuberecord_enqueue_block_seconds_bucket",
 				Labels: map[string]string{"le": "+Inf"},
 				Value:  41,
 			}},
 		},
 		{
 			name: "a label value may contain an escaped quote and a comma",
-			body: `kubestream_safe_mode{namespace="a,b",kind="Con\"figMap"} 1`,
+			body: `kuberecord_safe_mode{namespace="a,b",kind="Con\"figMap"} 1`,
 			want: []Sample{{
-				Name:   "kubestream_safe_mode",
+				Name:   "kuberecord_safe_mode",
 				Labels: map[string]string{"namespace": "a,b", "kind": `Con"figMap`},
 				Value:  1,
 			}},
@@ -82,26 +82,26 @@ func TestParseMetrics(t *testing.T) {
 			name: "an empty label value is preserved, not treated as absent",
 			// The core API group and a cluster-scoped object both render as "",
 			// and a scope query that treated them as unset would silently widen.
-			body: `kubestream_safe_mode{group="",namespace=""} 0`,
+			body: `kuberecord_safe_mode{group="",namespace=""} 0`,
 			want: []Sample{{
-				Name:   "kubestream_safe_mode",
+				Name:   "kuberecord_safe_mode",
 				Labels: map[string]string{"group": "", "namespace": ""},
 				Value:  0,
 			}},
 		},
 		{
 			name: "a trailing scrape timestamp is ignored",
-			body: `kubestream_write_queue_depth{sink="default"} 7 1700000000000`,
+			body: `kuberecord_write_queue_depth{sink="default"} 7 1700000000000`,
 			want: []Sample{{
-				Name:   "kubestream_write_queue_depth",
+				Name:   "kuberecord_write_queue_depth",
 				Labels: map[string]string{"sink": "default"},
 				Value:  7,
 			}},
 		},
 		{
 			name: "an exponent-form value parses",
-			body: "kubestream_write_latency_seconds_sum 1.5e-05",
-			want: []Sample{{Name: "kubestream_write_latency_seconds_sum", Labels: map[string]string{}, Value: 1.5e-05}},
+			body: "kuberecord_write_latency_seconds_sum 1.5e-05",
+			want: []Sample{{Name: "kuberecord_write_latency_seconds_sum", Labels: map[string]string{}, Value: 1.5e-05}},
 		},
 	}
 
@@ -157,12 +157,12 @@ func TestParseMetricsRejectsMalformedLines(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "no value", body: "kubestream_writes_total"},
-		{name: "no value after a label set", body: `kubestream_writes_total{sink="default"}`},
-		{name: "unterminated label value", body: `kubestream_writes_total{sink="default} 1`},
-		{name: "unquoted label value", body: `kubestream_writes_total{sink=default} 1`},
-		{name: "label with no value", body: `kubestream_writes_total{sink} 1`},
-		{name: "non-numeric value", body: "kubestream_writes_total not-a-number"},
+		{name: "no value", body: "kuberecord_writes_total"},
+		{name: "no value after a label set", body: `kuberecord_writes_total{sink="default"}`},
+		{name: "unterminated label value", body: `kuberecord_writes_total{sink="default} 1`},
+		{name: "unquoted label value", body: `kuberecord_writes_total{sink=default} 1`},
+		{name: "label with no value", body: `kuberecord_writes_total{sink} 1`},
+		{name: "non-numeric value", body: "kuberecord_writes_total not-a-number"},
 	}
 
 	for _, tt := range tests {
