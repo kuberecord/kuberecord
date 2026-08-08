@@ -56,7 +56,7 @@ var (
 	alertsPath          = repoPath("deploy", "prometheus", "alerts.yaml")
 	alertsSchemaPath    = repoPath("deploy", "prometheus", "prometheusrule.schema.json")
 
-	// operatorHealthPath is the dashboard for operators of kubestream (Task 2.5).
+	// operatorHealthPath is the dashboard for operators of kuberecord (Task 2.5).
 	// It is the only one backed by Prometheus, and therefore the only one the
 	// metric cross-check below has anything to say about.
 	operatorHealthPath = repoPath("deploy", "grafana", "operator-health.json")
@@ -237,7 +237,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 	}{
 		{
 			file:          "object-timeline",
-			wantUID:       "kubestream-object-timeline",
+			wantUID:       "kuberecord-object-timeline",
 			wantVariables: []string{"cluster", "datasource", "kind", "name", "namespace"},
 			wantPanels: []panelCriterion{
 				{
@@ -259,7 +259,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "drift-by-actor",
-			wantUID:       "kubestream-drift-by-actor",
+			wantUID:       "kuberecord-drift-by-actor",
 			wantVariables: []string{"cluster", "datasource", "gitops_manager", "namespace"},
 			wantPanels: []panelCriterion{
 				{
@@ -276,7 +276,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "flap-report",
-			wantUID:       "kubestream-flap-report",
+			wantUID:       "kuberecord-flap-report",
 			wantVariables: []string{"cluster", "datasource", "kind", "namespace", "threshold"},
 			wantPanels: []panelCriterion{
 				{
@@ -295,7 +295,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "namespace-activity",
-			wantUID:       "kubestream-namespace-activity",
+			wantUID:       "kuberecord-namespace-activity",
 			wantVariables: []string{"cluster", "datasource", "event_type", "kind"},
 			wantPanels: []panelCriterion{
 				{
@@ -470,7 +470,7 @@ func TestAlertRulesMatchTheAcceptanceCriteria(t *testing.T) {
 		wantExprs []string
 	}{
 		{
-			alert:   "KubestreamWriteQueueSaturated",
+			alert:   "KuberecordWriteQueueSaturated",
 			wantFor: "5m",
 			wantExprs: []string{
 				"kuberecord_write_queue_depth / kuberecord_write_queue_capacity > 0.8",
@@ -481,17 +481,17 @@ func TestAlertRulesMatchTheAcceptanceCriteria(t *testing.T) {
 			},
 		},
 		{
-			alert:     "KubestreamWriteFailures",
+			alert:     "KuberecordWriteFailures",
 			wantFor:   "10m",
 			wantExprs: []string{`kuberecord_writes_total{outcome="failed"}`, "> 0"},
 		},
 		{
-			alert:     "KubestreamRuleNotReady",
+			alert:     "KuberecordRuleNotReady",
 			wantFor:   "15m",
 			wantExprs: []string{`kuberecord_rules{condition="Ready",status="false"} > 0`},
 		},
 		{
-			alert:     "KubestreamEnqueueTimeouts",
+			alert:     "KuberecordEnqueueTimeouts",
 			wantFor:   "5m",
 			wantExprs: []string{"kuberecord_enqueue_timeouts_total", "> 0"},
 		},
@@ -607,7 +607,7 @@ func TestPromtoolChecksRules(t *testing.T) {
 		t.Fatalf("render .spec as YAML: %v", err)
 	}
 
-	rulesFile := filepath.Join(t.TempDir(), "kubestream.rules.yaml")
+	rulesFile := filepath.Join(t.TempDir(), "kuberecord.rules.yaml")
 	if err := os.WriteFile(rulesFile, specYAML, 0o600); err != nil {
 		t.Fatalf("write the extracted rule file: %v", err)
 	}
@@ -807,7 +807,7 @@ func explain(err error) string {
 
 // --- metric-name extraction --------------------------------------------------
 
-// metricRef matches a kubestream metric name inside a PromQL expression. Only
+// metricRef matches a kuberecord metric name inside a PromQL expression. Only
 // this operator's own metrics are extracted: a dashboard is free to reference
 // something else (kube-state-metrics, say) and this suite has no standing to
 // judge whether that exists.

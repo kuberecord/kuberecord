@@ -54,7 +54,7 @@ func SideloadImage(image string) {
 		Expect(pullErr).NotTo(HaveOccurred(), "Failed to pull %s: %s", image, out)
 	}
 
-	archiveDir, err := os.MkdirTemp("", "kubestream-images")
+	archiveDir, err := os.MkdirTemp("", "kuberecord-images")
 	Expect(err).NotTo(HaveOccurred(), "Failed to create a temporary directory for the image archive")
 	DeferCleanup(func() {
 		if err := os.RemoveAll(archiveDir); err != nil {

@@ -40,7 +40,7 @@ import (
 // namespace stays Terminating forever, so namespaces accumulate across the package's
 // tests and a shared label value would let one test's namespaces satisfy another
 // test's selector.
-const auditLabel = "kubestream.test/audit"
+const auditLabel = "kuberecord.test/audit"
 
 // resourceEntry is a shorthand for one entry of a rule's spec.resources. Every kind
 // these tables name is served at v1 (the version is exercised on its own in

@@ -9,7 +9,7 @@ image:
   # Pinned by digest rather than tag, so the digest branch of the image helper is
   # exercised by a real render. The digest is a well-formed placeholder; nothing
   # in lint or kubeconform pulls it.
-  repository: ghcr.io/yelzhy/kubestream
+  repository: ghcr.io/yelzhy/kuberecord
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: Always
 
@@ -42,7 +42,7 @@ rbac:
 serviceAccount:
   create: true
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/kubestream
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/kuberecord
 
 extraLabels:
   app.kubernetes.io/part-of: platform-audit
@@ -93,8 +93,8 @@ defaultSink:
   name: default
   connection:
     addr: clickhouse.clickhouse.svc:9000
-    database: kubestream
-    username: kubestream
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef:
       name: clickhouse-credentials
     dialTimeout: 5s

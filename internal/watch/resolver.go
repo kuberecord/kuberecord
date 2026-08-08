@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package watch holds kubestream's data plane: the machinery that turns the
+// Package watch holds kuberecord's data plane: the machinery that turns the
 // desired-state registry's watch targets (internal/plan) into live Kubernetes
 // informers.
 //

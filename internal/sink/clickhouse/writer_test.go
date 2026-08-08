@@ -648,7 +648,7 @@ func TestInsertArgsIsZoneIndependent(t *testing.T) {
 func pinLocalZone(t *testing.T, offset time.Duration) (restore func()) {
 	t.Helper()
 	previous := time.Local
-	time.Local = time.FixedZone("kubestream-test", int(offset/time.Second))
+	time.Local = time.FixedZone("kuberecord-test", int(offset/time.Second))
 	var once sync.Once
 	restore = func() { once.Do(func() { time.Local = previous }) }
 	t.Cleanup(restore)
@@ -906,7 +906,7 @@ func TestCheckpointEveryResolution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			w, err := Open(Config{
 				Addr:            "127.0.0.1:9000",
-				Database:        "kubestream",
+				Database:        "kuberecord",
 				Username:        "default",
 				DialTimeout:     time.Second,
 				ReadTimeout:     time.Second,

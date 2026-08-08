@@ -28,7 +28,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ClickHouseSink declares one ClickHouse instance kubestream may write to.
+          ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 
           It is cluster-scoped (D6) because rules in any namespace reference it by
           name, and because a sink is infrastructure owned by the platform team rather
@@ -66,7 +66,7 @@ spec:
                   addr:
                     description: |-
                       Addr is the ClickHouse native-protocol endpoint as "host:port", e.g.
-                      "clickhouse.kubestream-system.svc:9000".
+                      "clickhouse.kuberecord-system.svc:9000".
                     maxLength: 253
                     minLength: 1
                     type: string
@@ -101,8 +101,8 @@ spec:
                     - name
                     type: object
                   database:
-                    default: kubestream
-                    description: Database is the ClickHouse database holding kubestream's
+                    default: kuberecord
+                    description: Database is the ClickHouse database holding kuberecord's
                       tables.
                     maxLength: 63
                     minLength: 1

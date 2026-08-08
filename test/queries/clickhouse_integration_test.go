@@ -48,7 +48,7 @@ const testDatabase = "kuberecord_queries_it"
 const demoCluster = "demo-cluster"
 
 // TestPublishedQueriesRunAgainstFrozenSchemaIntegration is Task 3.2's third
-// acceptance criterion: every query kubestream publishes — the recipes in
+// acceptance criterion: every query kuberecord publishes — the recipes in
 // docs/QUERIES.md and every statement inside the four product dashboards — is
 // executed against a real ClickHouse whose tables were built from
 // deploy/clickhouse/schema and nothing else.

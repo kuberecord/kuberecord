@@ -1,16 +1,16 @@
-{{- include "kubestream.validateValues" . }}
+{{- include "kuberecord.validateValues" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kubestream.managerName" . }}
+  name: {{ include "kuberecord.managerName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "kubestream.selectorLabels" . | nindent 6 }}
+      {{- include "kuberecord.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -19,9 +19,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "kubestream.labels" . | nindent 8 }}
+        {{- include "kuberecord.labels" . | nindent 8 }}
     spec:
-      serviceAccountName: {{ include "kubestream.serviceAccountName" . }}
+      serviceAccountName: {{ include "kuberecord.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -33,12 +33,12 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
       - name: manager
-        image: {{ include "kubestream.image" . }}
+        image: {{ include "kuberecord.image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         command:
         - /manager
         args:
-          {{- include "kubestream.managerArgs" . | nindent 10 }}
+          {{- include "kuberecord.managerArgs" . | nindent 10 }}
         # Where ClickHouse lives is *not* here: it is a ClickHouseSink CR and the
         # Secret it references. What is left is the identity of this operator
         # instance and the namespace it reads credentials in.

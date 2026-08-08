@@ -56,7 +56,7 @@ var ch = &harness.ClickHouse{
 // kubectl build happens to use; server-side-applying under a fixed manager makes
 // "the applying manager appears in actors" a precise claim rather than a
 // substring guess.
-const fieldManager = "kubestream-e2e"
+const fieldManager = "kuberecord-e2e"
 
 // The shared types, spelled in this suite's own vocabulary. Aliases rather than
 // wrappers: a scenario builds an objectFilter and hands it straight to the

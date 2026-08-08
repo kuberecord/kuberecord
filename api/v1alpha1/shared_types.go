@@ -20,7 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Condition types shared by every kubestream CRD.
+// Condition types shared by every kuberecord CRD.
 //
 // They are string constants rather than inline literals because reconcilers
 // (Task 1.7) and the e2e suite both assert on them: a typo in one place would
@@ -80,7 +80,7 @@ const (
 )
 
 // kindPattern and its `kinds`-entry variant are the single source of truth for
-// what kubestream accepts as a Kubernetes Kind. They are duplicated verbatim
+// what kuberecord accepts as a Kubernetes Kind. They are duplicated verbatim
 // into the `+kubebuilder:validation:Pattern` markers below (markers cannot
 // reference Go constants) and re-asserted against the generated CRD YAML in
 // crdmanifests_test.go, so a drift between the two is a test failure rather
@@ -297,7 +297,7 @@ type StreamRuleSpec struct {
 	// name) are streamed in a built-in Events mode, because an Event is
 	// append-only ephemera rather than durable cluster state. Naming one is the
 	// only thing you do — there is no switch, and no way to opt out, since every
-	// difference exists to stop kubestream recording something untrue:
+	// difference exists to stop kuberecord recording something untrue:
 	//
 	//   - every row carries the full Event, never a diff, so a count bump is
 	//     readable on its own;
@@ -367,8 +367,8 @@ type StreamRuleStatus struct {
 // SecretReference points at a Secret holding a sink's credentials.
 //
 // It is a local type rather than corev1.SecretReference so the namespace can
-// carry kubestream's own defaulting semantics (see the field comment) and so
-// the API surface stays limited to the two fields kubestream actually honours.
+// carry kuberecord's own defaulting semantics (see the field comment) and so
+// the API surface stays limited to the two fields kuberecord actually honours.
 type SecretReference struct {
 	// Name is the Secret's name.
 	// +kubebuilder:validation:MinLength=1

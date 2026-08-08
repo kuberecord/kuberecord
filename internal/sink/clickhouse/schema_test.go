@@ -178,7 +178,7 @@ func TestValidateSchema(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSchema(context.Background(), fakeSchemaConn{rows: tt.rows}, "kubestream")
+			err := validateSchema(context.Background(), fakeSchemaConn{rows: tt.rows}, "kuberecord")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got nil")

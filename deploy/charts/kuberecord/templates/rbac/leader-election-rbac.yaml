@@ -5,10 +5,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "kubestream.fullname" . }}-leader-election-role
+  name: {{ include "kuberecord.fullname" . }}-leader-election-role
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - ""
@@ -45,16 +45,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "kubestream.fullname" . }}-leader-election-rolebinding
+  name: {{ include "kuberecord.fullname" . }}-leader-election-rolebinding
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "kubestream.fullname" . }}-leader-election-role
+  name: {{ include "kuberecord.fullname" . }}-leader-election-role
 subjects:
 - kind: ServiceAccount
-  name: {{ include "kubestream.serviceAccountName" . }}
+  name: {{ include "kuberecord.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 {{- end }}

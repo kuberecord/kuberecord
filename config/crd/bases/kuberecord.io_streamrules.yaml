@@ -141,7 +141,7 @@ spec:
                   name) are streamed in a built-in Events mode, because an Event is
                   append-only ephemera rather than durable cluster state. Naming one is the
                   only thing you do — there is no switch, and no way to opt out, since every
-                  difference exists to stop kubestream recording something untrue:
+                  difference exists to stop kuberecord recording something untrue:
 
                     - every row carries the full Event, never a diff, so a count bump is
                       readable on its own;

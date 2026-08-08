@@ -5,10 +5,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kubestream.managerName" . }}-metrics-service
+  name: {{ include "kuberecord.managerName" . }}-metrics-service
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
   {{- with .Values.metrics.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -20,5 +20,5 @@ spec:
     protocol: TCP
     targetPort: {{ .Values.metrics.port }}
   selector:
-    {{- include "kubestream.selectorLabels" . | nindent 4 }}
+    {{- include "kuberecord.selectorLabels" . | nindent 4 }}
 {{- end }}

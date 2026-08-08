@@ -1,7 +1,7 @@
 # Watch preset: RBAC objects. Not installed by default, and the one preset worth
 # a second thought before applying.
 #
-# Streaming Roles and bindings is the highest-value audit trail kubestream can
+# Streaming Roles and bindings is the highest-value audit trail kuberecord can
 # produce ("who was granted cluster-admin, and when?"), but it also means the
 # operator reads the cluster's full authorization graph and every change to it
 # lands in ClickHouse. Combined with the read-flattening caveat in docs/RBAC.md,
@@ -17,7 +17,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
     kuberecord.io/aggregate-to-watcher: "true"
   name: watcher-rbac-read

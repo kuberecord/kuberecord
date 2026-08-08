@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package queries loads the SQL kubestream publishes to its users — the recipes
+// Package queries loads the SQL kuberecord publishes to its users — the recipes
 // in docs/QUERIES.md and the queries embedded in the Grafana dashboards under
 // deploy/grafana — and prepares it to be executed against a real ClickHouse.
 //

@@ -187,7 +187,7 @@ func newObject(apiVersion, kind, namespace, name string, revision int) *unstruct
 			},
 			// A label every churned object carries, so a rule with a selector
 			// could be pointed at exactly this harness's objects.
-			"labels": map[string]any{"app.kubernetes.io/managed-by": "kubestream-loadgen"},
+			"labels": map[string]any{"app.kubernetes.io/managed-by": "kuberecord-loadgen"},
 		},
 	}}
 }
