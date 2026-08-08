@@ -17,7 +17,7 @@ metadata:
   labels:
     app.kubernetes.io/name: kubestream
     app.kubernetes.io/component: e2e-fixture
-    kubestream.io/aggregate-to-watcher: "true"
+    kuberecord.io/aggregate-to-watcher: "true"
 rules:
 - apiGroups:
   - ""

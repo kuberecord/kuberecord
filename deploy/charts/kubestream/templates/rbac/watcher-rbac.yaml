@@ -3,7 +3,7 @@
 #
 # It holds no rules of its own: `aggregationRule` tells the controller-manager to
 # keep `rules` equal to the union of every ClusterRole labelled
-# `kubestream.io/aggregate-to-watcher: "true"`. Watch rights therefore arrive by
+# `kuberecord.io/aggregate-to-watcher: "true"`. Watch rights therefore arrive by
 # *applying a small labelled role* — a preset from `rbac.presets`, or one of your
 # own for a CRD no preset covers — never by editing the operator's base grant.
 #
@@ -33,7 +33,7 @@ metadata:
 aggregationRule:
   clusterRoleSelectors:
   - matchLabels:
-      kubestream.io/aggregate-to-watcher: "true"
+      kuberecord.io/aggregate-to-watcher: "true"
 rules: []
 ---
 # Applied once, at install time, and never changed again: extending coverage

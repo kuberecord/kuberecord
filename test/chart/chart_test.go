@@ -29,7 +29,7 @@ import (
 // aggregateLabel is the label that makes a ClusterRole part of the operator's
 // watch rights. A preset without it is inert, which is the one way a rendered
 // preset can look right and grant nothing.
-const aggregateLabel = "kubestream.io/aggregate-to-watcher"
+const aggregateLabel = "kuberecord.io/aggregate-to-watcher"
 
 // TestDefaultValuesRenderTheExpectedObjects pins the default install's object
 // set. It is the test that notices a template being added, removed or silently

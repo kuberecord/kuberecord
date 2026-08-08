@@ -83,7 +83,7 @@ own. It carries an `aggregationRule` selecting
 
 ```yaml
 matchLabels:
-  kubestream.io/aggregate-to-watcher: "true"
+  kuberecord.io/aggregate-to-watcher: "true"
 ```
 
 and the **controller-manager** — not kubestream — keeps its `rules` equal to the
@@ -222,7 +222,7 @@ kind: ClusterRole
 metadata:
   name: watcher-my-crds
   labels:
-    kubestream.io/aggregate-to-watcher: "true"
+    kuberecord.io/aggregate-to-watcher: "true"
 rules:
 - apiGroups: ["acme.example.com"]
   resources: ["widgets"]

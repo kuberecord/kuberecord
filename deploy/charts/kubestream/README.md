@@ -129,7 +129,7 @@ repository is a starting point if you run the Prometheus Operator.
 | `rbac.presets.rbac-read` | bool | `false` | Watch `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`. The highest-value audit trail kubestream can produce, and the one preset worth a second thought: it puts the cluster's whole authorization graph in ClickHouse. See [`docs/RBAC.md`](../../../docs/RBAC.md). |
 
 Each enabled preset renders one `ClusterRole` labelled
-`kubestream.io/aggregate-to-watcher: "true"`, which the aggregated
+`kuberecord.io/aggregate-to-watcher: "true"`, which the aggregated
 `<release>-watcher` role picks up — no restart, no redeploy. The rules come
 verbatim from `config/rbac/presets/`, so a Helm-installed preset and a
 `kubectl apply -f config/rbac/presets/networking.yaml` grant the same thing.

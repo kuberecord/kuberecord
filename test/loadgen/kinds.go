@@ -34,7 +34,7 @@ import (
 // large.
 //
 // They are plain annotations under a harness-owned prefix, which the pipeline
-// treats as ordinary object content — unlike internal.kubestream.io/actors,
+// treats as ordinary object content — unlike internal.kuberecord.io/actors,
 // which normalizeObject strips before hashing. That is the point: filler that
 // the hash ignored would measure the wrong thing.
 const (

@@ -33,7 +33,7 @@ metadata:
   name: {{ include "kubestream.fullname" $ }}-{{ $parsed.metadata.name }}
   labels:
     {{- include "kubestream.labels" $ | nindent 4 }}
-    kubestream.io/aggregate-to-watcher: "true"
+    kuberecord.io/aggregate-to-watcher: "true"
 rules:
   {{- toYaml $parsed.rules | nindent 2 }}
 {{- end }}
