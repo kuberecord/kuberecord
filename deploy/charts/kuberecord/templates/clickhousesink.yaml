@@ -11,7 +11,7 @@ kind: ClickHouseSink
 metadata:
   name: {{ .Values.defaultSink.name }}
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 spec:
   connection:
     addr: {{ .Values.defaultSink.connection.addr | quote }}

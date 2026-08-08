@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pipeline is kubestream's data plane: a client-go workqueue drained by
+// Package pipeline is kuberecord's data plane: a client-go workqueue drained by
 // a pool of workers that run the normalize → hash → dedup → diff →
 // version-gated-commit machinery for every observed object change.
 //

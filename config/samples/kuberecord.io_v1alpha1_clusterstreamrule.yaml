@@ -3,7 +3,7 @@ kind: ClusterStreamRule
 metadata:
   name: platform-baseline
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
   sinkRef: default

@@ -1,4 +1,4 @@
-# Default values for the kubestream chart.
+# Default values for the kuberecord chart.
 #
 # Every value below is documented — with its type, default and effect — in
 # README.md next to this file. The comments here explain *why* a default is what
@@ -7,7 +7,7 @@
 # -- Operator image. tag defaults to the chart's appVersion; digest, when set,
 # wins over tag so an install can be pinned by content rather than by name.
 image:
-  repository: ghcr.io/yelzhy/kubestream
+  repository: ghcr.io/yelzhy/kuberecord
   tag: ""
   digest: ""
   pullPolicy: IfNotPresent
@@ -162,8 +162,8 @@ defaultSink:
   name: default
   connection:
     addr: ""
-    database: kubestream
-    username: kubestream
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef:
       # Resolved in the operator's own namespace — the only namespace it holds
       # Secret read rights in (D7).

@@ -60,8 +60,8 @@ const (
 	// The values that must never reach the sink. They are fixed, distinctive
 	// literals so a substring search over a whole row cannot match one by
 	// accident.
-	plantedBySink = "kubestream-e2e-planted-sink-secret-do-not-store"
-	plantedByRule = "kubestream-e2e-planted-rule-secret-do-not-store"
+	plantedBySink = "kuberecord-e2e-planted-sink-secret-do-not-store"
+	plantedByRule = "kuberecord-e2e-planted-rule-secret-do-not-store"
 	keptValue     = "debug"
 )
 

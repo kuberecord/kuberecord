@@ -16,7 +16,7 @@
 # because that is the real user path: Helm cannot label a namespace it creates, and
 # the chart deliberately never templates a password.
 image:
-  repository: example.com/kubestream
+  repository: example.com/kuberecord
   tag: v0.0.1
   pullPolicy: IfNotPresent
 

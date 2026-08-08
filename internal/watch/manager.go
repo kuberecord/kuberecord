@@ -215,7 +215,7 @@ type Options struct {
 	StopTimeout time.Duration
 }
 
-// WatchManager owns kubestream's data-plane watches: a pool of self-managed
+// WatchManager owns kuberecord's data-plane watches: a pool of self-managed
 // dynamic informers, level-triggered towards the desired-state registry, plus the
 // interest map that turns one informer's events into per-sink work keys.
 //

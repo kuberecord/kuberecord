@@ -15,7 +15,7 @@ kind: ClusterStreamRule
 metadata:
   name: quickstart
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: quickstart
 spec:
   resources:

@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package loadgen is kubestream's synthetic-churn load harness (Task 0.8,
+// Package loadgen is kuberecord's synthetic-churn load harness (Task 0.8,
 // extended into named scale profiles by Task 2.3). It drives realistic object
 // churn — create N objects across one or more kinds, then sustain M mutations/sec
 // with a configurable payload size and delete ratio — through the *real*
@@ -817,7 +817,7 @@ type runReport struct {
 func formatReport(p Profile, r runReport) string {
 	var b strings.Builder
 	cores := r.cpu.cores(r.churnElapsed)
-	fmt.Fprintf(&b, "\n===== kubestream load harness result =====\n")
+	fmt.Fprintf(&b, "\n===== kuberecord load harness result =====\n")
 	fmt.Fprintf(&b, "profile               : %s\n", p)
 	fmt.Fprintf(&b, "hardware              : %s/%s, %d logical CPUs, Go %s\n",
 		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())

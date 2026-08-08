@@ -5,9 +5,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "kubestream.fullname" . }}-metrics-auth-role
+  name: {{ include "kuberecord.fullname" . }}-metrics-auth-role
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - authentication.k8s.io
@@ -25,16 +25,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "kubestream.fullname" . }}-metrics-auth-rolebinding
+  name: {{ include "kuberecord.fullname" . }}-metrics-auth-rolebinding
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "kubestream.fullname" . }}-metrics-auth-role
+  name: {{ include "kuberecord.fullname" . }}-metrics-auth-role
 subjects:
 - kind: ServiceAccount
-  name: {{ include "kubestream.serviceAccountName" . }}
+  name: {{ include "kuberecord.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 ---
 # Granted to *scrapers*, not to the operator: bind it to whichever
@@ -44,9 +44,9 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "kubestream.fullname" . }}-metrics-reader
+  name: {{ include "kuberecord.fullname" . }}-metrics-reader
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 rules:
 - nonResourceURLs:
   - "/metrics"

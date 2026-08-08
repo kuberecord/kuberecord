@@ -1,4 +1,4 @@
-kubestream {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+kuberecord {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
 
 The operator boots healthy and idle: it streams nothing until a sink and a rule
 exist. Three steps from here.
@@ -65,4 +65,4 @@ this operator writes{{ if eq .Values.clusterID "local-kind-cluster" }} and is st
 something that identifies this cluster before it matters, because rows already
 written keep the old value{{ end }}.
 
-Metrics: {{ if .Values.metrics.enabled }}served on :{{ .Values.metrics.port }} over {{ if .Values.metrics.secure }}HTTPS, authenticated and authorized{{ else }}plain HTTP{{ end }}; bind a scraper to the ClusterRole {{ include "kubestream.fullname" . }}-metrics-reader.{{ else }}disabled (metrics.enabled=false).{{ end }}
+Metrics: {{ if .Values.metrics.enabled }}served on :{{ .Values.metrics.port }} over {{ if .Values.metrics.secure }}HTTPS, authenticated and authorized{{ else }}plain HTTP{{ end }}; bind a scraper to the ClusterRole {{ include "kuberecord.fullname" . }}-metrics-reader.{{ else }}disabled (metrics.enabled=false).{{ end }}

@@ -3,13 +3,13 @@ kind: ClickHouseSink
 metadata:
   name: default
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
   connection:
-    addr: clickhouse.kubestream-system.svc:9000
-    database: kubestream
-    username: kubestream
+    addr: clickhouse.kuberecord-system.svc:9000
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef:
       # namespace is omitted on purpose: it defaults to the operator's own
       # namespace, which is the only place the operator holds Secret read

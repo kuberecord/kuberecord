@@ -31,8 +31,8 @@ func validSink() *ClickHouseSink {
 		ObjectMeta: objectMeta(""),
 		Spec: ClickHouseSinkSpec{
 			Connection: ConnectionSpec{
-				Addr:                 "clickhouse.kubestream-system.svc:9000",
-				CredentialsSecretRef: SecretReference{Name: "kubestream-clickhouse"},
+				Addr:                 "clickhouse.kuberecord-system.svc:9000",
+				CredentialsSecretRef: SecretReference{Name: "kuberecord-clickhouse"},
 			},
 		},
 	}
@@ -207,7 +207,7 @@ func TestClickHouseSinkDefaults(t *testing.T) {
 		got   string
 		want  string
 	}{
-		{field: "spec.connection.database", got: got.Spec.Connection.Database, want: "kubestream"},
+		{field: "spec.connection.database", got: got.Spec.Connection.Database, want: "kuberecord"},
 		{field: "spec.connection.username", got: got.Spec.Connection.Username, want: "default"},
 		{field: "spec.connection.dialTimeout", got: durationString(got.Spec.Connection.DialTimeout), want: "5s"},
 		{field: "spec.connection.readTimeout", got: durationString(got.Spec.Connection.ReadTimeout), want: "10s"},

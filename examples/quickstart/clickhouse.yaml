@@ -8,7 +8,7 @@
 #     A real install gives ClickHouse a PersistentVolumeClaim (the chaos suite's
 #     fixture, test/chaos/manifests/, is the in-repo example of that shape).
 #   - There is one replica and no replication. ClickHouse's own clustering is out
-#     of scope here; kubestream talks to whatever address you give the sink.
+#     of scope here; kuberecord talks to whatever address you give the sink.
 #   - The password is committed in plain text below. It is `quickstart`, it is
 #     reachable only from inside this throwaway kind cluster, and
 #     `examples/quickstart/secret.yaml` carries the same value for the operator's
@@ -25,18 +25,18 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kubestream-quickstart
+  name: kuberecord-quickstart
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: quickstart
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: clickhouse-credentials
-  namespace: kubestream-quickstart
+  namespace: kuberecord-quickstart
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: quickstart
 type: Opaque
 stringData:
@@ -50,7 +50,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: clickhouse
-  namespace: kubestream-quickstart
+  namespace: kuberecord-quickstart
   labels:
     app: clickhouse
 spec:
@@ -85,9 +85,9 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: CLICKHOUSE_DB
-          value: kubestream
+          value: kuberecord
         - name: CLICKHOUSE_USER
-          value: kubestream
+          value: kuberecord
         - name: CLICKHOUSE_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -139,7 +139,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: clickhouse
-  namespace: kubestream-quickstart
+  namespace: kuberecord-quickstart
   labels:
     app: clickhouse
 spec:

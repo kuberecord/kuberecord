@@ -21,7 +21,7 @@ limitations under the License.
 //
 // These types are the operator's public UX and are validated entirely by CRD
 // structural schemas and CEL (`x-kubernetes-validations`) — never by an
-// admission webhook (D4), so kubestream installs with zero external
+// admission webhook (D4), so kuberecord installs with zero external
 // dependencies and no cert-manager. Every rule that a webhook would normally
 // enforce either lives on a field marker in this package or is explicitly
 // documented as reconciler-validated.

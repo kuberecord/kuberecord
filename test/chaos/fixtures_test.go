@@ -221,7 +221,7 @@ func awaitOperatorGone() {
 // would silently sum across sinks the day a scenario adds a second one.
 var sinkSeries = map[string]string{"sink": sinkName}
 
-// Metric names, fully qualified with the operator's "kubestream" namespace. Named
+// Metric names, fully qualified with the operator's "kuberecord" namespace. Named
 // constants because a typo in a metric name reads exactly like a metric sitting
 // at zero, which is the single most misleading way a chaos assertion can fail.
 const (

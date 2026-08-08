@@ -36,7 +36,7 @@ import (
 
 // managerName is the Deployment, ServiceAccount and metrics-Service prefix both
 // paths produce.
-const managerName = "kubestream-controller-manager"
+const managerName = "kuberecord-controller-manager"
 
 // kustomizeOnly are the two objects config/default ships and the chart does not,
 // each for a reason:
@@ -49,8 +49,8 @@ const managerName = "kubestream-controller-manager"
 //     release and echoed by `helm get values`, so the chart requires the user to
 //     create it (see the chart README).
 var kustomizeOnly = []string{
-	"Namespace/kubestream-system",
-	"Secret/kubestream-clickhouse-credentials",
+	"Namespace/kuberecord-system",
+	"Secret/kuberecord-clickhouse-credentials",
 }
 
 // TestRBACParityWithKustomize compares every Role, ClusterRole and binding the

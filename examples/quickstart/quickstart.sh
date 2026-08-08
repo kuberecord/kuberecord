@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# kubestream quickstart: from a fresh clone to rows in ClickHouse, on a laptop,
+# kuberecord quickstart: from a fresh clone to rows in ClickHouse, on a laptop,
 # in under ten minutes.
 #
 # Run it through the Makefile, which supplies the tool paths:
@@ -17,7 +17,7 @@
 #
 # Environment knobs, all optional:
 #
-#   QUICKSTART_CLUSTER=<name>       kind cluster name (default kubestream-quickstart)
+#   QUICKSTART_CLUSTER=<name>       kind cluster name (default kuberecord-quickstart)
 #   QUICKSTART_BUDGET_SECONDS=<n>   fail the run if it takes longer than n seconds
 #                                   (unset by default: a slow laptop is not a bug)
 #   QUICKSTART_ROW_TIMEOUT=<n>      seconds to wait for the first rows (default 180)
@@ -33,14 +33,14 @@ KUSTOMIZE="${KUSTOMIZE:-${REPO_ROOT}/bin/kustomize}"
 CONTAINER_TOOL="${CONTAINER_TOOL:-docker}"
 MAKE="${MAKE:-make}"
 
-CLUSTER="${QUICKSTART_CLUSTER:-kubestream-quickstart}"
+CLUSTER="${QUICKSTART_CLUSTER:-kuberecord-quickstart}"
 BUDGET="${QUICKSTART_BUDGET_SECONDS:-}"
 ROW_TIMEOUT="${QUICKSTART_ROW_TIMEOUT:-180}"
 
 # The image tag is fixed, not configurable: examples/quickstart/operator names it
 # too, and kustomize cannot read an environment variable. Two places, one value,
 # and a run that never rewrites a committed file.
-IMG="kubestream/quickstart:local"
+IMG="kuberecord/quickstart:local"
 CH_IMAGE="clickhouse/clickhouse-server:24.8"
 PAUSE_IMAGE="registry.k8s.io/pause:3.10"
 
@@ -51,14 +51,14 @@ PAUSE_IMAGE="registry.k8s.io/pause:3.10"
 # family of bare CH_* environment variables, removed with no compatibility shim,
 # and test/docs fails the build if one of those names reappears anywhere. Naming a
 # local shell variable after one would be confusing even where it is harmless.
-QS_CH_NAMESPACE="kubestream-quickstart"
-QS_CH_USER="kubestream"
+QS_CH_NAMESPACE="kuberecord-quickstart"
+QS_CH_USER="kuberecord"
 QS_CH_PASSWORD="quickstart"
-QS_CH_DATABASE="kubestream"
-OPERATOR_NAMESPACE="kubestream-system"
+QS_CH_DATABASE="kuberecord"
+OPERATOR_NAMESPACE="kuberecord-system"
 # Must match the CLUSTER_ID the quickstart overlay patches in. It is stamped on
 # every row, so every query below can name it.
-CLUSTER_ID="kubestream-quickstart"
+CLUSTER_ID="kuberecord-quickstart"
 
 log() { printf '\n\033[1m==> [%02d:%02d] %s\033[0m\n' $((SECONDS / 60)) $((SECONDS % 60)) "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -148,9 +148,9 @@ wait_for() { # predicate, want, timeout
 
 diagnose() {
 	printf '\n\033[1mLast 40 lines of the operator log:\033[0m\n' >&2
-	"${KUBECTL}" logs -n "${OPERATOR_NAMESPACE}" deploy/kubestream-controller-manager \
+	"${KUBECTL}" logs -n "${OPERATOR_NAMESPACE}" deploy/kuberecord-controller-manager \
 		--tail=40 >&2 2>/dev/null || printf '    (no operator pod to read)\n' >&2
-	printf '\n\033[1mkubestream custom resources:\033[0m\n' >&2
+	printf '\n\033[1mkuberecord custom resources:\033[0m\n' >&2
 	"${KUBECTL}" get clickhousesinks,clusterstreamrules -o wide >&2 2>/dev/null || true
 	printf '\nThe cluster is still up. Inspect it, then run: make quickstart-down\n' >&2
 }
@@ -206,7 +206,7 @@ sideload "${PAUSE_IMAGE}" >/dev/null 2>&1 ||
 # controller that serves it.
 log "Installing the CRDs and the operator"
 "${KUSTOMIZE}" build "${SCRIPT_DIR}/operator" | "${KUBECTL}" apply --server-side -f -
-"${KUBECTL}" -n "${OPERATOR_NAMESPACE}" rollout status deploy/kubestream-controller-manager --timeout=5m
+"${KUBECTL}" -n "${OPERATOR_NAMESPACE}" rollout status deploy/kuberecord-controller-manager --timeout=5m
 note "The operator is running and completely idle: no sink, no rules, nothing streamed."
 
 ##
@@ -344,7 +344,7 @@ ch "SELECT ts, action, api_group, kind, namespace, rule_ref
 ##
 cat <<EOF
 
-$(printf '\033[1;32m%s\033[0m' "kubestream is streaming. ${rows} rows in ${ELAPSED}s.")
+$(printf '\033[1;32m%s\033[0m' "kuberecord is streaming. ${rows} rows in ${ELAPSED}s.")
 
 Query it yourself — port-forward ClickHouse, then connect:
 
@@ -362,7 +362,7 @@ Or without a local client, straight through the pod:
 Your first query — everything that has happened, newest first:
 
   SELECT ts, event_type, kind, namespace, name, actors
-  FROM kubestream.resource_states
+  FROM kuberecord.resource_states
   WHERE cluster_id = '${CLUSTER_ID}'
   ORDER BY ts DESC
   LIMIT 20;

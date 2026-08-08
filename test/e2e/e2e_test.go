@@ -30,13 +30,13 @@ import (
 )
 
 // serviceAccountName created for the project
-const serviceAccountName = "kubestream-controller-manager"
+const serviceAccountName = "kuberecord-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "kubestream-controller-manager-metrics-service"
+const metricsServiceName = "kuberecord-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "kubestream-metrics-binding"
+const metricsRoleBindingName = "kuberecord-metrics-binding"
 
 // This container covers the manager as a *process*: that it runs, and that it
 // serves its metrics endpoint under authn/authz. The operator's actual behaviour
@@ -106,7 +106,7 @@ var _ = Describe("Manager", Ordered, Serial, func() {
 	It("should ensure the metrics endpoint is serving metrics", func() {
 		By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 		out, err := kubectl("create", "clusterrolebinding", metricsRoleBindingName,
-			"--clusterrole=kubestream-metrics-reader",
+			"--clusterrole=kuberecord-metrics-reader",
 			fmt.Sprintf("--serviceaccount=%s:%s", operatorNamespace, serviceAccountName),
 		)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding: %s", out)

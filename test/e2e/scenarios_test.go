@@ -77,7 +77,7 @@ const (
 	rebornDeployment = "reborn"
 
 	nodeRule            = "node-inventory"
-	nodeWatcherRole     = "kubestream-e2e-watcher-nodes"
+	nodeWatcherRole     = "kuberecord-e2e-watcher-nodes"
 	nodeDeniedNamespace = "node-denied"
 	nodeDeniedRule      = "namespaced-nodes"
 	nodeLabelKey        = "kuberecord.io/e2e"

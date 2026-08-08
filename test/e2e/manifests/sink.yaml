@@ -13,15 +13,15 @@ kind: ClickHouseSink
 metadata:
   name: default
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: e2e-fixture
 spec:
   connection:
-    addr: clickhouse.kubestream-e2e-clickhouse.svc:9000
-    database: kubestream
-    username: kubestream
+    addr: clickhouse.kuberecord-e2e-clickhouse.svc:9000
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef:
-      name: kubestream-clickhouse-credentials
+      name: kuberecord-clickhouse-credentials
   writer:
     # Deliberately small and eager compared with the shipped defaults: the
     # suite's assertions are per-row, so a batch that waits a second for a

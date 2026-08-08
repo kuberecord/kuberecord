@@ -27,9 +27,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "kubestream.fullname" . }}-watcher
+  name: {{ include "kuberecord.fullname" . }}-watcher
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 aggregationRule:
   clusterRoleSelectors:
   - matchLabels:
@@ -41,15 +41,15 @@ rules: []
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "kubestream.fullname" . }}-watcher-rolebinding
+  name: {{ include "kuberecord.fullname" . }}-watcher-rolebinding
   labels:
-    {{- include "kubestream.labels" . | nindent 4 }}
+    {{- include "kuberecord.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "kubestream.fullname" . }}-watcher
+  name: {{ include "kuberecord.fullname" . }}-watcher
 subjects:
 - kind: ServiceAccount
-  name: {{ include "kubestream.serviceAccountName" . }}
+  name: {{ include "kuberecord.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 {{- end }}

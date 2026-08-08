@@ -38,7 +38,7 @@ const (
 )
 
 // aggregateLabel is the label whose presence on a ClusterRole makes the
-// controller-manager fold that role's rules into kubestream-watcher.
+// controller-manager fold that role's rules into kuberecord-watcher.
 const aggregateLabel = "kuberecord.io/aggregate-to-watcher"
 
 // The RBAC kind names, spelled once each: the difference between `Role` and
@@ -323,8 +323,8 @@ func TestSecretRightsAreNamespaceScoped(t *testing.T) {
 }
 
 // assertBoundToOperatorSA checks that a binding's only subject is the operator's
-// ServiceAccount. A stray second subject (a Group, say) would hand kubestream's
-// rights to something that is not kubestream.
+// ServiceAccount. A stray second subject (a Group, say) would hand kuberecord's
+// rights to something that is not kuberecord.
 func assertBoundToOperatorSA(t *testing.T, binding rbacObject) {
 	t.Helper()
 
@@ -350,11 +350,11 @@ func TestWatcherRoleAggregatesByLabel(t *testing.T) {
 	role := findObject(t, objs, kindClusterRole, "watcher")
 
 	if len(role.Rules) != 0 {
-		t.Errorf("kubestream-watcher declares %d rule(s) of its own; the controller-manager "+
+		t.Errorf("kuberecord-watcher declares %d rule(s) of its own; the controller-manager "+
 			"overwrites them from the aggregation selector", len(role.Rules))
 	}
 	if role.AggregationRule == nil || len(role.AggregationRule.ClusterRoleSelectors) != 1 {
-		t.Fatalf("kubestream-watcher must carry exactly one clusterRoleSelector; got %+v",
+		t.Fatalf("kuberecord-watcher must carry exactly one clusterRoleSelector; got %+v",
 			role.AggregationRule)
 	}
 
@@ -422,7 +422,7 @@ func TestPresetsAreReadOnlyAndLabelled(t *testing.T) {
 			}
 			if role.AggregationRule != nil {
 				t.Error("preset declares an aggregationRule; an aggregated role's rules are " +
-					"server-owned, so its contents would never reach kubestream-watcher")
+					"server-owned, so its contents would never reach kuberecord-watcher")
 			}
 			if len(role.Rules) == 0 {
 				t.Fatal("preset grants nothing")
@@ -515,7 +515,7 @@ func TestRBACDocsCarryTheFlatteningCaveat(t *testing.T) {
 		"not shipped",
 		// The other three things the model is unusable without.
 		aggregateLabel,
-		"kubestream-watcher",
+		"kuberecord-watcher",
 		"No self-escalation",
 	}
 	for _, want := range required {

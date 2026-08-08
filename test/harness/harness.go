@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package harness is the cluster-side vocabulary kubestream's acceptance suites
+// Package harness is the cluster-side vocabulary kuberecord's acceptance suites
 // are written in: thin kubectl wrappers, ClickHouse querying, status-condition
 // and pod inspection, and the manifests a scenario applies.
 //

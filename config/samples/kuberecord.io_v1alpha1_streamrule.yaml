@@ -4,7 +4,7 @@ metadata:
   name: team-payments-workloads
   namespace: default
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
   # sinkRef is immutable: to move this rule to another sink, delete and

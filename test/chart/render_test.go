@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package chart holds the Helm chart's template tests (Task 2.4).
 //
-// They render deploy/charts/kubestream with `helm template` and assert on the
+// They render deploy/charts/kuberecord with `helm template` and assert on the
 // objects that come out — which values add or remove which object, and above all
 // that the chart and `kustomize build config/default` install *the same
 // operator*. That last claim is what lets the Phase 1 acceptance suite run
@@ -48,11 +48,11 @@ import (
 const (
 	// chartRelease is the release name every test renders with. It is the name the
 	// documented install uses, and it is load-bearing: because it matches the
-	// chart name, the fullname helper collapses to plain "kubestream" and every
+	// chart name, the fullname helper collapses to plain "kuberecord" and every
 	// object comes out named exactly as the kustomize install names it.
-	chartRelease = "kubestream"
+	chartRelease = "kuberecord"
 	// chartNamespace is where the operator is installed, matching config/default.
-	chartNamespace = "kubestream-system"
+	chartNamespace = "kuberecord-system"
 	// renderKubeVersion is the Kubernetes version handed to `helm template`.
 	// Without a cluster to ask, Helm assumes a very old version and refuses the
 	// chart's own `kubeVersion` floor, so a value has to be supplied; any release
@@ -62,7 +62,7 @@ const (
 	renderKubeVersion = "1.35.0"
 
 	// The paths the chart's generated copies are synced from.
-	chartDir      = "deploy/charts/kubestream"
+	chartDir      = "deploy/charts/kuberecord"
 	configCRDDir  = "config/crd/bases"
 	configPresets = "config/rbac/presets"
 )

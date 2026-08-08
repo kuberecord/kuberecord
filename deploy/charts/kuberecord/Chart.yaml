@@ -1,5 +1,5 @@
 apiVersion: v2
-name: kubestream
+name: kuberecord
 description: |
   Kubernetes-native operator that streams cluster state changes to ClickHouse
   for audit, GitOps forensics and change intelligence.

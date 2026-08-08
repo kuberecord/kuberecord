@@ -75,7 +75,7 @@ func TestSinkCredentialResolution(t *testing.T) {
 			secret: func(namespace, name string) *corev1.Secret {
 				return &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-					Data:       map[string][]byte{"user": []byte("kubestream")},
+					Data:       map[string][]byte{"user": []byte("kuberecord")},
 				}
 			},
 			wantStatus: metav1.ConditionFalse,

@@ -104,7 +104,7 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 
 	if err := setupOperator(mgr, operatorConfig{
 		clusterID:         "envtest-cluster",
-		operatorNamespace: "kubestream-system",
+		operatorNamespace: "kuberecord-system",
 		pipelineWorkers:   2,
 		writer: writerTuning{
 			queueSize: 16, workers: 1, batchMaxRows: 8,

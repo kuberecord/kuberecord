@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package docs holds the checks that keep kubestream's user-facing instructions
+// Package docs holds the checks that keep kuberecord's user-facing instructions
 // honest (Task 3.4).
 //
 // Documentation is the one artifact in this repository that nothing compiles: a
@@ -96,7 +96,7 @@ var bannedConfig = []struct {
 // somebody makes on purpose.
 var allowedToNameBannedConfig = map[string]string{
 	"CHANGELOG.md":           "the removal record and its migration table",
-	"kubestream-backlog.md":  "the roadmap that specified the removal",
+	"kuberecord-backlog.md":  "the roadmap that specified the removal",
 	"CLAUDE.md":              "the contributor guide, where D5 records what was removed",
 	"task.txt":               "the task brief handed to the agent",
 	"test/docs/docs_test.go": "this test",
@@ -400,7 +400,7 @@ func publishedPages(t *testing.T) []string {
 		"README.md",
 		"CHANGELOG.md",
 		"examples/quickstart/README.md",
-		"deploy/charts/kubestream/README.md",
+		"deploy/charts/kuberecord/README.md",
 	}
 	entries, err := os.ReadDir(repoPath("docs"))
 	if err != nil {
