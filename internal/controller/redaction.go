@@ -20,8 +20,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // canonicalRedaction projects a sink's redaction floor and a rule's additions

@@ -26,7 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kubestream/test/utils"
+	"github.com/yelzhy/kuberecord/test/utils"
 )
 
 // SideloadImage puts a published image into the kind node, pulling it to the

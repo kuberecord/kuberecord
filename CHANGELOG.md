@@ -531,5 +531,5 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/yelzhy/kubestream/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yelzhy/kubestream/releases/tag/v0.1.0
+[Unreleased]: https://github.com/yelzhy/kuberecord/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yelzhy/kuberecord/releases/tag/v0.1.0

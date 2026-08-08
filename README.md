@@ -82,7 +82,7 @@ From a fresh clone to rows you can query, on a laptop, in under ten minutes.
 You need Docker, [kind] and `kubectl`.
 
 ```sh
-git clone https://github.com/yelzhy/kubestream && cd kubestream
+git clone https://github.com/yelzhy/kuberecord && cd kubestream
 make quickstart
 ```
 
@@ -287,11 +287,11 @@ kubectl apply -f dist/install.yaml
 make deploy IMG=<some-registry>/kubestream:tag
 ```
 
-Both artifacts are also attached to every [release](https://github.com/yelzhy/kubestream/releases),
+Both artifacts are also attached to every [release](https://github.com/yelzhy/kuberecord/releases),
 with checksums, if you would rather install a tag than a checkout:
 
 ```sh
-kubectl apply -f https://github.com/yelzhy/kubestream/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.1.0/install.yaml
 ```
 
 The operator is pre-1.0 — while it is `v0.x` a minor bump may break, and every

@@ -65,7 +65,7 @@ spec:
               slower than the cluster is changing. Check write latency and the retry
               rate on the operator-health dashboard; if the backend is healthy, raise
               spec.writer.workers or spec.writer.queueSize on the ClickHouseSink.
-            runbook_url: https://github.com/yelzhy/kubestream/blob/main/docs/OPERATING.md#queue-saturation
+            runbook_url: https://github.com/yelzhy/kuberecord/blob/main/docs/OPERATING.md#queue-saturation
 
         # Why > 0: a failed write is not a retry — the writer has already exhausted
         # its per-job retry budget by the time the job settles as failed, and the row
@@ -90,7 +90,7 @@ spec:
               minutes ({{ $value | printf "%.2f" }}/s). Each one exhausted its retry
               budget, so those rows are not in ClickHouse and the audit trail has gaps.
               Check the ClickHouseSink's Ready condition and the operator logs.
-            runbook_url: https://github.com/yelzhy/kubestream/blob/main/docs/OPERATING.md#failed-writes
+            runbook_url: https://github.com/yelzhy/kuberecord/blob/main/docs/OPERATING.md#failed-writes
 
         # Why > 0: a rule that is not Ready is not streaming what its author asked
         # for, and by design the operator degrades that one rule rather than
@@ -120,7 +120,7 @@ spec:
               `kubectl get streamrules,clusterstreamrules -A` and read the conditions
               on the ones that are not Ready — the usual causes are a missing RBAC
               preset, a kind that does not resolve, or a sink policy denial.
-            runbook_url: https://github.com/yelzhy/kubestream/blob/main/docs/OPERATING.md#rules-not-ready
+            runbook_url: https://github.com/yelzhy/kuberecord/blob/main/docs/OPERATING.md#rules-not-ready
 
         # Why > 0: an enqueue timeout means the queue stayed full for the whole
         # enqueue timeout and the pipeline gave up handing that item over. Nothing is
@@ -148,4 +148,4 @@ spec:
               pipeline workers are requeueing instead of making progress and the data
               in ClickHouse is falling behind the cluster. Treat this as the escalation
               of KubestreamWriteQueueSaturated.
-            runbook_url: https://github.com/yelzhy/kubestream/blob/main/docs/OPERATING.md#enqueue-timeouts
+            runbook_url: https://github.com/yelzhy/kuberecord/blob/main/docs/OPERATING.md#enqueue-timeouts

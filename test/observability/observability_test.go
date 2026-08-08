@@ -44,8 +44,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"sigs.k8s.io/yaml"
 
-	"github.com/yelzhy/kubestream/internal/controller"
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/controller"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // Paths are resolved relative to this file rather than to the working directory,

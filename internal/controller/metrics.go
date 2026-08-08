@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
 )
 
 // metricsNamespace prefixes the control plane's metric names with "kubestream_",
