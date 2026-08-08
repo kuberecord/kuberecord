@@ -67,7 +67,7 @@ who ran the pre-CRD code out of `main`.
   **both** API groups, so a rule may name either spelling without a partial grant.
   It is **not** enabled by default: Events are usually the highest-volume kind in
   a cluster, so the storage bill belongs to somebody who asked for it.
-- **`kubestream_pipeline_dropped_total{reason="ephemeral_delete"}`** — the new
+- **`kuberecord_pipeline_dropped_total{reason="ephemeral_delete"}`** — the new
   drop reason, counting Events whose TTL expired. It is the one drop reason with
   a healthy nonzero rate, and its shape is the cheapest available proxy for the
   Event churn the operator is absorbing.
@@ -208,7 +208,7 @@ who ran the pre-CRD code out of `main`.
   rate for 5m — each carrying the reasoning for its threshold in a comment above
   it. [`docs/OPERATING.md`](docs/OPERATING.md) is the page that ties them together:
   every metric, every panel, and what to actually do when an alert fires.
-- **`kubestream_rules{condition,status}`** — a new gauge from the rule
+- **`kuberecord_rules{condition,status}`** — a new gauge from the rule
   reconcilers, counting how many `StreamRule`s and `ClusterStreamRule`s hold each
   condition at each status. It is deliberately identity-free (it counts rules, it
   does not name them: naming would make series cardinality a function of how many
@@ -220,7 +220,7 @@ who ran the pre-CRD code out of `main`.
 - `make verify-observability` validates both artifacts against JSON Schemas
   shipped beside them, runs `promtool check rules` over the `PrometheusRule`'s
   `.spec` (promtool is bootstrapped into `bin/` from the pinned Prometheus
-  release), and cross-checks every `kubestream_*` metric either file queries
+  release), and cross-checks every `kuberecord_*` metric either file queries
   against the set the operator's collectors actually declare — so renaming a
   metric fails the build instead of quietly emptying a panel. The schema and
   cross-check halves run under plain `make test`; a new `Observability` workflow

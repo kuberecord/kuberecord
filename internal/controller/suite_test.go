@@ -169,7 +169,7 @@ type harness struct {
 	// Parker bridges "a sink is gone" back onto the rule reconcilers.
 	Parker *Parker
 
-	// RuleMetrics is the kubestream_rules gauge both rule reconcilers of this
+	// RuleMetrics is the kuberecord_rules gauge both rule reconcilers of this
 	// harness count into, on a registry private to the test. The process-wide
 	// instance would work too, but its counts would then span every test in the
 	// package running against the same apiserver.
@@ -495,7 +495,7 @@ func (h *harness) waitForTargets(ruleKey string, want []string) {
 	})
 }
 
-// waitForReadyGauge blocks until kubestream_rules{condition="Ready",status} reaches
+// waitForReadyGauge blocks until kuberecord_rules{condition="Ready",status} reaches
 // want. It polls rather than reading once because the gauge is published by a
 // reconcile that has to happen first, exactly like every other assertion here.
 //
@@ -505,7 +505,7 @@ func (h *harness) waitForTargets(ruleKey string, want []string) {
 // metrics_test.go, where it needs no apiserver.
 func (h *harness) waitForReadyGauge(status string, want float64) {
 	h.t.Helper()
-	series := fmt.Sprintf("kubestream_rules{condition=%q,status=%q}", v1alpha1.ConditionReady, status)
+	series := fmt.Sprintf("kuberecord_rules{condition=%q,status=%q}", v1alpha1.ConditionReady, status)
 	waitFor(h.t, fmt.Sprintf("%s = %v", series, want), func() (bool, string) {
 		got := testutil.ToFloat64(h.RuleMetrics.rules.WithLabelValues(v1alpha1.ConditionReady, status))
 		return got == want, fmt.Sprintf("%v", got)

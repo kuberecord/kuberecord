@@ -225,12 +225,12 @@ var sinkSeries = map[string]string{"sink": sinkName}
 // constants because a typo in a metric name reads exactly like a metric sitting
 // at zero, which is the single most misleading way a chaos assertion can fail.
 const (
-	metricWrites          = "kubestream_writes_total"
-	metricEnqueueTimeouts = "kubestream_enqueue_timeouts_total"
-	metricEnqueueBlockCnt = "kubestream_enqueue_block_seconds_count"
-	metricEnqueueBlockBkt = "kubestream_enqueue_block_seconds_bucket"
-	metricQueueDepth      = "kubestream_write_queue_depth"
-	metricSafeMode        = "kubestream_safe_mode"
+	metricWrites          = "kuberecord_writes_total"
+	metricEnqueueTimeouts = "kuberecord_enqueue_timeouts_total"
+	metricEnqueueBlockCnt = "kuberecord_enqueue_block_seconds_count"
+	metricEnqueueBlockBkt = "kuberecord_enqueue_block_seconds_bucket"
+	metricQueueDepth      = "kuberecord_write_queue_depth"
+	metricSafeMode        = "kuberecord_safe_mode"
 )
 
 // metricSum reads one counter or gauge family from the live endpoint, summed over

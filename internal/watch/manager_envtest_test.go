@@ -367,7 +367,7 @@ func hashcacheEntries(t *testing.T, reg *prometheus.Registry) float64 {
 		t.Fatalf("gathering pipeline metrics: %v", err)
 	}
 	for _, family := range families {
-		if family.GetName() != "kubestream_hashcache_entries" {
+		if family.GetName() != "kuberecord_hashcache_entries" {
 			continue
 		}
 		for _, metric := range family.GetMetric() {

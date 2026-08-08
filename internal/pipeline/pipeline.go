@@ -65,7 +65,7 @@ import (
 const DefaultWorkers = 8
 
 // queueName labels this pipeline's queue in client-go's workqueue metrics.
-const queueName = "kubestream_pipeline"
+const queueName = "kuberecord_pipeline"
 
 // unavailableSinkLogInterval bounds how often a missing sink is logged at Error
 // level. A sink that is deleted or mid-recycle can affect every queued key at

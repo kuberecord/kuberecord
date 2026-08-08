@@ -40,7 +40,7 @@ import (
 // other's fixtures nondeterministically. A private database also makes the
 // frozen-column assertion below exact — nothing but the shipped DDL has ever run
 // against these tables.
-const testDatabase = "kubestream_queries_it"
+const testDatabase = "kuberecord_queries_it"
 
 // demoCluster is the cluster_id every fixture row carries. It matches
 // demoVariableValues, which is what makes "the query ran" and "the query returned
