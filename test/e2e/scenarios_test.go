@@ -80,7 +80,7 @@ const (
 	nodeWatcherRole     = "kubestream-e2e-watcher-nodes"
 	nodeDeniedNamespace = "node-denied"
 	nodeDeniedRule      = "namespaced-nodes"
-	nodeLabelKey        = "kubestream.io/e2e"
+	nodeLabelKey        = "kuberecord.io/e2e"
 	nodeLabelValue      = "cluster-scoped-scenario"
 )
 

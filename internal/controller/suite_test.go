@@ -71,7 +71,7 @@ var (
 	// testCfg is its rest config, for tests that build their own clients.
 	testCfg *rest.Config
 
-	// testScheme carries the core types plus kubestream.io/v1alpha1.
+	// testScheme carries the core types plus kuberecord.io/v1alpha1.
 	testScheme = runtime.NewScheme()
 )
 
@@ -110,7 +110,7 @@ func runTestsWithEnvtest(m *testing.M) (code int) {
 		return 1
 	}
 	if err := v1alpha1.AddToScheme(testScheme); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to register kubestream.io/v1alpha1: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to register kuberecord.io/v1alpha1: %v\n", err)
 		return 1
 	}
 

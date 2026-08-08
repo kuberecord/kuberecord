@@ -45,7 +45,7 @@ exist. Three steps from here.
 {{- end }}
 
      kubectl apply -f - <<'EOF'
-     apiVersion: kubestream.io/v1alpha1
+     apiVersion: kuberecord.io/v1alpha1
      kind: StreamRule
      metadata:
        name: my-workloads

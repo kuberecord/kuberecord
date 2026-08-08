@@ -1,4 +1,4 @@
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: default

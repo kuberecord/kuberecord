@@ -67,7 +67,7 @@ spec:
         name: manager
         # Where ClickHouse lives is no longer configured here: it belongs to the
         # ClickHouseSink CR and the Secret it references (see
-        # config/samples/kubestream.io_v1alpha1_clickhousesink.yaml). What is left
+        # config/samples/kuberecord.io_v1alpha1_clickhousesink.yaml). What is left
         # is the identity of *this operator instance*.
         env:
         # TODO(user): CLUSTER_ID is a local/dev placeholder. It is stamped on

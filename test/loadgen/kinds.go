@@ -38,8 +38,8 @@ import (
 // which normalizeObject strips before hashing. That is the point: filler that
 // the hash ignored would measure the wrong thing.
 const (
-	revisionAnnotation = "loadgen.kubestream.io/revision"
-	payloadAnnotation  = "loadgen.kubestream.io/payload"
+	revisionAnnotation = "loadgen.kuberecord.io/revision"
+	payloadAnnotation  = "loadgen.kuberecord.io/payload"
 )
 
 // churnKind is one kind the harness can create, mutate and delete.

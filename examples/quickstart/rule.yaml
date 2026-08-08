@@ -4,13 +4,13 @@
 # type an operator's owner writes: it can name cluster-scoped kinds and it can
 # select namespaces. A team that wants to opt only its own namespace in — without
 # holding cluster-level privileges — writes a StreamRule instead; see
-# config/samples/kubestream.io_v1alpha1_streamrule.yaml.
+# config/samples/kuberecord.io_v1alpha1_streamrule.yaml.
 #
 # `sinkRef` is omitted: it defaults to `default`, which is the sink next to this
 # file. It is also immutable — moving a rule to another sink is delete and
 # recreate, because re-pointing a live rule would strand the dedup and diff
 # baselines the pipeline built for every object in scope.
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClusterStreamRule
 metadata:
   name: quickstart
@@ -35,4 +35,4 @@ spec:
   # including ones created later — no restart, the watch pool follows the rule.
   namespaceSelector:
     matchLabels:
-      kubestream.io/quickstart: "true"
+      kuberecord.io/quickstart: "true"

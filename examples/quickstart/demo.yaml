@@ -14,7 +14,7 @@ metadata:
   name: quickstart-demo
   labels:
     # The label examples/quickstart/rule.yaml's namespaceSelector matches.
-    kubestream.io/quickstart: "true"
+    kuberecord.io/quickstart: "true"
     app.kubernetes.io/name: kubestream
     app.kubernetes.io/component: quickstart
 ---

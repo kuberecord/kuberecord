@@ -27,4 +27,4 @@ annotations:
   # The CRDs live in crds/ per Helm convention, which means Helm installs them
   # but never upgrades or deletes them. Declared here so the constraint is
   # visible to anyone reading the chart metadata rather than only its README.
-  kubestream.io/crd-lifecycle: install-only
+  kuberecord.io/crd-lifecycle: install-only

@@ -8,7 +8,7 @@
 # operator's own namespace, the only place the operator holds Secret read rights
 # (Task 1.9). The Secret it names is the one `config/manager` ships, so the
 # suite proves the shipped credential path works rather than inventing one.
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: default

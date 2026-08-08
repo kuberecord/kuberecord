@@ -1,4 +1,4 @@
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
   name: team-payments-workloads
@@ -21,7 +21,7 @@ spec:
     # effect without restarting the shared informer.
     labelSelector:
       matchLabels:
-        kubestream.io/audit: "true"
+        kuberecord.io/audit: "true"
   # Added to the sink's own redaction floor — a rule can add paths, never remove
   # them. A path matching nothing in a given object is a silent no-op, so one
   # entry can cover a mixed resources list.

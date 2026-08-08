@@ -24,7 +24,7 @@
 #     an assertion's patience.
 #   - enqueueTimeout: 2s. The saturation scenario asserts that no enqueue ever
 #     blocked longer than this, so it is the value the histogram is read against.
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: default

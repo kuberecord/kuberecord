@@ -47,7 +47,7 @@ func resourcesYAML(resources []RuleResource, indent string) string {
 // purpose: it defaults to "default", which is the sink both suites install, and
 // spelling it would only hide that the default works.
 func StreamRuleYAML(namespace, name string, resources []RuleResource) string {
-	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
   name: %s
@@ -87,7 +87,7 @@ func redactionYAML(entries []RedactionEntry, indent string) string {
 // manifests to the ones they rendered before redaction existed.
 func RedactingStreamRuleYAML(namespace, name string, resources []RuleResource,
 	redaction []RedactionEntry) string {
-	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
   name: %s
@@ -101,7 +101,7 @@ spec:
 // ClusterStreamRuleYAML renders a cluster-scoped ClusterStreamRule with no
 // namespaceSelector, i.e. one all-namespaces target per named resource.
 func ClusterStreamRuleYAML(name string, resources []RuleResource) string {
-	return fmt.Sprintf(`apiVersion: kubestream.io/v1alpha1
+	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: ClusterStreamRule
 metadata:
   name: %s
@@ -150,7 +150,7 @@ metadata:
   namespace: %s
 spec:
   rules:
-  - host: %s.e2e.kubestream.io
+  - host: %s.e2e.kuberecord.io
     http:
       paths:
       - path: /

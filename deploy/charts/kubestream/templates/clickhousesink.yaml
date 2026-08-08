@@ -6,7 +6,7 @@
 # cluster, and a sink is a property of that cluster rather than of a namespace.
 # Fields left unset in `defaultSink` are omitted here rather than spelled with a
 # copy of their default, so the CRD's own defaults — and only those — apply.
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: {{ .Values.defaultSink.name }}
