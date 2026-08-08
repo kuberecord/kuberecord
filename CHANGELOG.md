@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to kubestream are recorded here. The format is
+All notable changes to kuberecord are recorded here. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 The project carries three version numbers that move independently — the
@@ -16,7 +16,52 @@ than a summary of them.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The project is renamed `kubestream` → `kuberecord`.** Nothing had been
+  tagged, so there is no released version under the old name and no
+  compatibility shim for it: the old names are gone rather than deprecated
+  (D5). Everything below **breaks anyone running from `main`**.
+
+  - **CRD API group `kubestream.io` → `kuberecord.io`** (breaking). Every
+    resource is now `apiVersion: kuberecord.io/v1alpha1`, and the CRDs
+    themselves are `clickhousesinks.kuberecord.io`,
+    `streamrules.kuberecord.io` and `clusterstreamrules.kuberecord.io`.
+    **The old CRDs and every CR under them must be deleted before installing
+    the renamed build** — a group rename is not an in-place upgrade, the two
+    groups are unrelated types to the API server, and leaving the old CRDs
+    installed keeps their controllers' objects around with nothing reconciling
+    them. Re-create the CRs under the new group afterwards.
+  - **Prometheus metric namespace `kubestream_` → `kuberecord_`** (breaking).
+    Every series is renamed; dashboards, recording rules and alerts that name
+    the old prefix stop matching. The shipped Grafana dashboards and
+    `deploy/prometheus/alerts.yaml` are updated in step.
+  - **Container image `ghcr.io/yelzhy/kubestream` →
+    `ghcr.io/yelzhy/kuberecord`** (breaking). No tags were ever pushed under
+    the old path.
+  - Go module path `github.com/yelzhy/kubestream` →
+    `github.com/yelzhy/kuberecord`, matching the renamed GitHub repository.
+  - Helm chart `kubestream` → `kuberecord`, and the default release namespace
+    `kubestream-system` → `kuberecord-system`. Installed object names follow:
+    `kuberecord-controller-manager`, `kuberecord-watcher`, and the service
+    accounts and bindings beside them. Uninstall the old release rather than
+    upgrading it — the renamed objects will not adopt the old ones.
+  - The RBAC aggregation label
+    `kubestream.io/aggregate-to-watcher` → `kuberecord.io/aggregate-to-watcher`.
+    Any ClusterRole you wrote yourself to grant the operator extra watch
+    rights must be relabelled, or it silently stops aggregating.
+  - **Default `spec.connection.database` `kubestream` → `kuberecord`**
+    (breaking). To keep writing to an existing database, set
+    `spec.connection.database: kubestream` explicitly on the `ClickHouseSink`.
+  - The process-internal actors annotation is now
+    `internal.kuberecord.io/actors`. It is stripped before hashing and never
+    persisted, so this changes no stored row and no content hash.
+
+  **The ClickHouse schema is unchanged.** Schema v1 stays frozen: same table
+  names, columns, engines, `ORDER BY` tuples and partitioning. Object content
+  hashing is unchanged too, so a renamed operator pointed at an existing
+  database warms from it and de-duplicates as before rather than rewriting
+  every row.
 
 ## [0.1.0] - 2026-08-03
 
@@ -40,7 +85,7 @@ who ran the pre-CRD code out of `main`.
   kind, and each exists to keep one specific falsehood out of the audit trail:
   - **Full state on every row, never a diff.** The API server *updates* an Event
     in place to bump `count`, and that update is an ordinary `Modified` for
-    kubestream — the case naive exporters drop, because they treat an Event as
+    kuberecord — the case naive exporters drop, because they treat an Event as
     write-once. Carrying the whole Event means a `count`, a `message` or an
     `involvedObject` is readable straight off a row with no diff chain to replay.
     Hash dedup still runs, so a resync that changes nothing writes nothing, and
@@ -115,9 +160,9 @@ who ran the pre-CRD code out of `main`.
   cannot resurface as a patch operation in a `diff` and cannot be ground out of
   the hash column by an attacker testing candidates. The direct consequence is
   that two states of an object differing **only** in a redacted value are
-  indistinguishable to kubestream: they hash identically and the second one
+  indistinguishable to kuberecord: they hash identically and the second one
   deduplicates, writing no row at all. The cost of that is stated in
-  [`docs/SCHEMA.md`](docs/SCHEMA.md#redaction) — kubestream cannot report *that*
+  [`docs/SCHEMA.md`](docs/SCHEMA.md#redaction) — kuberecord cannot report *that*
   a redacted value changed.
   - The two fields are **additive in every direction**. A sink's policy is a
     floor its owner sets without reviewing every rule written against it, a rule
@@ -183,7 +228,7 @@ who ran the pre-CRD code out of `main`.
     one. `hack/changelog-section.sh` is the same script the gate and a maintainer
     run, so "will this tag release?" is answerable before tagging.
   - **One immutable image tag, and no floating `latest`.** Both install artifacts
-    pin `ghcr.io/yelzhy/kubestream:vX.Y.Z` exactly, so what a cluster runs is
+    pin `ghcr.io/yelzhy/kuberecord:vX.Y.Z` exactly, so what a cluster runs is
     decided by the tag somebody chose rather than by whatever moved last. For a
     non-prerelease tag the attached `install.yaml` is byte-identical to the
     committed `dist/install.yaml`, which makes the artifact a stranger downloads
@@ -229,7 +274,7 @@ who ran the pre-CRD code out of `main`.
   subset written for this repository — a lint-grade check, documented as such in
   `docs/OPERATING.md`.
 
-- **A Helm chart** (`deploy/charts/kubestream`) and a **committed, versioned
+- **A Helm chart** (`deploy/charts/kuberecord`) and a **committed, versioned
   `dist/install.yaml`**, alongside the existing kustomize path. All three install
   *the same operator*: the chart renders the same object names as
   `kustomize build config/default`, and `test/chart` asserts that object by
@@ -248,7 +293,7 @@ who ran the pre-CRD code out of `main`.
   templates a Secret — a password given as a value would live in the release's
   stored manifest and in every `helm get values` — so sink credentials remain the
   installer's to create. Every value is documented in
-  `deploy/charts/kubestream/README.md`.
+  `deploy/charts/kuberecord/README.md`.
   The chart's `crds/` and `files/presets/` are generated copies of
   `config/crd/bases/` and `config/rbac/presets/` (Helm requires the first inside
   the chart; the preset templates read the second at render time).
