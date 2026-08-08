@@ -29,8 +29,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/plan"
 )
 
 // bogusGVK is a kind no cluster in these tests serves, so a target naming it is

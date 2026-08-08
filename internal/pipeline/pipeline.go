@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pipeline is kubestream's data plane: a client-go workqueue drained by
+// Package pipeline is kuberecord's data plane: a client-go workqueue drained by
 // a pool of workers that run the normalize → hash → dedup → diff →
 // version-gated-commit machinery for every observed object change.
 //
@@ -48,7 +48,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // DefaultWorkers is the shipped worker count: the number of goroutines draining
@@ -65,7 +65,7 @@ import (
 const DefaultWorkers = 8
 
 // queueName labels this pipeline's queue in client-go's workqueue metrics.
-const queueName = "kubestream_pipeline"
+const queueName = "kuberecord_pipeline"
 
 // unavailableSinkLogInterval bounds how often a missing sink is logged at Error
 // level. A sink that is deleted or mid-recycle can affect every queued key at

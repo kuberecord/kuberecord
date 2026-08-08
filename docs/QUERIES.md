@@ -1,4 +1,4 @@
-# kubestream Query Library
+# kuberecord Query Library
 
 Runnable SQL against the frozen v1 schema ([`docs/SCHEMA.md`](SCHEMA.md)). Every
 query here uses only frozen columns, so it keeps working across operator
@@ -312,7 +312,7 @@ written every 50 modifications by default — and for an exact answer, feed
 
 A deletion with no `last_full_state` at all means history for that `uid` begins
 before your retention window. And note that `Deleted` rows carry no `actors`:
-kubestream inspects the live object for field managers, and on a deletion there is
+kuberecord inspects the live object for field managers, and on a deletion there is
 no longer one to inspect, so "who deleted it" is a question this schema
 deliberately does not answer.
 
@@ -328,7 +328,7 @@ plain `JSONExtract` reads with no history replay.
 
 **The join key lives inside `data`.** An Event names its subject in
 `involvedObject` (core `v1`) or `regarding` (`events.k8s.io/v1`), and that
-subject is the same `(kind, namespace, name, uid)` tuple kubestream records in
+subject is the same `(kind, namespace, name, uid)` tuple kuberecord records in
 its own columns for the object itself. UID is the exact key; name is the
 forgiving one that still finds Events for an object that has since been
 recreated.

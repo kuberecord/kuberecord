@@ -1,4 +1,4 @@
-# kubestream quickstart
+# kuberecord quickstart
 
 From a fresh clone to queryable cluster history in under ten minutes, on a
 laptop, with nothing but Docker, [kind] and `kubectl`.
@@ -10,7 +10,7 @@ make quickstart-down   # delete the kind cluster and everything in it
 
 That is the whole thing. The rest of this page is what the script does, so you
 can run it a step at a time against a cluster of your own — and so you can tell
-which parts are an evaluation shortcut and which parts are how kubestream is
+which parts are an evaluation shortcut and which parts are how kuberecord is
 actually meant to be installed.
 
 ## What you get
@@ -48,16 +48,16 @@ Every command here is one the script runs. `$` prompts are elided.
 **1. A cluster.**
 
 ```sh
-kind create cluster --name kubestream-quickstart --config examples/quickstart/kind.yaml
+kind create cluster --name kuberecord-quickstart --config examples/quickstart/kind.yaml
 ```
 
 **2. The operator image, side-loaded** so no registry sits on the critical path.
 The tag is fixed because `examples/quickstart/operator` names it too.
 
 ```sh
-make docker-build IMG=kubestream/quickstart:local
-docker save --platform linux/arm64 kubestream/quickstart:local -o /tmp/image.tar
-kind load image-archive /tmp/image.tar --name kubestream-quickstart
+make docker-build IMG=kuberecord/quickstart:local
+docker save --platform linux/arm64 kuberecord/quickstart:local -o /tmp/image.tar
+kind load image-archive /tmp/image.tar --name kuberecord-quickstart
 ```
 
 Through a `docker save` archive rather than `kind load docker-image` because
@@ -74,7 +74,7 @@ explains each.
 
 ```sh
 bin/kustomize build examples/quickstart/operator | kubectl apply --server-side -f -
-kubectl -n kubestream-system rollout status deploy/kubestream-controller-manager
+kubectl -n kuberecord-system rollout status deploy/kuberecord-controller-manager
 ```
 
 The operator is now running and **completely idle**: no sink, no rules, nothing
@@ -87,7 +87,7 @@ order just means watching a condition go red and then green.
 ```sh
 kubectl apply --server-side -f examples/quickstart/secret.yaml
 kubectl apply --server-side -f examples/quickstart/clickhouse.yaml
-kubectl -n kubestream-quickstart rollout status deploy/clickhouse
+kubectl -n kuberecord-quickstart rollout status deploy/clickhouse
 ```
 
 **5. Point the operator at it.**
@@ -137,20 +137,20 @@ kubectl -n quickstart-demo patch configmap checkout-config \
 **8. Query it.**
 
 ```sh
-kubectl port-forward -n kubestream-quickstart svc/clickhouse 9000:9000
+kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
 
 clickhouse-client --host 127.0.0.1 --port 9000 \
-  --user kubestream --password quickstart --database kubestream
+  --user kuberecord --password quickstart --database kuberecord
 ```
 
 Or without a local client, straight through the pod:
 
 ```sh
-kubectl exec -n kubestream-quickstart deploy/clickhouse -- \
-  clickhouse-client --user kubestream --password quickstart --database kubestream \
+kubectl exec -n kuberecord-quickstart deploy/clickhouse -- \
+  clickhouse-client --user kuberecord --password quickstart --database kuberecord \
   --query "SELECT ts, event_type, kind, namespace, name, actors
            FROM resource_states
-           WHERE cluster_id = 'kubestream-quickstart'
+           WHERE cluster_id = 'kuberecord-quickstart'
            ORDER BY ts DESC LIMIT 20
            FORMAT PrettyCompact"
 ```
@@ -173,7 +173,7 @@ Two more worth running:
 -- The flag flip as one RFC 6902 operation, not a second copy of the ConfigMap.
 SELECT ts, name, diff
 FROM resource_states
-WHERE cluster_id = 'kubestream-quickstart' AND kind = 'ConfigMap'
+WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'ConfigMap'
   AND name = 'checkout-config' AND event_type = 'Modified'
 ORDER BY ts DESC LIMIT 1;
 
@@ -183,7 +183,7 @@ SELECT name,
        JSONExtractString(data, 'data', 'feature_flags') AS feature_flags,
        JSONExtractString(data, 'data', 'password')      AS password
 FROM resource_states
-WHERE cluster_id = 'kubestream-quickstart' AND kind = 'ConfigMap'
+WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'ConfigMap'
   AND name = 'checkout-config' AND data != ''
 ORDER BY ts ASC LIMIT 1;
 ```
@@ -227,7 +227,7 @@ your custom resources before it exits. Beyond that:
 |---|---|
 | `ClickHouseSink` not `Ready` | `kubectl describe clickhousesink default` — `CredentialsResolved`, `SchemaValid` and `Ready` each name their own reason |
 | Rule not `Ready` | `kubectl describe clusterstreamrule quickstart` — `PolicyAllowed`, `ResourceResolved` and `RBACGranted`, each per-kind |
-| Sink ready, rule ready, no rows | `kubectl logs -n kubestream-system deploy/kubestream-controller-manager` |
+| Sink ready, rule ready, no rows | `kubectl logs -n kuberecord-system deploy/kuberecord-controller-manager` |
 | `kind: command not found` | [kind's install guide][kind] |
 
 [kind]: https://kind.sigs.k8s.io/docs/user/quick-start/#installation

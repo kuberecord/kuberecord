@@ -27,7 +27,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-logr/logr"
 
-	schemaddl "github.com/yelzhy/kubestream/deploy/clickhouse/schema"
+	schemaddl "github.com/yelzhy/kuberecord/deploy/clickhouse/schema"
 )
 
 const (

@@ -34,12 +34,12 @@ import (
 // large.
 //
 // They are plain annotations under a harness-owned prefix, which the pipeline
-// treats as ordinary object content — unlike internal.kubestream.io/actors,
+// treats as ordinary object content — unlike internal.kuberecord.io/actors,
 // which normalizeObject strips before hashing. That is the point: filler that
 // the hash ignored would measure the wrong thing.
 const (
-	revisionAnnotation = "loadgen.kubestream.io/revision"
-	payloadAnnotation  = "loadgen.kubestream.io/payload"
+	revisionAnnotation = "loadgen.kuberecord.io/revision"
+	payloadAnnotation  = "loadgen.kuberecord.io/payload"
 )
 
 // churnKind is one kind the harness can create, mutate and delete.
@@ -187,7 +187,7 @@ func newObject(apiVersion, kind, namespace, name string, revision int) *unstruct
 			},
 			// A label every churned object carries, so a rule with a selector
 			// could be pointed at exactly this harness's objects.
-			"labels": map[string]any{"app.kubernetes.io/managed-by": "kubestream-loadgen"},
+			"labels": map[string]any{"app.kubernetes.io/managed-by": "kuberecord-loadgen"},
 		},
 	}}
 }

@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // TestSinkCredentialResolution drives the CredentialsResolved condition through every
@@ -75,7 +75,7 @@ func TestSinkCredentialResolution(t *testing.T) {
 			secret: func(namespace, name string) *corev1.Secret {
 				return &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-					Data:       map[string][]byte{"user": []byte("kubestream")},
+					Data:       map[string][]byte{"user": []byte("kuberecord")},
 				}
 			},
 			wantStatus: metav1.ConditionFalse,

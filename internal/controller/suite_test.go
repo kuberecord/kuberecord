@@ -44,10 +44,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/plan"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/internal/watch"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
 // The control-plane reconcilers are almost entirely *about* the API server: what
@@ -71,7 +71,7 @@ var (
 	// testCfg is its rest config, for tests that build their own clients.
 	testCfg *rest.Config
 
-	// testScheme carries the core types plus kubestream.io/v1alpha1.
+	// testScheme carries the core types plus kuberecord.io/v1alpha1.
 	testScheme = runtime.NewScheme()
 )
 
@@ -110,7 +110,7 @@ func runTestsWithEnvtest(m *testing.M) (code int) {
 		return 1
 	}
 	if err := v1alpha1.AddToScheme(testScheme); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to register kubestream.io/v1alpha1: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to register kuberecord.io/v1alpha1: %v\n", err)
 		return 1
 	}
 
@@ -169,7 +169,7 @@ type harness struct {
 	// Parker bridges "a sink is gone" back onto the rule reconcilers.
 	Parker *Parker
 
-	// RuleMetrics is the kubestream_rules gauge both rule reconcilers of this
+	// RuleMetrics is the kuberecord_rules gauge both rule reconcilers of this
 	// harness count into, on a registry private to the test. The process-wide
 	// instance would work too, but its counts would then span every test in the
 	// package running against the same apiserver.
@@ -257,7 +257,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	sinkReconciler := &SinkReconciler{
 		Client: mgr.GetClient(),
 		//nolint:staticcheck // SA1019: matches the composition root; see cmd/main.go.
-		Recorder:          mgr.GetEventRecorderFor("kubestream-test"),
+		Recorder:          mgr.GetEventRecorderFor("kuberecord-test"),
 		Sinks:             h.Runtime,
 		BuildConfig:       buildConfig,
 		OperatorNamespace: operatorNamespace,
@@ -271,7 +271,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	base := RuleReconciler{
 		Client: mgr.GetClient(),
 		//nolint:staticcheck // SA1019: matches the composition root; see cmd/main.go.
-		Recorder:     mgr.GetEventRecorderFor("kubestream-test"),
+		Recorder:     mgr.GetEventRecorderFor("kuberecord-test"),
 		Registry:     h.Registry,
 		Resolver:     watch.NewResolver(mgr.GetRESTMapper()),
 		Access:       h.Reviewer,
@@ -495,7 +495,7 @@ func (h *harness) waitForTargets(ruleKey string, want []string) {
 	})
 }
 
-// waitForReadyGauge blocks until kubestream_rules{condition="Ready",status} reaches
+// waitForReadyGauge blocks until kuberecord_rules{condition="Ready",status} reaches
 // want. It polls rather than reading once because the gauge is published by a
 // reconcile that has to happen first, exactly like every other assertion here.
 //
@@ -505,7 +505,7 @@ func (h *harness) waitForTargets(ruleKey string, want []string) {
 // metrics_test.go, where it needs no apiserver.
 func (h *harness) waitForReadyGauge(status string, want float64) {
 	h.t.Helper()
-	series := fmt.Sprintf("kubestream_rules{condition=%q,status=%q}", v1alpha1.ConditionReady, status)
+	series := fmt.Sprintf("kuberecord_rules{condition=%q,status=%q}", v1alpha1.ConditionReady, status)
 	waitFor(h.t, fmt.Sprintf("%s = %v", series, want), func() (bool, string) {
 		got := testutil.ToFloat64(h.RuleMetrics.rules.WithLabelValues(v1alpha1.ConditionReady, status))
 		return got == want, fmt.Sprintf("%v", got)

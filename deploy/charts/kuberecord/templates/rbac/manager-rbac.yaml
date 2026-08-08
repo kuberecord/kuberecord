@@ -1,0 +1,115 @@
+{{- if .Values.rbac.create }}
+# The operator's own permissions — everything it needs to read its CRs, report
+# status, resolve credentials and answer "may I watch this?" — and nothing else.
+# Watch rights over *watched* kinds are not here: they arrive through the
+# aggregated watcher role (watcher-rbac.yaml) so that extending coverage never
+# means changing the operator's base grant.
+#
+# These rules mirror config/rbac/role.yaml, which controller-gen generates from
+# the kubebuilder markers in internal/controller. They are asserted equal to it,
+# rule for rule, by TestManagerRBACMatchesKustomize in test/chart — so a new
+# marker fails that test rather than silently leaving Helm users short a
+# permission the kustomize install has.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-manager-role
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - selfsubjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - kuberecord.io
+  resources:
+  - clickhousesinks
+  - clusterstreamrules
+  - streamrules
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kuberecord.io
+  resources:
+  - clickhousesinks/status
+  - clusterstreamrules/status
+  - streamrules/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-manager-rolebinding
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kuberecord.fullname" . }}-manager-role
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kuberecord.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+---
+# The namespaced half of the same grant: Secret reads, in the operator's own
+# namespace only. This is what turns the default of
+# ClickHouseSink.spec.connection.credentialsSecretRef.namespace into a real
+# boundary rather than a convenience — a cluster-scoped sink CR pointed at a
+# Secret in another namespace cannot make the operator read it, because the
+# operator holds no Secret rights there.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-manager-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-manager-secret-rolebinding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kuberecord.fullname" . }}-manager-role
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kuberecord.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

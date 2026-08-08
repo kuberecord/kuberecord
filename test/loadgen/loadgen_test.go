@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package loadgen is kubestream's synthetic-churn load harness (Task 0.8,
+// Package loadgen is kuberecord's synthetic-churn load harness (Task 0.8,
 // extended into named scale profiles by Task 2.3). It drives realistic object
 // churn — create N objects across one or more kinds, then sustain M mutations/sec
 // with a configurable payload size and delete ratio — through the *real*
@@ -77,10 +77,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
-	"github.com/yelzhy/kubestream/internal/watch"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
 // loadgenSink is the single sink name every work item routes to.
@@ -508,9 +508,9 @@ func TestLoadGenChurn(t *testing.T) {
 		peakRSSBytes:   peakRSSBytes(),
 		heapInUse:      mem.HeapInuse,
 		sys:            mem.Sys,
-		cacheEntries:   gatherGauge(t, registry, "kubestream_hashcache_entries"),
-		dedupSkips:     gatherCounter(t, registry, "kubestream_dedup_skips_total"),
-		dropped:        gatherCounter(t, registry, "kubestream_dropped_total"),
+		cacheEntries:   gatherGauge(t, registry, "kuberecord_hashcache_entries"),
+		dedupSkips:     gatherCounter(t, registry, "kuberecord_dedup_skips_total"),
+		dropped:        gatherCounter(t, registry, "kuberecord_dropped_total"),
 	})
 
 	// Report to stdout so `make bench-load` surfaces it directly.
@@ -817,7 +817,7 @@ type runReport struct {
 func formatReport(p Profile, r runReport) string {
 	var b strings.Builder
 	cores := r.cpu.cores(r.churnElapsed)
-	fmt.Fprintf(&b, "\n===== kubestream load harness result =====\n")
+	fmt.Fprintf(&b, "\n===== kuberecord load harness result =====\n")
 	fmt.Fprintf(&b, "profile               : %s\n", p)
 	fmt.Fprintf(&b, "hardware              : %s/%s, %d logical CPUs, Go %s\n",
 		runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())

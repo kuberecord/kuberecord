@@ -1,0 +1,42 @@
+{{- if .Values.createDefaultSink }}
+# A starter sink, off by default (see values.yaml for why the chart never
+# templates the password this CR points at).
+#
+# It is cluster-scoped, like every ClickHouseSink: one operator serves one
+# cluster, and a sink is a property of that cluster rather than of a namespace.
+# Fields left unset in `defaultSink` are omitted here rather than spelled with a
+# copy of their default, so the CRD's own defaults — and only those — apply.
+apiVersion: kuberecord.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: {{ .Values.defaultSink.name }}
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+spec:
+  connection:
+    addr: {{ .Values.defaultSink.connection.addr | quote }}
+    {{- with .Values.defaultSink.connection.database }}
+    database: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.defaultSink.connection.username }}
+    username: {{ . | quote }}
+    {{- end }}
+    credentialsSecretRef:
+      # No namespace: it defaults to the operator's own, the only namespace the
+      # operator holds Secret read rights in (D7).
+      name: {{ .Values.defaultSink.connection.credentialsSecretRef.name | quote }}
+    {{- with .Values.defaultSink.connection.dialTimeout }}
+    dialTimeout: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.defaultSink.connection.readTimeout }}
+    readTimeout: {{ . | quote }}
+    {{- end }}
+  {{- with .Values.defaultSink.writer }}
+  writer:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.defaultSink.policy }}
+  policy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

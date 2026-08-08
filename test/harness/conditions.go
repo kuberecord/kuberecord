@@ -41,7 +41,7 @@ type Condition struct {
 	ObservedGeneration int64  `json:"observedGeneration"`
 }
 
-// ConditionOf reads one status condition off any kubestream CR. It returns an
+// ConditionOf reads one status condition off any kuberecord CR. It returns an
 // error rather than failing, so a caller can poll it inside an Eventually while
 // the reconciler is still writing status for the first time.
 func ConditionOf(kind, name, namespace, condType string) (Condition, error) {

@@ -1,0 +1,179 @@
+# Default values for the kuberecord chart.
+#
+# Every value below is documented — with its type, default and effect — in
+# README.md next to this file. The comments here explain *why* a default is what
+# it is; the chart README next to this file is the reference table.
+
+# -- Operator image. tag defaults to the chart's appVersion; digest, when set,
+# wins over tag so an install can be pinned by content rather than by name.
+image:
+  repository: ghcr.io/yelzhy/kuberecord
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# One replica is the right default even though the operator supports leader
+# election: a standby replica buys faster failover, not throughput — the leader
+# owns every informer and the whole pipeline, so a second *active* instance would
+# double-write every row.
+replicaCount: 1
+
+# CLUSTER_ID: stamped on every row and every scope event this operator writes,
+# and part of an object's identity in the schema (Invariant 7). The default is a
+# local/dev placeholder — set it to something that identifies the cluster before
+# installing anywhere real, because rows already written keep the old value.
+clusterID: local-kind-cluster
+
+# Leader election. On by default: it is what makes `replicaCount: 2` safe and
+# what stops two operators — say, one left behind by a half-finished upgrade —
+# from both streaming the same cluster into the same tables.
+leaderElection:
+  enabled: true
+
+# The metrics endpoint (every metric is listed in docs/OPERATING.md). Disabling
+# it removes the Service, the endpoint's authn/authz ClusterRoles and the
+# --metrics-bind-address argument, leaving the operator with no listener but its
+# health probes.
+metrics:
+  enabled: true
+  # HTTPS with a self-signed, in-memory certificate, and every request
+  # authenticated (TokenReview) and authorized (SubjectAccessReview) against the
+  # cluster. Turning this off serves plaintext HTTP to anything that can reach
+  # the pod.
+  secure: true
+  port: 8443
+  service:
+    annotations: {}
+
+# Health and readiness probe listener. Both probes are plain pings: a cluster
+# with no sinks is healthy, and an unreachable ClickHouse is reported as a
+# condition on the sink's own CR rather than as process unreadiness.
+healthProbe:
+  port: 8081
+
+rbac:
+  # Master switch for every Role, ClusterRole and binding in the chart. Turn it
+  # off only when a platform team manages the operator's RBAC out of band — with
+  # nothing bound, the operator cannot read its own CRs and will not stream.
+  create: true
+  # Which watch presets to install (config/rbac/presets/*.yaml, rendered under
+  # this release's name). Each is a ClusterRole labelled
+  # `kuberecord.io/aggregate-to-watcher: "true"`, so the aggregated `watcher`
+  # role picks it up with no restart and no redeploy (D7).
+  #
+  # core-workloads is the only one enabled by default, because it is what the
+  # shipped sample rules watch. A rule naming a kind no enabled preset grants is
+  # not an outage: it reports RBACGranted=False/MissingPermissions, every other
+  # rule keeps streaming, and enabling the preset later flips the condition
+  # within one resync (Invariant 5).
+  #
+  # Never grant `secrets` here or in a preset of your own: v1/Secret is
+  # hard-denied as a watchable kind in code (D8), so the grant would be dead
+  # privilege.
+  presets:
+    core-workloads: true
+    batch: false
+    events: false
+    networking: false
+    rbac-read: false
+    storage: false
+
+serviceAccount:
+  create: true
+  # Defaults to the release's `<fullname>-controller-manager`.
+  name: ""
+  annotations: {}
+
+# Extra labels added to every object this chart renders, including the pod
+# template. They are deliberately *not* added to the Deployment's selector or the
+# metrics Service's selector: label selectors are immutable on a Deployment, so
+# folding user labels into them would make `helm upgrade --set extraLabels.…`
+# fail on an existing release.
+extraLabels: {}
+
+podAnnotations: {}
+
+# Extra arguments and environment for the manager container. This is how the
+# operator's remaining flags are set — they are process-level tuning, not
+# packaging, so the chart passes them through rather than growing a value per
+# flag. `<binary> --help` lists them all; docs/CONFIGURATION.md documents each.
+#
+#   extraArgs:
+#     - --ch-auto-create-schema      # let the operator apply the shipped DDL
+#     - --pipeline-workers=16        # more workqueue drainers on a big cluster
+#     - --writer-batch-max-rows=5000
+extraArgs: []
+extraEnv: []
+
+# Sized for the small profile in docs/PERFORMANCE.md (a few thousand watched
+# objects). The medium and massive profiles publish measured RSS and CPU
+# envelopes; raise these to match the profile you are actually running, since the
+# hashCache and the write queues are what grow with the object count.
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# Pod and container security context. The defaults satisfy the `restricted` Pod
+# Security Standard — the operator needs no filesystem writes, no capabilities
+# and no root — and the e2e suite installs into a namespace that enforces it, so
+# these are tested rather than aspirational. Relax them only if a platform
+# genuinely requires it.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+# 10s is enough for the writer's drainTimeout (15s default) to be the binding
+# constraint on a graceful shutdown only if you raise this; a sink whose
+# spec.writer.drainTimeout exceeds this value will be cut short mid-drain.
+terminationGracePeriodSeconds: 10
+
+# A starter ClickHouseSink named `defaultSink.name`, off by default: a sink needs
+# a reachable address and a password, and the password is a Secret this chart
+# deliberately never creates or templates (a chart that took a password as a
+# value would put it in the release's stored manifest and in every `helm get
+# values` output). Create the Secret yourself, in the operator's namespace:
+#
+#   kubectl create secret generic clickhouse-credentials \
+#     --namespace <release namespace> --from-literal=password='…'
+#
+# then either enable this or apply your own CR. With it enabled,
+# defaultSink.connection.addr is required.
+createDefaultSink: false
+defaultSink:
+  # `default` is the name a rule's spec.sinkRef defaults to, so a single-backend
+  # install needs no sinkRef on any rule.
+  name: default
+  connection:
+    addr: ""
+    database: kuberecord
+    username: kuberecord
+    credentialsSecretRef:
+      # Resolved in the operator's own namespace — the only namespace it holds
+      # Secret read rights in (D7).
+      name: clickhouse-credentials
+    dialTimeout: ""
+    readTimeout: ""
+  # Passed through verbatim; anything omitted keeps its CRD default. See the
+  # ClickHouseSink reference in docs/CRDS.md for every field.
+  writer: {}
+  policy: {}
+
+nameOverride: ""
+fullnameOverride: ""

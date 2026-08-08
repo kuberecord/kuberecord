@@ -26,9 +26,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
 )
 
 // parseWriterFlags registers the --writer-* flags on a throwaway FlagSet and
@@ -231,12 +231,12 @@ func TestRegisterFlagsOperatorSettings(t *testing.T) {
 			name: "env fallback",
 			env: map[string]string{
 				"CLUSTER_ID":            "prod-eu-1",
-				"POD_NAMESPACE":         "kubestream-system",
+				"POD_NAMESPACE":         "kuberecord-system",
 				"PIPELINE_WORKERS":      "24",
 				"CH_AUTO_CREATE_SCHEMA": "true",
 			},
 			wantClusterID:  "prod-eu-1",
-			wantNamespace:  "kubestream-system",
+			wantNamespace:  "kuberecord-system",
 			wantWorkers:    24,
 			wantAutoCreate: true,
 		},
@@ -337,7 +337,7 @@ func TestBuildSinkConfig(t *testing.T) {
 	}
 	connection := v1alpha1.ConnectionSpec{
 		Addr:        "clickhouse.example.svc:9000",
-		Database:    "kubestream",
+		Database:    "kuberecord",
 		Username:    "writer",
 		DialTimeout: duration(7 * time.Second),
 		ReadTimeout: duration(11 * time.Second),
@@ -457,7 +457,7 @@ func TestBuildSinkConfig(t *testing.T) {
 func TestBuildSinkConfigFingerprintsThePassword(t *testing.T) {
 	build := newSinkConfigBuilder(writerTuning{}, false)
 	spec := v1alpha1.ClickHouseSinkSpec{
-		Connection: v1alpha1.ConnectionSpec{Addr: "ch:9000", Database: "kubestream", Username: "writer"},
+		Connection: v1alpha1.ConnectionSpec{Addr: "ch:9000", Database: "kuberecord", Username: "writer"},
 	}
 
 	before, err := build("default", spec, "old-password")
@@ -499,7 +499,7 @@ func (foreignConfig) Fingerprint() string { return "foreign" }
 // because its client is effectively an administrator. Hence a unit test on the
 // options themselves.
 func TestManagerCacheOptionsConfineSecretsToTheOperatorNamespace(t *testing.T) {
-	const namespace = "kubestream-system"
+	const namespace = "kuberecord-system"
 
 	opts := managerCacheOptions(namespace)
 

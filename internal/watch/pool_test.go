@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // TestTransformObject is the transform half of D2: every informer's cached copy

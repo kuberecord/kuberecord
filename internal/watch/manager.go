@@ -30,8 +30,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/plan"
 )
 
 // Pacing of the reconcile loop.
@@ -215,7 +215,7 @@ type Options struct {
 	StopTimeout time.Duration
 }
 
-// WatchManager owns kubestream's data-plane watches: a pool of self-managed
+// WatchManager owns kuberecord's data-plane watches: a pool of self-managed
 // dynamic informers, level-triggered towards the desired-state registry, plus the
 // interest map that turns one informer's events into per-sink work keys.
 //

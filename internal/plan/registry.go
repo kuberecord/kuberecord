@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package plan holds the desired-state registry — the single seam between
-// kubestream's control plane and its data plane.
+// kuberecord's control plane and its data plane.
 //
 // Reconcilers (Task 1.7) translate each validated StreamRule / ClusterStreamRule
 // into a set of WatchTargets and write them here under the rule's key; the

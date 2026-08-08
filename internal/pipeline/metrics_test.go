@@ -53,18 +53,18 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	}
 
 	want := map[string]dto.MetricType{
-		"kubestream_write_batch_rows":           dto.MetricType_HISTOGRAM,
-		"kubestream_write_queue_depth":          dto.MetricType_GAUGE,
-		"kubestream_write_queue_capacity":       dto.MetricType_GAUGE,
-		"kubestream_writes_total":               dto.MetricType_COUNTER,
-		"kubestream_write_latency_seconds":      dto.MetricType_HISTOGRAM,
-		"kubestream_write_retry_attempts_total": dto.MetricType_COUNTER,
-		"kubestream_enqueue_block_seconds":      dto.MetricType_HISTOGRAM,
-		"kubestream_enqueue_timeouts_total":     dto.MetricType_COUNTER,
-		"kubestream_dedup_skips_total":          dto.MetricType_COUNTER,
-		"kubestream_hashcache_entries":          dto.MetricType_GAUGE,
-		"kubestream_safe_mode":                  dto.MetricType_GAUGE,
-		"kubestream_pipeline_dropped_total":     dto.MetricType_COUNTER,
+		"kuberecord_write_batch_rows":           dto.MetricType_HISTOGRAM,
+		"kuberecord_write_queue_depth":          dto.MetricType_GAUGE,
+		"kuberecord_write_queue_capacity":       dto.MetricType_GAUGE,
+		"kuberecord_writes_total":               dto.MetricType_COUNTER,
+		"kuberecord_write_latency_seconds":      dto.MetricType_HISTOGRAM,
+		"kuberecord_write_retry_attempts_total": dto.MetricType_COUNTER,
+		"kuberecord_enqueue_block_seconds":      dto.MetricType_HISTOGRAM,
+		"kuberecord_enqueue_timeouts_total":     dto.MetricType_COUNTER,
+		"kuberecord_dedup_skips_total":          dto.MetricType_COUNTER,
+		"kuberecord_hashcache_entries":          dto.MetricType_GAUGE,
+		"kuberecord_safe_mode":                  dto.MetricType_GAUGE,
+		"kuberecord_pipeline_dropped_total":     dto.MetricType_COUNTER,
 	}
 
 	for name, wantType := range want {
@@ -82,8 +82,8 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	// owns retries now, so a "dropped requeue trigger" is not a state the operator
 	// can be in. Asserting its absence keeps a stale dashboard panel from being
 	// mistaken for a live signal.
-	if _, stale := got["kubestream_requeue_drops_total"]; stale {
-		t.Error("kubestream_requeue_drops_total is still registered; the requeue channel it measured no longer exists")
+	if _, stale := got["kuberecord_requeue_drops_total"]; stale {
+		t.Error("kuberecord_requeue_drops_total is still registered; the requeue channel it measured no longer exists")
 	}
 }
 
@@ -136,20 +136,20 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 		metric string
 		want   []string
 	}{
-		{"kubestream_write_queue_depth", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_write_queue_capacity", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_write_latency_seconds", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_write_retry_attempts_total", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_write_batch_rows", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_enqueue_block_seconds", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_enqueue_timeouts_total", []string{"sink=audit", "sink=primary"}},
-		{"kubestream_writes_total", []string{
+		{"kuberecord_write_queue_depth", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_write_queue_capacity", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_write_latency_seconds", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_write_retry_attempts_total", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_write_batch_rows", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_enqueue_block_seconds", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_enqueue_timeouts_total", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_writes_total", []string{
 			"outcome=failed,sink=audit", "outcome=failed,sink=primary",
 			"outcome=success,sink=audit", "outcome=success,sink=primary",
 		}},
 		// Pipeline-owned, and deliberately not per-sink: dedup is a property of the
 		// shared workqueue's short-circuit rate, not of a backend.
-		{"kubestream_dedup_skips_total", []string{""}},
+		{"kuberecord_dedup_skips_total", []string{""}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.metric, func(t *testing.T) {
@@ -160,10 +160,10 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 	}
 
 	// Both sinks' values survive independently — the point of the label.
-	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "primary"); got != 7 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "primary"); got != 7 {
 		t.Errorf("primary write_queue_depth = %v, want 7", got)
 	}
-	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "audit"); got != 3 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "audit"); got != 3 {
 		t.Errorf("audit write_queue_depth = %v, want 3", got)
 	}
 }
@@ -192,10 +192,10 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 
 	labels := seriesLabels(t, reg)
 	for _, metric := range []string{
-		"kubestream_write_queue_depth", "kubestream_write_queue_capacity", "kubestream_writes_total",
-		"kubestream_write_latency_seconds", "kubestream_write_retry_attempts_total",
-		"kubestream_write_batch_rows", "kubestream_enqueue_block_seconds",
-		"kubestream_enqueue_timeouts_total", "kubestream_hashcache_entries", "kubestream_safe_mode",
+		"kuberecord_write_queue_depth", "kuberecord_write_queue_capacity", "kuberecord_writes_total",
+		"kuberecord_write_latency_seconds", "kuberecord_write_retry_attempts_total",
+		"kuberecord_write_batch_rows", "kuberecord_enqueue_block_seconds",
+		"kuberecord_enqueue_timeouts_total", "kuberecord_hashcache_entries", "kuberecord_safe_mode",
 	} {
 		for _, series := range labels[metric] {
 			if strings.Contains(series, "sink=gone") {
@@ -203,7 +203,7 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 			}
 		}
 	}
-	if got := gaugeValue(t, reg, "kubestream_write_queue_depth", "kept"); got != 2 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "kept"); got != 2 {
 		t.Errorf("the surviving sink's write_queue_depth = %v, want 2", got)
 	}
 }

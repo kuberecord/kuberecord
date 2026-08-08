@@ -71,7 +71,7 @@ extraArgs:
 
 `clusterID`, `leaderElection.enabled`, `metrics.*` and `healthProbe.port` have
 dedicated values because they change the rendered objects, not just the command
-line. See the [chart README](../deploy/charts/kubestream/README.md).
+line. See the [chart README](../deploy/charts/kuberecord/README.md).
 
 **Kustomize / `dist/install.yaml`** — the arguments live on the manager container
 in [`config/manager/manager.yaml`](../config/manager/manager.yaml), and

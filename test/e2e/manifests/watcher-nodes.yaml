@@ -13,11 +13,11 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kubestream-e2e-watcher-nodes
+  name: kuberecord-e2e-watcher-nodes
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: e2e-fixture
-    kubestream.io/aggregate-to-watcher: "true"
+    kuberecord.io/aggregate-to-watcher: "true"
 rules:
 - apiGroups:
   - ""

@@ -31,8 +31,8 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // nameArgIndex is the position of Record.Name in the positional args produced by
@@ -648,7 +648,7 @@ func TestInsertArgsIsZoneIndependent(t *testing.T) {
 func pinLocalZone(t *testing.T, offset time.Duration) (restore func()) {
 	t.Helper()
 	previous := time.Local
-	time.Local = time.FixedZone("kubestream-test", int(offset/time.Second))
+	time.Local = time.FixedZone("kuberecord-test", int(offset/time.Second))
 	var once sync.Once
 	restore = func() { once.Do(func() { time.Local = previous }) }
 	t.Cleanup(restore)
@@ -782,10 +782,10 @@ func TestIsolationPhaseDoesNotTruncateSlowBackend(t *testing.T) {
 }
 
 // writesTotalValue gathers reg and returns the value of
-// kubestream_writes_total{outcome=outcome}, or fails the test if absent.
+// kuberecord_writes_total{outcome=outcome}, or fails the test if absent.
 func writesTotalValue(t *testing.T, reg prometheus.Gatherer, outcome string) float64 {
 	t.Helper()
-	const metric, label = "kubestream_writes_total", "outcome"
+	const metric, label = "kuberecord_writes_total", "outcome"
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
@@ -906,7 +906,7 @@ func TestCheckpointEveryResolution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			w, err := Open(Config{
 				Addr:            "127.0.0.1:9000",
-				Database:        "kubestream",
+				Database:        "kuberecord",
 				Username:        "default",
 				DialTimeout:     time.Second,
 				ReadTimeout:     time.Second,

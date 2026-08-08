@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sink defines the backend-agnostic contract every kubestream storage
+// Package sink defines the backend-agnostic contract every kuberecord storage
 // backend implements. The pipeline (reconcilers, cache warm-up) depends only on
 // these interfaces and value types, never on a concrete driver, so a future
 // backend (Postgres, Elasticsearch, Kafka) is a new implementation of Writer /

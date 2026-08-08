@@ -27,14 +27,14 @@ import (
 // by anyone with cluster-read access without leaking a credential.
 type ConnectionSpec struct {
 	// Addr is the ClickHouse native-protocol endpoint as "host:port", e.g.
-	// "clickhouse.kubestream-system.svc:9000".
+	// "clickhouse.kuberecord-system.svc:9000".
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Addr string `json:"addr"`
 
-	// Database is the ClickHouse database holding kubestream's tables.
+	// Database is the ClickHouse database holding kuberecord's tables.
 	// +optional
-	// +kubebuilder:default="kubestream"
+	// +kubebuilder:default="kuberecord"
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Database string `json:"database,omitempty"`
@@ -218,7 +218,7 @@ type ClickHouseSinkStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
-// ClickHouseSink declares one ClickHouse instance kubestream may write to.
+// ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 //
 // It is cluster-scoped (D6) because rules in any namespace reference it by
 // name, and because a sink is infrastructure owned by the platform team rather

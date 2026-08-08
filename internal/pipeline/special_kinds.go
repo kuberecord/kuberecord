@@ -24,7 +24,7 @@ package pipeline
 //
 // The behaviour is intrinsic to the kind and is deliberately **not** a CRD
 // field. An Event is an Event whoever names it, so a knob would only ever let an
-// author configure kubestream into recording something untrue about Events —
+// author configure kuberecord into recording something untrue about Events —
 // TTL expiries as deletions, most obviously. The rule's `resources` field
 // comment (api/v1alpha1/shared_types.go) documents the behaviour for authors;
 // docs/SCHEMA.md documents it for readers of the data.
@@ -47,7 +47,7 @@ const (
 )
 
 // ephemeralKind reports whether (group, kind) names a Kubernetes Event — the one
-// kind kubestream treats as append-only ephemera rather than as durable cluster
+// kind kuberecord treats as append-only ephemera rather than as durable cluster
 // state.
 //
 // Three pipeline behaviours hang off it, and each exists because the ordinary

@@ -37,7 +37,7 @@ import (
 // hashing, so the annotation can never perturb an object's hash or show up in a
 // stored diff (see normalize). The "internal." prefix marks it as
 // operator-owned; it is never written back to the apiserver.
-const ActorsAnnotation = "internal.kubestream.io/actors"
+const ActorsAnnotation = "internal.kuberecord.io/actors"
 
 // actorsSeparator joins actor names inside ActorsAnnotation. A comma is safe
 // because field-manager names are apiserver-validated and cannot contain one.

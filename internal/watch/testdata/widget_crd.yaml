@@ -4,14 +4,14 @@
 # the REST mapper first sees it: the whole point of the test is that the mapper
 # caches a "no such group" answer and must still pick the kind up once the CRD
 # appears, with no operator restart. Its group is deliberately *not*
-# kubestream.io — a group the operator's own CRDs may occupy — so installing and
+# kuberecord.io — a group the operator's own CRDs may occupy — so installing and
 # uninstalling it can never perturb another test's discovery data.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: widgets.test.kubestream.io
+  name: widgets.test.kuberecord.io
 spec:
-  group: test.kubestream.io
+  group: test.kuberecord.io
   names:
     kind: Widget
     listKind: WidgetList

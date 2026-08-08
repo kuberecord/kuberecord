@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package chaos is kubestream's failure-mode suite (Task 2.1).
+// Package chaos is kuberecord's failure-mode suite (Task 2.1).
 //
 // The correctness machinery this project is built around — version-gated
 // commits, UID-gated delete claims, scope epochs, batch poison isolation, the
@@ -87,23 +87,23 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/test/harness"
-	"github.com/yelzhy/kubestream/test/utils"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/test/harness"
+	"github.com/yelzhy/kuberecord/test/utils"
 )
 
 // Identities of everything the suite installs. The operator-side names are the
 // ones `config/default` produces, so the suite breaks the shipped install rather
 // than a parallel one that could drift from it.
 const (
-	operatorNamespace   = "kubestream-system"
-	operatorDeployment  = "kubestream-controller-manager"
+	operatorNamespace   = "kuberecord-system"
+	operatorDeployment  = "kuberecord-controller-manager"
 	operatorPodSelector = "control-plane=controller-manager"
-	operatorAccount     = "kubestream-controller-manager"
+	operatorAccount     = "kuberecord-controller-manager"
 	// credentialsSecret is the Secret `config/manager` ships. Both the sink and
 	// the ClickHouse server take their password from it, so the two sides of the
 	// connection cannot drift apart.
-	credentialsSecret = "kubestream-clickhouse-credentials"
+	credentialsSecret = "kuberecord-clickhouse-credentials"
 	// clusterID is the value the shipped Deployment sets CLUSTER_ID to. Every row
 	// and scope event the operator writes is stamped with it, so every query in
 	// the suite filters on it.
@@ -115,21 +115,21 @@ const (
 
 // The stoppable ClickHouse fixture (test/chaos/manifests/clickhouse.yaml).
 const (
-	clickHouseNamespace  = "kubestream-chaos-clickhouse"
+	clickHouseNamespace  = "kuberecord-chaos-clickhouse"
 	clickHouseDeployment = "clickhouse"
 	clickHouseSecret     = "clickhouse-credentials"
 	clickHouseImage      = "clickhouse/clickhouse-server:24.8"
-	clickHouseUser       = "kubestream"
-	clickHouseDatabase   = "kubestream"
+	clickHouseUser       = "kuberecord"
+	clickHouseDatabase   = "kuberecord"
 )
 
 // The resident metrics-scraping pod. A chaos scenario reads the same counters
 // every couple of seconds for minutes at a stretch, so the pod is created once
 // and exec'd per scrape (see harness.MetricsEndpoint).
 const (
-	metricsService  = "kubestream-controller-manager-metrics-service"
-	metricsReader   = "kubestream-metrics-reader"
-	metricsBinding  = "kubestream-chaos-metrics-binding"
+	metricsService  = "kuberecord-controller-manager-metrics-service"
+	metricsReader   = "kuberecord-metrics-reader"
+	metricsBinding  = "kuberecord-chaos-metrics-binding"
 	metricsProbePod = "chaos-metrics-probe"
 	metricsImage    = "curlimages/curl:latest"
 )
@@ -194,7 +194,7 @@ const writerRetryBudget = 60 * time.Second
 var (
 	// managerImage is the manager image built and side-loaded for this run. It
 	// must match the image the chaos kustomize overlay pins.
-	managerImage = "example.com/kubestream:v0.0.1"
+	managerImage = "example.com/kuberecord:v0.0.1"
 
 	// ch is this suite's view of the backend. Password is filled in during
 	// BeforeSuite, once the credentials Secret has been read.
@@ -218,7 +218,7 @@ var (
 
 // fieldManager is the field-manager name every object the suite applies is
 // written under; see harness.ApplyYAML.
-const fieldManager = "kubestream-chaos"
+const fieldManager = "kuberecord-chaos"
 
 // TestChaos runs the Phase 2 failure-mode suite against a real kind cluster and a
 // real, stoppable ClickHouse. It expects Kind to be installed and a cluster to
@@ -229,7 +229,7 @@ func TestChaos(t *testing.T) {
 	SetDefaultEventuallyPollingInterval(pollInterval)
 	SetDefaultConsistentlyDuration(quietWindow)
 	SetDefaultConsistentlyPollingInterval(pollInterval)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting kubestream chaos test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting kuberecord chaos test suite\n")
 	RunSpecs(t, "chaos suite")
 }
 

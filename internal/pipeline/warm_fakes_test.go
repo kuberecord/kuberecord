@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // The doubles in this file complete the warm/GC coordinator's dependency set, so

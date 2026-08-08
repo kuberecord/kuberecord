@@ -1,7 +1,7 @@
 # Tag-triggered releases (Task 3.5). Strangers install tags, not `main`.
 #
 # Pushing `vX.Y.Z` publishes three things: a multi-arch image at
-# ghcr.io/<owner>/kubestream:vX.Y.Z, a GitHub Release whose body is that version's
+# ghcr.io/<owner>/kuberecord:vX.Y.Z, a GitHub Release whose body is that version's
 # CHANGELOG.md section, and the two install artifacts plus their checksums
 # attached to it. `workflow_dispatch` runs the identical sequence with nothing
 # pushed and nothing published, which is what makes a rehearsal meaningful.
@@ -137,7 +137,7 @@ jobs:
       - name: Upload the artifacts to the workflow run
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: kubestream-${{ env.RELEASE_VERSION }}
+          name: kuberecord-${{ env.RELEASE_VERSION }}
           path: |
             dist/release/install.yaml
             dist/release/*.tgz
@@ -157,12 +157,12 @@ jobs:
 
           # shellcheck disable=SC2086  # $prerelease is a flag or nothing
           gh release create "$RELEASE_VERSION" \
-            --title "kubestream $RELEASE_VERSION" \
+            --title "kuberecord $RELEASE_VERSION" \
             --notes-file dist/release/RELEASE_NOTES.md \
             --verify-tag \
             $prerelease \
             dist/release/install.yaml \
-            dist/release/kubestream-*.tgz \
+            dist/release/kuberecord-*.tgz \
             dist/release/checksums.txt
 
       - name: Summarise
@@ -177,7 +177,7 @@ jobs:
               echo
               # Read the image back out of the manifest rather than restating it:
               # what the release actually pins is what install.yaml says it pins.
-              echo "Image: \`$(grep -o 'image: [^ ]*kubestream:[^ ]*' dist/release/install.yaml | head -1 | cut -d' ' -f2)\`"
+              echo "Image: \`$(grep -o 'image: [^ ]*kuberecord:[^ ]*' dist/release/install.yaml | head -1 | cut -d' ' -f2)\`"
             fi
             echo
             echo '```'

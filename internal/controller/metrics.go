@@ -25,27 +25,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
 )
 
-// metricsNamespace prefixes the control plane's metric names with "kubestream_",
+// metricsNamespace prefixes the control plane's metric names with "kuberecord_",
 // matching the data plane's collectors (internal/pipeline) so one operator's
 // series all live under one greppable prefix on the same /metrics endpoint.
-const metricsNamespace = "kubestream"
+const metricsNamespace = "kuberecord"
 
 // conditionStatuses is the closed set of values a metav1.Condition status can
 // take, lowercased for the metric label.
 //
 // It is enumerated rather than derived from what has been observed because every
 // (condition, status) pair must exist as a series *before* the first rule of that
-// kind degrades: an alert written as `kubestream_rules{...,status="false"} > 0`
+// kind degrades: an alert written as `kuberecord_rules{...,status="false"} > 0`
 // over a series that does not exist yet evaluates to no data, which is neither
 // firing nor healthy, and which starts firing the instant the series appears —
 // resetting the alert's `for` clock at exactly the wrong moment.
 var conditionStatuses = []string{"true", "false", "unknown"}
 
 // RuleMetrics publishes how many rules currently hold each condition at each
-// status, as kubestream_rules{condition,status}.
+// status, as kuberecord_rules{condition,status}.
 //
 // It exists for one panel and one alert: "how many rules are broken right now?".
 // The rule reconcilers already answer that per rule, in status conditions and
@@ -83,7 +83,7 @@ type RuleMetrics struct {
 	published map[string]bool
 }
 
-// NewRuleMetrics constructs the kubestream_rules gauge and registers it on reg.
+// NewRuleMetrics constructs the kuberecord_rules gauge and registers it on reg.
 //
 // Registration uses MustRegister, so a registry that already holds the metric
 // panics: production registers exactly once through RuleMetricsInstance, and each

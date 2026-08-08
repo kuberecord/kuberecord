@@ -40,10 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/plan"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/internal/watch"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
 // defaultRuleResyncPeriod is how often a rule is reconciled even when nothing
@@ -278,7 +278,7 @@ type RuleReconciler struct {
 	// ResyncPeriod overrides defaultRuleResyncPeriod. Tests shorten it.
 	ResyncPeriod time.Duration
 
-	// Metrics is the shared kubestream_rules gauge both rule kinds count into. It
+	// Metrics is the shared kuberecord_rules gauge both rule kinds count into. It
 	// must be the same instance for both reconcilers, since the gauge is a count
 	// over the union of their rules; the constructors below default it to the
 	// process-wide instance when the caller leaves it nil.
@@ -323,8 +323,8 @@ func (r *RuleReconciler) defaultMetrics() {
 	}
 }
 
-// +kubebuilder:rbac:groups=kubestream.io,resources=streamrules;clusterstreamrules,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubestream.io,resources=streamrules/status;clusterstreamrules/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=streamrules;clusterstreamrules,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=streamrules/status;clusterstreamrules/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=selfsubjectaccessreviews,verbs=create
 
