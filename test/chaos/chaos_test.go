@@ -25,10 +25,10 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/controller"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/test/harness"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/controller"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/test/harness"
 )
 
 // The Phase 2 failure-mode gate: one scenario per failure Task 2.1 enumerates,

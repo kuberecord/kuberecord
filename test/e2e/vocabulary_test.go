@@ -23,7 +23,7 @@ import (
 
 	. "github.com/onsi/gomega" //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kubestream/test/harness"
+	"github.com/yelzhy/kuberecord/test/harness"
 )
 
 // This file binds the shared acceptance vocabulary (test/harness) to this

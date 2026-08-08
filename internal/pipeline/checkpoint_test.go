@@ -26,7 +26,7 @@ import (
 	"github.com/wI2L/jsondiff"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // eventModified and eventCheckpoint spell the two event_type values these specs

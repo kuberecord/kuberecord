@@ -77,10 +77,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
-	"github.com/yelzhy/kubestream/internal/watch"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
 // loadgenSink is the single sink name every work item routes to.

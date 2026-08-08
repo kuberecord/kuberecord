@@ -29,7 +29,7 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
-	schemaddl "github.com/yelzhy/kubestream/deploy/clickhouse/schema"
+	schemaddl "github.com/yelzhy/kuberecord/deploy/clickhouse/schema"
 )
 
 // testDatabase is this suite's own ClickHouse database.

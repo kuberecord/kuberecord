@@ -38,7 +38,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // resyncPeriod is 0 for every informer in the pool: no periodic resync. This is a

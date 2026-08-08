@@ -28,7 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.uber.org/goleak"
 
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // testClusterID matches the harness's ClusterID, so a filter built here is the one

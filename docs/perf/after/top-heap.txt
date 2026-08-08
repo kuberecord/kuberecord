@@ -12,21 +12,21 @@ Showing top 25 nodes out of 120
     7.40MB  4.24% 67.81%    14.62MB  8.37%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.SetNestedStringMap
     7.22MB  4.13% 71.95%     7.22MB  4.13%  github.com/ClickHouse/ch-go/proto.ColStr.EncodeColumn
     7.21MB  4.13% 76.08%     7.21MB  4.13%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.setNestedFieldNoCopy
-    7.11MB  4.07% 80.16%    67.62MB 38.73%  github.com/yelzhy/kubestream/internal/pipeline.(*Pipeline).processUpsert
+    7.11MB  4.07% 80.16%    67.62MB 38.73%  github.com/yelzhy/kuberecord/internal/pipeline.(*Pipeline).processUpsert
     4.33MB  2.48% 82.64%     4.33MB  2.48%  reflect.mapassign_faststr0
-    4.07MB  2.33% 84.97%     4.07MB  2.33%  github.com/yelzhy/kubestream/internal/pipeline.(*hashCache).Reserve
+    4.07MB  2.33% 84.97%     4.07MB  2.33%  github.com/yelzhy/kuberecord/internal/pipeline.(*hashCache).Reserve
     3.69MB  2.11% 87.08%    27.02MB 15.47%  sigs.k8s.io/json/internal/golang/encoding/json.(*decodeState).literalInterface
     3.46MB  1.98% 89.07%     3.46MB  1.98%  go.uber.org/zap/internal/bufferpool.init.NewPool.func1
     2.49MB  1.43% 90.49%     2.49MB  1.43%  github.com/klauspost/compress/zstd.(*blockEnc).init
     1.63MB  0.93% 91.43%     1.63MB  0.93%  encoding/hex.EncodeToString (inline)
-    1.57MB   0.9% 92.32%     1.57MB   0.9%  github.com/yelzhy/kubestream/internal/sink/clickhouse.insertArgs
+    1.57MB   0.9% 92.32%     1.57MB   0.9%  github.com/yelzhy/kuberecord/internal/sink/clickhouse.insertArgs
     1.47MB  0.84% 93.16%    77.10MB 44.16%  sigs.k8s.io/json/internal/golang/encoding/json.(*decodeState).object
     1.22MB   0.7% 93.86%     1.22MB   0.7%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.NestedNullCoercingStringMap
     1.22MB   0.7% 94.56%     1.22MB   0.7%  k8s.io/client-go/tools/cache.ObjectName.String
-    1.19MB  0.68% 95.24%     1.19MB  0.68%  github.com/yelzhy/kubestream/internal/pipeline.Key.cacheKey
+    1.19MB  0.68% 95.24%     1.19MB  0.68%  github.com/yelzhy/kuberecord/internal/pipeline.Key.cacheKey
     0.88MB   0.5% 95.75%     1.61MB  0.92%  k8s.io/client-go/tools/cache.(*threadSafeMap).updateLocked
     0.88MB   0.5% 96.25%     0.88MB   0.5%  sigs.k8s.io/json/internal/golang/encoding/json.(*decodeState).literalStore
     0.75MB  0.43% 96.68%    77.10MB 44.16%  k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.unstructuredJSONScheme.decodeToUnstructured
     0.16MB  0.09% 96.77%     0.97MB  0.56%  github.com/go-logr/zapr.(*zapLogger).WithValues
-    0.15MB 0.085% 96.85%     7.96MB  4.56%  github.com/yelzhy/kubestream/internal/sink/clickhouse.(*CHWriter).worker
+    0.15MB 0.085% 96.85%     7.96MB  4.56%  github.com/yelzhy/kuberecord/internal/sink/clickhouse.(*CHWriter).worker
     0.13MB 0.072% 96.92%    57.94MB 33.18%  sigs.k8s.io/json/internal/golang/encoding/json.(*decodeState).valueInterface
