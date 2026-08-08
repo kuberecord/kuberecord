@@ -1,8 +1,8 @@
 {
-  "uid": "kubestream-namespace-activity",
-  "title": "kubestream — Namespace Activity",
+  "uid": "kuberecord-namespace-activity",
+  "title": "kuberecord — Namespace Activity",
   "description": "Where the cluster is moving. A heatmap of change volume by namespace over time, with the breakdowns needed to explain a hot cell: which event types, which kinds, and which namespaces carry the volume. Use it to spot the deploy nobody announced, the namespace that never goes quiet, and the retention cost you are about to pay.",
-  "tags": ["kubestream", "clickhouse", "activity"],
+  "tags": ["kuberecord", "clickhouse", "activity"],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
@@ -24,7 +24,7 @@
         "name": "datasource",
         "label": "Data source",
         "query": "grafana-clickhouse-datasource",
-        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "description": "The ClickHouse holding kuberecord's resource_states table.",
         "hide": 0,
         "regex": "",
         "current": {}
@@ -40,7 +40,7 @@
         },
         "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
         "query": {
-          "refId": "kubestream-variable-cluster",
+          "refId": "kuberecord-variable-cluster",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",
@@ -62,7 +62,7 @@
         },
         "definition": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind",
         "query": {
-          "refId": "kubestream-variable-kind",
+          "refId": "kuberecord-variable-kind",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",
@@ -100,7 +100,7 @@
       "id": 1,
       "type": "heatmap",
       "title": "Change volume by namespace",
-      "description": "One row per namespace, one cell per time bucket, coloured by how many rows kubestream wrote. Cluster-scoped objects have an empty namespace in the schema and are shown as (cluster-scoped) so they do not render as a nameless row. Bucketing follows the dashboard's interval, so widening the time range coarsens the cells rather than dropping data.",
+      "description": "One row per namespace, one cell per time bucket, coloured by how many rows kuberecord wrote. Cluster-scoped objects have an empty namespace in the schema and are shown as (cluster-scoped) so they do not render as a nameless row. Bucketing follows the dashboard's interval, so widening the time range coarsens the cells rather than dropping data.",
       "datasource": {
         "type": "grafana-clickhouse-datasource",
         "uid": "${datasource}"

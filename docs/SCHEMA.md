@@ -1,13 +1,13 @@
-# kubestream ClickHouse Schema (v1)
+# kuberecord ClickHouse Schema (v1)
 
-This document is the authoritative reference for the kubestream ClickHouse
+This document is the authoritative reference for the kuberecord ClickHouse
 schema. The DDL is shipped in-repo under
 [`deploy/clickhouse/schema/`](../deploy/clickhouse/schema/):
 
 - [`001_resource_states.sql`](../deploy/clickhouse/schema/001_resource_states.sql) — the per-object change stream.
 - [`002_watch_scopes.sql`](../deploy/clickhouse/schema/002_watch_scopes.sql) — the watch-scope epoch log.
 
-> **Schema v1 is frozen.** Because kubestream had no users to keep compatibility
+> **Schema v1 is frozen.** Because kuberecord had no users to keep compatibility
 > with, the schema got exactly one free redesign window, and that window is now
 > **closed**: as of Task 2.6 these two tables are a **public API** with an
 > additive-only change policy. Every column below is deliberate, and none of them
@@ -52,7 +52,7 @@ working for the life of `v1`.
   fail on them. Existing values never change meaning.
 - **The shape of the JSON inside `data` and `diff`.** That is the Kubernetes
   object as the API server served it (normalized, and optionally
-  [redacted](#redaction)). kubestream does not own it and cannot freeze it.
+  [redacted](#redaction)). kuberecord does not own it and cannot freeze it.
 - **Anything a deployment adds on top** — TTL clauses, extra indices,
   projections, materialized views, the database name. All of it is yours; the
   operator neither sets nor inspects it.
@@ -111,7 +111,7 @@ table version** (`resource_states_v2`) created alongside the existing table, wit
 a documented `INSERT INTO ... SELECT` migration and a release note. Both tables
 are readable during the transition, and the operator writing `v2` is a new major
 of the operator. An in-place incompatible `ALTER` is never performed by
-kubestream and is never asked of an operator, because it would strand every query
+kuberecord and is never asked of an operator, because it would strand every query
 already written against `v1`.
 
 ### Phase 3 fit check (the freeze gate)
@@ -242,7 +242,7 @@ a physical row to be re-sent.
 > every row by the operator pod's UTC offset and — because the isolation path's
 > re-insert was rendered by a different encoder — broke the byte-identical
 > property above for any operator not running in UTC. Timestamps written by
-> kubestream are now independent of `TZ`.
+> kuberecord are now independent of `TZ`.
 
 Because `ReplacingMergeTree` de-duplicates only on background merge, a naive
 `SELECT *` can transiently observe a duplicate before the merge runs. **Any read
@@ -604,13 +604,13 @@ downstream is therefore a function of the *redacted* content:
 | `sha256` | the hash of the redacted object |
 
 The consequence worth stating plainly: two states of an object that differ
-**only** in a redacted value are indistinguishable to kubestream. They hash
+**only** in a redacted value are indistinguishable to kuberecord. They hash
 identically, so the second one deduplicates and **no row is written at all**.
 That is deliberate. A design that redacted on the way out would leak the value
 through the diff, and one that hashed before redacting would leave the `sha256`
 column as a stable oracle to grind guessed values against.
 
-The flip side is equally deliberate: kubestream cannot tell you *that* a redacted
+The flip side is equally deliberate: kuberecord cannot tell you *that* a redacted
 value changed. If you need change detection on a secretish field, redact its
 neighbours instead of it, or stream the object to a second sink under a different
 policy.
@@ -807,7 +807,7 @@ cross-contaminating each other's history.
 
 ## Suggested TTL (optional, non-mandatory)
 
-kubestream does **not** impose a retention policy — audit data is often kept
+kuberecord does **not** impose a retention policy — audit data is often kept
 indefinitely, and retention is a deployment decision. If you do want automatic
 expiry, a TTL clause can be added to `resource_states` (and/or `watch_scopes`),
 for example a 1-year retention:

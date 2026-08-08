@@ -1,6 +1,6 @@
-# Operating kubestream
+# Operating kuberecord
 
-kubestream watches your cluster, so something has to watch kubestream. This page
+kuberecord watches your cluster, so something has to watch kuberecord. This page
 is the short version of that: which signals matter, where they come from, and
 what to do when one of them goes the wrong way.
 
@@ -29,7 +29,7 @@ for plain HTTP on a local cluster. The Helm chart turns it on by default —
 `metrics.enabled: true` passes the argument and creates the `Service` — so with
 the chart you only have to point a `ServiceMonitor` or a scrape config at it.
 
-Everything kubestream exports is prefixed `kuberecord_`, alongside the standard
+Everything kuberecord exports is prefixed `kuberecord_`, alongside the standard
 `controller_runtime_*`, `workqueue_*` and `go_*` families the manager publishes on
 its own — the two `workqueue_*` families are worth a look too, since the pipeline's
 own queue is a client-go workqueue.
@@ -73,7 +73,7 @@ $ kubectl describe clusterstreamrule <name>   # the conditions carry the reason
 Import the JSON in Grafana (**Dashboards → New → Import → Upload JSON file**) and
 pick your Prometheus when prompted. The dashboard has a `Data source` variable, so
 nothing in it is pinned to one Grafana install, and a `Sink` variable for clusters
-streaming to more than one `ClickHouseSink`. Its UID is `kubestream-operator-health`,
+streaming to more than one `ClickHouseSink`. Its UID is `kuberecord-operator-health`,
 so re-importing an updated copy replaces it in place rather than creating a second one.
 
 The panels, and what each is for:
@@ -104,10 +104,10 @@ everything below the `spec` key is an ordinary Prometheus rule file.
 
 | Alert | Fires on | After | Severity |
 |---|---|---|---|
-| `KubestreamWriteQueueSaturated` | queue over 80% of capacity | 5m | warning |
-| `KubestreamWriteFailures` | any nonzero failed-write rate | 10m | critical |
-| `KubestreamRuleNotReady` | any rule with `Ready=False` | 15m | warning |
-| `KubestreamEnqueueTimeouts` | any nonzero enqueue-timeout rate | 5m | critical |
+| `KuberecordWriteQueueSaturated` | queue over 80% of capacity | 5m | warning |
+| `KuberecordWriteFailures` | any nonzero failed-write rate | 10m | critical |
+| `KuberecordRuleNotReady` | any rule with `Ready=False` | 15m | warning |
+| `KuberecordEnqueueTimeouts` | any nonzero enqueue-timeout rate | 5m | critical |
 
 The thresholds are argued in comments in the file itself; the short version is
 that the two "any nonzero rate" alerts have no meaningful threshold to tune (a

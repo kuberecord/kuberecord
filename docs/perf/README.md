@@ -1,4 +1,4 @@
-# kubestream — committed pprof profiles (Task 2.3)
+# kuberecord — committed pprof profiles (Task 2.3)
 
 `before/` and `after/` are the heap and allocation profiles of one full **massive**
 profile run (20,000 objects across ConfigMap + Deployment + ServiceAccount, 500

@@ -4,7 +4,7 @@ Three CRDs express the two-tier model: a **sink** says *where* state goes, a
 **rule** says *what* to stream there.
 
 They are validated entirely by CRD structural schemas and CEL
-(`x-kubernetes-validations`). kubestream registers no admission webhooks and
+(`x-kubernetes-validations`). kuberecord registers no admission webhooks and
 needs no cert-manager, so a validation failure is an ordinary `kubectl apply`
 error rather than a dependency you have to install and keep certificates alive
 for.

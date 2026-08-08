@@ -1,5 +1,5 @@
 
-===== kubestream load harness result =====
+===== kuberecord load harness result =====
 profile               : massive: objects=20000 rate=500/s payload=1024B duration=1m0s delete-ratio=0.10 concurrency=64 kinds=ConfigMap+Deployment+ServiceAccount
 hardware              : darwin/arm64, 8 logical CPUs, Go go1.26.2
 sustained records/sec : 545  (32693 records settled over 60.0s churn)

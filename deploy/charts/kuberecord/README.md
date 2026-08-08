@@ -1,6 +1,6 @@
-# kubestream Helm chart
+# kuberecord Helm chart
 
-Installs the kubestream operator: the CRDs, its RBAC (including the aggregated
+Installs the kuberecord operator: the CRDs, its RBAC (including the aggregated
 watch role and whichever watch presets you enable), the manager Deployment and,
 optionally, a starter `ClickHouseSink`.
 
@@ -14,21 +14,21 @@ either one unmodified (`make test-e2e-helm`, `make test-e2e-installer`).
 ## Install
 
 ```sh
-helm install kubestream deploy/charts/kubestream \
-  --namespace kubestream-system --create-namespace
+helm install kuberecord deploy/charts/kuberecord \
+  --namespace kuberecord-system --create-namespace
 ```
 
 The chart is packaged and attached to every tagged
 [release](https://github.com/yelzhy/kuberecord/releases) alongside a
-`checksums.txt`, so a `kubestream-X.Y.Z.tgz` can be installed directly without a
+`checksums.txt`, so a `kuberecord-X.Y.Z.tgz` can be installed directly without a
 checkout. There is no chart repository. The chart is **not** versioned
 independently of the operator: `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
 both equal to the operator release it installs — see
 [`docs/RELEASING.md`](../../../docs/RELEASING.md).
 
-Use the release name `kubestream`: it matches the chart name, so every object
+Use the release name `kuberecord`: it matches the chart name, so every object
 comes out named exactly as the kustomize install names it
-(`kubestream-controller-manager`, `kubestream-metrics-reader`, …). Any other
+(`kuberecord-controller-manager`, `kuberecord-metrics-reader`, …). Any other
 release name works, but the names gain a prefix and anything referring to them —
 a scrape config, a ClusterRoleBinding for metrics readers — has to follow.
 
@@ -48,7 +48,7 @@ only namespace the operator can read Secrets in:
 
 ```sh
 kubectl create secret generic clickhouse-credentials \
-  --namespace kubestream-system --from-literal=password='<your-password>'
+  --namespace kuberecord-system --from-literal=password='<your-password>'
 ```
 
 ### Upgrades and CRDs
@@ -58,8 +58,8 @@ upgrades or deletes them, so a chart upgrade that ships changed CRDs needs one
 explicit step first:
 
 ```sh
-kubectl apply -f deploy/charts/kubestream/crds/
-helm upgrade kubestream deploy/charts/kubestream --namespace kubestream-system
+kubectl apply -f deploy/charts/kuberecord/crds/
+helm upgrade kuberecord deploy/charts/kuberecord --namespace kuberecord-system
 ```
 
 `helm uninstall` likewise leaves the CRDs — and therefore your `ClickHouseSink`
@@ -73,7 +73,7 @@ already in ClickHouse are untouched, since the sink is the durable store
 
 | Value | Type | Default | Description |
 |---|---|---|---|
-| `image.repository` | string | `ghcr.io/yelzhy/kubestream` | Operator image repository. |
+| `image.repository` | string | `ghcr.io/yelzhy/kuberecord` | Operator image repository. |
 | `image.tag` | string | `""` | Image tag. Empty follows the chart's `appVersion`, so upgrading the chart moves the operator with it. |
 | `image.digest` | string | `""` | Image digest (`sha256:…`). Set, it wins over `image.tag` — a digest pins by content, a tag only by name. |
 | `image.pullPolicy` | string | `IfNotPresent` | Container image pull policy. |
@@ -103,8 +103,8 @@ Scrapers need the `<release>-metrics-reader` ClusterRole, which is shipped
 installer's decision, not a side effect of installing:
 
 ```sh
-kubectl create clusterrolebinding kubestream-metrics-reader \
-  --clusterrole=kubestream-metrics-reader \
+kubectl create clusterrolebinding kuberecord-metrics-reader \
+  --clusterrole=kuberecord-metrics-reader \
   --serviceaccount=monitoring:prometheus
 ```
 
@@ -126,7 +126,7 @@ repository is a starting point if you run the Prometheus Operator.
 | `rbac.presets.batch` | bool | `false` | Watch `batch` `jobs` and `cronjobs`. |
 | `rbac.presets.networking` | bool | `false` | Watch `ingresses`, `ingressclasses`, `networkpolicies`, `endpointslices` and `endpoints`. |
 | `rbac.presets.storage` | bool | `false` | Watch `persistentvolumes`, `persistentvolumeclaims`, `storageclasses`, `volumeattachments`, `csidrivers`, `csinodes`. |
-| `rbac.presets.rbac-read` | bool | `false` | Watch `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`. The highest-value audit trail kubestream can produce, and the one preset worth a second thought: it puts the cluster's whole authorization graph in ClickHouse. See [`docs/RBAC.md`](../../../docs/RBAC.md). |
+| `rbac.presets.rbac-read` | bool | `false` | Watch `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`. The highest-value audit trail kuberecord can produce, and the one preset worth a second thought: it puts the cluster's whole authorization graph in ClickHouse. See [`docs/RBAC.md`](../../../docs/RBAC.md). |
 
 Each enabled preset renders one `ClusterRole` labelled
 `kuberecord.io/aggregate-to-watcher: "true"`, which the aggregated
@@ -196,8 +196,8 @@ create the schema v1 tables itself instead of you applying the DDL.
 | `createDefaultSink` | bool | `false` | Render a `ClickHouseSink`. Off by default: a sink needs an address and a password, and the password is yours to create. |
 | `defaultSink.name` | string | `default` | The sink's name. `default` is what a rule's `spec.sinkRef` defaults to, so a single-backend install needs no `sinkRef` anywhere. |
 | `defaultSink.connection.addr` | string | `""` | `host:port` of ClickHouse's native protocol (9000). **Required** when `createDefaultSink` is true. |
-| `defaultSink.connection.database` | string | `kubestream` | Database holding the schema v1 tables. |
-| `defaultSink.connection.username` | string | `kubestream` | ClickHouse user. |
+| `defaultSink.connection.database` | string | `kuberecord` | Database holding the schema v1 tables. |
+| `defaultSink.connection.username` | string | `kuberecord` | ClickHouse user. |
 | `defaultSink.connection.credentialsSecretRef.name` | string | `clickhouse-credentials` | Secret with a `password` key, resolved in the operator's own namespace. |
 | `defaultSink.connection.dialTimeout` | duration | `""` | Dial timeout; empty keeps the CRD default. |
 | `defaultSink.connection.readTimeout` | duration | `""` | Read timeout; empty keeps the CRD default. |

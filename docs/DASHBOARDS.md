@@ -1,6 +1,6 @@
-# kubestream Dashboards
+# kuberecord Dashboards
 
-Four Grafana dashboards for reading what kubestream recorded. They are the
+Four Grafana dashboards for reading what kuberecord recorded. They are the
 clickable form of [`docs/QUERIES.md`](QUERIES.md) — same questions, same frozen
 columns, no UI to install beyond Grafana itself.
 
@@ -10,10 +10,10 @@ These are for reading **cluster history**. The dashboard for watching the
 
 | Dashboard | File | UID | Answers |
 |---|---|---|---|
-| Object Timeline | `deploy/grafana/object-timeline.json` | `kubestream-object-timeline` | "What happened to this one object, and what was Kubernetes saying about it?" |
-| Drift by Actor | `deploy/grafana/drift-by-actor.json` | `kubestream-drift-by-actor` | "What changed that my GitOps controller did not do?" |
-| Flap Report | `deploy/grafana/flap-report.json` | `kubestream-flap-report` | "What will not hold still?" |
-| Namespace Activity | `deploy/grafana/namespace-activity.json` | `kubestream-namespace-activity` | "Where is this cluster moving?" |
+| Object Timeline | `deploy/grafana/object-timeline.json` | `kuberecord-object-timeline` | "What happened to this one object, and what was Kubernetes saying about it?" |
+| Drift by Actor | `deploy/grafana/drift-by-actor.json` | `kuberecord-drift-by-actor` | "What changed that my GitOps controller did not do?" |
+| Flap Report | `deploy/grafana/flap-report.json` | `kuberecord-flap-report` | "What will not hold still?" |
+| Namespace Activity | `deploy/grafana/namespace-activity.json` | `kuberecord-namespace-activity` | "Where is this cluster moving?" |
 
 ## Prerequisites
 
@@ -53,10 +53,10 @@ Pick a cluster, kind, namespace and name; set the time range to the incident.
 | Changes over time | Always first. The shape of the object's life: quiet, then a cluster of changes. |
 | Field managers | You want to know who was involved before reading the diffs. |
 | Latest recorded state | Checking whether what you have is current; `sha256` is what a reconstruction is verified against. |
-| Rows and diffs | The actual answer. Every row kubestream wrote, newest first, with each change inlined. |
+| Rows and diffs | The actual answer. Every row kuberecord wrote, newest first, with each change inlined. |
 | Kubernetes Events for this object | The change rows alone do not explain it. Needs a rule streaming `v1/Event` or `events.k8s.io/v1/Event`. |
 
-`Kind` is matched unqualified, without its API group, because kubestream's
+`Kind` is matched unqualified, without its API group, because kuberecord's
 identity key is version-agnostic and a kind name is unique in practice within a
 cluster. If you genuinely run two same-named kinds from different groups, add an
 `api_group` filter to the panels.
@@ -120,12 +120,12 @@ tears its ClickHouse down on exit, so for screenshots run the harness against a
 container you keep:
 
 ```console
-$ docker run -d --name kubestream-demo \
-    -e CLICKHOUSE_USER=kubestream -e CLICKHOUSE_PASSWORD=kubestream \
+$ docker run -d --name kuberecord-demo \
+    -e CLICKHOUSE_USER=kuberecord -e CLICKHOUSE_PASSWORD=kuberecord \
     -p 19000:9000 -p 18123:8123 clickhouse/clickhouse-server:24.8
 
 $ KUBEBUILDER_ASSETS="$(bin/setup-envtest use -i --bin-dir bin -p path)" \
-  CH_TEST_ADDR=127.0.0.1:19000 CH_TEST_USER=kubestream CH_TEST_PASSWORD=kubestream \
+  CH_TEST_ADDR=127.0.0.1:19000 CH_TEST_USER=kuberecord CH_TEST_PASSWORD=kuberecord \
   go test -tags=integration ./test/loadgen/ -run TestLoadGenChurn -v -timeout 45m -profile=small
 ```
 

@@ -1,4 +1,4 @@
-# kubestream — Performance
+# kuberecord — Performance
 
 ## Informer memory: the cache transform (Task 1.4)
 

@@ -1,8 +1,8 @@
 {
-  "uid": "kubestream-operator-health",
-  "title": "kubestream — Operator Health",
-  "description": "Health of the kubestream operator itself: how saturated each sink's hand-off queue is, whether writes are settling, how well batches coalesce, and which rules and scopes are not serving. Built entirely on the metrics the operator exports on --metrics-bind-address; see docs/OPERATING.md.",
-  "tags": ["kubestream", "operator", "clickhouse"],
+  "uid": "kuberecord-operator-health",
+  "title": "kuberecord — Operator Health",
+  "description": "Health of the kuberecord operator itself: how saturated each sink's hand-off queue is, whether writes are settling, how well batches coalesce, and which rules and scopes are not serving. Built entirely on the metrics the operator exports on --metrics-bind-address; see docs/OPERATING.md.",
+  "tags": ["kuberecord", "operator", "clickhouse"],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
@@ -147,7 +147,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Write outcomes",
-      "description": "Settled write jobs per second, split by outcome. A job is counted exactly once, when it settles — so a write that succeeded after five retries appears here once, as a success. Any sustained `failed` rate means rows are being lost to the sink's retry budget and is what the KubestreamWriteFailures alert fires on; a `success` rate that falls without a matching `failed` rate is a throughput dip, not an error.",
+      "description": "Settled write jobs per second, split by outcome. A job is counted exactly once, when it settles — so a write that succeeded after five retries appears here once, as a success. Any sustained `failed` rate means rows are being lost to the sink's retry budget and is what the KuberecordWriteFailures alert fires on; a `success` rate that falls without a matching `failed` rate is a throughput dip, not an error.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -417,7 +417,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Enqueue backpressure",
-      "description": "The hot path's own view of saturation: p99 of the time Enqueue spent waiting for room in the queue, and the rate at which that wait gave up. Blocking above zero means pipeline workers are being paid for in latency; a nonzero timeout rate means the queue stayed full for the whole enqueue timeout and work is being shed. The KubestreamEnqueueTimeouts alert fires on the second series, and this panel is where an operator lands to see how long the first one had been climbing beforehand.",
+      "description": "The hot path's own view of saturation: p99 of the time Enqueue spent waiting for room in the queue, and the rate at which that wait gave up. Blocking above zero means pipeline workers are being paid for in latency; a nonzero timeout rate means the queue stayed full for the whole enqueue timeout and work is being shed. The KuberecordEnqueueTimeouts alert fires on the second series, and this panel is where an operator lands to see how long the first one had been climbing beforehand.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

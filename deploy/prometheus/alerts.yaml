@@ -1,4 +1,4 @@
-# Sample alert rules for kubestream, as a prometheus-operator PrometheusRule.
+# Sample alert rules for kuberecord, as a prometheus-operator PrometheusRule.
 #
 #   kubectl apply -f deploy/prometheus/alerts.yaml
 #
@@ -19,14 +19,14 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: kubestream-operator
+  name: kuberecord-operator
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: alerts
     release: kube-prometheus-stack
 spec:
   groups:
-    - name: kubestream.operator
+    - name: kuberecord.operator
       # 30s matches the dashboard's refresh and is well inside the shortest `for`
       # below, so no alert's clock is quantized by the evaluation interval.
       interval: 30s
@@ -47,7 +47,7 @@ spec:
         # has not been published yet would make the division +Inf, which satisfies
         # any threshold — the alert would fire on a sink that has never accepted a
         # single write.
-        - alert: KubestreamWriteQueueSaturated
+        - alert: KuberecordWriteQueueSaturated
           expr: |
             (
               kuberecord_write_queue_depth / kuberecord_write_queue_capacity > 0.8
@@ -56,9 +56,9 @@ spec:
           for: 5m
           labels:
             severity: warning
-            component: kubestream
+            component: kuberecord
           annotations:
-            summary: kubestream sink {{ $labels.sink }} write queue is over 80% full
+            summary: kuberecord sink {{ $labels.sink }} write queue is over 80% full
             description: >-
               The hand-off queue for sink {{ $labels.sink }} has been over 80% full for
               5 minutes ({{ $value | humanizePercentage }} now). ClickHouse is draining
@@ -77,14 +77,14 @@ spec:
         # rate that is still nonzero ten minutes later has outlived that budget and is
         # not going to resolve on its own. Alerting on the first failed write would
         # page for every routine ClickHouse upgrade.
-        - alert: KubestreamWriteFailures
+        - alert: KuberecordWriteFailures
           expr: sum by (sink) (rate(kuberecord_writes_total{outcome="failed"}[5m])) > 0
           for: 10m
           labels:
             severity: critical
-            component: kubestream
+            component: kuberecord
           annotations:
-            summary: kubestream sink {{ $labels.sink }} is losing writes
+            summary: kuberecord sink {{ $labels.sink }} is losing writes
             description: >-
               Writes to sink {{ $labels.sink }} have been settling as failed for 10
               minutes ({{ $value | printf "%.2f" }}/s). Each one exhausted its retry
@@ -106,14 +106,14 @@ spec:
         # No aggregation: the series carries only (condition, status), so the raw
         # comparison keeps whatever job/instance labels the scrape added, and an
         # operator running two replicas sees which one is reporting.
-        - alert: KubestreamRuleNotReady
+        - alert: KuberecordRuleNotReady
           expr: kuberecord_rules{condition="Ready",status="false"} > 0
           for: 15m
           labels:
             severity: warning
-            component: kubestream
+            component: kuberecord
           annotations:
-            summary: '{{ $value }} kubestream rule(s) have been not-Ready for 15 minutes'
+            summary: '{{ $value }} kuberecord rule(s) have been not-Ready for 15 minutes'
             description: >-
               {{ $value }} StreamRule(s) or ClusterStreamRule(s) report Ready=False and
               have not recovered across several resyncs. Run
@@ -129,23 +129,23 @@ spec:
         # requeue adds to how stale the audit trail is. Zero is the only healthy rate.
         #
         # Why 5m, i.e. sooner than the failed-write alert: this fires on backpressure
-        # that is still recoverable, while KubestreamWriteFailures fires on data that
+        # that is still recoverable, while KuberecordWriteFailures fires on data that
         # is already gone. Catching the first is how you avoid the second. It is
         # deliberately the same window as the queue-saturation alert, which is its
         # precursor: seeing both is the unambiguous signal that the sink is
         # undersized rather than briefly slow.
-        - alert: KubestreamEnqueueTimeouts
+        - alert: KuberecordEnqueueTimeouts
           expr: sum by (sink) (rate(kuberecord_enqueue_timeouts_total[5m])) > 0
           for: 5m
           labels:
             severity: critical
-            component: kubestream
+            component: kuberecord
           annotations:
-            summary: kubestream sink {{ $labels.sink }} is shedding work under backpressure
+            summary: kuberecord sink {{ $labels.sink }} is shedding work under backpressure
             description: >-
               Enqueues to sink {{ $labels.sink }} have been timing out for 5 minutes
               ({{ $value | printf "%.2f" }}/s). The write queue is staying full, so
               pipeline workers are requeueing instead of making progress and the data
               in ClickHouse is falling behind the cluster. Treat this as the escalation
-              of KubestreamWriteQueueSaturated.
+              of KuberecordWriteQueueSaturated.
             runbook_url: https://github.com/yelzhy/kuberecord/blob/main/docs/OPERATING.md#enqueue-timeouts
