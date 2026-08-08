@@ -1,4 +1,4 @@
-# Releasing kubestream
+# Releasing kuberecord
 
 Strangers install tags, not `main`. This page is the policy for what a tag
 promises, plus the mechanics of cutting one.
@@ -11,7 +11,7 @@ promises, plus the mechanics of cutting one.
 
 ## Versioning policy
 
-kubestream carries **three version numbers, and they are deliberately
+kuberecord carries **three version numbers, and they are deliberately
 independent**. Conflating them is the mistake this section exists to prevent: an
 operator upgrade is not a schema migration, and a schema that is frozen does not
 mean an operator that cannot change.
@@ -54,9 +54,9 @@ publishes:
 
 | Artifact | Notes |
 |---|---|
-| `ghcr.io/yelzhy/kubestream:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
+| `ghcr.io/yelzhy/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
 | `install.yaml` | `kubectl apply -f` it: CRDs, RBAC and the manager, with the image above pinned exactly. For a non-prerelease tag it is byte-identical to the committed [`dist/install.yaml`](../dist/install.yaml) — the artifact you download is the file that was reviewed. |
-| `kubestream-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
+| `kuberecord-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
 | `checksums.txt` | `sha256` over both artifacts. Verify with `sha256sum -c checksums.txt` in the directory you downloaded them to. |
 | The Release body | That version's section of [`CHANGELOG.md`](../CHANGELOG.md), extracted verbatim by `hack/changelog-section.sh`. The changelog *is* the release notes. |
 
@@ -66,7 +66,7 @@ harder than a tag, resolve the digest once and use it — the chart takes
 `image.digest`:
 
 ```sh
-docker buildx imagetools inspect ghcr.io/yelzhy/kubestream:v0.1.0 --format '{{.Manifest.Digest}}'
+docker buildx imagetools inspect ghcr.io/yelzhy/kuberecord:v0.1.0 --format '{{.Manifest.Digest}}'
 ```
 
 A tag carrying a prerelease suffix is published as a GitHub prerelease, so it
@@ -84,7 +84,7 @@ Everything below happens on a branch, in one commit, reviewed like any other.
    the only place a `v0.x` minor's breakage is documented.
 2. **Bump the version in the two places that carry it.** `VERSION` in the
    [`Makefile`](../Makefile) and `version` / `appVersion` in
-   [`Chart.yaml`](../deploy/charts/kubestream/Chart.yaml). They must agree; a test
+   [`Chart.yaml`](../deploy/charts/kuberecord/Chart.yaml). They must agree; a test
    and the release gate both check.
 3. **Regenerate the committed manifest**: `make build-installer`. It pins the new
    image tag, and CI fails if it is stale.
@@ -92,7 +92,7 @@ Everything below happens on a branch, in one commit, reviewed like any other.
 5. **Tag the merge commit and push it:**
 
    ```sh
-   git tag -a v0.2.0 -m 'kubestream v0.2.0'
+   git tag -a v0.2.0 -m 'kuberecord v0.2.0'
    git push origin v0.2.0
    ```
 

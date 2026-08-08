@@ -1,8 +1,8 @@
 {
-  "uid": "kubestream-flap-report",
-  "title": "kubestream — Flap Report",
+  "uid": "kuberecord-flap-report",
+  "title": "kuberecord — Flap Report",
   "description": "Objects that will not hold still. Ranks every watched object by how many Modified rows it produced in the selected window and compares that against a threshold you set, so 'this controller is fighting another one' becomes a number instead of a hunch. Flapping is expensive twice over — it burns apiserver and it fills this table — so the objects at the top are usually both a correctness bug and a cost line.",
-  "tags": ["kubestream", "clickhouse", "churn"],
+  "tags": ["kuberecord", "clickhouse", "churn"],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
@@ -24,7 +24,7 @@
         "name": "datasource",
         "label": "Data source",
         "query": "grafana-clickhouse-datasource",
-        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "description": "The ClickHouse holding kuberecord's resource_states table.",
         "hide": 0,
         "regex": "",
         "current": {}
@@ -40,7 +40,7 @@
         },
         "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
         "query": {
-          "refId": "kubestream-variable-cluster",
+          "refId": "kuberecord-variable-cluster",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",
@@ -62,7 +62,7 @@
         },
         "definition": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace",
         "query": {
-          "refId": "kubestream-variable-namespace",
+          "refId": "kuberecord-variable-namespace",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",
@@ -89,7 +89,7 @@
         },
         "definition": "SELECT DISTINCT kind FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY kind",
         "query": {
-          "refId": "kubestream-variable-kind",
+          "refId": "kuberecord-variable-kind",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",

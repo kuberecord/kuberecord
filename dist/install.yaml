@@ -3,18 +3,18 @@ kind: Namespace
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     control-plane: controller-manager
-  name: kubestream-system
+  name: kuberecord-system
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: clickhousesinks.kubestream.io
+  name: clickhousesinks.kuberecord.io
 spec:
-  group: kubestream.io
+  group: kuberecord.io
   names:
     kind: ClickHouseSink
     listKind: ClickHouseSinkList
@@ -36,7 +36,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          ClickHouseSink declares one ClickHouse instance kubestream may write to.
+          ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 
           It is cluster-scoped (D6) because rules in any namespace reference it by
           name, and because a sink is infrastructure owned by the platform team rather
@@ -74,7 +74,7 @@ spec:
                   addr:
                     description: |-
                       Addr is the ClickHouse native-protocol endpoint as "host:port", e.g.
-                      "clickhouse.kubestream-system.svc:9000".
+                      "clickhouse.kuberecord-system.svc:9000".
                     maxLength: 253
                     minLength: 1
                     type: string
@@ -109,8 +109,8 @@ spec:
                     - name
                     type: object
                   database:
-                    default: kubestream
-                    description: Database is the ClickHouse database holding kubestream's
+                    default: kuberecord
+                    description: Database is the ClickHouse database holding kuberecord's
                       tables.
                     maxLength: 63
                     minLength: 1
@@ -425,9 +425,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: clusterstreamrules.kubestream.io
+  name: clusterstreamrules.kuberecord.io
 spec:
-  group: kubestream.io
+  group: kuberecord.io
   names:
     kind: ClusterStreamRule
     listKind: ClusterStreamRuleList
@@ -619,7 +619,7 @@ spec:
                   name) are streamed in a built-in Events mode, because an Event is
                   append-only ephemera rather than durable cluster state. Naming one is the
                   only thing you do — there is no switch, and no way to opt out, since every
-                  difference exists to stop kubestream recording something untrue:
+                  difference exists to stop kuberecord recording something untrue:
 
                     - every row carries the full Event, never a diff, so a count bump is
                       readable on its own;
@@ -855,9 +855,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: streamrules.kubestream.io
+  name: streamrules.kuberecord.io
 spec:
-  group: kubestream.io
+  group: kuberecord.io
   names:
     kind: StreamRule
     listKind: StreamRuleList
@@ -992,7 +992,7 @@ spec:
                   name) are streamed in a built-in Events mode, because an Event is
                   append-only ephemera rather than durable cluster state. Naming one is the
                   only thing you do — there is no switch, and no way to opt out, since every
-                  difference exists to stop kubestream recording something untrue:
+                  difference exists to stop kuberecord recording something untrue:
 
                     - every row carries the full Event, never a diff, so a count bump is
                       readable on its own;
@@ -1228,18 +1228,18 @@ kind: ServiceAccount
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-leader-election-role
-  namespace: kubestream-system
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-leader-election-role
+  namespace: kuberecord-system
 rules:
 - apiGroups:
   - ""
@@ -1276,8 +1276,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: kubestream-manager-role
-  namespace: kubestream-system
+  name: kuberecord-manager-role
+  namespace: kuberecord-system
 rules:
 - apiGroups:
   - ""
@@ -1291,7 +1291,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kubestream-manager-role
+  name: kuberecord-manager-role
 rules:
 - apiGroups:
   - ""
@@ -1315,7 +1315,7 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - kubestream.io
+  - kuberecord.io
   resources:
   - clickhousesinks
   - clusterstreamrules
@@ -1325,7 +1325,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - kubestream.io
+  - kuberecord.io
   resources:
   - clickhousesinks/status
   - clusterstreamrules/status
@@ -1338,7 +1338,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kubestream-metrics-auth-role
+  name: kuberecord-metrics-auth-role
 rules:
 - apiGroups:
   - authentication.k8s.io
@@ -1356,7 +1356,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: kubestream-metrics-reader
+  name: kuberecord-metrics-reader
 rules:
 - nonResourceURLs:
   - /metrics
@@ -1366,14 +1366,14 @@ rules:
 aggregationRule:
   clusterRoleSelectors:
   - matchLabels:
-      kubestream.io/aggregate-to-watcher: "true"
+      kuberecord.io/aggregate-to-watcher: "true"
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-watcher
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-watcher
 rules: []
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1381,9 +1381,9 @@ kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-    kubestream.io/aggregate-to-watcher: "true"
-  name: kubestream-watcher-core-workloads
+    app.kubernetes.io/name: kuberecord
+    kuberecord.io/aggregate-to-watcher: "true"
+  name: kuberecord-watcher-core-workloads
 rules:
 - apiGroups:
   - ""
@@ -1413,88 +1413,88 @@ kind: RoleBinding
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-leader-election-rolebinding
-  namespace: kubestream-system
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-leader-election-rolebinding
+  namespace: kuberecord-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: kubestream-leader-election-role
+  name: kuberecord-leader-election-role
 subjects:
 - kind: ServiceAccount
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-manager-secret-rolebinding
-  namespace: kubestream-system
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-manager-secret-rolebinding
+  namespace: kuberecord-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: kubestream-manager-role
+  name: kuberecord-manager-role
 subjects:
 - kind: ServiceAccount
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-manager-rolebinding
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-manager-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kubestream-manager-role
+  name: kuberecord-manager-role
 subjects:
 - kind: ServiceAccount
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: kubestream-metrics-auth-rolebinding
+  name: kuberecord-metrics-auth-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kubestream-metrics-auth-role
+  name: kuberecord-metrics-auth-role
 subjects:
 - kind: ServiceAccount
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-watcher-rolebinding
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-watcher-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: kubestream-watcher
+  name: kuberecord-watcher
 subjects:
 - kind: ServiceAccount
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
-  name: kubestream-clickhouse-credentials
-  namespace: kubestream-system
+    app.kubernetes.io/name: kuberecord
+  name: kuberecord-clickhouse-credentials
+  namespace: kuberecord-system
 stringData:
   password: changeme
 type: Opaque
@@ -1504,10 +1504,10 @@ kind: Service
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     control-plane: controller-manager
-  name: kubestream-controller-manager-metrics-service
-  namespace: kubestream-system
+  name: kuberecord-controller-manager-metrics-service
+  namespace: kuberecord-system
 spec:
   ports:
   - name: https
@@ -1515,7 +1515,7 @@ spec:
     protocol: TCP
     targetPort: 8443
   selector:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     control-plane: controller-manager
 ---
 apiVersion: apps/v1
@@ -1523,22 +1523,22 @@ kind: Deployment
 metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     control-plane: controller-manager
-  name: kubestream-controller-manager
-  namespace: kubestream-system
+  name: kuberecord-controller-manager
+  namespace: kuberecord-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: kubestream
+      app.kubernetes.io/name: kuberecord
       control-plane: controller-manager
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        app.kubernetes.io/name: kubestream
+        app.kubernetes.io/name: kuberecord
         control-plane: controller-manager
     spec:
       containers:
@@ -1555,7 +1555,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: ghcr.io/yelzhy/kubestream:v0.1.0
+        image: ghcr.io/yelzhy/kuberecord:v0.1.0
         livenessProbe:
           httpGet:
             path: /healthz
@@ -1591,6 +1591,6 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      serviceAccountName: kubestream-controller-manager
+      serviceAccountName: kuberecord-controller-manager
       terminationGracePeriodSeconds: 10
       volumes: []
