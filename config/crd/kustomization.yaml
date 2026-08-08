@@ -6,7 +6,7 @@
 # (x-kubernetes-validations), so it installs with no webhooks and no
 # cert-manager (D4).
 resources:
-- bases/kubestream.io_clickhousesinks.yaml
-- bases/kubestream.io_streamrules.yaml
-- bases/kubestream.io_clusterstreamrules.yaml
+- bases/kuberecord.io_clickhousesinks.yaml
+- bases/kuberecord.io_streamrules.yaml
+- bases/kuberecord.io_clusterstreamrules.yaml
 # +kubebuilder:scaffold:crdkustomizeresource

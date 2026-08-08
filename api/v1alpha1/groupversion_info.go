@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1alpha1 contains the kubestream.io/v1alpha1 API types: the three
+// Package v1alpha1 contains the kuberecord.io/v1alpha1 API types: the three
 // CRDs (D6) that replace the operator's env-var configuration with declarative,
 // two-tier intent — a ClickHouseSink says *where* state goes, a StreamRule /
 // ClusterStreamRule says *what* to stream there.
@@ -31,7 +31,7 @@ limitations under the License.
 // registry (internal/plan), and the data plane (internal/watch) consume these
 // types but never the reverse.
 // +kubebuilder:object:generate=true
-// +groupName=kubestream.io
+// +groupName=kuberecord.io
 package v1alpha1
 
 import (
@@ -41,7 +41,7 @@ import (
 
 var (
 	// GroupVersion is group version used to register these objects.
-	GroupVersion = schema.GroupVersion{Group: "kubestream.io", Version: "v1alpha1"}
+	GroupVersion = schema.GroupVersion{Group: "kuberecord.io", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}

@@ -181,12 +181,12 @@ func TestBaseClusterRoleGrantsOnlyControlPlaneRights(t *testing.T) {
 		"/events":     {"create", "patch"},
 		"/namespaces": {"get", "list", "watch"},
 		"authorization.k8s.io/selfsubjectaccessreviews": {"create"},
-		"kubestream.io/clickhousesinks":                 {"get", "list", "watch"},
-		"kubestream.io/clusterstreamrules":              {"get", "list", "watch"},
-		"kubestream.io/streamrules":                     {"get", "list", "watch"},
-		"kubestream.io/clickhousesinks/status":          {"get", "patch", "update"},
-		"kubestream.io/clusterstreamrules/status":       {"get", "patch", "update"},
-		"kubestream.io/streamrules/status":              {"get", "patch", "update"},
+		"kuberecord.io/clickhousesinks":                 {"get", "list", "watch"},
+		"kuberecord.io/clusterstreamrules":              {"get", "list", "watch"},
+		"kuberecord.io/streamrules":                     {"get", "list", "watch"},
+		"kuberecord.io/clickhousesinks/status":          {"get", "patch", "update"},
+		"kuberecord.io/clusterstreamrules/status":       {"get", "patch", "update"},
+		"kuberecord.io/streamrules/status":              {"get", "patch", "update"},
 	}
 
 	got := map[string][]string{}

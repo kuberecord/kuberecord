@@ -136,7 +136,7 @@ func killOperator() {
 
 // leaderElectionLease is the Lease controller-runtime holds the manager's
 // leadership in; the name is cmd/main.go's LeaderElectionID verbatim.
-const leaderElectionLease = "885d930f.kubestream.io"
+const leaderElectionLease = "885d930f.kuberecord.io"
 
 // leaseStablePolls is how many consecutive polls must observe an unchanged
 // renewal before the process is declared dead. A live leader renews on

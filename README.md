@@ -307,7 +307,7 @@ The operator then boots **healthy and completely idle**. It starts streaming whe
 a sink and a rule appear, with no restart:
 
 ```yaml
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata: {name: default}
 spec:
@@ -317,7 +317,7 @@ spec:
     username: kubestream
     credentialsSecretRef: {name: clickhouse-credentials}   # operator's namespace
 ---
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata: {name: payments-workloads, namespace: payments}
 spec:

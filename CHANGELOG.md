@@ -518,7 +518,7 @@ unreadiness that would have taken every other sink out of service with it.
 
 For anyone who ran the pre-CRD code out of `main`:
 
-1. `make install` (or `make deploy`) to install the `kubestream.io/v1alpha1` CRDs.
+1. `make install` (or `make deploy`) to install the `kuberecord.io/v1alpha1` CRDs.
 2. Create the credentials Secret in the operator's namespace
    (`kubectl create secret generic clickhouse-credentials --from-literal=password=…`).
 3. Translate the old `CH_*` environment block into a `ClickHouseSink` — name it

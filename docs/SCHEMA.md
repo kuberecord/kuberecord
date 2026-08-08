@@ -568,7 +568,7 @@ stored payload and one hash per object per sink, so honouring less than the unio
 would let one rule's existence unredact another's stream.
 
 ```yaml
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: default
@@ -577,7 +577,7 @@ spec:
     redaction:
     - fieldPath: data.password
 ---
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
   name: app-config

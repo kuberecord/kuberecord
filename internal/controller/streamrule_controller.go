@@ -323,8 +323,8 @@ func (r *RuleReconciler) defaultMetrics() {
 	}
 }
 
-// +kubebuilder:rbac:groups=kubestream.io,resources=streamrules;clusterstreamrules,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubestream.io,resources=streamrules/status;clusterstreamrules/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=streamrules;clusterstreamrules,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=streamrules/status;clusterstreamrules/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=selfsubjectaccessreviews,verbs=create
 

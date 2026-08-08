@@ -76,7 +76,7 @@ func runTestsWithEnvtest(m *testing.M) (code int) {
 
 	scheme := runtime.NewScheme()
 	if err := AddToScheme(scheme); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to register kubestream.io/v1alpha1: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to register kuberecord.io/v1alpha1: %v\n", err)
 		return 1
 	}
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})

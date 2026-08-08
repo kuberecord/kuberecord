@@ -32,7 +32,7 @@ control-plane reconcilers, so it cannot drift from what the code actually calls:
 
 | Grant | Why |
 |---|---|
-| `kubestream.io/{clickhousesinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
+| `kuberecord.io/{clickhousesinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
 | the same three `/status` — `get,update,patch` | Report conditions back |
 | `namespaces` — `get,list,watch` | `ClusterStreamRule.spec.namespaceSelector` expansion |
 | `authorization.k8s.io/selfsubjectaccessreviews` — `create` | The per-target RBAC check behind `RBACGranted` |
@@ -205,7 +205,7 @@ The rule now heals itself, with **no restart and no redeploy**:
 
 ```console
 $ kubectl wait --for=condition=RBACGranted streamrule/ingress-audit --timeout=3m
-streamrule.kubestream.io/ingress-audit condition met
+streamrule.kuberecord.io/ingress-audit condition met
 ```
 
 Healing is bounded by the reconciler's periodic re-evaluation (~2m), so it is

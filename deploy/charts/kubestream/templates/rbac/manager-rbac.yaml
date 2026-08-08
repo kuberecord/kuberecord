@@ -39,7 +39,7 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - kubestream.io
+  - kuberecord.io
   resources:
   - clickhousesinks
   - clusterstreamrules
@@ -49,7 +49,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - kubestream.io
+  - kuberecord.io
   resources:
   - clickhousesinks/status
   - clusterstreamrules/status
