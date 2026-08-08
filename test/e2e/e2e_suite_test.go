@@ -30,29 +30,29 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/test/harness"
-	"github.com/yelzhy/kubestream/test/utils"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/test/harness"
+	"github.com/yelzhy/kuberecord/test/utils"
 )
 
 // Identities of everything the suite installs. The operator-side names are the
-// ones `config/default` produces (namespace kubestream-system, `kubestream-`
+// ones `config/default` produces (namespace kuberecord-system, `kuberecord-`
 // name prefix), so the suite exercises the shipped install rather than a
 // parallel one that could drift from it.
 const (
 	// operatorNamespace is where the operator, its ServiceAccount and the
 	// credentials Secret live. It is also the only namespace the operator holds
 	// Secret read rights in (Task 1.9).
-	operatorNamespace = "kubestream-system"
+	operatorNamespace = "kuberecord-system"
 	// operatorDeployment and operatorPodSelector address the manager Deployment
 	// and its pods, which the restart scenario scales and every scenario reads
 	// logs from on failure.
-	operatorDeployment  = "kubestream-controller-manager"
+	operatorDeployment  = "kuberecord-controller-manager"
 	operatorPodSelector = "control-plane=controller-manager"
 	// credentialsSecret is the Secret `config/manager` ships. Both the sink and
 	// the ClickHouse server take their password from it, so the two sides of the
 	// connection cannot drift apart.
-	credentialsSecret = "kubestream-clickhouse-credentials"
+	credentialsSecret = "kuberecord-clickhouse-credentials"
 	// clusterID is the value the shipped Deployment sets CLUSTER_ID to. Every
 	// row and scope event the operator writes is stamped with it, so every query
 	// in the suite filters on it.
@@ -64,12 +64,12 @@ const (
 
 // The in-cluster ClickHouse fixture (test/e2e/manifests/clickhouse.yaml).
 const (
-	clickHouseNamespace  = "kubestream-e2e-clickhouse"
+	clickHouseNamespace  = "kuberecord-e2e-clickhouse"
 	clickHouseDeployment = "clickhouse"
 	clickHouseSecret     = "clickhouse-credentials"
 	clickHouseImage      = "clickhouse/clickhouse-server:24.8"
-	clickHouseUser       = "kubestream"
-	clickHouseDatabase   = "kubestream"
+	clickHouseUser       = "kuberecord"
+	clickHouseDatabase   = "kuberecord"
 )
 
 // Manifest paths, relative to the project root — the directory utils.Run
@@ -136,7 +136,7 @@ var (
 	// managerImage is the manager image built and side-loaded for this run. It
 	// must match the image the e2e kustomize overlay pins, the tag
 	// test/e2e/manifests/helm-values.yaml sets, and E2E_INSTALLER_IMG.
-	managerImage = "example.com/kubestream:v0.0.1"
+	managerImage = "example.com/kuberecord:v0.0.1"
 
 	// installMode is the install path under test, from E2E_INSTALL (default
 	// kustomize). Read once in BeforeSuite so an unknown value fails the run
@@ -158,7 +158,7 @@ func TestE2E(t *testing.T) {
 	SetDefaultEventuallyPollingInterval(pollInterval)
 	SetDefaultConsistentlyDuration(quietWindow)
 	SetDefaultConsistentlyPollingInterval(pollInterval)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting kubestream e2e test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting kuberecord e2e test suite\n")
 	RunSpecs(t, "e2e suite")
 }
 
@@ -258,8 +258,8 @@ func undeployTarget() string {
 // manager through the selected install path, then waits for the Deployment to
 // become available.
 //
-// Every path lands on the same names — namespace kubestream-system, Deployment
-// kubestream-controller-manager, Secret kubestream-clickhouse-credentials — so
+// Every path lands on the same names — namespace kuberecord-system, Deployment
+// kuberecord-controller-manager, Secret kuberecord-clickhouse-credentials — so
 // nothing past this function knows or cares which one ran.
 func deployOperator() {
 	By(fmt.Sprintf("deploying the operator via %s", installMode))

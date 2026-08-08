@@ -1,0 +1,55 @@
+{{- if .Values.rbac.create }}
+# The aggregated watch role (D7).
+#
+# It holds no rules of its own: `aggregationRule` tells the controller-manager to
+# keep `rules` equal to the union of every ClusterRole labelled
+# `kuberecord.io/aggregate-to-watcher: "true"`. Watch rights therefore arrive by
+# *applying a small labelled role* — a preset from `rbac.presets`, or one of your
+# own for a CRD no preset covers — never by editing the operator's base grant.
+#
+# Two properties fall out of this, and both are load-bearing:
+#
+#   - The operator cannot self-escalate. It has no write access to
+#     clusterroles/clusterrolebindings, so it can neither create a preset nor
+#     label an existing role; and an administrator applying one is still bound by
+#     Kubernetes' own escalation check, which forbids granting a permission you do
+#     not hold yourself.
+#   - A missing grant is data, not an outage. The rule that wanted it reports
+#     RBACGranted=False/MissingPermissions while every other rule keeps streaming
+#     (Invariant 5), and the grant appearing later flips the condition within one
+#     resync, with no restart.
+#
+# `rules` is an empty list rather than omitted so `kubectl diff` against a live,
+# populated object stays readable: the field exists and is server-owned. The
+# aggregation selector deliberately matches by label alone — not by release — so a
+# preset applied straight from config/rbac/presets/ with kubectl is picked up by a
+# Helm-installed operator too.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-watcher
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+aggregationRule:
+  clusterRoleSelectors:
+  - matchLabels:
+      kuberecord.io/aggregate-to-watcher: "true"
+rules: []
+---
+# Applied once, at install time, and never changed again: extending coverage
+# mutates the aggregated role's *contents*, not this binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kuberecord.fullname" . }}-watcher-rolebinding
+  labels:
+    {{- include "kuberecord.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kuberecord.fullname" . }}-watcher
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kuberecord.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

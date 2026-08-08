@@ -1,6 +1,6 @@
-# Operating kubestream
+# Operating kuberecord
 
-kubestream watches your cluster, so something has to watch kubestream. This page
+kuberecord watches your cluster, so something has to watch kuberecord. This page
 is the short version of that: which signals matter, where they come from, and
 what to do when one of them goes the wrong way.
 
@@ -29,7 +29,7 @@ for plain HTTP on a local cluster. The Helm chart turns it on by default —
 `metrics.enabled: true` passes the argument and creates the `Service` — so with
 the chart you only have to point a `ServiceMonitor` or a scrape config at it.
 
-Everything kubestream exports is prefixed `kubestream_`, alongside the standard
+Everything kuberecord exports is prefixed `kuberecord_`, alongside the standard
 `controller_runtime_*`, `workqueue_*` and `go_*` families the manager publishes on
 its own — the two `workqueue_*` families are worth a look too, since the pipeline's
 own queue is a client-go workqueue.
@@ -44,21 +44,21 @@ linger as a live-but-idle one.
 
 | Metric | Type | Labels | What it tells you |
 |---|---|---|---|
-| `kubestream_write_queue_depth` | gauge | `sink` | Jobs buffered in a sink's hand-off queue right now. |
-| `kubestream_write_queue_capacity` | gauge | `sink` | That queue's ceiling. Moves only when the sink is reconfigured. |
-| `kubestream_writes_total` | counter | `sink`, `outcome` | Settled write jobs. Counted once per job, at settle, after retries. |
-| `kubestream_write_latency_seconds` | histogram | `sink` | First attempt to final settle, retries included. |
-| `kubestream_write_retry_attempts_total` | counter | `sink` | Attempts beyond the first. |
-| `kubestream_write_batch_rows` | histogram | `sink` | Rows in each flushed insert batch. |
-| `kubestream_enqueue_block_seconds` | histogram | `sink` | How long the hot path waited for queue room. |
-| `kubestream_enqueue_timeouts_total` | counter | `sink` | Enqueues that gave up because the queue stayed full. |
-| `kubestream_dedup_skips_total` | counter | — | Work items short-circuited by an unchanged hash. |
-| `kubestream_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
-| `kubestream_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. |
-| `kubestream_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
-| `kubestream_rules` | gauge | `condition`, `status` | How many rules hold each condition at each status. |
+| `kuberecord_write_queue_depth` | gauge | `sink` | Jobs buffered in a sink's hand-off queue right now. |
+| `kuberecord_write_queue_capacity` | gauge | `sink` | That queue's ceiling. Moves only when the sink is reconfigured. |
+| `kuberecord_writes_total` | counter | `sink`, `outcome` | Settled write jobs. Counted once per job, at settle, after retries. |
+| `kuberecord_write_latency_seconds` | histogram | `sink` | First attempt to final settle, retries included. |
+| `kuberecord_write_retry_attempts_total` | counter | `sink` | Attempts beyond the first. |
+| `kuberecord_write_batch_rows` | histogram | `sink` | Rows in each flushed insert batch. |
+| `kuberecord_enqueue_block_seconds` | histogram | `sink` | How long the hot path waited for queue room. |
+| `kuberecord_enqueue_timeouts_total` | counter | `sink` | Enqueues that gave up because the queue stayed full. |
+| `kuberecord_dedup_skips_total` | counter | — | Work items short-circuited by an unchanged hash. |
+| `kuberecord_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
+| `kuberecord_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. |
+| `kuberecord_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
+| `kuberecord_rules` | gauge | `condition`, `status` | How many rules hold each condition at each status. |
 
-`kubestream_rules` is the control plane's only metric, and it is deliberately
+`kuberecord_rules` is the control plane's only metric, and it is deliberately
 identity-free: it counts rules, it does not name them. Both `StreamRule` and
 `ClusterStreamRule` count into the same series. Once it tells you a rule is
 degraded, `kubectl` tells you which:
@@ -73,7 +73,7 @@ $ kubectl describe clusterstreamrule <name>   # the conditions carry the reason
 Import the JSON in Grafana (**Dashboards → New → Import → Upload JSON file**) and
 pick your Prometheus when prompted. The dashboard has a `Data source` variable, so
 nothing in it is pinned to one Grafana install, and a `Sink` variable for clusters
-streaming to more than one `ClickHouseSink`. Its UID is `kubestream-operator-health`,
+streaming to more than one `ClickHouseSink`. Its UID is `kuberecord-operator-health`,
 so re-importing an updated copy replaces it in place rather than creating a second one.
 
 The panels, and what each is for:
@@ -104,10 +104,10 @@ everything below the `spec` key is an ordinary Prometheus rule file.
 
 | Alert | Fires on | After | Severity |
 |---|---|---|---|
-| `KubestreamWriteQueueSaturated` | queue over 80% of capacity | 5m | warning |
-| `KubestreamWriteFailures` | any nonzero failed-write rate | 10m | critical |
-| `KubestreamRuleNotReady` | any rule with `Ready=False` | 15m | warning |
-| `KubestreamEnqueueTimeouts` | any nonzero enqueue-timeout rate | 5m | critical |
+| `KuberecordWriteQueueSaturated` | queue over 80% of capacity | 5m | warning |
+| `KuberecordWriteFailures` | any nonzero failed-write rate | 10m | critical |
+| `KuberecordRuleNotReady` | any rule with `Ready=False` | 15m | warning |
+| `KuberecordEnqueueTimeouts` | any nonzero enqueue-timeout rate | 5m | critical |
 
 The thresholds are argued in comments in the file itself; the short version is
 that the two "any nonzero rate" alerts have no meaningful threshold to tune (a
@@ -169,7 +169,7 @@ Both artifacts are validated against JSON Schemas
 ([`deploy/grafana/dashboard.schema.json`](../deploy/grafana/dashboard.schema.json),
 [`deploy/prometheus/prometheusrule.schema.json`](../deploy/prometheus/prometheusrule.schema.json)),
 the alert rules are additionally parsed by `promtool check rules`, and every
-`kubestream_*` metric either file queries is checked against the set the
+`kuberecord_*` metric either file queries is checked against the set the
 operator's collectors declare — so renaming a metric fails the build instead of
 quietly emptying a panel. The schema half runs under plain `make test`; the
 target above adds promtool, which it downloads into `bin/`. CI runs both.

@@ -28,11 +28,11 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/controller"
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/test/harness"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/controller"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/test/harness"
 )
 
 // The chaos verbs: the things this suite does to a running system that no other
@@ -136,7 +136,7 @@ func killOperator() {
 
 // leaderElectionLease is the Lease controller-runtime holds the manager's
 // leadership in; the name is cmd/main.go's LeaderElectionID verbatim.
-const leaderElectionLease = "885d930f.kubestream.io"
+const leaderElectionLease = "885d930f.kuberecord.io"
 
 // leaseStablePolls is how many consecutive polls must observe an unchanged
 // renewal before the process is declared dead. A live leader renews on
@@ -221,16 +221,16 @@ func awaitOperatorGone() {
 // would silently sum across sinks the day a scenario adds a second one.
 var sinkSeries = map[string]string{"sink": sinkName}
 
-// Metric names, fully qualified with the operator's "kubestream" namespace. Named
+// Metric names, fully qualified with the operator's "kuberecord" namespace. Named
 // constants because a typo in a metric name reads exactly like a metric sitting
 // at zero, which is the single most misleading way a chaos assertion can fail.
 const (
-	metricWrites          = "kubestream_writes_total"
-	metricEnqueueTimeouts = "kubestream_enqueue_timeouts_total"
-	metricEnqueueBlockCnt = "kubestream_enqueue_block_seconds_count"
-	metricEnqueueBlockBkt = "kubestream_enqueue_block_seconds_bucket"
-	metricQueueDepth      = "kubestream_write_queue_depth"
-	metricSafeMode        = "kubestream_safe_mode"
+	metricWrites          = "kuberecord_writes_total"
+	metricEnqueueTimeouts = "kuberecord_enqueue_timeouts_total"
+	metricEnqueueBlockCnt = "kuberecord_enqueue_block_seconds_count"
+	metricEnqueueBlockBkt = "kuberecord_enqueue_block_seconds_bucket"
+	metricQueueDepth      = "kuberecord_write_queue_depth"
+	metricSafeMode        = "kuberecord_safe_mode"
 )
 
 // metricSum reads one counter or gauge family from the live endpoint, summed over

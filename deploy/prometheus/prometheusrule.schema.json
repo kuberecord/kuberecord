@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kubestream.io/schemas/prometheusrule.schema.json",
-  "title": "PrometheusRule (kubestream subset)",
-  "description": "Structural contract for the alert rules shipped in deploy/prometheus/. It covers the prometheus-operator PrometheusRule envelope and the Prometheus rule-file grammar inside .spec, restricted to alerting rules — kubestream ships no recording rules, and a recording rule that appeared here without a deliberate decision would be a mistake, not a feature. Whether the PromQL parses is promtool's job (make verify-observability); this file is about shape.",
+  "$id": "https://kuberecord.io/schemas/prometheusrule.schema.json",
+  "title": "PrometheusRule (kuberecord subset)",
+  "description": "Structural contract for the alert rules shipped in deploy/prometheus/. It covers the prometheus-operator PrometheusRule envelope and the Prometheus rule-file grammar inside .spec, restricted to alerting rules — kuberecord ships no recording rules, and a recording rule that appeared here without a deliberate decision would be a mistake, not a feature. Whether the PromQL parses is promtool's job (make verify-observability); this file is about shape.",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "properties": {

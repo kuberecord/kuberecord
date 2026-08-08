@@ -1,8 +1,8 @@
 {
-  "uid": "kubestream-operator-health",
-  "title": "kubestream — Operator Health",
-  "description": "Health of the kubestream operator itself: how saturated each sink's hand-off queue is, whether writes are settling, how well batches coalesce, and which rules and scopes are not serving. Built entirely on the metrics the operator exports on --metrics-bind-address; see docs/OPERATING.md.",
-  "tags": ["kubestream", "operator", "clickhouse"],
+  "uid": "kuberecord-operator-health",
+  "title": "kuberecord — Operator Health",
+  "description": "Health of the kuberecord operator itself: how saturated each sink's hand-off queue is, whether writes are settling, how well batches coalesce, and which rules and scopes are not serving. Built entirely on the metrics the operator exports on --metrics-bind-address; see docs/OPERATING.md.",
+  "tags": ["kuberecord", "operator", "clickhouse"],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
@@ -38,10 +38,10 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(kubestream_write_queue_capacity, sink)",
+        "definition": "label_values(kuberecord_write_queue_capacity, sink)",
         "query": {
           "qryType": 1,
-          "query": "label_values(kubestream_write_queue_capacity, sink)",
+          "query": "label_values(kuberecord_write_queue_capacity, sink)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "includeAll": true,
@@ -127,7 +127,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "kubestream_write_queue_depth{sink=~\"$sink\"}",
+          "expr": "kuberecord_write_queue_depth{sink=~\"$sink\"}",
           "legendFormat": "{{sink}} depth"
         },
         {
@@ -138,7 +138,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "kubestream_write_queue_capacity{sink=~\"$sink\"}",
+          "expr": "kuberecord_write_queue_capacity{sink=~\"$sink\"}",
           "legendFormat": "{{sink}} capacity"
         }
       ]
@@ -147,7 +147,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Write outcomes",
-      "description": "Settled write jobs per second, split by outcome. A job is counted exactly once, when it settles — so a write that succeeded after five retries appears here once, as a success. Any sustained `failed` rate means rows are being lost to the sink's retry budget and is what the KubestreamWriteFailures alert fires on; a `success` rate that falls without a matching `failed` rate is a throughput dip, not an error.",
+      "description": "Settled write jobs per second, split by outcome. A job is counted exactly once, when it settles — so a write that succeeded after five retries appears here once, as a success. Any sustained `failed` rate means rows are being lost to the sink's retry budget and is what the KuberecordWriteFailures alert fires on; a `success` rate that falls without a matching `failed` rate is a throughput dip, not an error.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -208,7 +208,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum by (sink, outcome) (rate(kubestream_writes_total{sink=~\"$sink\"}[5m]))",
+          "expr": "sum by (sink, outcome) (rate(kuberecord_writes_total{sink=~\"$sink\"}[5m]))",
           "legendFormat": "{{sink}} {{outcome}}"
         }
       ]
@@ -262,7 +262,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kubestream_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kuberecord_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
           "legendFormat": "{{sink}} p99"
         },
         {
@@ -273,7 +273,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "histogram_quantile(0.50, sum by (le, sink) (rate(kubestream_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le, sink) (rate(kuberecord_write_latency_seconds_bucket{sink=~\"$sink\"}[5m])))",
           "legendFormat": "{{sink}} p50"
         }
       ]
@@ -327,7 +327,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum by (sink) (rate(kubestream_write_retry_attempts_total{sink=~\"$sink\"}[5m]))",
+          "expr": "sum by (sink) (rate(kuberecord_write_retry_attempts_total{sink=~\"$sink\"}[5m]))",
           "legendFormat": "{{sink}}"
         }
       ]
@@ -408,7 +408,7 @@
           "editorMode": "code",
           "range": true,
           "format": "heatmap",
-          "expr": "sum by (le) (rate(kubestream_write_batch_rows_bucket{sink=~\"$sink\"}[5m]))",
+          "expr": "sum by (le) (rate(kuberecord_write_batch_rows_bucket{sink=~\"$sink\"}[5m]))",
           "legendFormat": "{{le}}"
         }
       ]
@@ -417,7 +417,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Enqueue backpressure",
-      "description": "The hot path's own view of saturation: p99 of the time Enqueue spent waiting for room in the queue, and the rate at which that wait gave up. Blocking above zero means pipeline workers are being paid for in latency; a nonzero timeout rate means the queue stayed full for the whole enqueue timeout and work is being shed. The KubestreamEnqueueTimeouts alert fires on the second series, and this panel is where an operator lands to see how long the first one had been climbing beforehand.",
+      "description": "The hot path's own view of saturation: p99 of the time Enqueue spent waiting for room in the queue, and the rate at which that wait gave up. Blocking above zero means pipeline workers are being paid for in latency; a nonzero timeout rate means the queue stayed full for the whole enqueue timeout and work is being shed. The KuberecordEnqueueTimeouts alert fires on the second series, and this panel is where an operator lands to see how long the first one had been climbing beforehand.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -486,7 +486,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kubestream_enqueue_block_seconds_bucket{sink=~\"$sink\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, sink) (rate(kuberecord_enqueue_block_seconds_bucket{sink=~\"$sink\"}[5m])))",
           "legendFormat": "{{sink}} block p99"
         },
         {
@@ -497,7 +497,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum by (sink) (rate(kubestream_enqueue_timeouts_total{sink=~\"$sink\"}[5m]))",
+          "expr": "sum by (sink) (rate(kuberecord_enqueue_timeouts_total{sink=~\"$sink\"}[5m]))",
           "legendFormat": "{{sink}} timeouts"
         }
       ]
@@ -559,7 +559,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum(kubestream_rules{condition=\"Ready\",status=\"false\"})",
+          "expr": "sum(kuberecord_rules{condition=\"Ready\",status=\"false\"})",
           "legendFormat": "degraded"
         }
       ]
@@ -621,7 +621,7 @@
           },
           "editorMode": "code",
           "range": true,
-          "expr": "sum(kubestream_safe_mode{sink=~\"$sink\"})",
+          "expr": "sum(kuberecord_safe_mode{sink=~\"$sink\"})",
           "legendFormat": "warming"
         }
       ]
@@ -698,7 +698,7 @@
           "instant": true,
           "range": false,
           "format": "table",
-          "expr": "kubestream_safe_mode{sink=~\"$sink\"} == 1",
+          "expr": "kuberecord_safe_mode{sink=~\"$sink\"} == 1",
           "legendFormat": "__auto"
         }
       ]

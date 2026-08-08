@@ -1,6 +1,6 @@
-# kubestream RBAC
+# kuberecord RBAC
 
-This document is the authoritative reference for how kubestream gets — and does
+This document is the authoritative reference for how kuberecord gets — and does
 not get — permission to read your cluster. The manifests live under
 [`config/rbac/`](../config/rbac/):
 
@@ -15,15 +15,15 @@ not get — permission to read your cluster. The manifests live under
 
 ## The model
 
-kubestream's permissions come in three separable pieces, and the separation is
+kuberecord's permissions come in three separable pieces, and the separation is
 the point — each piece has a different owner, a different blast radius, and a
 different lifecycle.
 
 | Piece | Kind | Scope | Who edits it | Changes at runtime? |
 |---|---|---|---|---|
-| **Base rights** | `ClusterRole kubestream-manager-role` | Cluster | Generated from markers; nobody edits it by hand | No — a change is a code change |
-| **Credential rights** | `Role kubestream-manager-role` | Operator namespace only | Generated from markers | No |
-| **Watch rights** | `ClusterRole kubestream-watcher` (aggregated) | Cluster | Platform admins, by applying labelled roles | **Yes — no redeploy, no restart** |
+| **Base rights** | `ClusterRole kuberecord-manager-role` | Cluster | Generated from markers; nobody edits it by hand | No — a change is a code change |
+| **Credential rights** | `Role kuberecord-manager-role` | Operator namespace only | Generated from markers | No |
+| **Watch rights** | `ClusterRole kuberecord-watcher` (aggregated) | Cluster | Platform admins, by applying labelled roles | **Yes — no redeploy, no restart** |
 
 ### Base rights: what the control plane needs and nothing more
 
@@ -32,7 +32,7 @@ control-plane reconcilers, so it cannot drift from what the code actually calls:
 
 | Grant | Why |
 |---|---|
-| `kubestream.io/{clickhousesinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
+| `kuberecord.io/{clickhousesinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
 | the same three `/status` — `get,update,patch` | Report conditions back |
 | `namespaces` — `get,list,watch` | `ClusterStreamRule.spec.namespaceSelector` expansion |
 | `authorization.k8s.io/selfsubjectaccessreviews` — `create` | The per-target RBAC check behind `RBACGranted` |
@@ -50,11 +50,11 @@ Two absences are load-bearing:
   [No self-escalation](#no-self-escalation).
 
 The base role also grants no `create`, `update`, `delete` or `finalizers` access
-on kubestream's own CRDs. The reconcilers only ever write `status`, and the design
+on kuberecord's own CRDs. The reconcilers only ever write `status`, and the design
 is deliberately finalizer-free (a rule stuck `Terminating` because the operator
 that must release it is down is a worse failure than anything a finalizer buys),
 so those verbs would be privilege no code path exercises. Leader-election
-`leases` are likewise in the namespaced `kubestream-leader-election-role`, not the
+`leases` are likewise in the namespaced `kuberecord-leader-election-role`, not the
 cluster role: leader election only ever touches a Lease in the operator's own
 namespace.
 
@@ -78,15 +78,15 @@ unreachable.
 
 ### Watch rights: the aggregated role
 
-[`kubestream-watcher`](../config/rbac/watcher_role.yaml) declares no rules of its
+[`kuberecord-watcher`](../config/rbac/watcher_role.yaml) declares no rules of its
 own. It carries an `aggregationRule` selecting
 
 ```yaml
 matchLabels:
-  kubestream.io/aggregate-to-watcher: "true"
+  kuberecord.io/aggregate-to-watcher: "true"
 ```
 
-and the **controller-manager** — not kubestream — keeps its `rules` equal to the
+and the **controller-manager** — not kuberecord — keeps its `rules` equal to the
 union of every ClusterRole carrying that label. Applying a labelled role is
 therefore the entire grant mechanism: the aggregated role's contents change
 in-cluster, the binding to the operator's ServiceAccount never changes, and the
@@ -110,7 +110,7 @@ supported and safe: the operator boots healthy with no watch rights at all and
 every rule reports `RBACGranted=False` until a preset arrives.
 
 `events` is worth a deliberate decision rather than a reflex: Events are usually
-the highest-volume kind in a cluster, and kubestream streams them in a mode that
+the highest-volume kind in a cluster, and kuberecord streams them in a mode that
 writes the full Event on every occurrence count bump (see
 [SCHEMA.md](SCHEMA.md#kubernetes-events)). Grant it when you want the Event
 stream persisted, and prefer a namespaced `StreamRule` over a cluster-wide one
@@ -120,7 +120,7 @@ A Helm install selects the same presets by value, one boolean each, with the sam
 default:
 
 ```sh
-helm upgrade kubestream deploy/charts/kubestream --namespace kubestream-system \
+helm upgrade kuberecord deploy/charts/kuberecord --namespace kuberecord-system \
   --reuse-values --set rbac.presets.networking=true
 ```
 
@@ -134,14 +134,14 @@ hand is picked up by a Helm-installed operator, and neither needs a restart. Set
 at all.
 
 `rbac-read` deserves a decision rather than a habit. Streaming role changes is
-kubestream's highest-value audit trail ("who was granted cluster-admin, and
+kuberecord's highest-value audit trail ("who was granted cluster-admin, and
 when?"), and it also means the cluster's full authorization graph, and every
 change to it, lands in ClickHouse — where the caveat at the bottom of this
 document applies.
 
 ## No self-escalation
 
-The claim is that no path exists by which kubestream widens its own permissions.
+The claim is that no path exists by which kuberecord widens its own permissions.
 Three independent mechanisms hold it up, and any one of them would be enough:
 
 1. **The operator cannot write RBAC objects.** Its base role grants nothing on
@@ -192,12 +192,12 @@ Confirm the controller-manager aggregated it, and that the operator now holds th
 right:
 
 ```console
-$ kubectl get clusterrole kubestream-watcher -o jsonpath='{.rules}' | jq -r '.[].resources[]'
+$ kubectl get clusterrole kuberecord-watcher -o jsonpath='{.rules}' | jq -r '.[].resources[]'
 ...
 ingresses
 
 $ kubectl auth can-i watch ingresses.networking.k8s.io \
-    --as=system:serviceaccount:kubestream-system:kubestream-controller-manager
+    --as=system:serviceaccount:kuberecord-system:kuberecord-controller-manager
 yes
 ```
 
@@ -205,7 +205,7 @@ The rule now heals itself, with **no restart and no redeploy**:
 
 ```console
 $ kubectl wait --for=condition=RBACGranted streamrule/ingress-audit --timeout=3m
-streamrule.kubestream.io/ingress-audit condition met
+streamrule.kuberecord.io/ingress-audit condition met
 ```
 
 Healing is bounded by the reconciler's periodic re-evaluation (~2m), so it is
@@ -222,15 +222,15 @@ kind: ClusterRole
 metadata:
   name: watcher-my-crds
   labels:
-    kubestream.io/aggregate-to-watcher: "true"
+    kuberecord.io/aggregate-to-watcher: "true"
 rules:
 - apiGroups: ["acme.example.com"]
   resources: ["widgets"]
   verbs: ["get", "list", "watch"]
 ```
 
-Presets applied through the kustomization pick up the `kubestream-` name prefix
-(`kubestream-watcher-core-workloads`); applied directly with `kubectl -f` they
+Presets applied through the kustomization pick up the `kuberecord-` name prefix
+(`kuberecord-watcher-core-workloads`); applied directly with `kubectl -f` they
 keep the name written in the file (`watcher-core-workloads`). Aggregation is by
 label, so the two are equivalent — only the object name differs.
 
@@ -267,7 +267,7 @@ unaffected: the process never exits over one bad rule (Invariant 5).
 <!-- RBAC-FLATTENING-CAVEAT -->
 **`[RBAC-FLATTENING-CAVEAT]` — the honest limitation, stated plainly:**
 
-> kubestream's *write* path respects Kubernetes RBAC precisely — it can only
+> kuberecord's *write* path respects Kubernetes RBAC precisely — it can only
 > record what its own ServiceAccount is permitted to watch. Its *read* path does
 > not. Everything the operator streams lands in the same ClickHouse tables, and
 > **anyone who can query those tables can read the recorded state of every
@@ -281,7 +281,7 @@ This is the project's stated scope taken at face value: only the platform team
 queries ClickHouse for now, so the flattening is a documented, accepted
 limitation rather than a solved problem.
 
-Treat a ClickHouse credential for the kubestream tables as approximately
+Treat a ClickHouse credential for the kuberecord tables as approximately
 equivalent to cluster-wide read access on every kind any active preset grants,
 and gate it accordingly. Three knobs limit the exposure without any new code:
 install only the presets you need (an ungranted kind is never recorded), scope
@@ -301,16 +301,16 @@ bound the blast radius of the flattening rather than an answer to it.
 
 ```console
 # The base role must contain no workload-resource grants.
-$ kubectl get clusterrole kubestream-manager-role -o yaml | grep -E 'pods|deployments|services'
+$ kubectl get clusterrole kuberecord-manager-role -o yaml | grep -E 'pods|deployments|services'
 
 # What the operator can actually do, as the API server sees it.
 $ kubectl auth can-i --list \
-    --as=system:serviceaccount:kubestream-system:kubestream-controller-manager
+    --as=system:serviceaccount:kuberecord-system:kuberecord-controller-manager
 
 # Secret rights must be namespaced. This must succeed:
-$ kubectl get role kubestream-manager-role -n kubestream-system
+$ kubectl get role kuberecord-manager-role -n kuberecord-system
 # and this must fail:
-$ kubectl get clusterrole kubestream-manager-role -o yaml | grep secrets
+$ kubectl get clusterrole kuberecord-manager-role -o yaml | grep secrets
 ```
 
 The same invariants are asserted at build time against the manifests in

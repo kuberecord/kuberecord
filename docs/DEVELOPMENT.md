@@ -1,4 +1,4 @@
-# Developing kubestream
+# Developing kuberecord
 
 This project is scaffolded with [Kubebuilder](https://book.kubebuilder.io/) and
 uses its standard Makefile targets. `make help` lists every one; this page covers
@@ -58,7 +58,7 @@ Two suites run against a real, dockerized ClickHouse (build tag `integration`),
 in a container the target creates and always tears down:
 
 - `internal/sink` exercises the writer and reader paths against a real server;
-- `test/queries` executes **every query kubestream publishes** — the SQL in
+- `test/queries` executes **every query kuberecord publishes** — the SQL in
   [`docs/QUERIES.md`](QUERIES.md) and in every shipped Grafana dashboard —
   against tables built from the shipped DDL alone. That is how "these queries
   only touch frozen-schema columns" stays a tested claim rather than a review
@@ -93,7 +93,7 @@ The suite is install-path agnostic: `E2E_INSTALL=kustomize|helm|installer` choos
 three paths produce the same object names.
 
 ```sh
-make test-e2e-helm       # the happy path against `helm install deploy/charts/kubestream`
+make test-e2e-helm       # the happy path against `helm install deploy/charts/kuberecord`
 make test-e2e-installer  # the happy path against `kubectl apply -f dist/install.yaml`
 ```
 
@@ -106,7 +106,7 @@ to adopt objects another install path already owns.
 
 The failure-mode suite. It stands the same real operator up on its own Kind
 cluster, but against a ClickHouse it **stops and starts** — and it kills the
-operator itself. Every mechanism kubestream is built around (version gating,
+operator itself. Every mechanism kuberecord is built around (version gating,
 delete claims, scope epochs, batch poison isolation, the bounded hand-off queue)
 exists for conditions the e2e suite never creates; this is where those conditions
 are created on purpose, and each scenario asserts through direct ClickHouse
@@ -114,9 +114,9 @@ queries **and** the operator's own `/metrics` endpoint.
 
 | Scenario | What it proves |
 |---|---|
-| ClickHouse down at boot | rules still go active (only `Ready=False/SinkNotReady`), the scope watches in Snapshot mode (`kubestream_safe_mode=1`), and when the backend appears each pre-existing object lands **once**, as `Snapshot` and never as `Added`; the scope then leaves Snapshot mode and the next change is a `Modified` with a diff |
-| Mid-stream outage beyond the retry budget | writes fail terminally (`kubestream_writes_total{outcome="failed"}` rises) and are re-driven rather than abandoned; on recovery every object converges on exactly one latest row whose `sha256` equals a live recompute of the object |
-| Queue saturation | with the backend stopped and load three times the queue's capacity, `kubestream_enqueue_timeouts_total` rises and no `enqueue_block_seconds` observation exceeds the configured 2s timeout; the operator never restarts, and recovery drains the queue |
+| ClickHouse down at boot | rules still go active (only `Ready=False/SinkNotReady`), the scope watches in Snapshot mode (`kuberecord_safe_mode=1`), and when the backend appears each pre-existing object lands **once**, as `Snapshot` and never as `Added`; the scope then leaves Snapshot mode and the next change is a `Modified` with a diff |
+| Mid-stream outage beyond the retry budget | writes fail terminally (`kuberecord_writes_total{outcome="failed"}` rises) and are re-driven rather than abandoned; on recovery every object converges on exactly one latest row whose `sha256` equals a live recompute of the object |
+| Queue saturation | with the backend stopped and load three times the queue's capacity, `kuberecord_enqueue_timeouts_total` rises and no `enqueue_block_seconds` observation exceeds the configured 2s timeout; the operator never restarts, and recovery drains the queue |
 | Poison row | one record made individually un-insertable fails its batch, its blameless batch-mates still land, and the poison key keeps retrying visibly (counted and logged) instead of being dropped |
 | Kill -9 + offline delete | after a `SIGKILL` with writes in flight: exactly one `Deleted` for the offline deletion, the reincarnation closed out exactly once, and `watch_scopes` left consistent — a rule deleted during the outage is closed with a `Stopped` row and **zero** `Deleted` rows, and no scope stays open once its rule is gone |
 

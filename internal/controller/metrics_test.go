@@ -26,7 +26,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
 )
 
 // ready builds the roll-up condition at the given status, which is what almost
@@ -35,7 +35,7 @@ func ready(status metav1.ConditionStatus) metav1.Condition {
 	return metav1.Condition{Type: v1alpha1.ConditionReady, Status: status, Reason: "Test"}
 }
 
-// gaugeValue reads one kubestream_rules series. A series the registry does not
+// gaugeValue reads one kuberecord_rules series. A series the registry does not
 // hold is reported as absent rather than as 0, because the difference between
 // those two is exactly what the seeding behaviour is about.
 func gaugeValue(t *testing.T, reg *prometheus.Registry, condition, status string) (float64, bool) {
@@ -45,7 +45,7 @@ func gaugeValue(t *testing.T, reg *prometheus.Registry, condition, status string
 		t.Fatalf("Gather: %v", err)
 	}
 	for _, mf := range families {
-		if mf.GetName() != "kubestream_rules" {
+		if mf.GetName() != "kuberecord_rules" {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
@@ -79,12 +79,12 @@ func TestRuleMetricsSeedsReady(t *testing.T) {
 	for _, status := range []string{"true", "false", "unknown"} {
 		got, ok := gaugeValue(t, reg, v1alpha1.ConditionReady, status)
 		if !ok {
-			t.Errorf("kubestream_rules{condition=%q,status=%q} is absent; the alert would read no data",
+			t.Errorf("kuberecord_rules{condition=%q,status=%q} is absent; the alert would read no data",
 				v1alpha1.ConditionReady, status)
 			continue
 		}
 		if got != 0 {
-			t.Errorf("kubestream_rules{condition=%q,status=%q} = %v, want 0", v1alpha1.ConditionReady, status, got)
+			t.Errorf("kuberecord_rules{condition=%q,status=%q} = %v, want 0", v1alpha1.ConditionReady, status, got)
 		}
 	}
 }
@@ -220,11 +220,11 @@ func TestRuleMetricsCounts(t *testing.T) {
 				condition, status := splitKey(t, key)
 				got, ok := gaugeValue(t, reg, condition, status)
 				if !ok {
-					t.Errorf("kubestream_rules{condition=%q,status=%q} is absent, want %v", condition, status, want)
+					t.Errorf("kuberecord_rules{condition=%q,status=%q} is absent, want %v", condition, status, want)
 					continue
 				}
 				if got != want {
-					t.Errorf("kubestream_rules{condition=%q,status=%q} = %v, want %v", condition, status, got, want)
+					t.Errorf("kuberecord_rules{condition=%q,status=%q} = %v, want %v", condition, status, got, want)
 				}
 			}
 		})
@@ -279,6 +279,6 @@ func TestRuleMetricsConcurrent(t *testing.T) {
 	wg.Wait()
 
 	if got := testutil.ToFloat64(m.rules.WithLabelValues(v1alpha1.ConditionReady, "false")); got != rules/2 {
-		t.Errorf("kubestream_rules{condition=Ready,status=false} = %v, want %v", got, rules/2)
+		t.Errorf("kuberecord_rules{condition=Ready,status=false} = %v, want %v", got, rules/2)
 	}
 }

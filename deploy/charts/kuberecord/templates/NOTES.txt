@@ -1,0 +1,68 @@
+kuberecord {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+The operator boots healthy and idle: it streams nothing until a sink and a rule
+exist. Three steps from here.
+
+1. Credentials. The operator reads sink passwords from Secrets in its own
+   namespace only — that is the whole of its Secret grant.
+
+     kubectl create secret generic {{ .Values.defaultSink.connection.credentialsSecretRef.name }} \
+       --namespace {{ .Release.Namespace }} --from-literal=password='<your-password>'
+
+{{- if .Values.createDefaultSink }}
+
+2. Your sink `{{ .Values.defaultSink.name }}` was created by this release, pointed at
+   {{ .Values.defaultSink.connection.addr }}. Wait for it to connect:
+
+     kubectl get clickhousesink {{ .Values.defaultSink.name }} -o jsonpath='{.status.conditions}'
+
+   Ready=True means it dialled ClickHouse and validated the schema v1 tables.
+   SchemaValid=False names the columns that do not match; apply
+   deploy/clickhouse/schema/*.sql, or add --ch-auto-create-schema to
+   `extraArgs` to let the operator apply the shipped DDL itself.
+{{- else }}
+
+2. A sink. Create a ClickHouseSink named `default` (the name every rule's
+   spec.sinkRef defaults to), or set `createDefaultSink=true` and
+   `defaultSink.connection.addr` and let this chart create it:
+
+     helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} --reuse-values \
+       --set createDefaultSink=true \
+       --set defaultSink.connection.addr=clickhouse.{{ .Release.Namespace }}.svc:9000
+{{- end }}
+
+3. A rule, over kinds you have granted. Enabled watch presets in this release:
+{{- $any := false }}
+{{- range $preset, $enabled := .Values.rbac.presets }}
+{{- if $enabled }}
+{{- $any = true }}
+     - {{ $preset }}
+{{- end }}
+{{- end }}
+{{- if not $any }}
+     (none — every rule will report RBACGranted=False until you enable one
+     with --set rbac.presets.<name>=true, or apply your own labelled ClusterRole)
+{{- end }}
+
+     kubectl apply -f - <<'EOF'
+     apiVersion: kuberecord.io/v1alpha1
+     kind: StreamRule
+     metadata:
+       name: my-workloads
+       namespace: default
+     spec:
+       resources:
+       - group: apps
+         version: v1
+         kind: Deployment
+     EOF
+
+     kubectl get streamrule -A
+
+Then query `{{ .Values.defaultSink.connection.database }}.resource_states`, filtering on
+cluster_id = '{{ .Values.clusterID }}'. Note that CLUSTER_ID is stamped on every row
+this operator writes{{ if eq .Values.clusterID "local-kind-cluster" }} and is still the shipped placeholder — set `clusterID` to
+something that identifies this cluster before it matters, because rows already
+written keep the old value{{ end }}.
+
+Metrics: {{ if .Values.metrics.enabled }}served on :{{ .Values.metrics.port }} over {{ if .Values.metrics.secure }}HTTPS, authenticated and authorized{{ else }}plain HTTP{{ end }}; bind a scraper to the ClusterRole {{ include "kuberecord.fullname" . }}-metrics-reader.{{ else }}disabled (metrics.enabled=false).{{ end }}

@@ -37,8 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // DefaultCredentialsSecretKey is the key a sink's credentials Secret must carry
@@ -197,8 +197,8 @@ type SinkReconciler struct {
 // real namespace, exactly as it does for the shipped credentials Secret. The matching
 // RoleBinding is part of the RBAC task (1.9), which owns config/rbac.
 //
-// +kubebuilder:rbac:groups=kubestream.io,resources=clickhousesinks,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubestream.io,resources=clickhousesinks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=clickhousesinks,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kuberecord.io,resources=clickhousesinks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",namespace=system,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 

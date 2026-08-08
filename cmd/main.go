@@ -47,13 +47,13 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/yelzhy/kubestream/api/v1alpha1"
-	"github.com/yelzhy/kubestream/internal/controller"
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/plan"
-	"github.com/yelzhy/kubestream/internal/sink"
-	"github.com/yelzhy/kubestream/internal/sink/clickhouse"
-	"github.com/yelzhy/kubestream/internal/watch"
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/controller"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/internal/watch"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -106,7 +106,7 @@ func getEnvDurationOrDefault(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kubestream: invalid duration %q for env var %s, using default %s: %v\n", v, key, def, err)
+		fmt.Fprintf(os.Stderr, "kuberecord: invalid duration %q for env var %s, using default %s: %v\n", v, key, def, err)
 		return def
 	}
 	return d
@@ -122,7 +122,7 @@ func getEnvIntOrDefault(key string, def int) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kubestream: invalid integer %q for env var %s, using default %d: %v\n", v, key, def, err)
+		fmt.Fprintf(os.Stderr, "kuberecord: invalid integer %q for env var %s, using default %d: %v\n", v, key, def, err)
 		return def
 	}
 	return n
@@ -138,7 +138,7 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kubestream: invalid boolean %q for env var %s, using default %t: %v\n", v, key, def, err)
+		fmt.Fprintf(os.Stderr, "kuberecord: invalid boolean %q for env var %s, using default %t: %v\n", v, key, def, err)
 		return def
 	}
 	return b
@@ -368,7 +368,7 @@ type operator struct {
 	parker *controller.Parker
 }
 
-// setupOperator is kubestream's composition root: it builds the data plane, the
+// setupOperator is kuberecord's composition root: it builds the data plane, the
 // control plane and the health probes on mgr, and adds every runnable to it.
 //
 // It deliberately starts nothing. The manager owns every lifecycle, which is
@@ -513,10 +513,10 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 		// but the two are not interchangeable: the new EventRecorder's Eventf
 		// takes a `related` object and an `action` verb the reconcilers do not
 		// have, so switching is an API change to internal/controller (Task 1.7)
-		// and to the events kubestream emits, not a rename. Deferred deliberately
+		// and to the events kuberecord emits, not a rename. Deferred deliberately
 		// rather than smuggled into the e2e task.
 		//nolint:staticcheck // SA1019: events/v1 migration is its own change.
-		Recorder: mgr.GetEventRecorderFor("kubestream-clickhousesink"),
+		Recorder: mgr.GetEventRecorderFor("kuberecord-clickhousesink"),
 		Sinks:    op.sinks,
 		// The ClickHouse mapping lives here, in the wiring, so internal/controller
 		// depends on no driver and cannot dial a backend even by accident
@@ -531,7 +531,7 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 	base := controller.RuleReconciler{
 		Client: mgr.GetClient(),
 		//nolint:staticcheck // SA1019: see the ClickHouseSink recorder above.
-		Recorder: mgr.GetEventRecorderFor("kubestream-streamrule"),
+		Recorder: mgr.GetEventRecorderFor("kuberecord-streamrule"),
 		Registry: op.registry,
 		Resolver: watch.NewResolver(mgr.GetRESTMapper()),
 		Access:   clientset.AuthorizationV1().SelfSubjectAccessReviews(),
@@ -714,7 +714,7 @@ func managerCacheOptions(operatorNamespace string) cache.Options {
 
 // managerFlags are the controller-runtime manager's own settings: serving
 // addresses, leader election and the two TLS bundles. They configure the harness
-// rather than kubestream itself, which is why they are separate from
+// rather than kuberecord itself, which is why they are separate from
 // operatorConfig — setupOperator has no use for any of them.
 type managerFlags struct {
 	metricsAddr                                      string
@@ -748,7 +748,7 @@ func main() {
 		WebhookServer:          webhook.NewServer(webhookServerOptions(mf)),
 		HealthProbeBindAddress: mf.probeAddr,
 		LeaderElection:         mf.enableLeaderElection,
-		LeaderElectionID:       "885d930f.kubestream.io",
+		LeaderElectionID:       "885d930f.kuberecord.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

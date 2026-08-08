@@ -29,7 +29,7 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
-	schemaddl "github.com/yelzhy/kubestream/deploy/clickhouse/schema"
+	schemaddl "github.com/yelzhy/kuberecord/deploy/clickhouse/schema"
 )
 
 // testDatabase is this suite's own ClickHouse database.
@@ -40,7 +40,7 @@ import (
 // other's fixtures nondeterministically. A private database also makes the
 // frozen-column assertion below exact — nothing but the shipped DDL has ever run
 // against these tables.
-const testDatabase = "kubestream_queries_it"
+const testDatabase = "kuberecord_queries_it"
 
 // demoCluster is the cluster_id every fixture row carries. It matches
 // demoVariableValues, which is what makes "the query ran" and "the query returned
@@ -48,7 +48,7 @@ const testDatabase = "kubestream_queries_it"
 const demoCluster = "demo-cluster"
 
 // TestPublishedQueriesRunAgainstFrozenSchemaIntegration is Task 3.2's third
-// acceptance criterion: every query kubestream publishes — the recipes in
+// acceptance criterion: every query kuberecord publishes — the recipes in
 // docs/QUERIES.md and every statement inside the four product dashboards — is
 // executed against a real ClickHouse whose tables were built from
 // deploy/clickhouse/schema and nothing else.

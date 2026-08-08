@@ -1,0 +1,27 @@
+apiVersion: kuberecord.io/v1alpha1
+kind: ClusterStreamRule
+metadata:
+  name: platform-baseline
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  sinkRef: default
+  # ClusterStreamRule is the only rule type permitted to name cluster-scoped
+  # kinds; Node below is one.
+  resources:
+  - group: ""
+    version: v1
+    kind: Node
+  - group: apps
+    version: v1
+    kind: StatefulSet
+  # Namespace *labels*, not object labels. Omit namespaceSelector entirely to
+  # cover every namespace, including ones created later. Cluster-scoped kinds
+  # (Node above) ignore this selector — they have no namespace.
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system

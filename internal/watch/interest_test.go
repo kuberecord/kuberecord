@@ -20,8 +20,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/plan"
 )
 
 // podsInNamespace is the informer key these tests key most of their interests on.

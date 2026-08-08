@@ -1,8 +1,8 @@
 {
-  "uid": "kubestream-drift-by-actor",
-  "title": "kubestream — Drift by Actor",
+  "uid": "kuberecord-drift-by-actor",
+  "title": "kuberecord — Drift by Actor",
   "description": "Who is changing the cluster, and how much of it your GitOps controller is not responsible for. Every panel here reads Modified rows grouped by the field-manager names in actors, with one variable naming the GitOps controller's manager so its changes can be told apart from everything else. The changes that remain are the drift: kubectl edits, mutating webhooks, other operators, and controllers reacting to them.",
-  "tags": ["kubestream", "clickhouse", "gitops", "drift"],
+  "tags": ["kuberecord", "clickhouse", "gitops", "drift"],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
@@ -24,7 +24,7 @@
         "name": "datasource",
         "label": "Data source",
         "query": "grafana-clickhouse-datasource",
-        "description": "The ClickHouse holding kubestream's resource_states table.",
+        "description": "The ClickHouse holding kuberecord's resource_states table.",
         "hide": 0,
         "regex": "",
         "current": {}
@@ -40,7 +40,7 @@
         },
         "definition": "SELECT DISTINCT cluster_id FROM resource_states ORDER BY cluster_id",
         "query": {
-          "refId": "kubestream-variable-cluster",
+          "refId": "kuberecord-variable-cluster",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",
@@ -62,7 +62,7 @@
         },
         "definition": "SELECT DISTINCT namespace FROM resource_states WHERE cluster_id = ${cluster:sqlstring} ORDER BY namespace",
         "query": {
-          "refId": "kubestream-variable-namespace",
+          "refId": "kuberecord-variable-namespace",
           "editorType": "sql",
           "format": 1,
           "queryType": "table",

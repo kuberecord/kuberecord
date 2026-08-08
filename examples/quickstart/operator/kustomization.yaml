@@ -13,7 +13,7 @@
 #      DDL (deploy/clickhouse/schema/) idempotently before its first write. The
 #      flag is off by default — the operator runs no DDL uninvited — and turning
 #      it on is what saves the quickstart a separate schema step;
-#   3. CLUSTER_ID becomes `kubestream-quickstart`. It is stamped on every row and
+#   3. CLUSTER_ID becomes `kuberecord-quickstart`. It is stamped on every row and
 #      every scope event this operator writes and is part of an object's identity
 #      in the schema, so every query in the README and in the script can name it;
 #   4. the operator's namespace is labelled for the `restricted` Pod Security
@@ -34,11 +34,11 @@ resources:
 
 images:
 - name: controller
-  newName: kubestream/quickstart
+  newName: kuberecord/quickstart
   newTag: local
 
 patches:
-# The base applies a `kubestream-` name prefix, so the target is matched by
+# The base applies a `kuberecord-` name prefix, so the target is matched by
 # regex: the patch must keep working whether or not that prefix changes.
 - target:
     group: apps
@@ -69,12 +69,12 @@ patches:
           - name: manager
             env:
             - name: CLUSTER_ID
-              value: kubestream-quickstart
+              value: kuberecord-quickstart
 # `/` inside a JSON Pointer segment is escaped as `~1`.
 - target:
     version: v1
     kind: Namespace
-    name: kubestream-system
+    name: kuberecord-system
   patch: |
     - op: add
       path: /metadata/labels/pod-security.kubernetes.io~1enforce

@@ -7,20 +7,20 @@
 # `credentialsSecretRef` names no namespace on purpose: it resolves to the
 # operator's own, the only namespace the operator can read Secrets in. That is
 # the file next to this one, examples/quickstart/secret.yaml.
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata:
   name: default
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: quickstart
 spec:
   connection:
-    addr: clickhouse.kubestream-quickstart.svc:9000
-    database: kubestream
-    username: kubestream
+    addr: clickhouse.kuberecord-quickstart.svc:9000
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef:
-      name: kubestream-clickhouse-credentials
+      name: kuberecord-clickhouse-credentials
   writer:
     # Small and eager compared with the shipped defaults. Nothing about the write
     # path changes — only how long a partial batch waits before it flushes. At

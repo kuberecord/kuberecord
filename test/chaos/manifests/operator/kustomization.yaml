@@ -19,11 +19,11 @@ resources:
 
 images:
 - name: controller
-  newName: example.com/kubestream
+  newName: example.com/kuberecord
   newTag: v0.0.1
 
 patches:
-# The base applies a `kubestream-` name prefix, so the target is matched by
+# The base applies a `kuberecord-` name prefix, so the target is matched by
 # regex: the patch must keep working whether or not that prefix changes.
 - target:
     group: apps
@@ -38,7 +38,7 @@ patches:
 - target:
     version: v1
     kind: Namespace
-    name: kubestream-system
+    name: kuberecord-system
   patch: |
     - op: add
       path: /metadata/labels/pod-security.kubernetes.io~1enforce

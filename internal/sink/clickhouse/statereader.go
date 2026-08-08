@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // Compile-time proof that the ClickHouse sink still satisfies the read half of

@@ -4,7 +4,7 @@ IMG ?= controller:latest
 # and the image the committed dist/install.yaml names. It is deliberately not
 # IMG's default — IMG is a developer's local build tag, VERSION is what a user
 # installs — and it is the one place a release bump has to happen (see
-# deploy/charts/kubestream/Chart.yaml, which must carry the same value).
+# deploy/charts/kuberecord/Chart.yaml, which must carry the same value).
 VERSION ?= 0.1.0
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
@@ -77,7 +77,7 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots a throwaway container, waits for it to
 # accept queries, runs the tagged tests, and always tears the container down.
 # Two suites run here: internal/sink exercises the writer and reader paths, and
-# test/queries executes every query kubestream publishes — docs/QUERIES.md and
+# test/queries executes every query kuberecord publishes — docs/QUERIES.md and
 # the Grafana dashboards — against tables built from the shipped DDL alone, which
 # is how Task 3.2's "only frozen-schema columns" criterion is asserted. The two
 # use separate databases, because `go test` runs package binaries concurrently.
@@ -86,10 +86,10 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # localhost-only; CLICKHOUSE_USER/PASSWORD create an any-network user the host
 # test can actually authenticate as through the port mapping.
 CH_IT_IMAGE ?= clickhouse/clickhouse-server:24.8
-CH_IT_CONTAINER ?= kubestream-it-clickhouse
+CH_IT_CONTAINER ?= kuberecord-it-clickhouse
 CH_IT_ADDR ?= 127.0.0.1:19000
-CH_IT_USER ?= kubestream
-CH_IT_PASSWORD ?= kubestream
+CH_IT_USER ?= kuberecord
+CH_IT_PASSWORD ?= kuberecord
 
 .PHONY: test-integration
 test-integration: ## Run integration tests against a dockerized ClickHouse.
@@ -180,7 +180,7 @@ bench-load: setup-envtest ## Run the load benchmark harness (PROFILE=small|mediu
 #
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
-KIND_CLUSTER ?= kubestream-test-e2e
+KIND_CLUSTER ?= kuberecord-test-e2e
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -238,11 +238,11 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 # scenario rather than three times the full suite. Run the whole suite against an
 # install path with E2E_FOCUS= (empty).
 SMOKE_FOCUS ?= streams a Deployment
-HELM_KIND_CLUSTER ?= kubestream-test-e2e-helm
-INSTALLER_KIND_CLUSTER ?= kubestream-test-e2e-installer
+HELM_KIND_CLUSTER ?= kuberecord-test-e2e-helm
+INSTALLER_KIND_CLUSTER ?= kuberecord-test-e2e-installer
 
 .PHONY: test-e2e-helm
-test-e2e-helm: ## Run the e2e smoke against a `helm install` of deploy/charts/kubestream.
+test-e2e-helm: ## Run the e2e smoke against a `helm install` of deploy/charts/kuberecord.
 	$(MAKE) test-e2e E2E_INSTALL=helm E2E_FOCUS="$(SMOKE_FOCUS)" KIND_CLUSTER=$(HELM_KIND_CLUSTER)
 
 .PHONY: test-e2e-installer
@@ -265,7 +265,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 # to outlast the ClickHouse writer's 60-second per-batch retry budget before the
 # failure they are testing is even observable, and two of those wait out two full
 # cycles. Budget an hour; hence the timeout below.
-CHAOS_KIND_CLUSTER ?= kubestream-test-chaos
+CHAOS_KIND_CLUSTER ?= kuberecord-test-chaos
 CHAOS_TIMEOUT ?= 60m
 # As with the e2e suite, teardown is unconditional so a failed run cannot poison
 # the next one; CHAOS_KEEP_CLUSTER=true keeps the cluster up for inspection when
@@ -330,7 +330,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 # rather than a restatement of it. QUICKSTART_BUDGET_SECONDS is what CI sets to
 # enforce the time half of it; it is unset here on purpose, because a slow laptop
 # is not a failed install.
-QUICKSTART_CLUSTER ?= kubestream-quickstart
+QUICKSTART_CLUSTER ?= kuberecord-quickstart
 QUICKSTART_BUDGET_SECONDS ?=
 QUICKSTART_SCRIPT := examples/quickstart/quickstart.sh
 
@@ -355,7 +355,7 @@ build: manifests generate fmt vet ## Build manager binary.
 # OPERATOR_NAMESPACE is where `make run` looks up sink credentials Secrets. In
 # cluster the Deployment supplies it from the downward API; running from a host
 # there is no pod to read it from, and the operator refuses to guess.
-OPERATOR_NAMESPACE ?= kubestream-system
+OPERATOR_NAMESPACE ?= kuberecord-system
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -398,9 +398,9 @@ docker-buildx: ## Build (and, unless BUILDX_OUTPUT is empty, push) the manager i
 	@# runs from a trap — two trailing recipe lines would be skipped by make on
 	@# exactly the failure that most needs the tree left clean.
 	@set -e; \
-	trap '$(CONTAINER_TOOL) buildx rm kubestream-builder >/dev/null 2>&1 || true; rm -f Dockerfile.cross' EXIT; \
-	$(CONTAINER_TOOL) buildx create --name kubestream-builder --use >/dev/null 2>&1 \
-		|| $(CONTAINER_TOOL) buildx use kubestream-builder; \
+	trap '$(CONTAINER_TOOL) buildx rm kuberecord-builder >/dev/null 2>&1 || true; rm -f Dockerfile.cross' EXIT; \
+	$(CONTAINER_TOOL) buildx create --name kuberecord-builder --use >/dev/null 2>&1 \
+		|| $(CONTAINER_TOOL) buildx use kuberecord-builder; \
 	set -x; \
 	$(CONTAINER_TOOL) buildx build $(BUILDX_OUTPUT) --platform=$(PLATFORMS) --tag $(IMG) -f Dockerfile.cross .
 
@@ -421,7 +421,7 @@ docker-buildx: ## Build (and, unless BUILDX_OUTPUT is empty, push) the manager i
 # IMAGE_REPO is the one place the published registry is named. Both install
 # artifacts derive the image they pin from it, so a release cannot push to one
 # registry and hand out manifests naming another.
-IMAGE_REPO ?= ghcr.io/yelzhy/kubestream
+IMAGE_REPO ?= ghcr.io/yelzhy/kuberecord
 INSTALLER_IMG ?= $(IMAGE_REPO):v$(VERSION)
 
 # INSTALLER_OUT is where the manifest is written. The default is the committed
@@ -450,9 +450,9 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 # the *same install*: it renders the same object names as `kustomize build
 # config/default`, and test/chart asserts that RBAC rule for RBAC rule, so the
 # acceptance suite can run against either one unmodified.
-CHART_DIR ?= deploy/charts/kubestream
-CHART_RELEASE ?= kubestream
-CHART_NAMESPACE ?= kubestream-system
+CHART_DIR ?= deploy/charts/kuberecord
+CHART_RELEASE ?= kuberecord
+CHART_NAMESPACE ?= kuberecord-system
 
 # The Kubernetes version rendered manifests are validated against. Derived from
 # the same k8s.io/api version envtest is pinned to, so "the pinned Kubernetes
@@ -616,9 +616,9 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	@# directory, so `sha256sum -c checksums.txt` works wherever the assets land.
 	@cd "$(RELEASE_DIR)" && \
 	if command -v sha256sum >/dev/null 2>&1; then \
-		sha256sum install.yaml kubestream-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
+		sha256sum install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
 	else \
-		shasum -a 256 install.yaml kubestream-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
+		shasum -a 256 install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
 	fi
 	@echo; echo "release: artifacts for $(RELEASE_VERSION) in $(RELEASE_DIR):"
 	@cat "$(RELEASE_DIR)/checksums.txt"
@@ -634,7 +634,7 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@echo "release: dry run for $(RELEASE_VERSION) complete. Nothing was pushed or published."
 	@echo "  image      $(RELEASE_IMAGE) (built for $(PLATFORMS), discarded)"
 	@echo "  notes      $(RELEASE_NOTES)"
-	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_DIR)/kubestream-$(RELEASE_CHART_VERSION).tgz, $(RELEASE_DIR)/checksums.txt"
+	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_DIR)/kuberecord-$(RELEASE_CHART_VERSION).tgz, $(RELEASE_DIR)/checksums.txt"
 
 ##@ Deployment
 
@@ -691,7 +691,7 @@ E2E_CH_PASSWORD ?= changeme
 deploy-e2e-helm: helm helm-sync ## Install the operator with the Helm chart, e2e values. Used by test-e2e.
 	"$(KUBECTL)" create namespace $(CHART_NAMESPACE) --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	"$(KUBECTL)" label namespace $(CHART_NAMESPACE) pod-security.kubernetes.io/enforce=restricted --overwrite
-	"$(KUBECTL)" create secret generic kubestream-clickhouse-credentials \
+	"$(KUBECTL)" create secret generic kuberecord-clickhouse-credentials \
 		--namespace $(CHART_NAMESPACE) --from-literal=password=$(E2E_CH_PASSWORD) \
 		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	"$(HELM)" upgrade --install $(CHART_RELEASE) "$(CHART_DIR)" \
@@ -718,7 +718,7 @@ undeploy-e2e-helm: helm ## Remove the Helm-installed controller. Used by test-e2
 deploy-e2e-installer: kustomize ## Install the operator from dist/install.yaml. Used by test-e2e.
 	$(MAKE) build-installer INSTALLER_IMG=$(E2E_INSTALLER_IMG)
 	"$(KUBECTL)" apply -f dist/install.yaml
-	"$(KUBECTL)" patch deployment kubestream-controller-manager -n $(CHART_NAMESPACE) --type=json \
+	"$(KUBECTL)" patch deployment kuberecord-controller-manager -n $(CHART_NAMESPACE) --type=json \
 		-p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--ch-auto-create-schema"}]'
 
 .PHONY: undeploy-e2e-installer
@@ -729,7 +729,7 @@ undeploy-e2e-installer: ## Remove the controller installed from dist/install.yam
 # side-loads into Kind (managerImage in test/e2e/e2e_suite_test.go), for the same
 # reason the e2e kustomize overlay pins one: a manifest naming an image the node
 # does not have would sit in ImagePullBackOff, not fail.
-E2E_INSTALLER_IMG ?= example.com/kubestream:v0.0.1
+E2E_INSTALLER_IMG ?= example.com/kuberecord:v0.0.1
 
 # The chaos overlay is the same shape as the e2e one (see
 # test/chaos/manifests/operator/kustomization.yaml). The two exist separately so

@@ -25,16 +25,16 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: kubestream-chaos-clickhouse
+  name: kuberecord-chaos-clickhouse
   labels:
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: chaos-fixture
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: clickhouse-data
-  namespace: kubestream-chaos-clickhouse
+  namespace: kuberecord-chaos-clickhouse
 spec:
   accessModes:
   - ReadWriteOnce
@@ -46,7 +46,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: clickhouse
-  namespace: kubestream-chaos-clickhouse
+  namespace: kuberecord-chaos-clickhouse
   labels:
     app: clickhouse
 spec:
@@ -82,9 +82,9 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: CLICKHOUSE_DB
-          value: kubestream
+          value: kuberecord
         - name: CLICKHOUSE_USER
-          value: kubestream
+          value: kuberecord
         - name: CLICKHOUSE_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -137,7 +137,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: clickhouse
-  namespace: kubestream-chaos-clickhouse
+  namespace: kuberecord-chaos-clickhouse
   labels:
     app: clickhouse
 spec:

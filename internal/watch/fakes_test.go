@@ -35,7 +35,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/ptr"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // The doubles in this file stand in for the two components the WatchManager hands

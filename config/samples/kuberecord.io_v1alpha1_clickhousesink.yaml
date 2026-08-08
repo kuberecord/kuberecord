@@ -1,0 +1,53 @@
+apiVersion: kuberecord.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  connection:
+    addr: clickhouse.kuberecord-system.svc:9000
+    database: kuberecord
+    username: kuberecord
+    credentialsSecretRef:
+      # namespace is omitted on purpose: it defaults to the operator's own
+      # namespace, which is the only place the operator holds Secret read
+      # rights (Task 1.9). The name matches the Secret the deployment ships
+      # (config/manager/clickhouse-secret.yaml).
+      name: clickhouse-credentials
+    dialTimeout: 5s
+    readTimeout: 10s
+  writer:
+    queueSize: 5000
+    workers: 4
+    batchMaxRows: 1000
+    batchMaxWait: 1s
+    enqueueTimeout: 2s
+    drainTimeout: 15s
+    # Every 50th consecutive diff-only Modified row for an object is written as a
+    # Checkpoint instead: same row, plus the full state, so "what did this look
+    # like at time T?" replays at most 50 diffs. 0 turns it off.
+    checkpointEvery: 50
+  policy:
+    # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
+    # entirely to admit everything except the hard deny-list (D8: v1/Secret).
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds: ["*"]
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+      - Service
+    # The redaction floor for everything written to this sink. Values on these
+    # paths are replaced with "[REDACTED]" after normalization and *before*
+    # hashing, so they never reach ClickHouse — not in data, not in a diff, and
+    # not recoverable from the sha256 column. A rule may add paths through its
+    # own spec.extraRedaction; nothing can remove one listed here.
+    # kubectl.kubernetes.io/last-applied-configuration is always scrubbed and
+    # never needs listing.
+    redaction:
+    - fieldPath: data.password
+    - annotation: my.company.io/api-token

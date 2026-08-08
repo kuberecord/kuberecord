@@ -1,10 +1,10 @@
-# Custom resources (`kubestream.io/v1alpha1`)
+# Custom resources (`kuberecord.io/v1alpha1`)
 
 Three CRDs express the two-tier model: a **sink** says *where* state goes, a
 **rule** says *what* to stream there.
 
 They are validated entirely by CRD structural schemas and CEL
-(`x-kubernetes-validations`). kubestream registers no admission webhooks and
+(`x-kubernetes-validations`). kuberecord registers no admission webhooks and
 needs no cert-manager, so a validation failure is an ordinary `kubectl apply`
 error rather than a dependency you have to install and keep certificates alive
 for.
@@ -23,7 +23,7 @@ live in [`config/samples/`](../config/samples/) and
 ## A rule, annotated
 
 ```yaml
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata: {name: team-payments-workloads, namespace: payments}
 spec:
@@ -33,7 +33,7 @@ spec:
   - group: ""
     version: v1
     kind: ConfigMap
-    labelSelector: {matchLabels: {kubestream.io/audit: "true"}}
+    labelSelector: {matchLabels: {kuberecord.io/audit: "true"}}
   extraRedaction:              # optional — adds to the sink's own floor
   - {fieldPath: "data.password"}
   - {annotation: my.company.io/api-token}

@@ -15,7 +15,7 @@ resources:
 - leader_election_role_binding.yaml
 # The aggregated watch role and its binding. This role starts empty and is
 # populated by the controller-manager from the labelled ClusterRoles below, so
-# extending kubestream's coverage never means editing or redeploying the
+# extending kuberecord's coverage never means editing or redeploying the
 # operator. See docs/RBAC.md.
 - watcher_role.yaml
 - watcher_role_binding.yaml
@@ -30,8 +30,8 @@ resources:
 #   - To enable another family, add it here — or, with no redeploy at all, just
 #     `kubectl apply -f config/rbac/presets/<family>.yaml` against a live cluster.
 #   - To grant a kind no preset covers (a CRD, typically), copy any preset,
-#     change the rules, and keep the kubestream.io/aggregate-to-watcher label.
-#     Presets applied through this kustomization pick up the `kubestream-` name
+#     change the rules, and keep the kuberecord.io/aggregate-to-watcher label.
+#     Presets applied through this kustomization pick up the `kuberecord-` name
 #     prefix; applied directly with `kubectl -f` they keep the name in the file.
 #     Aggregation is by label, so both are equivalent.
 - presets/core-workloads.yaml

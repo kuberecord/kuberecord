@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package controller holds kubestream's control plane: the reconcilers that turn
+// Package controller holds kuberecord's control plane: the reconcilers that turn
 // ClickHouseSink, StreamRule and ClusterStreamRule CRs into two things, and only
 // two things — entries in the desired-state registry (internal/plan) and
 // configurations in the sink runtime (internal/sink) — plus the status conditions

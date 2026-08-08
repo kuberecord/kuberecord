@@ -1,4 +1,4 @@
-# kubestream
+# kuberecord
 
 **Git blame for your Kubernetes cluster.**
 
@@ -10,7 +10,7 @@ an answer, and answering it is a query rather than an archaeology project.
 ```console
 $ make quickstart
 ...
-==> [01:36] Rows recorded (cluster_id = 'kubestream-quickstart')
+==> [01:36] Rows recorded (cluster_id = 'kuberecord-quickstart')
    ┌─event_type─┬─kind───────┬─namespace───────┬─name────────────┬────────────────────────────ts─┐
 1. │ Snapshot   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:56.199673090 │
 2. │ Snapshot   │ Deployment │ quickstart-demo │ checkout-api    │ 2026-08-03 00:59:56.199748632 │
@@ -25,7 +25,7 @@ diff: [{"value":"new-checkout=on","op":"replace","path":"/data/feature_flags"}]
 1. │ checkout-config │ new-checkout=off │ [REDACTED] │
    └─────────────────┴──────────────────┴────────────┘
 
-kubestream is streaming. 8 rows in 96s.
+kuberecord is streaming. 8 rows in 96s.
 ```
 
 ---
@@ -37,7 +37,7 @@ that was evicted is gone, along with the status that explains why. A Deployment
 that was rolled back keeps no record of the spec that broke it. Post-mortems end
 up reconstructed from memory, dashboards, and luck.
 
-kubestream watches a declarative set of resource types and records every state
+kuberecord watches a declarative set of resource types and records every state
 transition. It hashes and diffs each object's normalized JSON, so it writes only
 when something actually changed — a compact, queryable, retrospective timeline
 rather than a live-only snapshot or a firehose of duplicates.
@@ -55,7 +55,7 @@ from which IP, with which user agent, and whether it was allowed. It is the
 authoritative record of **intent and authorization** — and it is the right tool
 for "who did this?" and "should they have been able to?".
 
-kubestream records *resulting object state*: what the object actually looked
+kuberecord records *resulting object state*: what the object actually looked
 like afterwards, and precisely what changed. It is the record of **outcome** —
 the right tool for "what was the spec at 03:14?", "what changed in this
 namespace during the incident window?", and "what did this deleted object
@@ -65,13 +65,13 @@ controller reconciling, a status field moving, an autoscaler acting.
 The complementarity is the point. An audit log entry tells you a `PATCH`
 happened; it does not tell you what the object became, and reconstructing that
 from a request body across many controllers writing to one object is not
-practical. kubestream tells you what the object became; it does not tell you who
+practical. kuberecord tells you what the object became; it does not tell you who
 was authenticated. Run both, and "who changed it" joins to "what it became" on
 time and object identity. `actors` — the field managers owning parts of the
 object — is the bridge, with the honest caveat that it records *ownership at
 write time*, not authorship of one edit.
 
-Where audit logs and kubestream genuinely overlap, kubestream is the cheaper
+Where audit logs and kuberecord genuinely overlap, kuberecord is the cheaper
 place to keep history: rows are deduplicated and diffed, so an object that
 changes once a week costs one row a week regardless of how many controllers
 touched it.
@@ -82,7 +82,7 @@ From a fresh clone to rows you can query, on a laptop, in under ten minutes.
 You need Docker, [kind] and `kubectl`.
 
 ```sh
-git clone https://github.com/yelzhy/kubestream && cd kubestream
+git clone https://github.com/yelzhy/kuberecord && cd kuberecord
 make quickstart
 ```
 
@@ -109,7 +109,7 @@ Everything below runs against the frozen v1 schema and uses ClickHouse-native
 parameters, so it is copy-pasteable without editing:
 
 ```console
-$ clickhouse-client --param_cluster=kubestream-quickstart \
+$ clickhouse-client --param_cluster=kuberecord-quickstart \
     --param_namespace=payments --param_from='2026-08-01 13:45:00.000' \
     --param_to='2026-08-01 14:30:00.000' --queries-file first.sql
 ```
@@ -276,22 +276,22 @@ object by object, and the acceptance suite runs against each of them unmodified.
 
 ```sh
 # Helm
-helm install kubestream deploy/charts/kubestream \
-  --namespace kubestream-system --create-namespace \
+helm install kuberecord deploy/charts/kuberecord \
+  --namespace kuberecord-system --create-namespace \
   --set clusterID=prod-eu-west-1
 
 # A single, committed manifest
 kubectl apply -f dist/install.yaml
 
 # Kustomize, which is also the development path
-make deploy IMG=<some-registry>/kubestream:tag
+make deploy IMG=<some-registry>/kuberecord:tag
 ```
 
-Both artifacts are also attached to every [release](https://github.com/yelzhy/kubestream/releases),
+Both artifacts are also attached to every [release](https://github.com/yelzhy/kuberecord/releases),
 with checksums, if you would rather install a tag than a checkout:
 
 ```sh
-kubectl apply -f https://github.com/yelzhy/kubestream/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.1.0/install.yaml
 ```
 
 The operator is pre-1.0 — while it is `v0.x` a minor bump may break, and every
@@ -307,17 +307,17 @@ The operator then boots **healthy and completely idle**. It starts streaming whe
 a sink and a rule appear, with no restart:
 
 ```yaml
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: ClickHouseSink
 metadata: {name: default}
 spec:
   connection:
-    addr: clickhouse.kubestream-system.svc:9000
-    database: kubestream
-    username: kubestream
+    addr: clickhouse.kuberecord-system.svc:9000
+    database: kuberecord
+    username: kuberecord
     credentialsSecretRef: {name: clickhouse-credentials}   # operator's namespace
 ---
-apiVersion: kubestream.io/v1alpha1
+apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata: {name: payments-workloads, namespace: payments}
 spec:
@@ -340,7 +340,7 @@ renamed, retyped or removed, and changes are additive only.
 ### Uninstalling
 
 ```sh
-helm uninstall kubestream -n kubestream-system   # leaves the CRDs behind
+helm uninstall kuberecord -n kuberecord-system   # leaves the CRDs behind
 kubectl delete -f dist/install.yaml
 make undeploy                                    # kustomize: operator + CRDs
 ```

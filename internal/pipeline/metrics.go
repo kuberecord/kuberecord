@@ -23,10 +23,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// metricsNamespace prefixes every metric name with "kubestream_", giving the
+// metricsNamespace prefixes every metric name with "kuberecord_", giving the
 // operator a single, greppable namespace on the /metrics endpoint that
 // controller-runtime already serves via --metrics-bind-address.
-const metricsNamespace = "kubestream"
+const metricsNamespace = "kuberecord"
 
 // sinkLabel is the label every collector a single sink instance reports through
 // carries, so a cluster streaming to two sinks can tell their queues, latencies

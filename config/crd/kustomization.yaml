@@ -2,11 +2,11 @@
 # by `make install`. It lists the CRDs generated into bases/ by `make manifests`.
 #
 # There are deliberately no conversion-webhook or CA-injection patches here:
-# kubestream validates entirely through CRD structural schemas and CEL
+# kuberecord validates entirely through CRD structural schemas and CEL
 # (x-kubernetes-validations), so it installs with no webhooks and no
 # cert-manager (D4).
 resources:
-- bases/kubestream.io_clickhousesinks.yaml
-- bases/kubestream.io_streamrules.yaml
-- bases/kubestream.io_clusterstreamrules.yaml
+- bases/kuberecord.io_clickhousesinks.yaml
+- bases/kuberecord.io_streamrules.yaml
+- bases/kuberecord.io_clusterstreamrules.yaml
 # +kubebuilder:scaffold:crdkustomizeresource

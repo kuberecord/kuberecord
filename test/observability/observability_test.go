@@ -44,8 +44,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"sigs.k8s.io/yaml"
 
-	"github.com/yelzhy/kubestream/internal/controller"
-	"github.com/yelzhy/kubestream/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/controller"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
 )
 
 // Paths are resolved relative to this file rather than to the working directory,
@@ -56,7 +56,7 @@ var (
 	alertsPath          = repoPath("deploy", "prometheus", "alerts.yaml")
 	alertsSchemaPath    = repoPath("deploy", "prometheus", "prometheusrule.schema.json")
 
-	// operatorHealthPath is the dashboard for operators of kubestream (Task 2.5).
+	// operatorHealthPath is the dashboard for operators of kuberecord (Task 2.5).
 	// It is the only one backed by Prometheus, and therefore the only one the
 	// metric cross-check below has anything to say about.
 	operatorHealthPath = repoPath("deploy", "grafana", "operator-health.json")
@@ -162,40 +162,40 @@ func TestOperatorHealthDashboardHasTheRequiredPanels(t *testing.T) {
 		{
 			panel: "queue depth vs capacity",
 			wantExprs: []string{
-				"kubestream_write_queue_depth",
-				"kubestream_write_queue_capacity",
+				"kuberecord_write_queue_depth",
+				"kuberecord_write_queue_capacity",
 			},
 		},
 		{
 			panel:     "write outcomes rate",
-			wantExprs: []string{"rate(kubestream_writes_total"},
+			wantExprs: []string{"rate(kuberecord_writes_total"},
 		},
 		{
 			panel: "write latency p99",
 			wantExprs: []string{
 				"histogram_quantile(0.99",
-				"kubestream_write_latency_seconds_bucket",
+				"kuberecord_write_latency_seconds_bucket",
 			},
 		},
 		{
 			panel:     "batch-size distribution",
-			wantExprs: []string{"kubestream_write_batch_rows_bucket"},
+			wantExprs: []string{"kuberecord_write_batch_rows_bucket"},
 		},
 		{
 			panel:     "retry rate",
-			wantExprs: []string{"rate(kubestream_write_retry_attempts_total"},
+			wantExprs: []string{"rate(kuberecord_write_retry_attempts_total"},
 		},
 		{
 			panel:     "degraded rules count",
-			wantExprs: []string{`kubestream_rules{condition="Ready",status="false"}`},
+			wantExprs: []string{`kuberecord_rules{condition="Ready",status="false"}`},
 		},
 		{
 			panel:     "SafeMode scopes",
-			wantExprs: []string{"kubestream_safe_mode"},
+			wantExprs: []string{"kuberecord_safe_mode"},
 		},
 		{
 			panel:     "enqueue backpressure",
-			wantExprs: []string{"kubestream_enqueue_timeouts_total"},
+			wantExprs: []string{"kuberecord_enqueue_timeouts_total"},
 		},
 	}
 
@@ -237,7 +237,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 	}{
 		{
 			file:          "object-timeline",
-			wantUID:       "kubestream-object-timeline",
+			wantUID:       "kuberecord-object-timeline",
 			wantVariables: []string{"cluster", "datasource", "kind", "name", "namespace"},
 			wantPanels: []panelCriterion{
 				{
@@ -259,7 +259,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "drift-by-actor",
-			wantUID:       "kubestream-drift-by-actor",
+			wantUID:       "kuberecord-drift-by-actor",
 			wantVariables: []string{"cluster", "datasource", "gitops_manager", "namespace"},
 			wantPanels: []panelCriterion{
 				{
@@ -276,7 +276,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "flap-report",
-			wantUID:       "kubestream-flap-report",
+			wantUID:       "kuberecord-flap-report",
 			wantVariables: []string{"cluster", "datasource", "kind", "namespace", "threshold"},
 			wantPanels: []panelCriterion{
 				{
@@ -295,7 +295,7 @@ func TestProductDashboardsHaveTheRequiredPanels(t *testing.T) {
 		},
 		{
 			file:          "namespace-activity",
-			wantUID:       "kubestream-namespace-activity",
+			wantUID:       "kuberecord-namespace-activity",
 			wantVariables: []string{"cluster", "datasource", "event_type", "kind"},
 			wantPanels: []panelCriterion{
 				{
@@ -470,30 +470,30 @@ func TestAlertRulesMatchTheAcceptanceCriteria(t *testing.T) {
 		wantExprs []string
 	}{
 		{
-			alert:   "KubestreamWriteQueueSaturated",
+			alert:   "KuberecordWriteQueueSaturated",
 			wantFor: "5m",
 			wantExprs: []string{
-				"kubestream_write_queue_depth / kubestream_write_queue_capacity > 0.8",
+				"kuberecord_write_queue_depth / kuberecord_write_queue_capacity > 0.8",
 				// The guard against a capacity-0 sink making the ratio +Inf. It is
 				// asserted because dropping it would leave an alert that fires on
 				// every sink that has not published a capacity yet.
-				"and kubestream_write_queue_capacity > 0",
+				"and kuberecord_write_queue_capacity > 0",
 			},
 		},
 		{
-			alert:     "KubestreamWriteFailures",
+			alert:     "KuberecordWriteFailures",
 			wantFor:   "10m",
-			wantExprs: []string{`kubestream_writes_total{outcome="failed"}`, "> 0"},
+			wantExprs: []string{`kuberecord_writes_total{outcome="failed"}`, "> 0"},
 		},
 		{
-			alert:     "KubestreamRuleNotReady",
+			alert:     "KuberecordRuleNotReady",
 			wantFor:   "15m",
-			wantExprs: []string{`kubestream_rules{condition="Ready",status="false"} > 0`},
+			wantExprs: []string{`kuberecord_rules{condition="Ready",status="false"} > 0`},
 		},
 		{
-			alert:     "KubestreamEnqueueTimeouts",
+			alert:     "KuberecordEnqueueTimeouts",
 			wantFor:   "5m",
-			wantExprs: []string{"kubestream_enqueue_timeouts_total", "> 0"},
+			wantExprs: []string{"kuberecord_enqueue_timeouts_total", "> 0"},
 		},
 	}
 
@@ -529,7 +529,7 @@ func TestAlertRulesMatchTheAcceptanceCriteria(t *testing.T) {
 // TestQueriesOnlyUseExportedMetrics is the drift guard, and the reason this
 // package imports the operator's own code.
 //
-// Every kubestream_* metric named by a dashboard panel or an alert is checked
+// Every kuberecord_* metric named by a dashboard panel or an alert is checked
 // against the set the collectors *declare* — obtained from their Describe output,
 // not from a Gather, so a metric whose series have no label values yet (safe_mode
 // before the first warming scope) still counts as exported. A renamed or deleted
@@ -607,7 +607,7 @@ func TestPromtoolChecksRules(t *testing.T) {
 		t.Fatalf("render .spec as YAML: %v", err)
 	}
 
-	rulesFile := filepath.Join(t.TempDir(), "kubestream.rules.yaml")
+	rulesFile := filepath.Join(t.TempDir(), "kuberecord.rules.yaml")
 	if err := os.WriteFile(rulesFile, specYAML, 0o600); err != nil {
 		t.Fatalf("write the extracted rule file: %v", err)
 	}
@@ -807,11 +807,11 @@ func explain(err error) string {
 
 // --- metric-name extraction --------------------------------------------------
 
-// metricRef matches a kubestream metric name inside a PromQL expression. Only
+// metricRef matches a kuberecord metric name inside a PromQL expression. Only
 // this operator's own metrics are extracted: a dashboard is free to reference
 // something else (kube-state-metrics, say) and this suite has no standing to
 // judge whether that exists.
-var metricRef = regexp.MustCompile(`\bkubestream_[a-z0-9_]+\b`)
+var metricRef = regexp.MustCompile(`\bkuberecord_[a-z0-9_]+\b`)
 
 func metricNamesIn(expr string) []string {
 	found := metricRef.FindAllString(expr, -1)
@@ -820,8 +820,8 @@ func metricNamesIn(expr string) []string {
 }
 
 // histogramSuffixes are the series a histogram publishes in addition to its
-// declared name. Prometheus exposes kubestream_x_bucket for a histogram declared
-// as kubestream_x, and a dashboard that did not query the bucket series could not
+// declared name. Prometheus exposes kuberecord_x_bucket for a histogram declared
+// as kuberecord_x, and a dashboard that did not query the bucket series could not
 // compute a quantile at all.
 var histogramSuffixes = []string{"_bucket", "_sum", "_count"}
 

@@ -27,8 +27,8 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // probeMetrics is a throwaway per-sink metrics view: Probe records nothing itself,
@@ -42,9 +42,9 @@ func probeMetrics() *pipeline.SinkMetrics {
 // field of at a time.
 func baseConfig() Config {
 	return Config{
-		Addr:                 "clickhouse.kubestream-system.svc:9000",
-		Database:             "kubestream",
-		Username:             "kubestream",
+		Addr:                 "clickhouse.kuberecord-system.svc:9000",
+		Database:             "kuberecord",
+		Username:             "kuberecord",
 		Password:             "s3cret",
 		DialTimeout:          5 * time.Second,
 		ReadTimeout:          10 * time.Second,
@@ -189,7 +189,7 @@ func TestProbeClassifiesOutcomes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewCHWriter(tc.conn, 1, 1, 1, time.Second, time.Second, time.Second, time.Second, time.Second, probeMetrics())
-			w.database = "kubestream"
+			w.database = "kuberecord"
 
 			err := w.Probe(context.Background())
 			if (err != nil) != tc.wantErr {
@@ -216,7 +216,7 @@ func TestProbeClassifiesOutcomes(t *testing.T) {
 func TestProbeIsRefusedWhileShuttingDown(t *testing.T) {
 	w := NewCHWriter(fakeProbeConn{rows: fullSchemaRows()}, 1, 1, 1,
 		time.Second, time.Second, time.Second, time.Second, time.Second, probeMetrics())
-	w.database = "kubestream"
+	w.database = "kuberecord"
 
 	w.mu.Lock()
 	w.closing = true
@@ -246,7 +246,7 @@ func TestProbeAgainstAnUnreachableAddress(t *testing.T) {
 
 	w, err := Open(Config{
 		Addr:        addr,
-		Database:    "kubestream",
+		Database:    "kuberecord",
 		Username:    "default",
 		DialTimeout: time.Second,
 		ReadTimeout: time.Second,

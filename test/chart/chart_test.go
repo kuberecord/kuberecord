@@ -29,7 +29,7 @@ import (
 // aggregateLabel is the label that makes a ClusterRole part of the operator's
 // watch rights. A preset without it is inert, which is the one way a rendered
 // preset can look right and grant nothing.
-const aggregateLabel = "kubestream.io/aggregate-to-watcher"
+const aggregateLabel = "kuberecord.io/aggregate-to-watcher"
 
 // TestDefaultValuesRenderTheExpectedObjects pins the default install's object
 // set. It is the test that notices a template being added, removed or silently
@@ -38,24 +38,24 @@ func TestDefaultValuesRenderTheExpectedObjects(t *testing.T) {
 	rendered := render(t, renderArgs{})
 
 	want := []string{
-		"ClusterRole/kubestream-manager-role",
-		"ClusterRole/kubestream-metrics-auth-role",
-		"ClusterRole/kubestream-metrics-reader",
-		"ClusterRole/kubestream-watcher",
-		"ClusterRole/kubestream-watcher-core-workloads",
-		"ClusterRoleBinding/kubestream-manager-rolebinding",
-		"ClusterRoleBinding/kubestream-metrics-auth-rolebinding",
-		"ClusterRoleBinding/kubestream-watcher-rolebinding",
-		"CustomResourceDefinition/clickhousesinks.kubestream.io",
-		"CustomResourceDefinition/clusterstreamrules.kubestream.io",
-		"CustomResourceDefinition/streamrules.kubestream.io",
-		"Deployment/kubestream-controller-manager",
-		"Role/kubestream-leader-election-role",
-		"Role/kubestream-manager-role",
-		"RoleBinding/kubestream-leader-election-rolebinding",
-		"RoleBinding/kubestream-manager-secret-rolebinding",
-		"Service/kubestream-controller-manager-metrics-service",
-		"ServiceAccount/kubestream-controller-manager",
+		"ClusterRole/kuberecord-manager-role",
+		"ClusterRole/kuberecord-metrics-auth-role",
+		"ClusterRole/kuberecord-metrics-reader",
+		"ClusterRole/kuberecord-watcher",
+		"ClusterRole/kuberecord-watcher-core-workloads",
+		"ClusterRoleBinding/kuberecord-manager-rolebinding",
+		"ClusterRoleBinding/kuberecord-metrics-auth-rolebinding",
+		"ClusterRoleBinding/kuberecord-watcher-rolebinding",
+		"CustomResourceDefinition/clickhousesinks.kuberecord.io",
+		"CustomResourceDefinition/clusterstreamrules.kuberecord.io",
+		"CustomResourceDefinition/streamrules.kuberecord.io",
+		"Deployment/kuberecord-controller-manager",
+		"Role/kuberecord-leader-election-role",
+		"Role/kuberecord-manager-role",
+		"RoleBinding/kuberecord-leader-election-rolebinding",
+		"RoleBinding/kuberecord-manager-secret-rolebinding",
+		"Service/kuberecord-controller-manager-metrics-service",
+		"ServiceAccount/kuberecord-controller-manager",
 	}
 	if got := rendered.keys(); !slices.Equal(got, want) {
 		t.Errorf("default rendering:\n got %v\nwant %v", got, want)
@@ -211,7 +211,7 @@ func TestRBACCreateFalseRemovesEveryRoleAndBinding(t *testing.T) {
 	}
 	// The workload itself is untouched: the operator is still installed, it simply
 	// has no permissions of the chart's making.
-	if !rendered.has(kindDeployment, "kubestream-controller-manager") {
+	if !rendered.has(kindDeployment, "kuberecord-controller-manager") {
 		t.Error("rbac.create=false must not remove the manager Deployment")
 	}
 }
@@ -221,10 +221,10 @@ func TestRBACCreateFalseRemovesEveryRoleAndBinding(t *testing.T) {
 // follow `metrics.enabled` together.
 func TestMetricsToggle(t *testing.T) {
 	metricsObjects := []struct{ kind, name string }{
-		{kindService, "kubestream-controller-manager-metrics-service"},
-		{kindClusterRole, "kubestream-metrics-auth-role"},
-		{kindClusterRoleBinding, "kubestream-metrics-auth-rolebinding"},
-		{kindClusterRole, "kubestream-metrics-reader"},
+		{kindService, "kuberecord-controller-manager-metrics-service"},
+		{kindClusterRole, "kuberecord-metrics-auth-role"},
+		{kindClusterRoleBinding, "kuberecord-metrics-auth-rolebinding"},
+		{kindClusterRole, "kuberecord-metrics-reader"},
 	}
 
 	t.Run("enabled", func(t *testing.T) {
@@ -234,7 +234,7 @@ func TestMetricsToggle(t *testing.T) {
 				t.Errorf("metrics enabled: expected %s/%s", want.kind, want.name)
 			}
 		}
-		args := containerArgs(t, rendered.get(t, kindDeployment, "kubestream-controller-manager"))
+		args := containerArgs(t, rendered.get(t, kindDeployment, "kuberecord-controller-manager"))
 		if !hasArg(args, "--metrics-bind-address=:8443", false) {
 			t.Errorf("metrics enabled: args %v carry no --metrics-bind-address=:8443", args)
 		}
@@ -252,7 +252,7 @@ func TestMetricsToggle(t *testing.T) {
 				t.Errorf("metrics disabled: %s/%s should not be rendered", gone.kind, gone.name)
 			}
 		}
-		deployment := rendered.get(t, kindDeployment, "kubestream-controller-manager")
+		deployment := rendered.get(t, kindDeployment, "kuberecord-controller-manager")
 		if args := containerArgs(t, deployment); hasArg(args, "--metrics-bind-address", true) {
 			t.Errorf("metrics disabled: args %v still bind the metrics endpoint", args)
 		}
@@ -265,7 +265,7 @@ func TestMetricsToggle(t *testing.T) {
 
 	t.Run("insecure", func(t *testing.T) {
 		rendered := render(t, renderArgs{sets: []string{"metrics.secure=false"}})
-		args := containerArgs(t, rendered.get(t, kindDeployment, "kubestream-controller-manager"))
+		args := containerArgs(t, rendered.get(t, kindDeployment, "kuberecord-controller-manager"))
 		if !hasArg(args, "--metrics-secure=false", false) {
 			t.Errorf("metrics.secure=false: args %v do not turn TLS off", args)
 		}
@@ -278,13 +278,13 @@ func TestMetricsToggle(t *testing.T) {
 func TestLeaderElectionToggle(t *testing.T) {
 	t.Run("enabled", func(t *testing.T) {
 		rendered := render(t, renderArgs{})
-		if !rendered.has(kindRole, "kubestream-leader-election-role") {
+		if !rendered.has(kindRole, "kuberecord-leader-election-role") {
 			t.Error("leader election enabled: expected the leader-election Role")
 		}
-		if !rendered.has(kindRoleBinding, "kubestream-leader-election-rolebinding") {
+		if !rendered.has(kindRoleBinding, "kuberecord-leader-election-rolebinding") {
 			t.Error("leader election enabled: expected the leader-election RoleBinding")
 		}
-		args := containerArgs(t, rendered.get(t, kindDeployment, "kubestream-controller-manager"))
+		args := containerArgs(t, rendered.get(t, kindDeployment, "kuberecord-controller-manager"))
 		if !hasArg(args, "--leader-elect", false) {
 			t.Errorf("leader election enabled: args %v carry no --leader-elect", args)
 		}
@@ -292,13 +292,13 @@ func TestLeaderElectionToggle(t *testing.T) {
 
 	t.Run("disabled", func(t *testing.T) {
 		rendered := render(t, renderArgs{sets: []string{"leaderElection.enabled=false"}})
-		if rendered.has(kindRole, "kubestream-leader-election-role") {
+		if rendered.has(kindRole, "kuberecord-leader-election-role") {
 			t.Error("leader election disabled: the leader-election Role should not be rendered")
 		}
-		if rendered.has(kindRoleBinding, "kubestream-leader-election-rolebinding") {
+		if rendered.has(kindRoleBinding, "kuberecord-leader-election-rolebinding") {
 			t.Error("leader election disabled: the leader-election RoleBinding should not be rendered")
 		}
-		args := containerArgs(t, rendered.get(t, kindDeployment, "kubestream-controller-manager"))
+		args := containerArgs(t, rendered.get(t, kindDeployment, "kuberecord-controller-manager"))
 		if hasArg(args, "--leader-elect", false) {
 			t.Errorf("leader election disabled: args %v still pass --leader-elect", args)
 		}
@@ -332,24 +332,24 @@ func TestImageReference(t *testing.T) {
 			// An empty tag follows the chart's appVersion, so upgrading the chart
 			// moves the operator with it.
 			name: "tag defaults to appVersion",
-			want: "ghcr.io/yelzhy/kubestream:" + chartAppVersion(t),
+			want: "ghcr.io/yelzhy/kuberecord:" + chartAppVersion(t),
 		},
 		{
 			name: "explicit repository and tag",
-			sets: []string{"image.repository=example.com/kubestream", "image.tag=v9.9.9"},
-			want: "example.com/kubestream:v9.9.9",
+			sets: []string{"image.repository=example.com/kuberecord", "image.tag=v9.9.9"},
+			want: "example.com/kuberecord:v9.9.9",
 		},
 		{
 			// A digest pins by content, so it must win over any tag that is also set.
 			name: "digest wins over tag",
 			sets: []string{"image.tag=v9.9.9", "image.digest=" + digest},
-			want: "ghcr.io/yelzhy/kubestream@" + digest,
+			want: "ghcr.io/yelzhy/kuberecord@" + digest,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rendered := render(t, renderArgs{sets: tc.sets})
-			got := managerContainer(t, rendered.get(t, kindDeployment, "kubestream-controller-manager"))
+			got := managerContainer(t, rendered.get(t, kindDeployment, "kuberecord-controller-manager"))
 			if got.Image != tc.want {
 				t.Errorf("image = %q; want %q", got.Image, tc.want)
 			}
@@ -377,7 +377,7 @@ func TestExtraLabelsReachEveryObjectButNoSelector(t *testing.T) {
 	}
 
 	var deployment deploymentSpec
-	rendered.get(t, kindDeployment, "kubestream-controller-manager").decode(t, &deployment)
+	rendered.get(t, kindDeployment, "kuberecord-controller-manager").decode(t, &deployment)
 	if _, found := deployment.Spec.Selector.MatchLabels[teamLabel]; found {
 		t.Error("extra labels must not appear in the Deployment's immutable selector")
 	}
@@ -390,7 +390,7 @@ func TestExtraLabelsReachEveryObjectButNoSelector(t *testing.T) {
 			Selector map[string]string `json:"selector"`
 		} `json:"spec"`
 	}
-	rendered.get(t, kindService, "kubestream-controller-manager-metrics-service").decode(t, &service)
+	rendered.get(t, kindService, "kuberecord-controller-manager-metrics-service").decode(t, &service)
 	if _, found := service.Spec.Selector[teamLabel]; found {
 		t.Error("extra labels must not appear in the metrics Service's selector")
 	}
@@ -402,7 +402,7 @@ const teamLabel = "team"
 // TestDefaultSinkToggle covers the optional starter sink: off by default,
 // complete when on, and refused rather than rendered half-configured.
 func TestDefaultSinkToggle(t *testing.T) {
-	const addr = "clickhouse.kubestream-system.svc:9000"
+	const addr = "clickhouse.kuberecord-system.svc:9000"
 
 	t.Run("off by default", func(t *testing.T) {
 		rendered := render(t, renderArgs{})
@@ -472,7 +472,7 @@ func TestCIValuesFilesRender(t *testing.T) {
 	for _, file := range listYAML(t, chartDir+"/ci") {
 		t.Run(file, func(t *testing.T) {
 			rendered := render(t, renderArgs{valuesFiles: []string{chartDir + "/ci/" + file}})
-			if !rendered.has(kindDeployment, "kubestream-controller-manager") {
+			if !rendered.has(kindDeployment, "kuberecord-controller-manager") {
 				t.Errorf("ci/%s renders no manager Deployment", file)
 			}
 		})

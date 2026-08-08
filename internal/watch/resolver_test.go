@@ -122,7 +122,7 @@ var (
 	podGVK        = schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
 	deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 	namespaceGVK  = schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}
-	widgetGVK     = schema.GroupVersionKind{Group: "test.kubestream.io", Version: "v1", Kind: "Widget"}
+	widgetGVK     = schema.GroupVersionKind{Group: "test.kuberecord.io", Version: "v1", Kind: "Widget"}
 
 	podGVR        = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	deploymentGVR = deploymentGVK.GroupVersion().WithResource("deployments")

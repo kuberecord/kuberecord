@@ -215,7 +215,7 @@ func TestProcessEventResyncStillDeduplicates(t *testing.T) {
 }
 
 // TestProcessEventExpiryWritesNoRow is the TTL case: the watch delivers a Deleted
-// for an Event that simply aged out, and kubestream must record *nothing* — not a
+// for an Event that simply aged out, and kuberecord must record *nothing* — not a
 // Deleted row, not anything else. The cache entry goes, though: an entry left
 // behind per expired Event is an unbounded leak on the highest-churn kind there
 // is.

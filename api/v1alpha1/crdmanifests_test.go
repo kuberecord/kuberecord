@@ -48,7 +48,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 	}{
 		{
 			name: "clickhousesink",
-			file: "kubestream.io_clickhousesinks.yaml",
+			file: "kuberecord.io_clickhousesinks.yaml",
 			mustContain: []string{
 				// Printer columns: READY, ADDR (see the type comment on
 				// ClickHouseSink for why ADDR is host:port, not host).
@@ -84,7 +84,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 		},
 		{
 			name: "streamrule",
-			file: "kubestream.io_streamrules.yaml",
+			file: "kuberecord.io_streamrules.yaml",
 			mustContain: []string{
 				`jsonPath: .status.conditions[?(@.type=="Ready")].status`,
 				"name: READY",
@@ -120,7 +120,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 		},
 		{
 			name: "clusterstreamrule",
-			file: "kubestream.io_clusterstreamrules.yaml",
+			file: "kuberecord.io_clusterstreamrules.yaml",
 			mustContain: []string{
 				`jsonPath: .status.conditions[?(@.type=="Ready")].status`,
 				"name: SINK",
@@ -173,13 +173,13 @@ func TestCRDPatternConstantsMatchMarkers(t *testing.T) {
 		file    string
 		pattern string
 	}{
-		{name: "kind", file: "kubestream.io_streamrules.yaml", pattern: KindPattern},
-		{name: "group", file: "kubestream.io_streamrules.yaml", pattern: GroupPattern},
-		{name: "version", file: "kubestream.io_streamrules.yaml", pattern: VersionPattern},
-		{name: "kindsEntry", file: "kubestream.io_clickhousesinks.yaml", pattern: KindsEntryPattern},
-		{name: "redactionFieldPath", file: "kubestream.io_streamrules.yaml", pattern: RedactionFieldPathPattern},
-		{name: "redactionAnnotation", file: "kubestream.io_streamrules.yaml", pattern: RedactionAnnotationPattern},
-		{name: "redactionFieldPathOnSink", file: "kubestream.io_clickhousesinks.yaml",
+		{name: "kind", file: "kuberecord.io_streamrules.yaml", pattern: KindPattern},
+		{name: "group", file: "kuberecord.io_streamrules.yaml", pattern: GroupPattern},
+		{name: "version", file: "kuberecord.io_streamrules.yaml", pattern: VersionPattern},
+		{name: "kindsEntry", file: "kuberecord.io_clickhousesinks.yaml", pattern: KindsEntryPattern},
+		{name: "redactionFieldPath", file: "kuberecord.io_streamrules.yaml", pattern: RedactionFieldPathPattern},
+		{name: "redactionAnnotation", file: "kuberecord.io_streamrules.yaml", pattern: RedactionAnnotationPattern},
+		{name: "redactionFieldPathOnSink", file: "kuberecord.io_clickhousesinks.yaml",
 			pattern: RedactionFieldPathPattern},
 	}
 

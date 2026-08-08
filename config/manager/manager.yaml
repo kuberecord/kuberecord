@@ -3,7 +3,7 @@ kind: Namespace
 metadata:
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
   name: system
 ---
@@ -14,13 +14,13 @@ metadata:
   namespace: system
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: kubestream
+    app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: kubestream
+      app.kubernetes.io/name: kuberecord
   replicas: 1
   template:
     metadata:
@@ -28,7 +28,7 @@ spec:
         kubectl.kubernetes.io/default-container: manager
       labels:
         control-plane: controller-manager
-        app.kubernetes.io/name: kubestream
+        app.kubernetes.io/name: kuberecord
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
@@ -67,7 +67,7 @@ spec:
         name: manager
         # Where ClickHouse lives is no longer configured here: it belongs to the
         # ClickHouseSink CR and the Secret it references (see
-        # config/samples/kubestream.io_v1alpha1_clickhousesink.yaml). What is left
+        # config/samples/kuberecord.io_v1alpha1_clickhousesink.yaml). What is left
         # is the identity of *this operator instance*.
         env:
         # TODO(user): CLUSTER_ID is a local/dev placeholder. It is stamped on

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kubestream.io/schemas/grafana-dashboard.schema.json",
-  "title": "Grafana dashboard (kubestream subset)",
+  "$id": "https://kuberecord.io/schemas/grafana-dashboard.schema.json",
+  "title": "Grafana dashboard (kuberecord subset)",
   "description": "Structural contract for the dashboards shipped in deploy/grafana/. Grafana publishes no stable, self-contained JSON Schema for a dashboard — its own model is a Go/TypeScript type that changes shape between minor releases — so this is a deliberately curated subset: the fields a dashboard must get right to import cleanly and to stay reviewable, and nothing else. Unknown properties are allowed everywhere so a dashboard exported from a newer Grafana still validates; what is pinned is that the fields we do rely on exist and are well formed.",
   "type": "object",
   "required": [

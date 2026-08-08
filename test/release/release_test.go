@@ -543,7 +543,7 @@ func TestReleaseWorkflow(t *testing.T) {
 		{"artifacts", "make release-artifacts", "install.yaml, the chart and the checksums"},
 		{"notes are the body", "--notes-file dist/release/RELEASE_NOTES.md", "the changelog is the release notes"},
 		{"checksums attached", "dist/release/checksums.txt", "checksums are published, not merely computed"},
-		{"chart attached", "dist/release/kubestream-*.tgz", "the packaged chart is an artifact of the release"},
+		{"chart attached", "dist/release/kuberecord-*.tgz", "the packaged chart is an artifact of the release"},
 		{"gate precedes publishing", "needs: [gate, image]", "publishing is not undoable, so ordering is the safeguard"},
 		{"image needs the gate", "needs: gate", "an image pushed under a rejected tag cannot be unpushed"},
 	}

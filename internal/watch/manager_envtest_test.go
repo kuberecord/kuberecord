@@ -31,9 +31,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/yelzhy/kubestream/internal/pipeline"
-	"github.com/yelzhy/kubestream/internal/plan"
-	"github.com/yelzhy/kubestream/internal/sink"
+	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 const (
@@ -367,7 +367,7 @@ func hashcacheEntries(t *testing.T, reg *prometheus.Registry) float64 {
 		t.Fatalf("gathering pipeline metrics: %v", err)
 	}
 	for _, family := range families {
-		if family.GetName() != "kubestream_hashcache_entries" {
+		if family.GetName() != "kuberecord_hashcache_entries" {
 			continue
 		}
 		for _, metric := range family.GetMetric() {

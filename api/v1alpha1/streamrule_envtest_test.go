@@ -113,7 +113,7 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 		},
 		{
 			name: "alpha-version-is-accepted",
-			obj:  withResource(WatchedResource{Group: "kubestream.io", Version: "v1alpha1", Kind: "StreamRule"}),
+			obj:  withResource(WatchedResource{Group: "kuberecord.io", Version: "v1alpha1", Kind: "StreamRule"}),
 		},
 		{
 			name:    "empty-resources-is-rejected",
@@ -272,7 +272,7 @@ func TestStreamRuleLabelSelectorAndDefaults(t *testing.T) {
 			Resources: []WatchedResource{{
 				Group: "", Version: "v1", Kind: "ConfigMap",
 				LabelSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"kubestream.io/audit": "true"},
+					MatchLabels: map[string]string{"kuberecord.io/audit": "true"},
 				},
 			}},
 		},
@@ -292,7 +292,7 @@ func TestStreamRuleLabelSelectorAndDefaults(t *testing.T) {
 		t.Errorf("sinkRef defaulted to %q, want %q", got.Spec.SinkRef, defaultSinkRef)
 	}
 	sel := got.Spec.Resources[0].LabelSelector
-	if sel == nil || sel.MatchLabels["kubestream.io/audit"] != "true" {
+	if sel == nil || sel.MatchLabels["kuberecord.io/audit"] != "true" {
 		t.Errorf("labelSelector did not round-trip: %+v", sel)
 	}
 }
