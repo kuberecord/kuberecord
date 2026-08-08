@@ -7,7 +7,7 @@ an object is ever cached:
 
 1. the field-manager names are harvested out of `metadata.managedFields`;
 2. they are written to the operator-internal annotation
-   `internal.kubestream.io/actors` as a sorted, de-duplicated, comma-joined
+   `internal.kuberecord.io/actors` as a sorted, de-duplicated, comma-joined
    list;
 3. `metadata.managedFields` is deleted from the cached copy.
 

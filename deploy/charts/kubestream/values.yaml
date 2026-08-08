@@ -60,7 +60,7 @@ rbac:
   create: true
   # Which watch presets to install (config/rbac/presets/*.yaml, rendered under
   # this release's name). Each is a ClusterRole labelled
-  # `kubestream.io/aggregate-to-watcher: "true"`, so the aggregated `watcher`
+  # `kuberecord.io/aggregate-to-watcher: "true"`, so the aggregated `watcher`
   # role picks it up with no restart and no redeploy (D7).
   #
   # core-workloads is the only one enabled by default, because it is what the

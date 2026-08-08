@@ -39,7 +39,7 @@ const (
 
 // aggregateLabel is the label whose presence on a ClusterRole makes the
 // controller-manager fold that role's rules into kubestream-watcher.
-const aggregateLabel = "kubestream.io/aggregate-to-watcher"
+const aggregateLabel = "kuberecord.io/aggregate-to-watcher"
 
 // The RBAC kind names, spelled once each: the difference between `Role` and
 // `ClusterRole` is the entire point of several assertions below, so a typo in one
