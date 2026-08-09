@@ -1,4 +1,4 @@
-# kuberecord
+# KubeRecord
 
 **Git blame for your Kubernetes cluster.**
 
