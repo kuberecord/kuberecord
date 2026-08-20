@@ -28,6 +28,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/api/v1alpha1"
 	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
 	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
 )
 
@@ -479,7 +480,7 @@ func TestBuildSinkConfigFingerprintsThePassword(t *testing.T) {
 // type assertion on a lifecycle goroutine.
 func TestSinkFactoryRejectsAForeignConfig(t *testing.T) {
 	factory := newSinkFactory(pipeline.NewPipelineMetrics(prometheus.NewRegistry()))
-	if _, err := factory("default", foreignConfig{}); err == nil {
+	if _, err := factory(sink.ID{Kind: sink.DefaultSinkKind, Name: "default"}, foreignConfig{}); err == nil {
 		t.Fatal("factory accepted a non-ClickHouse configuration, want an error")
 	}
 }

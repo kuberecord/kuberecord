@@ -85,13 +85,25 @@ var errNoLiveConfig = errors.New("sink configuration is incomplete; not handing 
 // prove no reconcile path reaches a dialer. sink.SinkManager is the production
 // implementation, asserted at the bottom of this file.
 type SinkRuntime interface {
-	// Ensure declares that the named sink must be running with cfg. It must not
-	// block on a backend round-trip: the reconciler calls it inline.
-	Ensure(name string, cfg sink.InstanceConfig) error
+	// Ensure declares that the identified sink must be running with cfg. It must
+	// not block on a backend round-trip: the reconciler calls it inline.
+	Ensure(id sink.ID, cfg sink.InstanceConfig) error
 
 	// Delete withdraws a sink for good. Draining happens on the runtime's own
 	// goroutines, so this returns immediately.
-	Delete(name string)
+	Delete(id sink.ID)
+}
+
+// clickHouseSinkID is the runtime identity of one ClickHouseSink CR.
+//
+// It is not a default being applied: this reconciler reconciles exactly one kind
+// and therefore *knows* its own, which is the only condition under which naming
+// sink.DefaultSinkKind is legitimate (see its doc comment). Keeping the
+// construction in one function is what makes "which kind does the ClickHouseSink
+// reconciler register under?" a single, greppable answer rather than a literal
+// repeated at every call site.
+func clickHouseSinkID(name string) sink.ID {
+	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
 }
 
 // SinkConfigBuilder turns a resolved ClickHouseSink plus its credential into the
@@ -117,11 +129,11 @@ type SinkConfigBuilder func(name string, spec v1alpha1.ClickHouseSinkSpec, passw
 // wrong to write.
 type probeStore struct {
 	mu      sync.RWMutex
-	results map[string]sink.ProbeResult
+	results map[sink.ID]sink.ProbeResult
 }
 
 func newProbeStore() *probeStore {
-	return &probeStore{results: make(map[string]sink.ProbeResult)}
+	return &probeStore{results: make(map[sink.ID]sink.ProbeResult)}
 }
 
 // record stores a verdict, overwriting any older one for the same sink.
@@ -131,20 +143,25 @@ func (s *probeStore) record(result sink.ProbeResult) {
 	s.results[result.Sink] = result
 }
 
-// latest returns the newest verdict for name, if any has settled yet.
-func (s *probeStore) latest(name string) (sink.ProbeResult, bool) {
+// latest returns the newest verdict for id, if any has settled yet.
+//
+// Keying on the whole identity is what keeps two same-named sinks of different
+// kinds from reading each other's health: a verdict is about one backend, and an
+// S3Sink that cannot be reached says nothing about the ClickHouseSink that
+// happens to share its name.
+func (s *probeStore) latest(id sink.ID) (sink.ProbeResult, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result, ok := s.results[name]
+	result, ok := s.results[id]
 	return result, ok
 }
 
-// forget drops a deleted sink's verdict, so a sink recreated under the same name
+// forget drops a deleted sink's verdict, so a sink recreated under the same ID
 // starts from ProbePending rather than inheriting its predecessor's health.
-func (s *probeStore) forget(name string) {
+func (s *probeStore) forget(id sink.ID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.results, name)
+	delete(s.results, id)
 }
 
 // SinkReconciler reconciles ClickHouseSink: it resolves the credential, hands the
@@ -225,9 +242,10 @@ func (r *SinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			// operator was down is picked up by the level-triggered boot pass
 			// rather than by a finalizer that would block the deletion of a CR the
 			// operator might never come back to release.
-			log.Info("ClickHouseSink is gone; withdrawing it from the sink runtime", "sink", req.Name)
-			r.Probes.forget(req.Name)
-			r.Sinks.Delete(req.Name)
+			gone := clickHouseSinkID(req.Name)
+			log.Info("ClickHouseSink is gone; withdrawing it from the sink runtime", "sink", gone.String())
+			r.Probes.forget(gone)
+			r.Sinks.Delete(gone)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get ClickHouseSink %q: %w", req.Name, err)
@@ -344,7 +362,7 @@ func (r *SinkReconciler) declare(chSink *v1alpha1.ClickHouseSink, password strin
 	if cfg == nil {
 		return fmt.Errorf("build configuration for sink %q: %w", chSink.Name, errNoLiveConfig)
 	}
-	return r.Sinks.Ensure(chSink.Name, cfg)
+	return r.Sinks.Ensure(clickHouseSinkID(chSink.Name), cfg)
 }
 
 // setHealthConditions turns the latest probe verdict into SchemaValid.
@@ -364,7 +382,7 @@ func (r *SinkReconciler) setHealthConditions(status *statusWriter, chSink *v1alp
 		return
 	}
 
-	result, probed := r.Probes.latest(chSink.Name)
+	result, probed := r.Probes.latest(clickHouseSinkID(chSink.Name))
 	switch {
 	case !probed:
 		status.set(v1alpha1.ConditionSchemaValid, metav1.ConditionUnknown, ReasonProbePending,
@@ -461,7 +479,9 @@ func (w *ProbeWatcher) Start(ctx context.Context) error {
 			return nil
 		case result := <-w.Results:
 			w.Probes.record(result)
-			obj := &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: result.Sink}}
+			// Only the name reaches the wake-up: the object identifies which CR to
+			// reconcile, and the kind is already fixed by the type being constructed.
+			obj := &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: result.Sink.Name}}
 			select {
 			case w.Events <- event.GenericEvent{Object: obj}:
 			case <-ctx.Done():

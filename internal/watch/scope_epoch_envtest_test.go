@@ -107,22 +107,22 @@ func (h *scopeHistory) historyReads() []sink.ScopeFilter {
 // scope-log writer — the shape Task 1.8's SinkManager will have for a
 // single-ClickHouseSink deployment.
 type singleSinkBackends struct {
-	name   string
+	id     sink.ID
 	reader sink.StateReader
 	events sink.ScopeEventWriter
 }
 
-func (b singleSinkBackends) StateReaderFor(name string) (sink.StateReader, bool) {
-	if name != b.name {
+func (b singleSinkBackends) StateReaderFor(id sink.ID) (sink.StateReader, bool) {
+	if id != b.id {
 		return nil, false
 	}
 	return b.reader, true
 }
 
-func (b singleSinkBackends) SinkNames() []string { return []string{b.name} }
+func (b singleSinkBackends) SinkIDs() []sink.ID { return []sink.ID{b.id} }
 
-func (b singleSinkBackends) ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool) {
-	if name != b.name {
+func (b singleSinkBackends) ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool) {
+	if id != b.id {
 		return nil, false
 	}
 	return b.events, true
@@ -173,7 +173,7 @@ func TestScopeEpochsThroughTheRealDataPlane(t *testing.T) {
 	lister := &deferredLister{}
 	writer := &recordingWriter{}
 	events := &fakeScopeEventWriter{}
-	backends := singleSinkBackends{name: testSinkName, reader: history, events: events}
+	backends := singleSinkBackends{id: sinkIDFor(testSinkName), reader: history, events: events}
 
 	pipe, err := pipeline.New(pipeline.Options{
 		ClusterID: clusterID,
@@ -202,8 +202,10 @@ func TestScopeEpochsThroughTheRealDataPlane(t *testing.T) {
 	}
 
 	recorder, err := NewScopeEpochRecorder(ScopeRecorderOptions{
-		ClusterID:     clusterID,
-		Events:        &fakeScopeEventRouter{writers: map[string]sink.ScopeEventWriter{testSinkName: events}},
+		ClusterID: clusterID,
+		Events: &fakeScopeEventRouter{
+			writers: map[sink.ID]sink.ScopeEventWriter{sinkIDFor(testSinkName): events},
+		},
 		Warmer:        coordinator,
 		FlushInterval: 10 * time.Millisecond,
 	})

@@ -158,34 +158,39 @@ func (f *fakeRedactions) drop(scope ScopeKey) {
 	f.dropped[scope] = struct{}{}
 }
 
-// fakeRouter is a map-backed SinkRouter. Removing a name reproduces the
+// fakeRouter is a map-backed SinkRouter. Removing a sink reproduces the
 // "sink deleted or mid-recycle" condition the pipeline must survive.
+//
+// It is keyed by sink.ID, exactly as the real SinkManager's routing table is, so
+// a lookup carrying the wrong kind misses here too rather than being quietly
+// answered by whatever shares its name. The setters take a name because the keys
+// the pipeline itself still holds are names (see sinkIDFor).
 type fakeRouter struct {
 	mu      sync.RWMutex
-	writers map[string]sink.Writer
+	writers map[sink.ID]sink.Writer
 }
 
 func newFakeRouter() *fakeRouter {
-	return &fakeRouter{writers: make(map[string]sink.Writer)}
+	return &fakeRouter{writers: make(map[sink.ID]sink.Writer)}
 }
 
-func (f *fakeRouter) WriterFor(name string) (sink.Writer, bool) {
+func (f *fakeRouter) WriterFor(id sink.ID) (sink.Writer, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	w, ok := f.writers[name]
+	w, ok := f.writers[id]
 	return w, ok
 }
 
 func (f *fakeRouter) set(name string, w sink.Writer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.writers[name] = w
+	f.writers[sinkIDFor(name)] = w
 }
 
 func (f *fakeRouter) remove(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.writers, name)
+	delete(f.writers, sinkIDFor(name))
 }
 
 // fakeWriter is a sink.Writer that records every accepted job and settles it

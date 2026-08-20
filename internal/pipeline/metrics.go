@@ -21,6 +21,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // metricsNamespace prefixes every metric name with "kuberecord_", giving the
@@ -40,6 +42,12 @@ const metricsNamespace = "kuberecord"
 // deliberate: metrics the *pipeline* owns (dedup skips, dropped items) stay
 // unlabelled, because they are properties of the shared workqueue rather than of
 // any one backend.
+//
+// Its *value* is sink.ID.String() — "<Kind>/<Name>", e.g.
+// "ClickHouseSink/default" — not the bare CR name (Task 4.1). The kind belongs in
+// the label because a name is only unique within a kind: a ClickHouseSink and an
+// S3Sink may both be called "default", and labelled by name alone their series
+// would merge into one that describes neither backend.
 const sinkLabel = "sink"
 
 // PipelineMetrics is the full set of Prometheus collectors describing the
@@ -284,50 +292,52 @@ type SinkMetrics struct {
 	enqueueGaveUp prometheus.Counter
 }
 
-// ForSink returns the write-path metrics view for the sink named name, seeding
-// both of its outcome counters at 0 so dashboards and rate() queries over them
-// are well-defined from the moment the sink exists rather than from its first
-// settled write.
+// ForSink returns the write-path metrics view for the sink id, seeding both of
+// its outcome counters at 0 so dashboards and rate() queries over them are
+// well-defined from the moment the sink exists rather than from its first settled
+// write.
 //
 // It is called once per sink instance, by whoever builds that instance (Task
 // 1.8's sink factory), because internal/sink cannot import this package: the
-// factory receives the sink's name and is the only place where a name and a
-// backend meet.
-func (m *PipelineMetrics) ForSink(name string) *SinkMetrics {
+// factory receives the sink's identity and is the only place where an identity
+// and a backend meet.
+func (m *PipelineMetrics) ForSink(id sink.ID) *SinkMetrics {
+	label := id.String()
 	return &SinkMetrics{
-		queueDepth:    m.writeQueueDepth.WithLabelValues(name),
-		queueCapacity: m.writeQueueCapacity.WithLabelValues(name),
-		writeSuccess:  m.writesTotal.WithLabelValues(name, "success"),
-		writeFailed:   m.writesTotal.WithLabelValues(name, "failed"),
-		latency:       m.writeLatency.WithLabelValues(name),
-		retries:       m.writeRetryAttempts.WithLabelValues(name),
-		batchRows:     m.writeBatchRows.WithLabelValues(name),
-		enqueueBlock:  m.enqueueBlock.WithLabelValues(name),
-		enqueueGaveUp: m.enqueueTimeouts.WithLabelValues(name),
+		queueDepth:    m.writeQueueDepth.WithLabelValues(label),
+		queueCapacity: m.writeQueueCapacity.WithLabelValues(label),
+		writeSuccess:  m.writesTotal.WithLabelValues(label, "success"),
+		writeFailed:   m.writesTotal.WithLabelValues(label, "failed"),
+		latency:       m.writeLatency.WithLabelValues(label),
+		retries:       m.writeRetryAttempts.WithLabelValues(label),
+		batchRows:     m.writeBatchRows.WithLabelValues(label),
+		enqueueBlock:  m.enqueueBlock.WithLabelValues(label),
+		enqueueGaveUp: m.enqueueTimeouts.WithLabelValues(label),
 	}
 }
 
-// deleteSinkSeries drops every per-sink series for name.
+// deleteSinkSeries drops every per-sink series for id.
 //
 // It runs when a sink's pipeline state is discarded (see RemoveSink), for the
 // same reason the hashcache_entries series is dropped there: a gauge left behind
 // keeps reporting a queue depth and capacity for a backend the operator no longer
 // writes to, which reads as a live-but-idle sink rather than an absent one.
-func (m *PipelineMetrics) deleteSinkSeries(name string) {
-	m.writeQueueDepth.DeleteLabelValues(name)
-	m.writeQueueCapacity.DeleteLabelValues(name)
-	m.writesTotal.DeleteLabelValues(name, "success")
-	m.writesTotal.DeleteLabelValues(name, "failed")
-	m.writeLatency.DeleteLabelValues(name)
-	m.writeRetryAttempts.DeleteLabelValues(name)
-	m.writeBatchRows.DeleteLabelValues(name)
-	m.enqueueBlock.DeleteLabelValues(name)
-	m.enqueueTimeouts.DeleteLabelValues(name)
+func (m *PipelineMetrics) deleteSinkSeries(id sink.ID) {
+	label := id.String()
+	m.writeQueueDepth.DeleteLabelValues(label)
+	m.writeQueueCapacity.DeleteLabelValues(label)
+	m.writesTotal.DeleteLabelValues(label, "success")
+	m.writesTotal.DeleteLabelValues(label, "failed")
+	m.writeLatency.DeleteLabelValues(label)
+	m.writeRetryAttempts.DeleteLabelValues(label)
+	m.writeBatchRows.DeleteLabelValues(label)
+	m.enqueueBlock.DeleteLabelValues(label)
+	m.enqueueTimeouts.DeleteLabelValues(label)
 	// safe_mode carries the scope dimension as well, and a deleted sink may still
 	// have had warming scopes when it went away (its rules are parked *after* the
 	// sink is gone), so its series are matched on the sink label alone rather than
 	// re-derived from a scope list this call does not have.
-	m.safeMode.DeletePartialMatch(prometheus.Labels{sinkLabel: name})
+	m.safeMode.DeletePartialMatch(prometheus.Labels{sinkLabel: label})
 }
 
 // SetWriteQueueDepth publishes this sink's current hand-off queue depth.

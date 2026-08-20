@@ -17,6 +17,7 @@ limitations under the License.
 package pipeline
 
 import (
+	"cmp"
 	"context"
 	"slices"
 	"sync"
@@ -242,65 +243,71 @@ func (f *fakeScopeEvents) awaitEvents(t *testing.T, n int) []sink.ScopeEvent {
 // of Task 1.8's SinkManager the coordinator consumes. A sink present in one map
 // but not the other reproduces a real condition: a sink that writes records but
 // cannot read its history back.
+// It is keyed by sink.ID, as the real SinkManager's registry is, so a lookup
+// carrying an unexpected kind misses rather than being answered by the sink that
+// shares its name. The setters take names, which is what the coordinator itself
+// still holds (see sinkIDFor).
 type fakeSinkBackends struct {
 	mu      sync.Mutex
-	readers map[string]sink.StateReader
-	events  map[string]sink.ScopeEventWriter
+	readers map[sink.ID]sink.StateReader
+	events  map[sink.ID]sink.ScopeEventWriter
 }
 
 func newFakeSinkBackends() *fakeSinkBackends {
 	return &fakeSinkBackends{
-		readers: make(map[string]sink.StateReader),
-		events:  make(map[string]sink.ScopeEventWriter),
+		readers: make(map[sink.ID]sink.StateReader),
+		events:  make(map[sink.ID]sink.ScopeEventWriter),
 	}
 }
 
-func (f *fakeSinkBackends) StateReaderFor(name string) (sink.StateReader, bool) {
+func (f *fakeSinkBackends) StateReaderFor(id sink.ID) (sink.StateReader, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r, ok := f.readers[name]
+	r, ok := f.readers[id]
 	return r, ok
 }
 
-func (f *fakeSinkBackends) SinkNames() []string {
+func (f *fakeSinkBackends) SinkIDs() []sink.ID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	names := make([]string, 0, len(f.readers)+len(f.events))
-	for name := range f.readers {
-		names = append(names, name)
+	ids := make([]sink.ID, 0, len(f.readers)+len(f.events))
+	for id := range f.readers {
+		ids = append(ids, id)
 	}
-	for name := range f.events {
-		if _, dup := f.readers[name]; !dup {
-			names = append(names, name)
+	for id := range f.events {
+		if _, dup := f.readers[id]; !dup {
+			ids = append(ids, id)
 		}
 	}
-	slices.Sort(names)
-	return names
+	slices.SortFunc(ids, func(a, b sink.ID) int {
+		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name))
+	})
+	return ids
 }
 
-func (f *fakeSinkBackends) ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool) {
+func (f *fakeSinkBackends) ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	w, ok := f.events[name]
+	w, ok := f.events[id]
 	return w, ok
 }
 
 func (f *fakeSinkBackends) setReader(name string, r sink.StateReader) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.readers[name] = r
+	f.readers[sinkIDFor(name)] = r
 }
 
 func (f *fakeSinkBackends) removeReader(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.readers, name)
+	delete(f.readers, sinkIDFor(name))
 }
 
 func (f *fakeSinkBackends) setEvents(name string, w sink.ScopeEventWriter) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.events[name] = w
+	f.events[sinkIDFor(name)] = w
 }
 
 // fakeScopes is a ScopeStates whose answers default to the conservative side:

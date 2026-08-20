@@ -224,7 +224,7 @@ func TestSinkProbeFailureAndRecovery(t *testing.T) {
 	// Unreachable: the schema is unknowable, but the sink is definitely not usable,
 	// so the roll-up is False while the specific condition stays Unknown.
 	h.pushProbe(sink.ProbeResult{
-		Sink:   name,
+		Sink:   clickHouseSinkID(name),
 		At:     time.Now().UTC(),
 		Err:    errors.New("dial tcp: lookup clickhouse.invalid: no such host"),
 		Reason: sink.ProbeReasonUnreachable,
@@ -235,7 +235,7 @@ func TestSinkProbeFailureAndRecovery(t *testing.T) {
 	// A backend that answered but disagrees about its columns is the one probe
 	// failure that is a real verdict about the schema.
 	h.pushProbe(sink.ProbeResult{
-		Sink:   name,
+		Sink:   clickHouseSinkID(name),
 		At:     time.Now().UTC(),
 		Err:    fmt.Errorf("%w: resource_states is missing column sha256", sink.ErrSchemaInvalid),
 		Reason: sink.ProbeReasonSchemaInvalid,
@@ -244,7 +244,7 @@ func TestSinkProbeFailureAndRecovery(t *testing.T) {
 	h.waitForSinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionFalse, sink.ProbeReasonSchemaInvalid)
 
 	// Recovery flips both back with no restart and no re-created CR.
-	h.pushProbe(sink.ProbeResult{Sink: name, At: time.Now().UTC()})
+	h.pushProbe(sink.ProbeResult{Sink: clickHouseSinkID(name), At: time.Now().UTC()})
 	h.waitForSinkCondition(name, v1alpha1.ConditionSchemaValid, metav1.ConditionTrue, ReasonSchemaMatches)
 	h.waitForSinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonConnected)
 }
@@ -317,13 +317,14 @@ func TestSinkDeletionWithdrawsFromRuntime(t *testing.T) {
 		t.Fatalf("delete the sink: %v", err)
 	}
 	waitFor(t, "the sink runtime to be told the sink is gone", func() (bool, string) {
-		return slices.Contains(h.Runtime.deletions(), name), fmt.Sprintf("%v", h.Runtime.deletions())
+		return slices.Contains(h.Runtime.deletions(), clickHouseSinkID(name)),
+			fmt.Sprintf("%v", h.Runtime.deletions())
 	})
 
 	// The probe verdict is forgotten with the sink, so a sink recreated under the
 	// same name starts from ProbePending rather than inheriting its predecessor's
 	// health.
-	if _, ok := h.Probes.latest(name); ok {
+	if _, ok := h.Probes.latest(clickHouseSinkID(name)); ok {
 		t.Error("the deleted sink's probe verdict is still stored")
 	}
 }
@@ -345,7 +346,7 @@ func TestProbeWatcherShutdown(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- watcher.Start(ctx) }()
 
-		results <- sink.ProbeResult{Sink: "one", At: time.Now().UTC()}
+		results <- sink.ProbeResult{Sink: clickHouseSinkID("one"), At: time.Now().UTC()}
 		select {
 		case ev := <-events:
 			if ev.Object.GetName() != "one" {
@@ -357,7 +358,7 @@ func TestProbeWatcherShutdown(t *testing.T) {
 		// The store is written before the wake-up is sent, so a reconcile triggered
 		// by that wake-up can never read a verdict older than the one it was woken
 		// for.
-		if _, recorded := probes.latest("one"); !recorded {
+		if _, recorded := probes.latest(clickHouseSinkID("one")); !recorded {
 			t.Error("the verdict was announced before it was recorded")
 		}
 
@@ -382,7 +383,7 @@ func TestProbeWatcherShutdown(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- watcher.Start(ctx) }()
-		results <- sink.ProbeResult{Sink: "blocked", At: time.Now().UTC()}
+		results <- sink.ProbeResult{Sink: clickHouseSinkID("blocked"), At: time.Now().UTC()}
 
 		cancel()
 		select {

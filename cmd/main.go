@@ -287,24 +287,26 @@ func (d *dataPlane) bind(pipe *pipeline.Pipeline, watches *watch.WatchManager, w
 }
 
 // RemoveSink implements sink.Pipeline.
-func (d *dataPlane) RemoveSink(name string) {
+func (d *dataPlane) RemoveSink(id sink.ID) {
 	if d.pipe == nil {
-		setupLog.Error(errDataPlaneUnbound, "Cannot evict a deleted sink's pipeline state", "sink", name)
+		setupLog.Error(errDataPlaneUnbound, "Cannot evict a deleted sink's pipeline state",
+			"sink", id.String())
 		return
 	}
-	d.pipe.RemoveSink(name)
+	d.pipe.RemoveSink(id)
 }
 
 // ForgetSink implements sink.WarmHooks. The coordinator is reached through this
 // indirection rather than handed to the sink runtime directly because the runtime
 // is constructed first — it is the pipeline's router, and the pipeline is the
 // coordinator's own dependency.
-func (d *dataPlane) ForgetSink(name string) {
+func (d *dataPlane) ForgetSink(id sink.ID) {
 	if d.warm == nil {
-		setupLog.Error(errDataPlaneUnbound, "Cannot clear a deleted sink's warm bookkeeping", "sink", name)
+		setupLog.Error(errDataPlaneUnbound, "Cannot clear a deleted sink's warm bookkeeping",
+			"sink", id.String())
 		return
 	}
-	d.warm.ForgetSink(name)
+	d.warm.ForgetSink(id)
 }
 
 // Get implements pipeline.ListerRegistry.
@@ -554,12 +556,13 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 
 // parkRules implements sink.ParkFunc: it re-reconciles the rules that streamed to
 // a sink that has gone for good, so each reports Ready=False/SinkMissing.
-func (op *operator) parkRules(sinkName string, ruleKeys []string) {
+func (op *operator) parkRules(id sink.ID, ruleKeys []string) {
 	if op.parker == nil {
-		setupLog.Error(errDataPlaneUnbound, "Cannot park the rules of a sink that is gone", "sink", sinkName)
+		setupLog.Error(errDataPlaneUnbound, "Cannot park the rules of a sink that is gone",
+			"sink", id.String())
 		return
 	}
-	op.parker.SinkGone(sinkName, ruleKeys)
+	op.parker.SinkGone(id, ruleKeys)
 }
 
 // newSinkFactory returns the sink.Factory that turns a resolved configuration
@@ -571,15 +574,15 @@ func (op *operator) parkRules(sinkName string, ruleKeys []string) {
 // everything upstream speaks only the sink interfaces.
 //
 // The per-sink metrics view is resolved here because the factory is where a sink's
-// name and its backend meet; internal/sink cannot import internal/pipeline, so it
-// could not label its own series.
+// identity and its backend meet; internal/sink cannot import internal/pipeline, so
+// it could not label its own series.
 func newSinkFactory(metrics *pipeline.PipelineMetrics) sink.Factory {
-	return func(name string, cfg sink.InstanceConfig) (sink.Writer, error) {
+	return func(id sink.ID, cfg sink.InstanceConfig) (sink.Writer, error) {
 		chConfig, ok := cfg.(clickhouse.Config)
 		if !ok {
-			return nil, fmt.Errorf("sink %q: %T is not a ClickHouse configuration", name, cfg)
+			return nil, fmt.Errorf("sink %s: %T is not a ClickHouse configuration", id, cfg)
 		}
-		return clickhouse.Open(chConfig, metrics.ForSink(name))
+		return clickhouse.Open(chConfig, metrics.ForSink(id))
 	}
 }
 

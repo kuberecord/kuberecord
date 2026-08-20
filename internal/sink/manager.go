@@ -140,16 +140,16 @@ type InstanceConfig interface {
 // PostgresSink means supplying a second factory branch at wiring time, not
 // changing anything here.
 //
-// name is passed so the instance can label its own metrics with the sink it
-// serves (see pipeline.PipelineMetrics.ForSink) — the manager itself never
-// touches those collectors, because internal/sink cannot import
-// internal/pipeline.
+// id is passed so the instance can label its own metrics with the sink it serves
+// (see pipeline.PipelineMetrics.ForSink, whose label value is ID.String()) — the
+// manager itself never touches those collectors, because internal/sink cannot
+// import internal/pipeline.
 //
 // The returned Writer is inspected for the optional halves of the sink contract
 // (StateReader, ScopeEventWriter, Prober); a backend that implements none of
 // them still routes writes correctly and simply has warm-up, scope epochs and
 // health probing disabled for it.
-type Factory func(name string, cfg InstanceConfig) (Writer, error)
+type Factory func(id ID, cfg InstanceConfig) (Writer, error)
 
 // Prober is the optional health half of a sink: an active check that the backend
 // is reachable and shaped the way the operator expects.
@@ -175,8 +175,10 @@ type Prober interface {
 // Kubernetes client on the sink's own goroutines — exactly the coupling the
 // two-tier split exists to prevent.
 type ProbeResult struct {
-	// Sink is the ClickHouseSink name this result describes.
-	Sink string
+	// Sink is the identity of the sink this result describes. It carries the kind
+	// as well as the name so a consumer can never write one backend's verdict onto
+	// a different kind of sink that happens to share its name.
+	Sink ID
 
 	// At is when the attempt settled.
 	At time.Time
@@ -203,7 +205,7 @@ type Pipeline interface {
 	// its warm-scope set. It is called only after the sink's instance has fully
 	// drained, so no in-flight commit can still be looking for the state it drops
 	// (Invariant 3).
-	RemoveSink(name string)
+	RemoveSink(id ID)
 }
 
 // WarmHooks is the warm/GC coordinator's half of a vanished sink's teardown, as
@@ -217,25 +219,25 @@ type Pipeline interface {
 // pipeline.WarmCoordinator is the production implementation.
 type WarmHooks interface {
 	// ForgetSink discards the coordinator's per-sink bookkeeping. It must be safe
-	// to call for a name the coordinator never saw, and is called immediately
-	// after RemoveSink so a sink deleted and re-created under the same name is
+	// to call for a sink the coordinator never saw, and is called immediately
+	// after RemoveSink so a sink deleted and re-created under the same ID is
 	// boot-reconciled again instead of inheriting a stale "already done" mark.
-	ForgetSink(name string)
+	ForgetSink(id ID)
 }
 
 // Dependents reports which rules currently stream to a sink, so the parking
 // callback can name them.
 //
-// It is optional: without it the callback still fires with the sink's name and an
+// It is optional: without it the callback still fires with the sink's ID and an
 // empty rule list, which is enough for a consumer that can resolve dependents
 // itself. It exists as a separate interface (rather than the manager reading the
 // desired-state registry) to keep this package free of any notion of rules or
 // watch targets.
 type Dependents interface {
-	// RulesForSink returns the keys of the rules streaming to sinkName, in any
-	// order. An unknown sink yields an empty slice, never an error: a sink nothing
-	// references is an ordinary state, not a fault.
-	RulesForSink(sinkName string) []string
+	// RulesForSink returns the keys of the rules streaming to id, in any order. An
+	// unknown sink yields an empty slice, never an error: a sink nothing references
+	// is an ordinary state, not a fault.
+	RulesForSink(id ID) []string
 }
 
 // ParkFunc is invoked when a sink is gone for good, with the rule keys that
@@ -246,7 +248,7 @@ type Dependents interface {
 // finished draining the sink, and a callback that waited on the API server would
 // hold that goroutine (and, through the wait group, the manager's shutdown) for
 // as long as the API server took to answer.
-type ParkFunc func(sinkName string, ruleKeys []string)
+type ParkFunc func(id ID, ruleKeys []string)
 
 // ManagerOptions configures a SinkManager. Factory and Pipeline are mandatory;
 // everything else has a documented default or is genuinely optional.
@@ -303,7 +305,7 @@ type ManagerOptions struct {
 // routing call: the type assertions are cheap but the hot path resolves a writer
 // per work item, and a nil field is a clearer answer than a repeated assertion.
 type liveSink struct {
-	name        string
+	id          ID
 	fingerprint string
 
 	writer Writer
@@ -323,8 +325,8 @@ type liveSink struct {
 
 // newLiveSink wraps a freshly built writer, discovering which optional halves of
 // the sink contract it implements.
-func newLiveSink(name, fingerprint string, writer Writer) *liveSink {
-	inst := &liveSink{name: name, fingerprint: fingerprint, writer: writer, done: make(chan struct{})}
+func newLiveSink(id ID, fingerprint string, writer Writer) *liveSink {
+	inst := &liveSink{id: id, fingerprint: fingerprint, writer: writer, done: make(chan struct{})}
 	if reader, ok := writer.(StateReader); ok {
 		inst.reader = reader
 	}
@@ -338,7 +340,7 @@ func newLiveSink(name, fingerprint string, writer Writer) *liveSink {
 }
 
 // SinkManager runs one backend instance per sink CR and is the operator's single
-// authority on which instance currently serves a given sink name.
+// authority on which instance currently serves a given sink ID.
 //
 // It exists because sinks, like rules, come and go at runtime (Phase 1's whole
 // premise): a ClickHouseSink can be created hours after boot, have its password
@@ -380,7 +382,7 @@ type SinkManager struct {
 	// on every change. Readers (WriterFor and friends, called once per work item)
 	// load the pointer and never lock; writers hold mu while they build and store
 	// the successor. Never nil — New stores an empty map.
-	live atomic.Pointer[map[string]*liveSink]
+	live atomic.Pointer[map[ID]*liveSink]
 
 	// mu serializes lifecycle operations (Ensure, Delete, shutdown) with each
 	// other. It does not guard reads of live, which is the point of the atomic
@@ -391,7 +393,7 @@ type SinkManager struct {
 	// are both manager.Runnables with no ordering guarantee between them, so an
 	// Ensure can legitimately arrive first and is held in pending.
 	ctx     context.Context
-	pending map[string]InstanceConfig
+	pending map[ID]InstanceConfig
 	stopped bool
 
 	// wg tracks every goroutine the manager owns — instance writers, probe loops,
@@ -459,10 +461,10 @@ func NewSinkManager(opts ManagerOptions) (*SinkManager, error) {
 		probeTimeout:    probeTimeout,
 		drainTimeout:    drainTimeout,
 		results:         make(chan ProbeResult, resultBuffer),
-		pending:         make(map[string]InstanceConfig),
+		pending:         make(map[ID]InstanceConfig),
 		log:             logf.Log.WithName("sinks"),
 	}
-	empty := make(map[string]*liveSink)
+	empty := make(map[ID]*liveSink)
 	m.live.Store(&empty)
 	return m, nil
 }
@@ -490,14 +492,14 @@ func (m *SinkManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	m.ctx = ctx
 	pending := m.pending
-	m.pending = make(map[string]InstanceConfig)
+	m.pending = make(map[ID]InstanceConfig)
 	// Sorted so a boot with several pending sinks starts them in a stable order,
 	// which keeps startup logs comparable between runs.
-	for _, name := range slices.Sorted(maps.Keys(pending)) {
-		if err := m.ensureLocked(name, pending[name]); err != nil {
+	for _, id := range slices.SortedFunc(maps.Keys(pending), compareIDs) {
+		if err := m.ensureLocked(id, pending[id]); err != nil {
 			// One bad sink must not stop the others from starting (Invariant 5);
 			// its reconciler retries, and its CR reports the failure (Task 1.7).
-			log.Error(err, "Failed to start a sink declared before the manager ran", "sink", name)
+			log.Error(err, "Failed to start a sink declared before the manager ran", "sink", id.String())
 		}
 	}
 	log.Info("Started sink manager", "sinks", len(*m.live.Load()))
@@ -511,7 +513,7 @@ func (m *SinkManager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	m.stopped = true
 	instances := slices.Collect(maps.Values(*m.live.Load()))
-	empty := make(map[string]*liveSink)
+	empty := make(map[ID]*liveSink)
 	m.live.Store(&empty)
 	m.mu.Unlock()
 
@@ -540,7 +542,7 @@ func (m *SinkManager) Start(ctx context.Context) error {
 // round-trip and a set of duplicate per-sink metric series each.
 func (m *SinkManager) NeedLeaderElection() bool { return true }
 
-// Ensure declares that the sink named name must be running with cfg.
+// Ensure declares that the sink identified by id must be running with cfg.
 //
 // It is idempotent: a configuration whose fingerprint matches the running
 // instance's is a no-op, which is what makes it safe to call from every reconcile
@@ -560,12 +562,18 @@ func (m *SinkManager) NeedLeaderElection() bool { return true }
 // A factory failure leaves the previous instance running and is returned to the
 // caller, which is the graceful degradation Invariant 5 asks for: a
 // mis-configured update must not take down a sink that was working.
-func (m *SinkManager) Ensure(name string, cfg InstanceConfig) error {
-	if name == "" {
-		return errors.New("sink: Ensure requires a sink name")
+//
+// An ID missing either half is rejected rather than completed. Defaulting the
+// kind here would be the silent collision typed identity exists to prevent (see
+// DefaultSinkKind): a caller that cannot say which *kind* of backend it is
+// declaring has a bug, and that bug must surface as a returned error rather than
+// as records landing in another sink's store.
+func (m *SinkManager) Ensure(id ID, cfg InstanceConfig) error {
+	if id.Kind == "" || id.Name == "" {
+		return fmt.Errorf("sink: Ensure requires a complete sink ID (kind and name), got %q", id.String())
 	}
 	if cfg == nil {
-		return fmt.Errorf("sink: Ensure(%q) requires a configuration", name)
+		return fmt.Errorf("sink: Ensure(%s) requires a configuration", id)
 	}
 
 	m.mu.Lock()
@@ -576,41 +584,41 @@ func (m *SinkManager) Ensure(name string, cfg InstanceConfig) error {
 	if m.ctx == nil {
 		// Not started yet; hold the request rather than dropping it, so a sink CR
 		// reconciled before this runnable came up is still brought up.
-		m.pending[name] = cfg
+		m.pending[id] = cfg
 		return nil
 	}
-	return m.ensureLocked(name, cfg)
+	return m.ensureLocked(id, cfg)
 }
 
 // ensureLocked is Ensure's body, with mu held and the manager known to be
 // running.
-func (m *SinkManager) ensureLocked(name string, cfg InstanceConfig) error {
+func (m *SinkManager) ensureLocked(id ID, cfg InstanceConfig) error {
 	fingerprint := cfg.Fingerprint()
-	current := (*m.live.Load())[name]
+	current := (*m.live.Load())[id]
 	if current != nil && current.fingerprint == fingerprint {
 		return nil
 	}
 
-	writer, err := m.factory(name, cfg)
+	writer, err := m.factory(id, cfg)
 	if err != nil {
-		return fmt.Errorf("build sink %q: %w", name, err)
+		return fmt.Errorf("build sink %s: %w", id, err)
 	}
-	inst := newLiveSink(name, fingerprint, writer)
+	inst := newLiveSink(id, fingerprint, writer)
 	m.startLocked(inst)
-	m.swapLocked(name, inst)
+	m.swapLocked(id, inst)
 
 	if current == nil {
-		m.log.Info("Sink instance started", "sink", name, "fingerprint", fingerprint)
+		m.log.Info("Sink instance started", "sink", id.String(), "fingerprint", fingerprint)
 		return nil
 	}
 
 	m.log.Info("Sink instance recycled; draining the previous one",
-		"sink", name, "fingerprint", fingerprint, "previous_fingerprint", current.fingerprint)
+		"sink", id.String(), "fingerprint", fingerprint, "previous_fingerprint", current.fingerprint)
 	m.wg.Go(func() { m.drain(current) })
 	return nil
 }
 
-// Delete stops the sink named name for good: routing is withdrawn immediately,
+// Delete stops the sink identified by id for good: routing is withdrawn immediately,
 // and then — on a background goroutine — the instance is drained and closed, the
 // pipeline's per-sink state is evicted, and the rules that streamed to it are
 // parked.
@@ -624,70 +632,70 @@ func (m *SinkManager) ensureLocked(name string, cfg InstanceConfig) error {
 // those objects would re-emit them. Parking comes last, once there is genuinely
 // nothing left running for the name.
 //
-// Deleting a name the manager never knew still evicts and parks: a rule can
+// Deleting an ID the manager never knew still evicts and parks: a rule can
 // reference a sink whose CR never existed, and it needs the same Degraded
 // condition as one whose sink was removed.
-func (m *SinkManager) Delete(name string) {
+func (m *SinkManager) Delete(id ID) {
 	m.mu.Lock()
 	if m.stopped {
 		m.mu.Unlock()
 		return
 	}
-	delete(m.pending, name)
-	current := (*m.live.Load())[name]
+	delete(m.pending, id)
+	current := (*m.live.Load())[id]
 	if current != nil {
-		m.swapLocked(name, nil)
+		m.swapLocked(id, nil)
 	}
 	// was_live distinguishes the two shapes of a deletion: an instance that has to
-	// be drained, and a name that was only ever referenced by rules.
+	// be drained, and an ID that was only ever referenced by rules.
 	m.log.Info("Sink deleted; draining it and evicting its pipeline state",
-		"sink", name, "was_live", current != nil)
-	m.wg.Go(func() { m.finishDelete(name, current) })
+		"sink", id.String(), "was_live", current != nil)
+	m.wg.Go(func() { m.finishDelete(id, current) })
 	m.mu.Unlock()
 }
 
 // finishDelete is Delete's background tail: drain, evict, park.
-func (m *SinkManager) finishDelete(name string, inst *liveSink) {
+func (m *SinkManager) finishDelete(id ID, inst *liveSink) {
 	if inst != nil {
 		m.drain(inst)
 	}
 
 	// A sink recreated while its predecessor drained (delete-then-recreate, or a
 	// CR re-applied within the drain window) already has a live instance and a
-	// fresh hashCache under this name. Evicting now would drop *its* state, and
+	// fresh hashCache under this ID. Evicting now would drop *its* state, and
 	// parking its rules would degrade rules that are working — so the tail stands
 	// down instead.
 	m.mu.Lock()
-	_, recreated := (*m.live.Load())[name]
+	_, recreated := (*m.live.Load())[id]
 	m.mu.Unlock()
 	if recreated {
 		m.log.V(1).Info("Sink was recreated while its previous instance drained; keeping the new instance's state",
-			"sink", name)
+			"sink", id.String())
 		return
 	}
 
-	m.pipeline.RemoveSink(name)
+	m.pipeline.RemoveSink(id)
 	if m.warm != nil {
 		// Paired with RemoveSink, and for the same reason: the coordinator's
 		// per-sink bookkeeping outlives the caches it describes otherwise, and a
-		// sink re-created under this name would never be boot-reconciled again
+		// sink re-created under this ID would never be boot-reconciled again
 		// (see WarmHooks).
-		m.warm.ForgetSink(name)
+		m.warm.ForgetSink(id)
 	}
-	m.parkDependents(name)
+	m.parkDependents(id)
 }
 
 // parkDependents fires the parking callback for a sink that is gone.
-func (m *SinkManager) parkDependents(name string) {
+func (m *SinkManager) parkDependents(id ID) {
 	if m.park == nil {
 		return
 	}
 	var ruleKeys []string
 	if m.dependents != nil {
-		ruleKeys = m.dependents.RulesForSink(name)
+		ruleKeys = m.dependents.RulesForSink(id)
 	}
-	m.log.Info("Parking the rules that streamed to a sink that is gone", "sink", name, "rules", ruleKeys)
-	m.park(name, ruleKeys)
+	m.log.Info("Parking the rules that streamed to a sink that is gone", "sink", id.String(), "rules", ruleKeys)
+	m.park(id, ruleKeys)
 }
 
 // startLocked launches inst's writer and (if the backend supports it) its probe
@@ -702,32 +710,32 @@ func (m *SinkManager) startLocked(inst *liveSink) {
 		// instance until the timeout.
 		defer close(inst.done)
 		if err := inst.writer.Start(ctx); err != nil {
-			m.log.Error(err, "Sink instance stopped with an error", "sink", inst.name)
+			m.log.Error(err, "Sink instance stopped with an error", "sink", inst.id.String())
 		}
 	})
 
 	if inst.prober == nil {
-		m.log.V(1).Info("Sink backend cannot be probed; no health results will be posted for it", "sink", inst.name)
+		m.log.V(1).Info("Sink backend cannot be probed; no health results will be posted for it", "sink", inst.id.String())
 		return
 	}
 	m.wg.Go(func() { m.probeLoop(ctx, inst) })
 }
 
 // swapLocked replaces the routing table with a copy carrying one changed entry (a
-// nil instance removes the name). The caller holds mu.
+// nil instance removes the ID). The caller holds mu.
 //
 // Copy-on-write, rather than mutating a shared map under a lock, is what lets
 // WriterFor be lock-free on the hot path: a reader holds a snapshot that is never
 // written to again, so there is no torn state to observe and no reader to block.
 // Sinks change at human frequency, so the copy is free.
-func (m *SinkManager) swapLocked(name string, inst *liveSink) {
+func (m *SinkManager) swapLocked(id ID, inst *liveSink) {
 	current := *m.live.Load()
-	next := make(map[string]*liveSink, len(current)+1)
+	next := make(map[ID]*liveSink, len(current)+1)
 	maps.Copy(next, current)
 	if inst == nil {
-		delete(next, name)
+		delete(next, id)
 	} else {
-		next[name] = inst
+		next[id] = inst
 	}
 	m.live.Store(&next)
 }
@@ -747,22 +755,22 @@ func (m *SinkManager) drain(inst *liveSink) {
 	defer timer.Stop()
 	select {
 	case <-inst.done:
-		m.log.V(1).Info("Sink instance drained and closed", "sink", inst.name)
+		m.log.V(1).Info("Sink instance drained and closed", "sink", inst.id.String())
 	case <-timer.C:
 		m.log.Error(errDrainTimeout, "Sink instance is still draining; abandoning the wait",
-			"sink", inst.name, "timeout", m.drainTimeout.String())
+			"sink", inst.id.String(), "timeout", m.drainTimeout.String())
 	}
 }
 
-// WriterFor implements pipeline.SinkRouter: the live Writer for name, or
-// ok=false when there is none — the CR was deleted, its instance is mid-build, or
-// the manager has not started yet. False is an ordinary, transient answer; the
+// WriterFor implements pipeline.SinkRouter: the live Writer for id, or ok=false
+// when there is none — the CR was deleted, its instance is mid-build, or the
+// manager has not started yet. False is an ordinary, transient answer; the
 // pipeline re-queues the key on its rate limiter.
 //
 // It is on the hot path (once per work item), which is why it only loads an
 // atomic pointer and reads an immutable map.
-func (m *SinkManager) WriterFor(name string) (Writer, bool) {
-	inst, ok := (*m.live.Load())[name]
+func (m *SinkManager) WriterFor(id ID) (Writer, bool) {
+	inst, ok := (*m.live.Load())[id]
 	if !ok {
 		return nil, false
 	}
@@ -770,15 +778,15 @@ func (m *SinkManager) WriterFor(name string) (Writer, bool) {
 }
 
 // StateReaderFor implements pipeline.StateReaderRouter: the live StateReader for
-// name, or ok=false when the sink has no live instance *or* when its backend
-// cannot read its own history back.
+// id, or ok=false when the sink has no live instance *or* when its backend cannot
+// read its own history back.
 //
 // The two cases are deliberately not distinguished here — the caller separates
 // them by asking WriterFor whether the sink is live at all, which is exactly what
 // the warm coordinator's readerFor does. Collapsing them into one boolean keeps
 // the routing surface uniform across the three routers.
-func (m *SinkManager) StateReaderFor(name string) (StateReader, bool) {
-	inst, ok := (*m.live.Load())[name]
+func (m *SinkManager) StateReaderFor(id ID) (StateReader, bool) {
+	inst, ok := (*m.live.Load())[id]
 	if !ok || inst.reader == nil {
 		return nil, false
 	}
@@ -786,25 +794,25 @@ func (m *SinkManager) StateReaderFor(name string) (StateReader, bool) {
 }
 
 // ScopeEventWriterFor implements pipeline.ScopeEventRouter: the live scope-log
-// writer for name, or ok=false when the sink has no live instance or its backend
+// writer for id, or ok=false when the sink has no live instance or its backend
 // does not record scope epochs.
-func (m *SinkManager) ScopeEventWriterFor(name string) (ScopeEventWriter, bool) {
-	inst, ok := (*m.live.Load())[name]
+func (m *SinkManager) ScopeEventWriterFor(id ID) (ScopeEventWriter, bool) {
+	inst, ok := (*m.live.Load())[id]
 	if !ok || inst.events == nil {
 		return nil, false
 	}
 	return inst.events, true
 }
 
-// SinkNames implements the enumeration half of pipeline.StateReaderRouter: the
-// names of the sinks currently live, sorted.
+// SinkIDs implements the enumeration half of pipeline.StateReaderRouter: the IDs
+// of the sinks currently live, sorted by kind and then name.
 //
 // Boot reconciliation needs the enumeration rather than a per-sink probe, because
 // a rule deleted while the operator was down leaves an open scope nothing in the
 // desired state mentions any more — there is no candidate list to probe. Sorting
 // is not required by the contract; it just makes the pass's logs stable.
-func (m *SinkManager) SinkNames() []string {
-	return slices.Sorted(maps.Keys(*m.live.Load()))
+func (m *SinkManager) SinkIDs() []ID {
+	return slices.SortedFunc(maps.Keys(*m.live.Load()), compareIDs)
 }
 
 // ProbeResults returns the channel every probe attempt's outcome is published on.
@@ -893,7 +901,7 @@ func (m *SinkManager) probe(ctx context.Context, inst *liveSink) ProbeResult {
 	defer cancel()
 
 	err := inst.prober.Probe(attemptCtx)
-	result := ProbeResult{Sink: inst.name, At: time.Now().UTC(), Err: err}
+	result := ProbeResult{Sink: inst.id, At: time.Now().UTC(), Err: err}
 	if err == nil {
 		return result
 	}
@@ -904,7 +912,7 @@ func (m *SinkManager) probe(ctx context.Context, inst *liveSink) ProbeResult {
 	}
 	// Logged here, with the sink's identity, so the condition the reconciler
 	// eventually writes is never the only record of the failure (Invariant 4).
-	m.log.Error(err, "Sink probe failed", "sink", inst.name, "reason", result.Reason)
+	m.log.Error(err, "Sink probe failed", "sink", inst.id.String(), "reason", result.Reason)
 	return result
 }
 

@@ -96,7 +96,7 @@ func TestCheckpointStateReconstructionIntegration(t *testing.T) {
 	// A short batchMaxWait keeps the poll below quick; nothing about the property
 	// under test depends on batching, and one worker keeps the insert order for a
 	// single key identical to the order the pipeline issued the writes in.
-	metrics := pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkName)
+	metrics := pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkID)
 	writer := NewCHWriter(conn, 64, 1, 8, 10*time.Second, 0, 5*time.Second, 100*time.Millisecond, time.Second, metrics)
 	writer.checkpointEvery = checkpointCadence
 
@@ -378,4 +378,4 @@ func (l *checkpointLister) current() *unstructured.Unstructured {
 // object production reads it from.
 type singleWriterRouter struct{ writer sink.Writer }
 
-func (r singleWriterRouter) WriterFor(string) (sink.Writer, bool) { return r.writer, true }
+func (r singleWriterRouter) WriterFor(sink.ID) (sink.Writer, bool) { return r.writer, true }

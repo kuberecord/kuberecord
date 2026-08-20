@@ -62,7 +62,7 @@ func newManagerHarness(t *testing.T, tune func(*ManagerOptions)) *managerHarness
 
 	opts := ManagerOptions{
 		Pipeline:   h.pipe,
-		Dependents: fakeDependents{rules: map[string][]string{"primary": {"team-a/audit", "team-b/audit"}}},
+		Dependents: fakeDependents{rules: map[ID][]string{testID("primary"): {"team-a/audit", "team-b/audit"}}},
 		OnSinkGone: h.parks.park,
 		// Long enough that no test is re-probed by accident, short enough that the
 		// probe test can drive the cadence itself by overriding these.
@@ -71,7 +71,7 @@ func newManagerHarness(t *testing.T, tune func(*ManagerOptions)) *managerHarness
 		ProbeMaxBackoff: time.Hour,
 		ProbeTimeout:    time.Second,
 		DrainTimeout:    2 * time.Second,
-		Factory: func(name string, cfg InstanceConfig) (Writer, error) {
+		Factory: func(id ID, cfg InstanceConfig) (Writer, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			if h.buildErr != nil {
@@ -79,7 +79,7 @@ func newManagerHarness(t *testing.T, tune func(*ManagerOptions)) *managerHarness
 				h.buildErr = nil
 				return nil, err
 			}
-			inst := h.instance(fmt.Sprintf("%s#%s", name, cfg.Fingerprint()))
+			inst := h.instance(fmt.Sprintf("%s#%s", id.Name, cfg.Fingerprint()))
 			h.built = append(h.built, inst)
 			return inst, nil
 		},
@@ -151,7 +151,7 @@ func (h *managerHarness) instances() []*fakeInstance {
 // routed for it.
 func (h *managerHarness) writerFor(name string) Writer {
 	h.t.Helper()
-	w, ok := h.mgr.WriterFor(name)
+	w, ok := h.mgr.WriterFor(testID(name))
 	if !ok {
 		h.t.Fatalf("WriterFor(%q) reported no live writer", name)
 	}
@@ -171,7 +171,7 @@ func TestSecretRotationSwapsInstancesWithoutLosingJobs(t *testing.T) {
 	h := newManagerHarness(t, nil)
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "pass-v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "pass-v1"}); err != nil {
 		t.Fatalf("Ensure(primary, pass-v1): %v", err)
 	}
 	old := h.writerFor("primary")
@@ -183,7 +183,7 @@ func TestSecretRotationSwapsInstancesWithoutLosingJobs(t *testing.T) {
 	}
 
 	// The rotation: same sink, new credential, hence a new fingerprint.
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "pass-v2"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "pass-v2"}); err != nil {
 		t.Fatalf("Ensure(primary, pass-v2): %v", err)
 	}
 
@@ -256,7 +256,7 @@ func TestEnsureIsIdempotentForAnUnchangedConfig(t *testing.T) {
 	h.start()
 
 	for range 3 {
-		if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "same"}); err != nil {
+		if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "same"}); err != nil {
 			t.Fatalf("Ensure: %v", err)
 		}
 	}
@@ -276,7 +276,7 @@ func TestEnsureKeepsThePreviousInstanceWhenTheFactoryFails(t *testing.T) {
 	h := newManagerHarness(t, nil)
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "good"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "good"}); err != nil {
 		t.Fatalf("Ensure(good): %v", err)
 	}
 	live := h.writerFor("primary")
@@ -285,7 +285,7 @@ func TestEnsureKeepsThePreviousInstanceWhenTheFactoryFails(t *testing.T) {
 	h.buildErr = errFactory
 	h.mu.Unlock()
 
-	err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "bad"})
+	err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "bad"})
 	if !errors.Is(err, errFactory) {
 		t.Fatalf("Ensure(bad) error = %v, want it to wrap errFactory", err)
 	}
@@ -309,7 +309,7 @@ func TestDeleteDrainsThenEvictsThenParks(t *testing.T) {
 	h := newManagerHarness(t, nil)
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	writer := h.writerFor("primary")
@@ -320,16 +320,16 @@ func TestDeleteDrainsThenEvictsThenParks(t *testing.T) {
 		enqueue(t, writer, inst.fakeWriter, fmt.Sprintf("job-%d", i))
 	}
 
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 
 	// Routing is gone at once, before any draining has finished.
-	if _, ok := h.mgr.WriterFor("primary"); ok {
+	if _, ok := h.mgr.WriterFor(testID("primary")); ok {
 		t.Error("WriterFor still routes to a deleted sink")
 	}
 
 	waitFor(t, "the deleted sink to be parked", func() bool {
 		parked, _ := h.parks.snapshot()
-		_, ok := parked["primary"]
+		_, ok := parked[testID("primary")]
 		return ok
 	})
 
@@ -348,21 +348,21 @@ func TestDeleteDrainsThenEvictsThenParks(t *testing.T) {
 	}
 
 	removed, removeAt := h.pipe.removals()
-	if !slices.Contains(removed, "primary") {
+	if !slices.Contains(removed, testID("primary")) {
 		t.Fatalf("RemoveSink was not called for the deleted sink; removals=%v", removed)
 	}
-	if removeAt["primary"] <= closedAt {
+	if removeAt[testID("primary")] <= closedAt {
 		t.Errorf("pipeline state was evicted at %d, before the instance closed at %d",
-			removeAt["primary"], closedAt)
+			removeAt[testID("primary")], closedAt)
 	}
 
 	parked, parkAt := h.parks.snapshot()
-	if want := []string{"team-a/audit", "team-b/audit"}; !slices.Equal(parked["primary"], want) {
-		t.Errorf("parked rules = %v, want %v", parked["primary"], want)
+	if want := []string{"team-a/audit", "team-b/audit"}; !slices.Equal(parked[testID("primary")], want) {
+		t.Errorf("parked rules = %v, want %v", parked[testID("primary")], want)
 	}
-	if parkAt["primary"] <= removeAt["primary"] {
+	if parkAt[testID("primary")] <= removeAt[testID("primary")] {
 		t.Errorf("rules were parked at %d, before the pipeline eviction at %d",
-			parkAt["primary"], removeAt["primary"])
+			parkAt[testID("primary")], removeAt[testID("primary")])
 	}
 }
 
@@ -379,14 +379,14 @@ func TestDeleteClearsTheWarmCoordinatorsBookkeeping(t *testing.T) {
 	})
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 
 	waitFor(t, "the deleted sink to be forgotten by the warm coordinator", func() bool {
 		forgotten, _ := warm.forgets()
-		return slices.Contains(forgotten, "primary")
+		return slices.Contains(forgotten, testID("primary"))
 	})
 
 	// Ordering: the coordinator is cleared immediately after the pipeline
@@ -394,9 +394,9 @@ func TestDeleteClearsTheWarmCoordinatorsBookkeeping(t *testing.T) {
 	// and the other has not been scheduled.
 	_, removeAt := h.pipe.removals()
 	_, forgetAt := warm.forgets()
-	if forgetAt["primary"] <= removeAt["primary"] {
+	if forgetAt[testID("primary")] <= removeAt[testID("primary")] {
 		t.Errorf("the warm coordinator was cleared at %d, before the pipeline eviction at %d",
-			forgetAt["primary"], removeAt["primary"])
+			forgetAt[testID("primary")], removeAt[testID("primary")])
 	}
 }
 
@@ -407,11 +407,11 @@ func TestDeleteWithoutWarmHooksStillEvicts(t *testing.T) {
 	h := newManagerHarness(t, nil) // ManagerOptions.Warm left nil
 	h.start()
 
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 
 	waitFor(t, "the deleted sink to be evicted with no warm hooks wired", func() bool {
 		removed, _ := h.pipe.removals()
-		return slices.Contains(removed, "primary")
+		return slices.Contains(removed, testID("primary"))
 	})
 }
 
@@ -423,15 +423,15 @@ func TestDeleteOfAnUnknownSinkStillEvictsAndParks(t *testing.T) {
 	h := newManagerHarness(t, nil)
 	h.start()
 
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 
 	waitFor(t, "the unknown sink to be parked", func() bool {
 		parked, _ := h.parks.snapshot()
-		_, ok := parked["primary"]
+		_, ok := parked[testID("primary")]
 		return ok
 	})
 	removed, _ := h.pipe.removals()
-	if !slices.Contains(removed, "primary") {
+	if !slices.Contains(removed, testID("primary")) {
 		t.Errorf("RemoveSink was not called for an unknown sink; removals=%v", removed)
 	}
 	if n := len(h.instances()); n != 0 {
@@ -457,13 +457,13 @@ func TestDeleteDoesNotEvictAStateRecreatedMidDrain(t *testing.T) {
 	}
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure(v1): %v", err)
 	}
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 
 	// Recreated while the old instance is still inside its (blocked) drain.
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v2"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v2"}); err != nil {
 		t.Fatalf("Ensure(v2): %v", err)
 	}
 	close(hold)
@@ -481,7 +481,7 @@ func TestDeleteDoesNotEvictAStateRecreatedMidDrain(t *testing.T) {
 	if parked, _ := h.parks.snapshot(); len(parked) != 0 {
 		t.Errorf("the delete tail parked rules for a recreated sink: %v", parked)
 	}
-	if _, ok := h.mgr.WriterFor("primary"); !ok {
+	if _, ok := h.mgr.WriterFor(testID("primary")); !ok {
 		t.Error("the recreated sink is not routed")
 	}
 }
@@ -493,10 +493,10 @@ func TestDeleteDoesNotEvictAStateRecreatedMidDrain(t *testing.T) {
 func TestEnsureBeforeStartIsAppliedWhenTheManagerRuns(t *testing.T) {
 	h := newManagerHarness(t, nil)
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure before Start: %v", err)
 	}
-	if _, ok := h.mgr.WriterFor("primary"); ok {
+	if _, ok := h.mgr.WriterFor(testID("primary")); ok {
 		t.Error("a pending sink is routed before the manager started")
 	}
 	if n := len(h.instances()); n != 0 {
@@ -505,7 +505,7 @@ func TestEnsureBeforeStartIsAppliedWhenTheManagerRuns(t *testing.T) {
 
 	h.start()
 	waitFor(t, "the pending sink to be routed", func() bool {
-		_, ok := h.mgr.WriterFor("primary")
+		_, ok := h.mgr.WriterFor(testID("primary"))
 		return ok
 	})
 	if n := len(h.instances()); n != 1 {
@@ -519,21 +519,21 @@ func TestEnsureBeforeStartIsAppliedWhenTheManagerRuns(t *testing.T) {
 func TestDeleteBeforeStartCancelsThePendingSink(t *testing.T) {
 	h := newManagerHarness(t, nil)
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure before Start: %v", err)
 	}
-	h.mgr.Delete("primary")
+	h.mgr.Delete(testID("primary"))
 	h.start()
 
 	waitFor(t, "the deleted-before-start sink to be parked", func() bool {
 		parked, _ := h.parks.snapshot()
-		_, ok := parked["primary"]
+		_, ok := parked[testID("primary")]
 		return ok
 	})
 	if n := len(h.instances()); n != 0 {
 		t.Errorf("a sink deleted before Start still built %d instances, want 0", n)
 	}
-	if _, ok := h.mgr.WriterFor("primary"); ok {
+	if _, ok := h.mgr.WriterFor(testID("primary")); ok {
 		t.Error("a sink deleted before Start is routed")
 	}
 }
@@ -548,17 +548,17 @@ func TestDeleteBeforeStartCancelsThePendingSink(t *testing.T) {
 func TestRoutingReportsTheOptionalHalvesHonestly(t *testing.T) {
 	h := newManagerHarness(t, func(opts *ManagerOptions) {
 		clock := &atomic.Int64{}
-		opts.Factory = func(name string, _ InstanceConfig) (Writer, error) {
-			if name == "write-only" {
-				return newFakeWriter(name, clock), nil
+		opts.Factory = func(id ID, _ InstanceConfig) (Writer, error) {
+			if id.Name == "write-only" {
+				return newFakeWriter(id.Name, clock), nil
 			}
-			return newFakeInstance(name, clock), nil
+			return newFakeInstance(id.Name, clock), nil
 		}
 	})
 	h.start()
 
 	for _, name := range []string{"full", "write-only"} {
-		if err := h.mgr.Ensure(name, fakeConfig{fingerprint: "v1"}); err != nil {
+		if err := h.mgr.Ensure(testID(name), fakeConfig{fingerprint: "v1"}); err != nil {
 			t.Fatalf("Ensure(%q): %v", name, err)
 		}
 		// Both are routed for writes, whatever else they can or cannot do.
@@ -568,21 +568,26 @@ func TestRoutingReportsTheOptionalHalvesHonestly(t *testing.T) {
 	}
 
 	tests := []struct {
-		sink        string
+		sink        ID
 		wantWriter  bool
 		wantReader  bool
 		wantEvents  bool
 		description string
 	}{
-		{sink: "full", wantWriter: true, wantReader: true, wantEvents: true,
+		{sink: testID("full"), wantWriter: true, wantReader: true, wantEvents: true,
 			description: "a backend implementing every half answers every router"},
-		{sink: "write-only", wantWriter: true, wantReader: false, wantEvents: false,
+		{sink: testID("write-only"), wantWriter: true, wantReader: false, wantEvents: false,
 			description: "a write-only backend routes writes and reports no reader"},
-		{sink: "absent", wantWriter: false, wantReader: false, wantEvents: false,
+		{sink: testID("absent"), wantWriter: false, wantReader: false, wantEvents: false,
 			description: "an unknown sink is transiently absent from every router"},
+		// A live ClickHouseSink named "full" must not answer for an S3Sink of the
+		// same name: the routers key on the whole identity, which is what stops one
+		// backend's writer from serving another's records (Task 4.1).
+		{sink: ID{Kind: "S3Sink", Name: "full"}, wantWriter: false, wantReader: false, wantEvents: false,
+			description: "a different kind sharing a live sink's name is absent from every router"},
 	}
 	for _, tc := range tests {
-		t.Run(tc.sink, func(t *testing.T) {
+		t.Run(tc.sink.String(), func(t *testing.T) {
 			if _, ok := h.mgr.WriterFor(tc.sink); ok != tc.wantWriter {
 				t.Errorf("WriterFor(%q) ok = %t, want %t (%s)", tc.sink, ok, tc.wantWriter, tc.description)
 			}
@@ -595,8 +600,9 @@ func TestRoutingReportsTheOptionalHalvesHonestly(t *testing.T) {
 		})
 	}
 
-	if got, want := h.mgr.SinkNames(), []string{"full", "write-only"}; !slices.Equal(got, want) {
-		t.Errorf("SinkNames() = %v, want %v", got, want)
+	want := []ID{testID("full"), testID("write-only")}
+	if got := h.mgr.SinkIDs(); !slices.Equal(got, want) {
+		t.Errorf("SinkIDs() = %v, want %v", got, want)
 	}
 }
 
@@ -627,7 +633,7 @@ func TestProbeFailsWithBackoffThenRecovers(t *testing.T) {
 	}
 	h.start()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
@@ -650,8 +656,8 @@ settled:
 		t.Fatalf("got %d results, want %d failures followed by one success: %+v", len(results), failures+1, results)
 	}
 	for i, res := range results[:failures] {
-		if res.Sink != "primary" {
-			t.Errorf("result %d is for sink %q, want %q", i, res.Sink, "primary")
+		if res.Sink != testID("primary") {
+			t.Errorf("result %d is for sink %q, want %q", i, res.Sink, testID("primary"))
 		}
 		if !errors.Is(res.Err, dialErr) {
 			t.Errorf("result %d error = %v, want the dial error", i, res.Err)
@@ -718,7 +724,7 @@ func TestProbeClassifiesASchemaMismatch(t *testing.T) {
 			}
 			h.start()
 
-			if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); err != nil {
+			if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); err != nil {
 				t.Fatalf("Ensure: %v", err)
 			}
 
@@ -800,17 +806,17 @@ func TestNoProbeLoopWithoutAProber(t *testing.T) {
 	h := newManagerHarness(t, func(opts *ManagerOptions) {
 		clock := &atomic.Int64{}
 		opts.ProbeInterval = time.Millisecond
-		opts.Factory = func(name string, _ InstanceConfig) (Writer, error) {
-			return newFakeWriter(name, clock), nil
+		opts.Factory = func(id ID, _ InstanceConfig) (Writer, error) {
+			return newFakeWriter(id.Name, clock), nil
 		}
 	})
 	h.start()
 
-	if err := h.mgr.Ensure("write-only", fakeConfig{fingerprint: "v1"}); err != nil {
+	if err := h.mgr.Ensure(testID("write-only"), fakeConfig{fingerprint: "v1"}); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	waitFor(t, "the write-only sink to be routed", func() bool {
-		_, ok := h.mgr.WriterFor("write-only")
+		_, ok := h.mgr.WriterFor(testID("write-only"))
 		return ok
 	})
 
@@ -828,7 +834,7 @@ func TestEnsureAfterShutdownIsRefused(t *testing.T) {
 	h.start()
 	h.stop()
 
-	if err := h.mgr.Ensure("primary", fakeConfig{fingerprint: "v1"}); !errors.Is(err, errManagerStopped) {
+	if err := h.mgr.Ensure(testID("primary"), fakeConfig{fingerprint: "v1"}); !errors.Is(err, errManagerStopped) {
 		t.Errorf("Ensure after shutdown error = %v, want errManagerStopped", err)
 	}
 	if n := len(h.instances()); n != 0 {
@@ -853,11 +859,11 @@ func TestManagerShutdownDrainsEveryInstance(t *testing.T) {
 	h.start()
 
 	for _, name := range []string{"primary", "audit"} {
-		if err := h.mgr.Ensure(name, fakeConfig{fingerprint: "v1"}); err != nil {
+		if err := h.mgr.Ensure(testID(name), fakeConfig{fingerprint: "v1"}); err != nil {
 			t.Fatalf("Ensure(%q): %v", name, err)
 		}
 	}
-	waitFor(t, "both sinks to be routed", func() bool { return len(h.mgr.SinkNames()) == 2 })
+	waitFor(t, "both sinks to be routed", func() bool { return len(h.mgr.SinkIDs()) == 2 })
 
 	// Drain the probe results so no probe goroutine is parked on a full channel
 	// when shutdown begins; a consumer is what production has (Task 1.7).
@@ -883,8 +889,8 @@ func TestManagerShutdownDrainsEveryInstance(t *testing.T) {
 			t.Errorf("instance %s was not closed by shutdown", inst.label)
 		}
 	}
-	if names := h.mgr.SinkNames(); len(names) != 0 {
-		t.Errorf("SinkNames() after shutdown = %v, want empty", names)
+	if ids := h.mgr.SinkIDs(); len(ids) != 0 {
+		t.Errorf("SinkIDs() after shutdown = %v, want empty", ids)
 	}
 	if removed, _ := h.pipe.removals(); len(removed) != 0 {
 		t.Errorf("shutdown evicted pipeline state for %v, want no eviction", removed)
@@ -898,7 +904,7 @@ func TestManagerShutdownDrainsEveryInstance(t *testing.T) {
 // surface as a nil-pointer panic on a lifecycle goroutine, in the middle of a
 // drain whose whole job is to not lose writes.
 func TestNewSinkManagerValidatesItsDependencies(t *testing.T) {
-	factory := func(string, InstanceConfig) (Writer, error) { return nil, nil }
+	factory := func(ID, InstanceConfig) (Writer, error) { return nil, nil }
 
 	tests := []struct {
 		name string
@@ -922,10 +928,16 @@ func TestNewSinkManagerValidatesItsDependencies(t *testing.T) {
 	if !m.NeedLeaderElection() {
 		t.Error("NeedLeaderElection() = false; two replicas holding sink connections would double every row")
 	}
-	if err := m.Ensure("", fakeConfig{fingerprint: "v1"}); err == nil {
-		t.Error("Ensure accepted an empty sink name")
+	// An incomplete ID is refused rather than completed. Defaulting the kind here
+	// is the silent collision typed identity exists to prevent, so a caller that
+	// cannot name the kind gets an error instead of another backend's routing slot.
+	incomplete := []ID{{}, {Name: "primary"}, {Kind: DefaultSinkKind}}
+	for _, id := range incomplete {
+		if err := m.Ensure(id, fakeConfig{fingerprint: "v1"}); err == nil {
+			t.Errorf("Ensure(%+v) accepted an incomplete sink ID", id)
+		}
 	}
-	if err := m.Ensure("primary", nil); err == nil {
+	if err := m.Ensure(testID("primary"), nil); err == nil {
 		t.Error("Ensure accepted a nil configuration")
 	}
 }

@@ -219,7 +219,7 @@ func awaitOperatorGone() {
 // sinkSeries pins a metric to the one sink this suite installs. Every write-path
 // collector carries the label (see pipeline.PipelineMetrics), so leaving it off
 // would silently sum across sinks the day a scenario adds a second one.
-var sinkSeries = map[string]string{"sink": sinkName}
+var sinkSeries = map[string]string{"sink": sinkLabel}
 
 // Metric names, fully qualified with the operator's "kuberecord" namespace. Named
 // constants because a typo in a metric name reads exactly like a metric sitting
@@ -246,7 +246,7 @@ func metricSum(g Gomega, name string, labels map[string]string) float64 {
 // failedWrites is the counter Task 2.1 names directly: settled write jobs whose
 // outcome was a failure, per sink.
 func failedWrites(g Gomega) float64 {
-	return metricSum(g, metricWrites, map[string]string{"sink": sinkName, "outcome": "failed"})
+	return metricSum(g, metricWrites, map[string]string{"sink": sinkLabel, "outcome": "failed"})
 }
 
 // safeMode reads one scope's Snapshot-mode gauge, distinguishing "this scope is
@@ -256,7 +256,7 @@ func safeMode(g Gomega, namespace string) (float64, bool) {
 	samples, err := metrics.Scrape()
 	g.Expect(err).NotTo(HaveOccurred(), "failed to scrape the operator's metrics")
 	sample, ok := harness.Find(samples, metricSafeMode, map[string]string{
-		"sink": sinkName, "group": groupCore, "kind": kindConfigMap, "namespace": namespace,
+		"sink": sinkLabel, "group": groupCore, "kind": kindConfigMap, "namespace": namespace,
 	})
 	return sample.Value, ok
 }
