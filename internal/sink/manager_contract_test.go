@@ -192,11 +192,11 @@ func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
 	})
 
 	lister := newStaticLister()
-	// Key.Sink is still a bare name until Task 4.2 types it; the pipeline lifts it
-	// onto the ID the manager routes on, which is why these resolve to the two
-	// instances declared above.
-	primaryKey := pipeline.Key{Sink: primaryID.Name, Kind: "Pod", Namespace: "default", Name: "web"}
-	auditKey := pipeline.Key{Sink: auditID.Name, Kind: "Pod", Namespace: "default", Name: "web"}
+	// A work key carries the sink's whole identity, which is the same value the
+	// manager's routing table is keyed by — so these resolve to exactly the two
+	// instances declared above, with no lift or lookup by name in between.
+	primaryKey := pipeline.Key{Sink: primaryID, Kind: "Pod", Namespace: "default", Name: "web"}
+	auditKey := pipeline.Key{Sink: auditID, Kind: "Pod", Namespace: "default", Name: "web"}
 	lister.set(primaryKey, newPod("web", "uid-1", "nginx:1"))
 
 	pipe, err := pipeline.New(pipeline.Options{

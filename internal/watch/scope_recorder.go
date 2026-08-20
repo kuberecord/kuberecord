@@ -68,19 +68,6 @@ type ScopeEventRouter interface {
 	ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool)
 }
 
-// sinkIDFor lifts a bare sink name onto the typed identity the sink runtime
-// routes on (Task 4.1).
-//
-// This package still holds sink *names* — the interest map, and the queued scope
-// events derived from it, are keyed by one — so the lift happens at the routing
-// boundary. Task 4.2 types those keys and the lift disappears. It is exact rather
-// than a guess: ClickHouseSink is the only sink CRD, so every name held here
-// belongs to one (see sink.DefaultSinkKind for why the manager still refuses to
-// make the same substitution itself).
-func sinkIDFor(name string) sink.ID {
-	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
-}
-
 // ScopeWarmer is the per-scope warm/GC coordinator as the recorder needs it.
 //
 // The recorder drives it because warm-up is a per-*scope* concern and this is the
@@ -94,7 +81,7 @@ type ScopeWarmer interface {
 	WarmScope(target pipeline.WarmTarget)
 
 	// StopScope abandons any warm for a scope that is no longer watched.
-	StopScope(sinkName string, scope pipeline.ScopeKey)
+	StopScope(id sink.ID, scope pipeline.ScopeKey)
 }
 
 // ScopeRecorderOptions configures a ScopeEpochRecorder. Only Events is mandatory.
@@ -121,18 +108,20 @@ type ScopeRecorderOptions struct {
 }
 
 // scopeKey identifies one (sink, scope) pair — the granularity a scope epoch is
-// recorded at.
+// recorded at. The sink is its whole identity: two same-named sinks of different
+// kinds own two separate scope logs, and refcounting them together would let one
+// sink's last interest close the other's epoch.
 type scopeKey struct {
-	sink  string
+	sink  sink.ID
 	scope pipeline.ScopeKey
 }
 
-// pendingScopeEvent is one queued event plus the sink it belongs to. The sink name
-// travels alongside rather than inside sink.ScopeEvent because it is routing
-// information, not part of the recorded row: the scope log lives inside the sink,
-// so which sink it is has no column to occupy.
+// pendingScopeEvent is one queued event plus the sink it belongs to. The sink
+// identity travels alongside rather than inside sink.ScopeEvent because it is
+// routing information, not part of the recorded row: the scope log lives inside
+// the sink, so which sink it is has no column to occupy.
 type pendingScopeEvent struct {
-	sink  string
+	sink  sink.ID
 	event sink.ScopeEvent
 }
 
@@ -381,8 +370,8 @@ func triggeringRule(ruleKeys []string) string {
 // Dropping is deliberately silent here and reported by the flush loop instead:
 // this runs on the reconcile loop, and logging under the recorder's lock from that
 // path is exactly the kind of incidental work the loop must stay free of.
-func (r *ScopeEpochRecorder) enqueueLocked(sinkName string, event sink.ScopeEvent) {
-	r.pending = append(r.pending, pendingScopeEvent{sink: sinkName, event: event})
+func (r *ScopeEpochRecorder) enqueueLocked(id sink.ID, event sink.ScopeEvent) {
+	r.pending = append(r.pending, pendingScopeEvent{sink: id, event: event})
 	if overflow := len(r.pending) - r.queueLimit; overflow > 0 {
 		r.pending = r.pending[overflow:]
 		r.dropped += overflow
@@ -419,12 +408,12 @@ func (r *ScopeEpochRecorder) flush(ctx context.Context, log logr.Logger) {
 		r.mu.Unlock()
 
 		values := []any{
-			"sink", next.sink, "action", string(next.event.Action),
+			"sink", next.sink.String(), "action", string(next.event.Action),
 			"group", next.event.Scope.APIGroup, "kind", next.event.Scope.Kind,
 			"namespace", next.event.Scope.Namespace, "rule_ref", next.event.RuleRef,
 		}
 
-		writer, ok := r.events.ScopeEventWriterFor(sinkIDFor(next.sink))
+		writer, ok := r.events.ScopeEventWriterFor(next.sink)
 		if !ok {
 			// Not an anomaly: the sink may simply not be live yet (a rule applied
 			// before its ClickHouseSink became ready) or be mid-recycle. The events

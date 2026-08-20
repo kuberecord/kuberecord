@@ -495,7 +495,7 @@ func (m *SinkManager) Start(ctx context.Context) error {
 	m.pending = make(map[ID]InstanceConfig)
 	// Sorted so a boot with several pending sinks starts them in a stable order,
 	// which keeps startup logs comparable between runs.
-	for _, id := range slices.SortedFunc(maps.Keys(pending), compareIDs) {
+	for _, id := range slices.SortedFunc(maps.Keys(pending), ID.Compare) {
 		if err := m.ensureLocked(id, pending[id]); err != nil {
 			// One bad sink must not stop the others from starting (Invariant 5);
 			// its reconciler retries, and its CR reports the failure (Task 1.7).
@@ -812,7 +812,7 @@ func (m *SinkManager) ScopeEventWriterFor(id ID) (ScopeEventWriter, bool) {
 // desired state mentions any more — there is no candidate list to probe. Sorting
 // is not required by the contract; it just makes the pass's logs stable.
 func (m *SinkManager) SinkIDs() []ID {
-	return slices.SortedFunc(maps.Keys(*m.live.Load()), compareIDs)
+	return slices.SortedFunc(maps.Keys(*m.live.Load()), ID.Compare)
 }
 
 // ProbeResults returns the channel every probe attempt's outcome is published on.

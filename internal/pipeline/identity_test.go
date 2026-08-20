@@ -79,9 +79,9 @@ func TestCacheKeyIsVersionAgnostic(t *testing.T) {
 // of the *cache* key, because each sink owns its own hashCache instance. Encoding
 // it in both places would silently double every cache entry.
 func TestCacheKeyIgnoresSink(t *testing.T) {
-	a := Key{Sink: "default", Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "name"}
+	a := Key{Sink: testSink, Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "name"}
 	b := a
-	b.Sink = "audit"
+	b.Sink = clickHouseSink("audit")
 
 	if a == b {
 		t.Fatal("keys for two sinks must be distinct queue items")

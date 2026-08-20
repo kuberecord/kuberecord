@@ -16,13 +16,14 @@ limitations under the License.
 
 package pipeline
 
-import "fmt"
+import "github.com/yelzhy/kuberecord/internal/sink"
 
 // Key is one unit of work in the pipeline: "settle this object identity, for
 // this sink." It is the workqueue's item type, so it must stay a comparable
 // value type with no pointers or slices — the workqueue deduplicates pending
 // items by equality, which is what collapses a burst of informer events for
-// the same object into a single Process call.
+// the same object into a single Process call. sink.ID is two plain strings, so
+// embedding it by value keeps that property intact.
 //
 // The identity fields are exactly Invariant 7's in-process identity
 // (api_group, kind, namespace, name) — deliberately **version-agnostic**, so
@@ -34,9 +35,15 @@ import "fmt"
 // cluster, so it is stamped onto the Record at write time, never threaded
 // through in-memory keys.
 type Key struct {
-	// Sink is the name of the ClickHouseSink CR this record is destined for,
-	// resolved to a live sink.Writer at Process time via SinkRouter.
-	Sink string
+	// Sink is the typed identity of the sink this record is destined for — which
+	// kind of backend and which CR of that kind — resolved to a live sink.Writer
+	// at Process time via SinkRouter.
+	//
+	// The kind is carried rather than assumed because a name is only unique
+	// within a kind: an S3Sink and a ClickHouseSink may both be named "default",
+	// and a name-keyed work item would route to whichever of them the registry
+	// happened to hold, settling its write against the *other* one's hashCache.
+	Sink sink.ID
 	// Group is the object's API group ("" for the core group).
 	Group string
 	// Kind is the object's kind.
@@ -86,16 +93,19 @@ func (k Key) Scope() ScopeKey {
 	return ScopeKey{Group: k.Group, Kind: k.Kind, Namespace: k.Namespace}
 }
 
-// String makes a Key readable in error messages and test failures.
+// String makes a Key readable in error messages and test failures. The sink
+// renders as "<Kind>/<Name>" (see sink.ID.String), so a failure naming one of two
+// same-named sinks says which backend it meant.
 func (k Key) String() string {
-	return fmt.Sprintf("%s/%s", k.Sink, k.cacheKey())
+	return k.Sink.String() + "/" + k.cacheKey()
 }
 
 // logValues returns this key's fields as logr key/value pairs, so every log
 // line in the pipeline carries the same kind/namespace/name context
 // (Invariant 4) without each call site re-listing them.
 func (k Key) logValues() []any {
-	return []any{"sink", k.Sink, "group", k.Group, "kind", k.Kind, "namespace", k.Namespace, "name", k.Name}
+	return []any{"sink", k.Sink.String(), "group", k.Group, "kind", k.Kind,
+		"namespace", k.Namespace, "name", k.Name}
 }
 
 // ScopeKey identifies a watch scope: one (version-agnostic) resource type,

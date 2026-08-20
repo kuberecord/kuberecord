@@ -83,8 +83,12 @@ import (
 	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
-// loadgenSink is the single sink name every work item routes to.
-const loadgenSink = "loadgen"
+// loadgenSinkName is the name of the single sink every work item routes to;
+// loadgenSink is the identity built from it, which is what a work key carries and
+// what the router matches on.
+const loadgenSinkName = "loadgen"
+
+var loadgenSink = sink.ID{Kind: sink.DefaultSinkKind, Name: loadgenSinkName}
 
 // churnNamespace is where every churned object lives. One namespace keeps the
 // scope count equal to the kind count, so a profile's "mixed GVKs" dimension is
@@ -185,9 +189,7 @@ type harnessRouter struct {
 }
 
 func (r harnessRouter) WriterFor(id sink.ID) (sink.Writer, bool) {
-	// The pipeline routes on sink.ID (Task 4.1); Key.Sink is still the bare name
-	// the harness authors its keys with, lifted onto the ClickHouseSink kind.
-	if id != (sink.ID{Kind: sink.DefaultSinkKind, Name: loadgenSink}) {
+	if id != loadgenSink {
 		return nil, false
 	}
 	return r.writer, true
@@ -393,7 +395,7 @@ func TestLoadGenChurn(t *testing.T) {
 	// and what proves the run did the work it claims.
 	registry := prometheus.NewRegistry()
 	pipe, err := pipeline.New(pipeline.Options{
-		ClusterID: loadgenSink,
+		ClusterID: loadgenSinkName,
 		Workers:   pipeline.DefaultWorkers,
 		Lister:    harnessLister{reader: mgr.GetCache(), gvks: gvksByKind(kinds)},
 		Router:    harnessRouter{writer: chWriter},

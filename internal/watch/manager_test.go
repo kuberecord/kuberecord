@@ -31,6 +31,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // bogusGVK is a kind no cluster in these tests serves, so a target naming it is
@@ -136,8 +137,8 @@ func (h *managerHarness) remove(t *testing.T, ruleKey string) {
 }
 
 // podTarget builds a watch target for Pods.
-func podTarget(sink, namespace, selector string) plan.WatchTarget {
-	return plan.WatchTarget{Sink: sink, GVK: podGVK, Namespace: namespace, Selector: selector}
+func podTarget(sinkID sink.ID, namespace, selector string) plan.WatchTarget {
+	return plan.WatchTarget{Sink: sinkID, GVK: podGVK, Namespace: namespace, Selector: selector}
 }
 
 // TestNewValidatesRequiredOptions covers the eager dependency checks: each missing
@@ -217,7 +218,7 @@ func TestWatchManagerDebouncesRegistryChanges(t *testing.T) {
 
 	passesBefore := h.manager.poolDiffs.Load()
 	for i := range 20 {
-		target := plan.WatchTarget{Sink: "sink-a", GVK: bogusGVK, Namespace: fmt.Sprintf("ns-%d", i)}
+		target := plan.WatchTarget{Sink: sinkA, GVK: bogusGVK, Namespace: fmt.Sprintf("ns-%d", i)}
 		if err := h.registry.Upsert(fmt.Sprintf("rule-%d", i), []plan.WatchTarget{target}); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
@@ -244,22 +245,22 @@ func TestWatchManagerSharesOneInformerPerTarget(t *testing.T) {
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 
 	// Two rules, same sink, same scope: one informer, one key per event.
-	h.upsert(t, "rule-1", podTarget("sink-a", namespace, ""))
-	h.upsert(t, "rule-2", podTarget("sink-a", namespace, ""))
+	h.upsert(t, "rule-1", podTarget(sinkA, namespace, ""))
+	h.upsert(t, "rule-2", podTarget(sinkA, namespace, ""))
 	if got := h.manager.PoolSize(); got != 1 {
 		t.Fatalf("pool size with two rules on one scope = %d, want 1", got)
 	}
 
 	createPod(t, h.dyn, newPod(namespace, "shared", nil))
 	keys := h.pipe.waitForKeys(t, 1)
-	if got := sinksOf(keys); !slices.Equal(got, []string{"sink-a"}) {
+	if got := sinksOf(keys); !slices.Equal(got, []sink.ID{sinkA}) {
 		t.Errorf("one event enqueued keys for %v, want one key for sink-a", got)
 	}
 
 	// A third rule on a *different* sink: still one informer, now two keys per
 	// event, because the sink is part of the work key but not of informer identity.
 	h.pipe.reset()
-	h.upsert(t, "rule-3", podTarget("sink-b", namespace, ""))
+	h.upsert(t, "rule-3", podTarget(sinkB, namespace, ""))
 	if got := h.manager.PoolSize(); got != 1 {
 		t.Fatalf("pool size with two sinks on one scope = %d, want 1", got)
 	}
@@ -270,12 +271,12 @@ func TestWatchManagerSharesOneInformerPerTarget(t *testing.T) {
 	}, func() string {
 		return fmt.Sprintf("two keys for the new pod, have %v", h.pipe.enqueued())
 	})
-	if got := sinksOf(keysNamed(h.pipe.enqueued(), "fanned-out")); !slices.Equal(got, []string{"sink-a", "sink-b"}) {
+	if got := sinksOf(keysNamed(h.pipe.enqueued(), "fanned-out")); !slices.Equal(got, []sink.ID{sinkA, sinkB}) {
 		t.Errorf("one event enqueued keys for %v, want one per sink", got)
 	}
 
 	// A different resource in the same namespace is a different informer.
-	h.upsert(t, "rule-4", plan.WatchTarget{Sink: "sink-a", GVK: configMapGVK, Namespace: namespace})
+	h.upsert(t, "rule-4", plan.WatchTarget{Sink: sinkA, GVK: configMapGVK, Namespace: namespace})
 	if got := h.manager.PoolSize(); got != 2 {
 		t.Errorf("pool size with a second resource = %d, want 2", got)
 	}
@@ -289,7 +290,7 @@ func TestWatchManagerSelectorChangeKeepsTheInformer(t *testing.T) {
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 	informer := podsInNamespace(namespace)
 
-	h.upsert(t, "rule-1", podTarget("sink-a", namespace, "app=web"))
+	h.upsert(t, "rule-1", podTarget(sinkA, namespace, "app=web"))
 	before, running := h.manager.pool.entryFor(informer)
 	if !running {
 		t.Fatal("the informer did not start")
@@ -304,7 +305,7 @@ func TestWatchManagerSelectorChangeKeepsTheInformer(t *testing.T) {
 
 	// Same target, new selector.
 	h.pipe.reset()
-	h.upsert(t, "rule-1", podTarget("sink-a", namespace, "app=db"))
+	h.upsert(t, "rule-1", podTarget(sinkA, namespace, "app=db"))
 
 	after, running := h.manager.pool.entryFor(informer)
 	if !running {
@@ -343,8 +344,8 @@ func TestWatchManagerStopsStaleTargets(t *testing.T) {
 	namespaces := newNamespaces(t, h.dyn, "ns-a", "ns-b")
 	nsA, nsB := namespaces[0], namespaces[1]
 
-	h.upsert(t, "rule-a", podTarget("sink-a", nsA, ""))
-	h.upsert(t, "rule-b", podTarget("sink-a", nsB, ""))
+	h.upsert(t, "rule-a", podTarget(sinkA, nsA, ""))
+	h.upsert(t, "rule-b", podTarget(sinkA, nsB, ""))
 	if got := h.manager.PoolSize(); got != 2 {
 		t.Fatalf("pool size = %d, want 2", got)
 	}
@@ -353,8 +354,8 @@ func TestWatchManagerStopsStaleTargets(t *testing.T) {
 	createPod(t, h.dyn, newPod(nsB, "web", nil))
 	h.pipe.waitForKeys(t, 2)
 
-	refA := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: nsA, Name: "web"}
-	refB := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: nsB, Name: "web"}
+	refA := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: nsA, Name: "web"}
+	refB := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: nsB, Name: "web"}
 	waitFor(t, func() bool {
 		_, found, _, err := h.manager.Get(refA)
 		return found && err == nil
@@ -385,7 +386,7 @@ func TestWatchManagerStopsStaleTargets(t *testing.T) {
 	}
 
 	wantScope := pipeline.ScopeKey{Kind: "Pod", Namespace: nsA}
-	if got := h.pipe.evictions(); len(got) != 1 || got[0].sink != "sink-a" || got[0].scope != wantScope {
+	if got := h.pipe.evictions(); len(got) != 1 || got[0].sink != sinkA || got[0].scope != wantScope {
 		t.Errorf("evictions = %+v, want exactly one for sink-a %+v", got, wantScope)
 	}
 
@@ -406,15 +407,15 @@ func TestWatchManagerReportsScopeTransitions(t *testing.T) {
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 	scope := pipeline.ScopeKey{Kind: "Pod", Namespace: namespace}
 
-	h.upsert(t, "rule-1", podTarget("sink-a", namespace, ""))
+	h.upsert(t, "rule-1", podTarget(sinkA, namespace, ""))
 	starts := transitionsWithAction(h.recorder.recorded(), "Started")
-	if len(starts) != 1 || starts[0].Scope != scope || starts[0].Sink != "sink-a" {
+	if len(starts) != 1 || starts[0].Scope != scope || starts[0].Sink != sinkA {
 		t.Fatalf("recorded starts = %+v, want exactly one for sink-a %+v", starts, scope)
 	}
 
 	// A second rule on the same scope is not a new transition: the informer, the
 	// interest and the scope are all already there.
-	h.upsert(t, "rule-2", podTarget("sink-a", namespace, "app=web"))
+	h.upsert(t, "rule-2", podTarget(sinkA, namespace, "app=web"))
 	if got := transitionsWithAction(h.recorder.recorded(), "Started"); len(got) != 1 {
 		t.Errorf("a second rule on one scope recorded %d starts, want 1", len(got))
 	}
@@ -423,7 +424,7 @@ func TestWatchManagerReportsScopeTransitions(t *testing.T) {
 	// edges, not a per-pass restatement of the current state. The pass is driven
 	// through the loop (by a rule for an unresolvable kind) rather than by calling
 	// reconcilePool directly, which would race the loop's own state.
-	h.upsert(t, "rule-unrelated", plan.WatchTarget{Sink: "sink-a", GVK: bogusGVK, Namespace: namespace})
+	h.upsert(t, "rule-unrelated", plan.WatchTarget{Sink: sinkA, GVK: bogusGVK, Namespace: namespace})
 	if got := transitionsWithAction(h.recorder.recorded(), "Started"); len(got) != 1 {
 		t.Errorf("a pass that changed nothing recorded %d starts, want 1", len(got))
 	}
@@ -456,10 +457,10 @@ func TestWatchManagerGetReportsAnUnstartedInformer(t *testing.T) {
 
 	// Register an interest without starting anything, which is exactly the window
 	// between a pool diff installing interests and the pool starting informers.
-	in := interestFor(t, "sink-a", "ns-a", nil, []string{"rule-1"})
+	in := interestFor(t, sinkA, "ns-a", nil, []string{"rule-1"})
 	m.table.replace(map[interestID]*scopeInterest{in.id(): in})
 
-	obj, found, active, err := m.Get(pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-a", Name: "web"})
+	obj, found, active, err := m.Get(pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-a", Name: "web"})
 	if err == nil {
 		t.Fatal("Get against an unstarted informer returned no error")
 	}
@@ -479,9 +480,9 @@ func TestWatchManagerSkipsUntranslatableTargets(t *testing.T) {
 	h := newManagerHarness(t)
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 
-	h.upsert(t, "rule-bogus", plan.WatchTarget{Sink: "sink-a", GVK: bogusGVK, Namespace: namespace})
-	h.upsert(t, "rule-misscoped", plan.WatchTarget{Sink: "sink-a", GVK: namespaceGVK, Namespace: namespace})
-	h.upsert(t, "rule-good", podTarget("sink-a", namespace, ""))
+	h.upsert(t, "rule-bogus", plan.WatchTarget{Sink: sinkA, GVK: bogusGVK, Namespace: namespace})
+	h.upsert(t, "rule-misscoped", plan.WatchTarget{Sink: sinkA, GVK: namespaceGVK, Namespace: namespace})
+	h.upsert(t, "rule-good", podTarget(sinkA, namespace, ""))
 
 	if got := h.manager.PoolSize(); got != 1 {
 		t.Fatalf("pool size = %d, want 1: only the Pod target is translatable", got)
@@ -525,8 +526,8 @@ func TestWatchManagerStopsEveryInformerOnShutdown(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	if err := registry.Upsert("rule-1", []plan.WatchTarget{
-		podTarget("sink-a", namespaces[0], ""),
-		podTarget("sink-a", namespaces[1], ""),
+		podTarget(sinkA, namespaces[0], ""),
+		podTarget(sinkA, namespaces[1], ""),
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}

@@ -35,10 +35,12 @@ import (
 // neither an apiserver nor a ClickHouse: fakeScopeEventWriter stands in for the
 // sink's scope log and fakeWarmer for Task 1.6's warm coordinator.
 
-const (
-	recorderSink    = "sink-a"
-	recorderCluster = "test-cluster"
-)
+const recorderCluster = "test-cluster"
+
+// recorderSink is the one sink these tests narrate transitions for. It is a
+// sink.ID because that is what a transition carries: an epoch belongs to one
+// backend, so the kind is part of the key the recorder refcounts by.
+var recorderSink = sinkA
 
 // recorderScope is the scope every test here narrates transitions for.
 var recorderScope = pipeline.ScopeKey{Kind: "Pod", Namespace: "ns-a"}
@@ -102,18 +104,19 @@ func (f *fakeScopeEventRouter) ScopeEventWriterFor(id sink.ID) (sink.ScopeEventW
 	return w, ok
 }
 
-// attach and detach operate on recorderSink, the one sink these tests use: a name
-// that resolves to nothing is how they reproduce a sink that is not live yet.
+// attach and detach operate on recorderSink, the one sink these tests use: an
+// identity that resolves to nothing is how they reproduce a sink that is not live
+// yet.
 func (f *fakeScopeEventRouter) attach(w sink.ScopeEventWriter) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.writers[sinkIDFor(recorderSink)] = w
+	f.writers[recorderSink] = w
 }
 
 func (f *fakeScopeEventRouter) detach() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.writers, sinkIDFor(recorderSink))
+	delete(f.writers, recorderSink)
 }
 
 // warmCall is one WarmScope / StopScope invocation.
@@ -134,11 +137,11 @@ func (f *fakeWarmer) WarmScope(target pipeline.WarmTarget) {
 	f.calls = append(f.calls, warmCall{action: "warm", target: target})
 }
 
-func (f *fakeWarmer) StopScope(sinkName string, scope pipeline.ScopeKey) {
+func (f *fakeWarmer) StopScope(id sink.ID, scope pipeline.ScopeKey) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, warmCall{action: "stop",
-		target: pipeline.WarmTarget{Sink: sinkName, Scope: scope}})
+		target: pipeline.WarmTarget{Sink: id, Scope: scope}})
 }
 
 func (f *fakeWarmer) recorded() []warmCall {

@@ -245,13 +245,16 @@ func benchPipeline(b *testing.B, lister ListerRegistry) *Pipeline {
 	if err != nil {
 		b.Fatalf("build pipeline: %v", err)
 	}
-	pipe.MarkScopeWarm("bench", ScopeKey{Kind: "Pod", Namespace: "default"})
+	pipe.MarkScopeWarm(benchSink, ScopeKey{Kind: "Pod", Namespace: "default"})
 	return pipe
 }
 
+// benchSink is the sink every Process benchmark routes to.
+var benchSink = clickHouseSink("bench")
+
 // benchKey is the identity every Process benchmark settles.
 func benchKey() Key {
-	return Key{Sink: "bench", Kind: "Pod", Namespace: "default", Name: "bench-object"}
+	return Key{Sink: benchSink, Kind: "Pod", Namespace: "default", Name: "bench-object"}
 }
 
 // benchContext carries a discarded logger. Production's logger is a real cost on

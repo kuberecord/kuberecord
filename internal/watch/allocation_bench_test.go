@@ -25,6 +25,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // These benchmarks measure the two per-event costs on the watch side, which is
@@ -53,16 +54,23 @@ var benchInformerKey = informerKey{
 
 var benchGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 
+// benchWarehouse is the sink the benchmarks' interests are installed for, and
+// benchUnknown one that never is — the miss path.
+var (
+	benchWarehouse = clickHouseSink("warehouse")
+	benchUnknown   = clickHouseSink("unknown")
+)
+
 // benchTable installs one interest per sink, each with the given selectors (nil
 // meaning "match everything", which is what a rule with no selector produces and
 // the overwhelmingly common shape in practice).
-func benchTable(b *testing.B, sinks []string, selectors []string) *interestTable {
+func benchTable(b *testing.B, sinks []sink.ID, selectors []string) *interestTable {
 	b.Helper()
 	table := newInterestTable()
 	desired := make(map[interestID]*scopeInterest, len(sinks))
-	for _, sinkName := range sinks {
+	for _, sinkID := range sinks {
 		in, err := newScopeInterest(
-			plan.TargetKey{GVK: benchGVK, Namespace: "", Sink: sinkName},
+			plan.TargetKey{GVK: benchGVK, Namespace: "", Sink: sinkID},
 			benchInformerKey,
 			selectors,
 			nil,
@@ -120,7 +128,7 @@ func BenchmarkFanOut(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			table := benchTable(b, []string{"warehouse"}, tc.selectors)
+			table := benchTable(b, []sink.ID{benchWarehouse}, tc.selectors)
 			queue := &countingEnqueuer{}
 			p := newPool(nil, table, queue, logr.Discard())
 			entry := &informerEntry{key: benchInformerKey, gvk: benchGVK}
@@ -149,20 +157,20 @@ func BenchmarkLookupIdentity(b *testing.B) {
 		{
 			name: "namespaced-object-clusterwide-interest",
 			ref: pipeline.Key{
-				Sink: "warehouse", Group: "apps", Kind: "Deployment",
+				Sink: benchWarehouse, Group: "apps", Kind: "Deployment",
 				Namespace: "production", Name: "checkout",
 			},
 		},
 		{
 			name: "cluster-scoped-object",
 			ref: pipeline.Key{
-				Sink: "warehouse", Group: "apps", Kind: "Deployment", Name: "checkout",
+				Sink: benchWarehouse, Group: "apps", Kind: "Deployment", Name: "checkout",
 			},
 		},
 		{
 			name: "no-interest",
 			ref: pipeline.Key{
-				Sink: "unknown", Group: "apps", Kind: "Deployment",
+				Sink: benchUnknown, Group: "apps", Kind: "Deployment",
 				Namespace: "production", Name: "checkout",
 			},
 		},
@@ -170,7 +178,7 @@ func BenchmarkLookupIdentity(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			table := benchTable(b, []string{"warehouse"}, nil)
+			table := benchTable(b, []sink.ID{benchWarehouse}, nil)
 			b.ReportAllocs()
 			for b.Loop() {
 				table.lookupIdentity(tc.ref)

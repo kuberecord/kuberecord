@@ -35,9 +35,6 @@ import (
 )
 
 const (
-	sinkDefault = "default"
-	sinkAudit   = "audit"
-
 	nsProd    = "prod"
 	nsStaging = "staging"
 
@@ -53,17 +50,22 @@ const (
 var (
 	gvkDeployment = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 	gvkPod        = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
+
+	// The two sinks every case in this file streams to. They are ClickHouseSinks
+	// because that is the only kind an authored rule can name today; nothing here
+	// depends on the kind beyond its being part of the identity.
+	sinkDefault = sink.ID{Kind: sink.DefaultSinkKind, Name: "default"}
+	sinkAudit   = sink.ID{Kind: sink.DefaultSinkKind, Name: "audit"}
 )
 
-// The parameter is sinkName, not sink: WatchTarget.Sink is still a bare name
-// until Task 4.2 types it, and this file now imports internal/sink for the
-// identity RulesForSink takes.
-func target(sinkName string, gvk schema.GroupVersionKind, namespace, selector string) WatchTarget {
-	return WatchTarget{Sink: sinkName, GVK: gvk, Namespace: namespace, Selector: selector}
+// The parameter is sinkID: a target names the sink by its whole typed identity,
+// which is what the data plane and RulesForSink both key on.
+func target(sinkID sink.ID, gvk schema.GroupVersionKind, namespace, selector string) WatchTarget {
+	return WatchTarget{Sink: sinkID, GVK: gvk, Namespace: namespace, Selector: selector}
 }
 
-func tkey(sinkName string, gvk schema.GroupVersionKind, namespace string) TargetKey {
-	return TargetKey{Sink: sinkName, GVK: gvk, Namespace: namespace}
+func tkey(sinkID sink.ID, gvk schema.GroupVersionKind, namespace string) TargetKey {
+	return TargetKey{Sink: sinkID, GVK: gvk, Namespace: namespace}
 }
 
 func state(key TargetKey, ruleKeys, selectors []string) TargetState {
@@ -591,7 +593,7 @@ func TestRulesForSink(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(*Registry)
-		sink  string
+		sink  sink.ID
 		want  []string
 	}{
 		{
@@ -631,6 +633,18 @@ func TestRulesForSink(t *testing.T) {
 			want: []string{ruleB},
 		},
 		{
+			// The collision typed identity exists to prevent: both sinks are named
+			// "default" and are legal at once in etcd, so a name-only match would
+			// report the ClickHouseSink's rule as a dependent of the S3Sink and park
+			// it when the S3Sink was deleted.
+			name: "a same-named sink of another kind is not the same sink",
+			setup: func(reg *Registry) {
+				mustUpsert(t, reg, ruleA, []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)})
+			},
+			sink: sink.ID{Kind: "S3Sink", Name: sinkDefault.Name},
+			want: nil,
+		},
+		{
 			name: "a rule that contributes nothing is not a dependent",
 			setup: func(reg *Registry) {
 				mustUpsert(t, reg, ruleA, []WatchTarget{target(sinkDefault, gvkPod, nsProd, selEverything)})
@@ -645,11 +659,8 @@ func TestRulesForSink(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := New()
 			tc.setup(reg)
-			// A target is authored with a bare sink name (WatchTarget.Sink is typed in
-			// Task 4.2) while the sink runtime asks with the typed identity it keys on.
-			asked := sink.ID{Kind: sink.DefaultSinkKind, Name: tc.sink}
-			if got := reg.RulesForSink(asked); !slices.Equal(got, tc.want) {
-				t.Errorf("RulesForSink(%s) = %v, want %v", asked, got, tc.want)
+			if got := reg.RulesForSink(tc.sink); !slices.Equal(got, tc.want) {
+				t.Errorf("RulesForSink(%s) = %v, want %v", tc.sink, got, tc.want)
 			}
 		})
 	}

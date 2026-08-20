@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // TestTransformObject is the transform half of D2: every informer's cached copy
@@ -217,8 +218,8 @@ func TestEventTargetOf(t *testing.T) {
 // reaches every interested sink whose selector matches, and only those.
 func TestPoolFanOutAppliesSelectorsPerSink(t *testing.T) {
 	table := newInterestTable()
-	web := interestFor(t, "sink-web", "ns-a", []string{"app=web"}, []string{"rule-web"})
-	all := interestFor(t, "sink-all", "ns-a", nil, []string{"rule-all"})
+	web := interestFor(t, clickHouseSink("sink-web"), "ns-a", []string{"app=web"}, []string{"rule-web"})
+	all := interestFor(t, clickHouseSink("sink-all"), "ns-a", nil, []string{"rule-all"})
 	table.replace(map[interestID]*scopeInterest{web.id(): web, all.id(): all})
 
 	queue := &fakePipeline{}
@@ -235,7 +236,7 @@ func TestPoolFanOutAppliesSelectorsPerSink(t *testing.T) {
 	queue.reset()
 	p.fanOut(entry, newPod("ns-a", "db", map[string]string{"app": "db"}), nil)
 	got := queue.enqueued()
-	if len(got) != 1 || got[0].Sink != "sink-all" {
+	if len(got) != 1 || got[0].Sink != all.sink {
 		t.Fatalf("a non-matching object enqueued %+v, want one key for sink-all", got)
 	}
 
@@ -246,7 +247,7 @@ func TestPoolFanOutAppliesSelectorsPerSink(t *testing.T) {
 		newPod("ns-a", "web", map[string]string{"app": "db"}),
 		newPod("ns-a", "web", map[string]string{"app": "web"}))
 	sinks := sinksOf(queue.enqueued())
-	if !slices.Equal(sinks, []string{"sink-all", "sink-web"}) {
+	if !slices.Equal(sinks, []sink.ID{all.sink, web.sink}) {
 		t.Errorf("a scope exit enqueued keys for %v, want both sinks", sinks)
 	}
 }
@@ -257,7 +258,7 @@ func TestPoolFanOutAppliesSelectorsPerSink(t *testing.T) {
 func TestPoolFanOutTombstone(t *testing.T) {
 	table := newInterestTable()
 	// A narrow selector on purpose: a tombstone with no labels must still fan out.
-	in := interestFor(t, "sink-a", "ns-a", []string{"app=web"}, []string{"rule-1"})
+	in := interestFor(t, sinkA, "ns-a", []string{"app=web"}, []string{"rule-1"})
 	table.replace(map[interestID]*scopeInterest{in.id(): in})
 
 	queue := &fakePipeline{}
@@ -265,7 +266,7 @@ func TestPoolFanOutTombstone(t *testing.T) {
 	entry := &informerEntry{key: podsInNamespace("ns-a"), gvk: podGVK}
 	handler := p.handlerFor(entry)
 
-	wantKey := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-a", Name: "web"}
+	wantKey := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-a", Name: "web"}
 
 	cases := []struct {
 		name      string
@@ -303,7 +304,7 @@ func TestPoolStartStop(t *testing.T) {
 	namespace := newNamespaces(t, dyn, "ns-a")[0]
 
 	table := newInterestTable()
-	in := interestFor(t, "sink-a", namespace, nil, []string{"rule-1"})
+	in := interestFor(t, sinkA, namespace, nil, []string{"rule-1"})
 	table.replace(map[interestID]*scopeInterest{in.id(): in})
 
 	queue := &fakePipeline{}
@@ -433,13 +434,13 @@ func podWithAnnotations(namespace, name string, annotations map[string]string,
 	return pod
 }
 
-// sinksOf projects work keys onto their sink names, sorted, for order-independent
-// assertions about fan-out.
-func sinksOf(keys []pipeline.Key) []string {
-	sinks := make([]string, 0, len(keys))
+// sinksOf projects work keys onto their sink identities, sorted, for
+// order-independent assertions about fan-out.
+func sinksOf(keys []pipeline.Key) []sink.ID {
+	sinks := make([]sink.ID, 0, len(keys))
 	for _, key := range keys {
 		sinks = append(sinks, key.Sink)
 	}
-	slices.Sort(sinks)
+	slices.SortFunc(sinks, sink.ID.Compare)
 	return sinks
 }

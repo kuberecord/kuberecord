@@ -333,19 +333,19 @@ func (d *dataPlane) RedactionFor(ref pipeline.Key) (*pipeline.RedactionPolicy, b
 }
 
 // ScopeSynced implements pipeline.ScopeStates.
-func (d *dataPlane) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
+func (d *dataPlane) ScopeSynced(id sink.ID, scope pipeline.ScopeKey) bool {
 	if d.watches == nil {
 		return false
 	}
-	return d.watches.ScopeSynced(sinkName, scope)
+	return d.watches.ScopeSynced(id, scope)
 }
 
 // ScopeDesired implements pipeline.ScopeStates.
-func (d *dataPlane) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
+func (d *dataPlane) ScopeDesired(id sink.ID, scope pipeline.ScopeKey) bool {
 	if d.watches == nil {
 		return false
 	}
-	return d.watches.ScopeDesired(sinkName, scope)
+	return d.watches.ScopeDesired(id, scope)
 }
 
 // Settled implements pipeline.ScopeStates.

@@ -40,9 +40,9 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	// that for the whole write path in one call (which is also how production
 	// reaches them), leaving only the two pipeline-owned label sets. The
 	// pipeline_dropped_total series is already seeded by the constructor.
-	m.ForSink(sinkIDFor("default"))
-	m.hashcacheEntries.WithLabelValues(sinkIDFor("default").String())
-	m.safeMode.WithLabelValues(sinkIDFor("default").String(), "apps", "Deployment", "demo")
+	m.ForSink(clickHouseSink("default"))
+	m.hashcacheEntries.WithLabelValues(clickHouseSink("default").String())
+	m.safeMode.WithLabelValues(clickHouseSink("default").String(), "apps", "Deployment", "demo")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -126,8 +126,8 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPipelineMetrics(reg)
 
-	primary := m.ForSink(sinkIDFor("primary"))
-	audit := m.ForSink(sinkIDFor("audit"))
+	primary := m.ForSink(clickHouseSink("primary"))
+	audit := m.ForSink(clickHouseSink("audit"))
 
 	primary.SetWriteQueueDepth(7)
 	primary.SetWriteQueueCapacity(100)
@@ -174,10 +174,10 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 	}
 
 	// Both sinks' values survive independently — the point of the label.
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("primary")); got != 7 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", clickHouseSink("primary")); got != 7 {
 		t.Errorf("primary write_queue_depth = %v, want 7", got)
 	}
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("audit")); got != 3 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", clickHouseSink("audit")); got != 3 {
 		t.Errorf("audit write_queue_depth = %v, want 3", got)
 	}
 }
@@ -194,14 +194,14 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	goneID := sinkIDFor("gone")
+	goneID := clickHouseSink("gone")
 	gone := m.ForSink(goneID)
 	gone.SetWriteQueueDepth(9)
 	gone.IncWrite("success")
 	m.hashcacheEntries.WithLabelValues(goneID.String()).Set(4)
 	m.safeMode.WithLabelValues(goneID.String(), "apps", "Deployment", "demo").Set(1)
 	// A second sink proves the eviction is scoped to the one sink, not a wipe.
-	m.ForSink(sinkIDFor("kept")).SetWriteQueueDepth(2)
+	m.ForSink(clickHouseSink("kept")).SetWriteQueueDepth(2)
 
 	p.RemoveSink(goneID)
 
@@ -218,7 +218,7 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 			}
 		}
 	}
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("kept")); got != 2 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", clickHouseSink("kept")); got != 2 {
 		t.Errorf("the surviving sink's write_queue_depth = %v, want 2", got)
 	}
 }

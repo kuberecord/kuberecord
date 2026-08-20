@@ -32,6 +32,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // Pacing of the reconcile loop.
@@ -93,7 +94,7 @@ type Pipeline interface {
 	// records of any kind — "we stopped watching" is recorded once, as a
 	// watch_scopes Stopped row, never as Deleted rows for the objects that were in
 	// scope.
-	EvictScope(sinkName string, scope pipeline.ScopeKey)
+	EvictScope(id sink.ID, scope pipeline.ScopeKey)
 }
 
 // ScopeTransition is one watch-scope edge as the WatchManager observes it: a
@@ -105,8 +106,11 @@ type Pipeline interface {
 // transition semantics — one row per scope, whatever the number of contributing
 // rules or informers — belong.
 type ScopeTransition struct {
-	// Sink is the ClickHouseSink name this interest streams to.
-	Sink string
+	// Sink is the typed identity of the sink this interest streams to. The kind
+	// travels with the name because an epoch belongs to one backend: two
+	// same-named sinks of different kinds keep separate scope logs, and a
+	// name-keyed transition would close one sink's epoch on the other's behalf.
+	Sink sink.ID
 
 	// Scope is the version-agnostic (group, kind, namespace) triple the pipeline
 	// evicts and warms by.
@@ -549,8 +553,8 @@ func (m *WatchManager) RedactionFor(ref pipeline.Key) (*pipeline.RedactionPolicy
 // depends on that reading: a false answer there closes a scope's epoch, so
 // answering "no" for a scope whose informer is merely slow (or whose kind is not
 // installed yet) would close an epoch the very next pass reopens.
-func (m *WatchManager) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
-	return len(m.table.interestsForScope(sinkName, scope)) > 0
+func (m *WatchManager) ScopeDesired(id sink.ID, scope pipeline.ScopeKey) bool {
+	return len(m.table.interestsForScope(id, scope)) > 0
 }
 
 // ScopeSynced reports whether every informer serving this (sink, scope) pair has
@@ -564,8 +568,8 @@ func (m *WatchManager) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bo
 // only when both are, since a seeded object may live in either one's indexer.
 // Reporting a premature "yes" would make every seeded object look absent and turn
 // the GC pass into a mass-deletion event.
-func (m *WatchManager) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
-	interests := m.table.interestsForScope(sinkName, scope)
+func (m *WatchManager) ScopeSynced(id sink.ID, scope pipeline.ScopeKey) bool {
+	interests := m.table.interestsForScope(id, scope)
 	if len(interests) == 0 {
 		return false
 	}
@@ -612,7 +616,7 @@ func (m *WatchManager) reconcilePool(ctx context.Context) {
 		m.recorder.ScopeStopped(in.transition(at))
 		m.pipeline.EvictScope(in.sink, in.scope)
 		log.Info("Watch scope stopped",
-			"sink", in.sink, "group", in.scope.Group, "kind", in.scope.Kind,
+			"sink", in.sink.String(), "group", in.scope.Group, "kind", in.scope.Kind,
 			"namespace", in.scope.Namespace, "rules", in.ruleKeys)
 	}
 
@@ -622,7 +626,7 @@ func (m *WatchManager) reconcilePool(ctx context.Context) {
 		m.startedTargets[in.id()] = struct{}{}
 		m.recorder.ScopeStarted(in.transition(at))
 		log.Info("Watch scope started",
-			"sink", in.sink, "group", in.scope.Group, "kind", in.scope.Kind,
+			"sink", in.sink.String(), "group", in.scope.Group, "kind", in.scope.Kind,
 			"namespace", in.scope.Namespace, "rules", in.ruleKeys)
 	}
 
@@ -677,7 +681,8 @@ func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 			// it here means the two tiers disagree — worth an Error, not a silent
 			// namespace-scoped List that would return nothing forever.
 			log.Error(errClusterScopedTarget, "Refusing a namespaced watch target for a cluster-scoped resource",
-				"sink", key.Sink, "gvk", key.GVK.String(), "namespace", key.Namespace, "rules", state.RuleKeys)
+				"sink", key.Sink.String(), "gvk", key.GVK.String(), "namespace", key.Namespace,
+				"rules", state.RuleKeys)
 			continue
 		}
 
@@ -685,7 +690,8 @@ func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 		in, err := newScopeInterest(key, informer, state.Selectors, state.Redactions, state.RuleKeys)
 		if err != nil {
 			log.Error(err, "Skipping a watch target whose selectors or redaction policy could not be parsed",
-				"sink", key.Sink, "gvk", key.GVK.String(), "namespace", key.Namespace, "rules", state.RuleKeys)
+				"sink", key.Sink.String(), "gvk", key.GVK.String(), "namespace", key.Namespace,
+				"rules", state.RuleKeys)
 			continue
 		}
 
@@ -707,7 +713,7 @@ var errClusterScopedTarget = errors.New("a namespaced watch target cannot be ser
 // condition is where an operator is meant to see it. Anything else means discovery
 // itself is failing, which is an anomaly and logs at Error (Invariant 4).
 func (m *WatchManager) logResolveFailure(log logr.Logger, key plan.TargetKey, err error) {
-	values := []any{"sink", key.Sink, "gvk", key.GVK.String(), "namespace", key.Namespace}
+	values := []any{"sink", key.Sink.String(), "gvk", key.GVK.String(), "namespace", key.Namespace}
 
 	var notFound *ErrKindNotFound
 	if errors.As(err, &notFound) {
