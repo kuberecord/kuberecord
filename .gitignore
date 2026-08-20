@@ -30,8 +30,8 @@ go.work
 *.kubeconfig
 
 CLAUDE.md
-task.txt
-kuberecord-backlog.md
+task.md
+kuberecord-backlog-*.md
 # Per-tag release artifacts (`make release-artifacts`). dist/install.yaml is
 # committed on purpose; these are built for one tag and belong to the release.
 dist/release/
