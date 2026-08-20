@@ -32,8 +32,9 @@ limitations under the License.
 // I/O, no blocking.
 //
 // internal/sink is imported for sink.ID alone — two strings naming which backend
-// a target streams to (Task 4.1) — because the registry is the component the sink
-// runtime asks "who depends on this sink?". Nothing here ever holds a Writer,
+// a target streams to. It is part of a target's own identity, because "which sink"
+// is half of what makes two watch targets distinct, and it is what the sink
+// runtime asks "who depends on this sink?" with. Nothing here ever holds a Writer,
 // resolves one, or dials a backend, and that is the line the sentence above
 // draws.
 package plan
@@ -60,12 +61,17 @@ import (
 // arithmetic instead of an ordering-sensitive slice comparison — a rule that
 // merely reorders its `resources` list must produce no churn in the data plane.
 type WatchTarget struct {
-	// Sink is the name of the ClickHouseSink this target's records are written
-	// to (cluster-scoped, hence no namespace). It participates in target
-	// identity because the same Kind in the same namespace streamed to two
-	// different sinks is two independent streams with independent dedup
-	// baselines.
-	Sink string
+	// Sink is the typed identity of the sink this target's records are written to
+	// — which kind of backend and which CR of that kind (sink CRs are
+	// cluster-scoped, hence no namespace). It participates in target identity
+	// because the same Kind in the same namespace streamed to two different sinks
+	// is two independent streams with independent dedup baselines.
+	//
+	// The *kind* is part of it because a name is only unique within a kind: a
+	// ClickHouseSink and an S3Sink may both be named "default", and keyed on the
+	// name alone the two would collapse into one target whose rules streamed to
+	// whichever backend reconciled last, carrying the other's dedup baselines.
+	Sink sink.ID
 
 	// GVK is the resource type to watch. The stored object identity is
 	// version-agnostic (Invariant 7), but the version is retained here because
@@ -112,7 +118,7 @@ type WatchTarget struct {
 // target whose selectors are merged — otherwise a selector edit would tear down
 // and re-list a watch that did not actually need to change.
 type TargetKey struct {
-	Sink      string
+	Sink      sink.ID
 	GVK       schema.GroupVersionKind
 	Namespace string
 }
@@ -389,18 +395,17 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 // inert, and re-parking it would only overwrite a more specific verdict with a
 // less specific one.
 //
-// TargetKey.Sink is still a bare name until Task 4.2 types WatchTarget.Sink, so
-// the match is on id.Name. That is exact rather than lossy today — every target
-// this registry can hold names a ClickHouseSink, the only sink kind — and Task
-// 4.2 replaces it with a whole-ID comparison, at which point a rule naming
-// {S3Sink, default} stops matching targets on {ClickHouseSink, default}.
+// The match is on the whole identity, kind included, which is what makes the
+// answer safe once a second sink kind exists: a rule streaming to
+// {S3Sink, default} does not answer for {ClickHouseSink, default}, so deleting one
+// of two same-named sinks parks only the rules that actually depended on it.
 func (r *Registry) RulesForSink(id sink.ID) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	rules := make(map[string]struct{})
 	for key, entry := range r.targets {
-		if key.Sink != id.Name {
+		if key.Sink != id {
 			continue
 		}
 		for ruleKey := range entry.rules {

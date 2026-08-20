@@ -27,6 +27,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/goleak"
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // warm marks a key's scope as warmed, which is what most specs want: without it
@@ -244,7 +246,7 @@ func TestPipelineSnapshotTaggingUntilScopeWarm(t *testing.T) {
 
 	// The gauge must be observable in both states, or "is this scope still
 	// warming?" is unanswerable from metrics alone.
-	gauge := h.pipeline.metrics.safeMode.WithLabelValues(sinkIDFor(testSink).String(), "", "Pod", "default")
+	gauge := h.pipeline.metrics.safeMode.WithLabelValues(testSink.String(), "", "Pod", "default")
 	if got := testutil.ToFloat64(gauge); got != 0 {
 		t.Errorf("safe_mode = %v after warming, want 0", got)
 	}
@@ -256,7 +258,7 @@ func TestPipelineSnapshotTaggingUntilScopeWarm(t *testing.T) {
 		t.Fatalf("Process(cold again): %v", err)
 	}
 	if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(
-		sinkIDFor(testSink).String(), "", "Pod", "default")); got != 1 {
+		testSink.String(), "", "Pod", "default")); got != 1 {
 		t.Errorf("safe_mode = %v while the scope is un-warmed, want 1", got)
 	}
 }
@@ -421,7 +423,7 @@ func TestPipelineListerErrorIsRetried(t *testing.T) {
 // per-sink: the same object streaming to two sinks must produce a record on
 // each, because a write confirmed on one says nothing about the other.
 func TestPipelinePerSinkStateIsIndependent(t *testing.T) {
-	const other = "audit"
+	other := clickHouseSink("audit")
 	h := newHarness(t, testSink, other)
 
 	keyA := podKey("shared")
@@ -448,6 +450,92 @@ func TestPipelinePerSinkStateIsIndependent(t *testing.T) {
 	stB, _ := h.pipeline.sinks.lookup(other)
 	if stA == stB {
 		t.Fatal("both sinks share one sinkState; dedup/version state must be per-sink")
+	}
+}
+
+// TestPipelineSameNameDifferentKindsAreSeparateSinks is the regression guard for
+// the precise corruption typed sink identity exists to prevent.
+//
+// A ClickHouseSink named "default" and an S3Sink named "default" are both legal at
+// once in etcd — sink CRs are cluster-scoped and uniqueness is per *kind*. While
+// the pipeline keyed its per-sink state by the bare name, the two shared one
+// sinkState, so the *first* sink's confirmed write became the second's dedup
+// baseline: the S3Sink would never receive an object the ClickHouseSink had
+// already recorded, and there would be nothing in the logs to say so.
+//
+// The subject is therefore the hashCache entries themselves, not just the emitted
+// rows: each sink must hold its own entry for the same object identity, and
+// tearing one sink down must leave the other's baselines intact.
+func TestPipelineSameNameDifferentKindsAreSeparateSinks(t *testing.T) {
+	clickhouse := clickHouseSink("default")
+	s3 := sink.ID{Kind: "S3Sink", Name: "default"}
+	h := newHarness(t, clickhouse, s3)
+
+	chKey := podKey("shared")
+	chKey.Sink = clickhouse
+	s3Key := chKey
+	s3Key.Sink = s3
+	h.warm(chKey)
+	h.warm(s3Key)
+
+	// One object identity, and only one — the cache key is deliberately
+	// sink-agnostic (see TestCacheKeyIgnoresSink), so nothing but the registry's
+	// keying keeps these two apart.
+	if chKey.cacheKey() != s3Key.cacheKey() {
+		t.Fatalf("fixture is wrong: %q and %q are not the same object identity",
+			chKey.cacheKey(), s3Key.cacheKey())
+	}
+	h.lister.set(chKey, newPod(chKey.Name, "uid-1", "1", "busybox:1"))
+
+	for _, key := range []Key{chKey, s3Key} {
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process(%s): %v", key, err)
+		}
+	}
+
+	// Two rows, not one: the S3Sink's write was not suppressed by the
+	// ClickHouseSink's.
+	if got := h.writer.eventTypes(); !slices.Equal(got, []string{"Added", "Added"}) {
+		t.Fatalf("event types = %v, want an Added per sink; a same-named sink of "+
+			"another kind was deduplicated against the first one's history", got)
+	}
+
+	chState, ok := h.pipeline.sinks.lookup(clickhouse)
+	if !ok {
+		t.Fatalf("no state for %s", clickhouse)
+	}
+	s3State, ok := h.pipeline.sinks.lookup(s3)
+	if !ok {
+		t.Fatalf("no state for %s; it collided with %s", s3, clickhouse)
+	}
+	if chState == s3State {
+		t.Fatalf("%s and %s share one sinkState; per-sink dedup state is keyed by name only",
+			clickhouse, s3)
+	}
+	for _, tc := range []struct {
+		id sink.ID
+		st *sinkState
+	}{{clickhouse, chState}, {s3, s3State}} {
+		if _, exists := tc.st.cache.Load(chKey.cacheKey()); !exists {
+			t.Errorf("%s holds no baseline for %s", tc.id, chKey.cacheKey())
+		}
+	}
+
+	// The teardown half: removing one sink must not take the other's state with
+	// it, which is the same collision seen from the other end.
+	h.pipeline.RemoveSink(clickhouse)
+	if _, ok := h.pipeline.sinks.lookup(clickhouse); ok {
+		t.Error("RemoveSink left the ClickHouseSink's state behind")
+	}
+	survivor, ok := h.pipeline.sinks.lookup(s3)
+	if !ok {
+		t.Fatalf("removing %s also removed %s", clickhouse, s3)
+	}
+	if _, exists := survivor.cache.Load(s3Key.cacheKey()); !exists {
+		t.Errorf("removing %s dropped %s's baseline for %s", clickhouse, s3, s3Key.cacheKey())
+	}
+	if !survivor.scopeWarm(s3Key) {
+		t.Errorf("removing %s cleared %s's warm marker", clickhouse, s3)
 	}
 }
 
@@ -509,7 +597,7 @@ func TestPipelineRemoveSink(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 
-	h.pipeline.RemoveSink(sinkIDFor(testSink))
+	h.pipeline.RemoveSink(testSink)
 	if _, ok := h.pipeline.sinks.lookup(testSink); ok {
 		t.Fatal("RemoveSink left the sink's state behind")
 	}

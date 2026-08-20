@@ -22,6 +22,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // podsInNamespace is the informer key these tests key most of their interests on.
@@ -32,12 +33,13 @@ func podsInNamespace(namespace string) informerKey {
 // interestFor builds one interest the way reconcilePool does, failing the test if
 // the selectors do not parse (which is what the dedicated error case asserts
 // instead).
-func interestFor(t *testing.T, sink, namespace string, selectors, ruleKeys []string) *scopeInterest {
+func interestFor(t *testing.T, sinkID sink.ID, namespace string,
+	selectors, ruleKeys []string) *scopeInterest {
 	t.Helper()
-	key := plan.TargetKey{Sink: sink, GVK: podGVK, Namespace: namespace}
+	key := plan.TargetKey{Sink: sinkID, GVK: podGVK, Namespace: namespace}
 	in, err := newScopeInterest(key, podsInNamespace(namespace), selectors, nil, ruleKeys)
 	if err != nil {
-		t.Fatalf("newScopeInterest(%q, %q, %v): %v", sink, namespace, selectors, err)
+		t.Fatalf("newScopeInterest(%s, %q, %v): %v", sinkID, namespace, selectors, err)
 	}
 	return in
 }
@@ -111,7 +113,7 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
+			key := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
 			in, err := newScopeInterest(key, podsInNamespace("ns-a"), tc.selectors, nil, []string{"rule-1"})
 			if tc.wantErr {
 				if err == nil {
@@ -136,7 +138,7 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 // evicts by, and the work key an event produces. Both must be version-agnostic
 // (Invariant 7) even though the interest itself carries a versioned GVR.
 func TestScopeInterestDerivedIdentity(t *testing.T) {
-	key := plan.TargetKey{Sink: "sink-a", GVK: deploymentGVK, Namespace: "ns-a"}
+	key := plan.TargetKey{Sink: sinkA, GVK: deploymentGVK, Namespace: "ns-a"}
 	in, err := newScopeInterest(key, informerKey{GVR: deploymentGVR, Namespace: "ns-a"}, nil, nil, []string{"rule-1"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
@@ -147,12 +149,12 @@ func TestScopeInterestDerivedIdentity(t *testing.T) {
 		t.Errorf("scope = %+v, want %+v", in.scope, wantScope)
 	}
 
-	wantKey := pipeline.Key{Sink: "sink-a", Group: "apps", Kind: "Deployment", Namespace: "ns-a", Name: "web"}
+	wantKey := pipeline.Key{Sink: sinkA, Group: "apps", Kind: "Deployment", Namespace: "ns-a", Name: "web"}
 	if got := in.keyFor("ns-a", "web"); got != wantKey {
 		t.Errorf("keyFor = %+v, want %+v", got, wantKey)
 	}
 
-	wantIdentity := identityKey{Group: "apps", Kind: "Deployment", Namespace: "ns-a", Sink: "sink-a"}
+	wantIdentity := identityKey{Group: "apps", Kind: "Deployment", Namespace: "ns-a", Sink: sinkA}
 	if got := in.identity(); got != wantIdentity {
 		t.Errorf("identity = %+v, want %+v", got, wantIdentity)
 	}
@@ -162,7 +164,7 @@ func TestScopeInterestDerivedIdentity(t *testing.T) {
 // if the object matches *either* before or after, so that losing a label produces
 // one final work item instead of silently freezing the sink's last-known state.
 func TestScopeInterestMatchesEither(t *testing.T) {
-	in := interestFor(t, "sink-a", "ns-a", []string{"app=web"}, []string{"rule-1"})
+	in := interestFor(t, sinkA, "ns-a", []string{"app=web"}, []string{"rule-1"})
 
 	cases := []struct {
 		name     string
@@ -211,8 +213,8 @@ func TestScopeInterestMatchesEither(t *testing.T) {
 func TestInterestTableReplaceReportsRemovals(t *testing.T) {
 	table := newInterestTable()
 
-	first := interestFor(t, "sink-a", "ns-a", nil, []string{"rule-1"})
-	second := interestFor(t, "sink-b", "ns-a", nil, []string{"rule-2"})
+	first := interestFor(t, sinkA, "ns-a", nil, []string{"rule-1"})
+	second := interestFor(t, sinkB, "ns-a", nil, []string{"rule-2"})
 	if removed := table.replace(map[interestID]*scopeInterest{
 		first.id():  first,
 		second.id(): second,
@@ -224,13 +226,13 @@ func TestInterestTableReplaceReportsRemovals(t *testing.T) {
 	}
 
 	// Same two identities, but sink-a's selector changed and sink-b is gone.
-	narrowed := interestFor(t, "sink-a", "ns-a", []string{"app=web"}, []string{"rule-1"})
+	narrowed := interestFor(t, sinkA, "ns-a", []string{"app=web"}, []string{"rule-1"})
 	removed := table.replace(map[interestID]*scopeInterest{narrowed.id(): narrowed})
 	if len(removed) != 1 {
 		t.Fatalf("second replace removed %d interests, want 1: %+v", len(removed), removed)
 	}
-	if removed[0].sink != "sink-b" {
-		t.Errorf("removed sink = %q, want %q", removed[0].sink, "sink-b")
+	if removed[0].sink != sinkB {
+		t.Errorf("removed sink = %s, want %s", removed[0].sink, sinkB)
 	}
 	if got := table.interestsFor(podsInNamespace("ns-a")); len(got) != 1 || got[0] != narrowed {
 		t.Errorf("interestsFor returned %+v, want only the narrowed interest", got)
@@ -241,17 +243,17 @@ func TestInterestTableReplaceReportsRemovals(t *testing.T) {
 // "one event, two keys" can name the keys in a stable order.
 func TestInterestTableFanOutIsSortedBySink(t *testing.T) {
 	table := newInterestTable()
-	zeta := interestFor(t, "zeta", "ns-a", nil, []string{"rule-1"})
-	alpha := interestFor(t, "alpha", "ns-a", nil, []string{"rule-2"})
+	zeta := interestFor(t, clickHouseSink("zeta"), "ns-a", nil, []string{"rule-1"})
+	alpha := interestFor(t, clickHouseSink("alpha"), "ns-a", nil, []string{"rule-2"})
 	table.replace(map[interestID]*scopeInterest{zeta.id(): zeta, alpha.id(): alpha})
 
 	interests := table.interestsFor(podsInNamespace("ns-a"))
-	sinks := make([]string, 0, len(interests))
+	sinks := make([]sink.ID, 0, len(interests))
 	for _, in := range interests {
 		sinks = append(sinks, in.sink)
 	}
-	if !slices.Equal(sinks, []string{"alpha", "zeta"}) {
-		t.Errorf("fan-out order = %v, want [alpha zeta]", sinks)
+	if !slices.Equal(sinks, []sink.ID{alpha.sink, zeta.sink}) {
+		t.Errorf("fan-out order = %v, want [%s %s]", sinks, alpha.sink, zeta.sink)
 	}
 }
 
@@ -260,9 +262,9 @@ func TestInterestTableFanOutIsSortedBySink(t *testing.T) {
 // the per-sink isolation that makes scopeActive a per-(sink, scope) answer, and the
 // empty result that means "this scope is not being watched".
 func TestInterestTableLookupIdentity(t *testing.T) {
-	nsScoped := interestFor(t, "sink-a", "ns-a", nil, []string{"rule-ns"})
-	clusterWide := interestFor(t, "sink-a", "", nil, []string{"rule-cluster"})
-	otherSink := interestFor(t, "sink-b", "ns-a", nil, []string{"rule-other"})
+	nsScoped := interestFor(t, sinkA, "ns-a", nil, []string{"rule-ns"})
+	clusterWide := interestFor(t, sinkA, "", nil, []string{"rule-cluster"})
+	otherSink := interestFor(t, sinkB, "ns-a", nil, []string{"rule-other"})
 
 	table := newInterestTable()
 	table.replace(map[interestID]*scopeInterest{
@@ -271,8 +273,8 @@ func TestInterestTableLookupIdentity(t *testing.T) {
 		otherSink.id():   otherSink,
 	})
 
-	podKey := func(sink, namespace string) pipeline.Key {
-		return pipeline.Key{Sink: sink, Kind: "Pod", Namespace: namespace, Name: "web"}
+	podKey := func(sinkID sink.ID, namespace string) pipeline.Key {
+		return pipeline.Key{Sink: sinkID, Kind: "Pod", Namespace: namespace, Name: "web"}
 	}
 
 	cases := []struct {
@@ -283,27 +285,27 @@ func TestInterestTableLookupIdentity(t *testing.T) {
 	}{
 		{
 			name: "exact namespace first, then the cluster-wide scope",
-			ref:  podKey("sink-a", "ns-a"),
+			ref:  podKey(sinkA, "ns-a"),
 			want: []string{"ns-a", ""},
 		},
 		{
 			name: "a namespace only the cluster-wide scope covers",
-			ref:  podKey("sink-a", "ns-b"),
+			ref:  podKey(sinkA, "ns-b"),
 			want: []string{""},
 		},
 		{
 			name: "another sink sees only its own interest",
-			ref:  podKey("sink-b", "ns-a"),
+			ref:  podKey(sinkB, "ns-a"),
 			want: []string{"ns-a"},
 		},
 		{
 			name: "an unknown sink sees nothing",
-			ref:  podKey("sink-c", "ns-a"),
+			ref:  podKey(clickHouseSink("sink-c"), "ns-a"),
 			want: nil,
 		},
 		{
 			name: "a different kind sees nothing",
-			ref:  pipeline.Key{Sink: "sink-a", Group: "apps", Kind: "Deployment", Namespace: "ns-a", Name: "web"},
+			ref:  pipeline.Key{Sink: sinkA, Group: "apps", Kind: "Deployment", Namespace: "ns-a", Name: "web"},
 			want: nil,
 		},
 	}
@@ -326,7 +328,7 @@ func TestInterestTableLookupIdentity(t *testing.T) {
 // cluster-scoped object the exact-namespace lookup and the cluster-wide fallback
 // are the same lookup, and the candidate must not be returned twice.
 func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
-	key := plan.TargetKey{Sink: "sink-a", GVK: namespaceGVK, Namespace: ""}
+	key := plan.TargetKey{Sink: sinkA, GVK: namespaceGVK, Namespace: ""}
 	in, err := newScopeInterest(key, informerKey{GVR: namespaceGVR}, nil, nil, []string{"rule-1"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
@@ -334,7 +336,7 @@ func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
 	table := newInterestTable()
 	table.replace(map[interestID]*scopeInterest{in.id(): in})
 
-	got := table.lookupIdentity(pipeline.Key{Sink: "sink-a", Kind: "Namespace", Name: "kube-system"})
+	got := table.lookupIdentity(pipeline.Key{Sink: sinkA, Kind: "Namespace", Name: "kube-system"})
 	if len(got) != 1 {
 		t.Fatalf("lookupIdentity returned %d interests, want 1", len(got))
 	}
@@ -346,13 +348,13 @@ func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
 // own slices rather than copies.
 func TestInterestTableConcurrentAccess(t *testing.T) {
 	table := newInterestTable()
-	ref := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-a", Name: "web"}
+	ref := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-a", Name: "web"}
 
 	// Both interests are built on the test goroutine: interestFor calls Fatalf,
 	// which is only legal there.
 	alternating := []*scopeInterest{
-		interestFor(t, "sink-a", "ns-a", nil, []string{"rule-1"}),
-		interestFor(t, "sink-a", "ns-b", nil, []string{"rule-1"}),
+		interestFor(t, sinkA, "ns-a", nil, []string{"rule-1"}),
+		interestFor(t, sinkA, "ns-b", nil, []string{"rule-1"}),
 	}
 
 	done := make(chan struct{})
@@ -420,7 +422,7 @@ func TestNewScopeInterestCompilesRedaction(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			key := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
+			key := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
 			in, err := newScopeInterest(key, podsInNamespace("ns-a"), nil, tc.redactions, []string{"rule-1"})
 			if tc.wantErr {
 				if err == nil {
@@ -446,6 +448,99 @@ func TestNewScopeInterestCompilesRedaction(t *testing.T) {
 	}
 }
 
+// TestInterestTableSeparatesSinksOfDifferentKinds is the interest-map half of the
+// collision typed sink identity exists to prevent (the pipeline's dedup half is
+// TestPipelineSameNameDifferentKindsAreSeparateSinks).
+//
+// Two sinks named "default", one a ClickHouseSink and one an S3Sink, are both
+// legal at once. Keyed on the name alone they would collide on one byIdentity
+// entry, and the consequences run through both of this index's readers: Get would
+// report the *other* sink's scope as active — writing rows for a sink no rule
+// currently targets — and RedactionFor would hand out the other sink's policy,
+// which is how an object one rule asked to have scrubbed reaches a backend
+// unredacted.
+func TestInterestTableSeparatesSinksOfDifferentKinds(t *testing.T) {
+	clickhouse := clickHouseSink("default")
+	s3 := sink.ID{Kind: "S3Sink", Name: "default"}
+
+	// Only the ClickHouseSink is interested, and only in ns-a. Distinct redaction
+	// paths so a leak between the two is visible rather than merely possible.
+	inClickHouse, err := newScopeInterest(
+		plan.TargetKey{Sink: clickhouse, GVK: podGVK, Namespace: "ns-a"},
+		podsInNamespace("ns-a"), nil, []string{"data.clickhouse-only"}, []string{"rule-ch"})
+	if err != nil {
+		t.Fatalf("newScopeInterest(ClickHouseSink): %v", err)
+	}
+	inS3, err := newScopeInterest(
+		plan.TargetKey{Sink: s3, GVK: podGVK, Namespace: "ns-b"},
+		podsInNamespace("ns-b"), nil, []string{"data.s3-only"}, []string{"rule-s3"})
+	if err != nil {
+		t.Fatalf("newScopeInterest(S3Sink): %v", err)
+	}
+
+	m := &WatchManager{table: newInterestTable()}
+	m.table.replace(map[interestID]*scopeInterest{
+		inClickHouse.id(): inClickHouse,
+		inS3.id():         inS3,
+	})
+
+	// Each sink's own scope resolves to its own interest, and neither answers for
+	// the other's scope — which is exactly the scopeActive=false the pipeline drops
+	// a work item on.
+	cases := []struct {
+		name string
+		ref  pipeline.Key
+		want *scopeInterest
+	}{
+		{"the ClickHouseSink's own scope", pipeline.Key{
+			Sink: clickhouse, Kind: "Pod", Namespace: "ns-a", Name: "web"}, inClickHouse},
+		{"the S3Sink's own scope", pipeline.Key{
+			Sink: s3, Kind: "Pod", Namespace: "ns-b", Name: "web"}, inS3},
+		{"the S3Sink does not see the ClickHouseSink's scope", pipeline.Key{
+			Sink: s3, Kind: "Pod", Namespace: "ns-a", Name: "web"}, nil},
+		{"the ClickHouseSink does not see the S3Sink's scope", pipeline.Key{
+			Sink: clickhouse, Kind: "Pod", Namespace: "ns-b", Name: "web"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := m.table.lookupIdentity(tc.ref)
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("lookupIdentity(%s) answered with %d interest(s), want none: "+
+						"a same-named sink of another kind shares this index entry", tc.ref, len(got))
+				}
+				// And the policy lookup fails closed for the same reason.
+				if _, ok := m.RedactionFor(tc.ref); ok {
+					t.Error("RedactionFor answered for a scope this sink has no interest in")
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("lookupIdentity(%s) = %v, want exactly the one interest for %s",
+					tc.ref, got, tc.ref.Sink)
+			}
+			policy, ok := m.RedactionFor(tc.ref)
+			if !ok {
+				t.Fatal("RedactionFor reported no policy for a live scope")
+			}
+			if policy != tc.want.redaction {
+				t.Errorf("redaction paths = %v, want this sink's own policy %v",
+					policy.Paths(), tc.want.redaction.Paths())
+			}
+		})
+	}
+
+	// The scope-level lookup (ScopeDesired / ScopeSynced) has no cluster-wide
+	// fallback and must separate the two just as strictly.
+	scope := pipeline.ScopeKey{Kind: "Pod", Namespace: "ns-a"}
+	if !m.ScopeDesired(clickhouse, scope) {
+		t.Errorf("ScopeDesired(%s, %+v) = false, want true", clickhouse, scope)
+	}
+	if m.ScopeDesired(s3, scope) {
+		t.Errorf("ScopeDesired(%s, %+v) = true; it borrowed %s's interest", s3, scope, clickhouse)
+	}
+}
+
 // TestWatchManagerRedactionForUnionsInterests covers the lookup the pipeline
 // makes per work item, in the ambiguous case that makes merging mandatory: one
 // object answered for by both a namespaced interest and a cluster-wide one.
@@ -454,8 +549,8 @@ func TestNewScopeInterestCompilesRedaction(t *testing.T) {
 // the two of them. Picking either policy over the other would let one rule's
 // existence unredact the other's stream; the union cannot.
 func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
-	namespaced := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: "ns-a"}
-	clusterWide := plan.TargetKey{Sink: "sink-a", GVK: podGVK, Namespace: ""}
+	namespaced := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
+	clusterWide := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: ""}
 
 	inNamespace, err := newScopeInterest(namespaced, podsInNamespace("ns-a"), nil,
 		[]string{"data.password"}, []string{"rule-ns"})
@@ -474,7 +569,7 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 		inCluster.id():   inCluster,
 	})
 
-	ref := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-a", Name: "web"}
+	ref := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-a", Name: "web"}
 	policy, ok := m.RedactionFor(ref)
 	if !ok {
 		t.Fatal("RedactionFor reported no policy for a live scope")
@@ -490,7 +585,7 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 	}
 
 	// A single interest answers with its own compiled policy, unmerged.
-	single, ok := m.RedactionFor(pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: "ns-b", Name: "web"})
+	single, ok := m.RedactionFor(pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-b", Name: "web"})
 	if !ok {
 		t.Fatal("RedactionFor reported no policy for the cluster-wide scope")
 	}
@@ -501,7 +596,7 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 
 	// A sink nothing is registered for is the fail-closed answer the pipeline
 	// refuses to write through.
-	if _, ok := m.RedactionFor(pipeline.Key{Sink: "sink-b", Kind: "Pod", Namespace: "ns-a", Name: "web"}); ok {
+	if _, ok := m.RedactionFor(pipeline.Key{Sink: sinkB, Kind: "Pod", Namespace: "ns-a", Name: "web"}); ok {
 		t.Error("RedactionFor answered for a sink with no interests")
 	}
 }

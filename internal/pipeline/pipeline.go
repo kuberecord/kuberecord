@@ -32,7 +32,7 @@ limitations under the License.
 //
 // The package depends on two interfaces it does not implement — ListerRegistry
 // (the watch cache's view of reality, implemented by internal/watch's
-// WatchManager in Task 1.4) and SinkRouter (name → live sink.Writer,
+// WatchManager in Task 1.4) and SinkRouter (sink.ID → live sink.Writer,
 // implemented by the SinkManager in Task 1.8). That inversion keeps the hot path
 // free of any informer or backend detail: a pipeline test needs neither an
 // apiserver nor a database.
@@ -139,24 +139,6 @@ type SinkRouter interface {
 	// is an ordinary, transient answer, never a reason to panic: the caller
 	// re-queues the key on the rate limiter and retries.
 	WriterFor(id sink.ID) (sink.Writer, bool)
-}
-
-// sinkIDFor lifts a bare sink name onto the typed identity the sink runtime
-// routes on and the per-sink metric series are labelled by (Task 4.1).
-//
-// It exists only for as long as this package still holds sink *names*: Task 4.2
-// retypes Key.Sink (and the per-sink state registry's keys) to sink.ID, at which
-// point every call site below passes the typed value straight through and this
-// function goes away.
-//
-// The lift is exact rather than a guess, and that distinction is the whole reason
-// it lives here rather than inside the manager: ClickHouseSink is the only sink
-// CRD that exists, so every name this process can hold belongs to one, and the
-// kind is *known*. SinkManager.Ensure refuses to make the same substitution
-// precisely because there the kind would be *invented* — see
-// sink.DefaultSinkKind.
-func sinkIDFor(name string) sink.ID {
-	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
 }
 
 // RedactionRegistry answers "what must be scrubbed out of this key's objects
@@ -447,8 +429,8 @@ func (p *Pipeline) RemoveSink(id sink.ID) {
 // Deleted rows for the objects that were in scope. Keeping the entries instead
 // would be worse than a leak — a stale hash could later suppress a genuine
 // change if the same scope is watched again.
-func (p *Pipeline) EvictScope(sinkName string, scope ScopeKey) {
-	p.sinks.evictScope(sinkName, scope)
+func (p *Pipeline) EvictScope(id sink.ID, scope ScopeKey) {
+	p.sinks.evictScope(id, scope)
 }
 
 // MarkScopeWarm records that a (sink, scope) pair's dedup cache has been seeded
@@ -461,8 +443,8 @@ func (p *Pipeline) EvictScope(sinkName string, scope ScopeKey) {
 // process.go), which is the safe direction: a Snapshot row that should have been
 // an Added is a cosmetic imprecision, whereas an Added row for an object the
 // sink already knows about is a duplicate-write storm at cluster scale.
-func (p *Pipeline) MarkScopeWarm(sinkName string, scope ScopeKey) {
-	p.sinks.markScopeWarm(sinkName, scope)
+func (p *Pipeline) MarkScopeWarm(id sink.ID, scope ScopeKey) {
+	p.sinks.markScopeWarm(id, scope)
 }
 
 // sinkState is everything the pipeline remembers about one sink: the dedup cache
@@ -503,51 +485,52 @@ func (s *sinkState) scopeWarm(key Key) bool {
 	return ok
 }
 
-// sinkStateRegistry maps sink name → sinkState, creating an entry lazily on a
-// sink's first work item. Lazy creation (rather than a registration call from
+// sinkStateRegistry maps sink identity → sinkState, creating an entry lazily on
+// a sink's first work item. Lazy creation (rather than a registration call from
 // the SinkManager) keeps the two components decoupled: the pipeline needs no
 // notification that a sink now exists, only that a key names it.
+//
+// It is keyed by the whole sink.ID rather than by the CR name, and that is the
+// corruption this keying exists to prevent: a ClickHouseSink and an S3Sink may
+// both be named "default", and one entry serving both would hand each backend the
+// other's dedup baselines — re-emitting every object, or suppressing genuine
+// changes, with nothing in the logs to say so.
 type sinkStateRegistry struct {
 	mu      sync.Mutex
-	states  map[string]*sinkState
+	states  map[sink.ID]*sinkState
 	metrics *PipelineMetrics
 }
 
 func newSinkStateRegistry(metrics *PipelineMetrics) *sinkStateRegistry {
-	return &sinkStateRegistry{states: make(map[string]*sinkState), metrics: metrics}
+	return &sinkStateRegistry{states: make(map[sink.ID]*sinkState), metrics: metrics}
 }
 
-// get returns name's state, creating it on first use.
-func (r *sinkStateRegistry) get(name string) *sinkState {
+// get returns id's state, creating it on first use.
+func (r *sinkStateRegistry) get(id sink.ID) *sinkState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if st, ok := r.states[name]; ok {
+	if st, ok := r.states[id]; ok {
 		return st
 	}
 	st := &sinkState{warm: make(map[ScopeKey]struct{})}
-	r.states[name] = st
+	r.states[id] = st
 	return st
 }
 
-// lookup returns name's state without creating it, so lifecycle hooks for an
+// lookup returns id's state without creating it, so lifecycle hooks for an
 // unknown sink are no-ops instead of allocating state for a sink that is on its
 // way out.
-func (r *sinkStateRegistry) lookup(name string) (*sinkState, bool) {
+func (r *sinkStateRegistry) lookup(id sink.ID) (*sinkState, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st, ok := r.states[name]
+	st, ok := r.states[id]
 	return st, ok
 }
 
 // remove drops a sink's state and every series that described it.
-//
-// The states map is still keyed by name until Task 4.2 types Key.Sink, so the
-// entry is dropped by id.Name — the same key every other hook here uses — while
-// the metric series are dropped by id.String(), which is what they are labelled
-// with.
 func (r *sinkStateRegistry) remove(id sink.ID) {
 	r.mu.Lock()
-	delete(r.states, id.Name)
+	delete(r.states, id)
 	r.mu.Unlock()
 	// Delete the sink's series too: leaving them behind would report a stale entry
 	// count, queue depth and capacity for a sink that no longer exists — which
@@ -556,8 +539,8 @@ func (r *sinkStateRegistry) remove(id sink.ID) {
 	r.metrics.deleteSinkSeries(id)
 }
 
-func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
-	st, ok := r.lookup(name)
+func (r *sinkStateRegistry) evictScope(id sink.ID, scope ScopeKey) {
+	st, ok := r.lookup(id)
 	if !ok {
 		return
 	}
@@ -565,7 +548,7 @@ func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
 	st.mu.Lock()
 	delete(st.warm, scope)
 	st.mu.Unlock()
-	sinkSeries := sinkIDFor(name).String()
+	sinkSeries := id.String()
 	r.metrics.safeMode.DeleteLabelValues(sinkSeries, scope.Group, scope.Kind, scope.Namespace)
 
 	// Entry removal happens outside every lock the metric touches: DeletePrefix
@@ -576,16 +559,16 @@ func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
 	r.metrics.hashcacheEntries.WithLabelValues(sinkSeries).Set(float64(st.cache.Len()))
 
 	logf.Log.WithName("pipeline").V(1).Info("Evicted watch scope from pipeline cache",
-		"sink", name, "group", scope.Group, "kind", scope.Kind, "namespace", scope.Namespace,
+		"sink", sinkSeries, "group", scope.Group, "kind", scope.Kind, "namespace", scope.Namespace,
 		"entries_removed", removed)
 }
 
-func (r *sinkStateRegistry) markScopeWarm(name string, scope ScopeKey) {
-	st := r.get(name)
+func (r *sinkStateRegistry) markScopeWarm(id sink.ID, scope ScopeKey) {
+	st := r.get(id)
 	st.mu.Lock()
 	st.warm[scope] = struct{}{}
 	st.mu.Unlock()
-	r.metrics.safeMode.WithLabelValues(sinkIDFor(name).String(), scope.Group, scope.Kind, scope.Namespace).Set(0)
+	r.metrics.safeMode.WithLabelValues(id.String(), scope.Group, scope.Kind, scope.Namespace).Set(0)
 }
 
 // recordScopeUnwarmed publishes safe_mode=1 for a (sink, scope) pair the pipeline
@@ -597,15 +580,15 @@ func (r *sinkStateRegistry) markScopeWarm(name string, scope ScopeKey) {
 // warming?" unanswerable from metrics alone.
 func (p *Pipeline) recordScopeUnwarmed(key Key) {
 	scope := key.Scope()
-	p.metrics.safeMode.WithLabelValues(sinkIDFor(key.Sink).String(), scope.Group, scope.Kind, scope.Namespace).Set(1)
+	p.metrics.safeMode.WithLabelValues(key.Sink.String(), scope.Group, scope.Kind, scope.Namespace).Set(1)
 }
 
 // recordCacheEntries publishes a sink's current hashCache size to the
 // hashcache_entries gauge. Len() takes and releases the cache's own lock, and
 // the gauge Set happens here, strictly outside it — no metric call ever runs
 // while a hashCache lock is held (a Task 0.1 acceptance criterion).
-func (p *Pipeline) recordCacheEntries(sinkName string, st *sinkState) {
-	p.metrics.hashcacheEntries.WithLabelValues(sinkIDFor(sinkName).String()).Set(float64(st.cache.Len()))
+func (p *Pipeline) recordCacheEntries(id sink.ID, st *sinkState) {
+	p.metrics.hashcacheEntries.WithLabelValues(id.String()).Set(float64(st.cache.Len()))
 }
 
 // logThrottle allows one event per interval per key, so a condition affecting

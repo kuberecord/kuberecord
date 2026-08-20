@@ -17,7 +17,6 @@ limitations under the License.
 package pipeline
 
 import (
-	"cmp"
 	"context"
 	"slices"
 	"sync"
@@ -243,10 +242,10 @@ func (f *fakeScopeEvents) awaitEvents(t *testing.T, n int) []sink.ScopeEvent {
 // of Task 1.8's SinkManager the coordinator consumes. A sink present in one map
 // but not the other reproduces a real condition: a sink that writes records but
 // cannot read its history back.
+//
 // It is keyed by sink.ID, as the real SinkManager's registry is, so a lookup
 // carrying an unexpected kind misses rather than being answered by the sink that
-// shares its name. The setters take names, which is what the coordinator itself
-// still holds (see sinkIDFor).
+// shares its name.
 type fakeSinkBackends struct {
 	mu      sync.Mutex
 	readers map[sink.ID]sink.StateReader
@@ -279,9 +278,7 @@ func (f *fakeSinkBackends) SinkIDs() []sink.ID {
 			ids = append(ids, id)
 		}
 	}
-	slices.SortFunc(ids, func(a, b sink.ID) int {
-		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name))
-	})
+	slices.SortFunc(ids, sink.ID.Compare)
 	return ids
 }
 
@@ -292,22 +289,22 @@ func (f *fakeSinkBackends) ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWrite
 	return w, ok
 }
 
-func (f *fakeSinkBackends) setReader(name string, r sink.StateReader) {
+func (f *fakeSinkBackends) setReader(id sink.ID, r sink.StateReader) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.readers[sinkIDFor(name)] = r
+	f.readers[id] = r
 }
 
-func (f *fakeSinkBackends) removeReader(name string) {
+func (f *fakeSinkBackends) removeReader(id sink.ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.readers, sinkIDFor(name))
+	delete(f.readers, id)
 }
 
-func (f *fakeSinkBackends) setEvents(name string, w sink.ScopeEventWriter) {
+func (f *fakeSinkBackends) setEvents(id sink.ID, w sink.ScopeEventWriter) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.events[sinkIDFor(name)] = w
+	f.events[id] = w
 }
 
 // fakeScopes is a ScopeStates whose answers default to the conservative side:
@@ -352,11 +349,11 @@ func (f *fakeScopes) withSettleGate() (open func()) {
 	return sync.OnceFunc(func() { close(gate) })
 }
 
-func (f *fakeScopes) ScopeSynced(sinkName string, scope ScopeKey) bool {
+func (f *fakeScopes) ScopeSynced(id sink.ID, scope ScopeKey) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.syncChecks++
-	_, ok := f.synced[scopeRef{sink: sinkName, scope: scope}]
+	_, ok := f.synced[scopeRef{sink: id, scope: scope}]
 	return ok
 }
 
@@ -367,10 +364,10 @@ func (f *fakeScopes) syncChecked() int {
 	return f.syncChecks
 }
 
-func (f *fakeScopes) ScopeDesired(sinkName string, scope ScopeKey) bool {
+func (f *fakeScopes) ScopeDesired(id sink.ID, scope ScopeKey) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.desired[scopeRef{sink: sinkName, scope: scope}]
+	_, ok := f.desired[scopeRef{sink: id, scope: scope}]
 	return ok
 }
 

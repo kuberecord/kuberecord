@@ -93,8 +93,12 @@ var errCloseOutEvidencePending = errors.New("the successor's first row has not r
 // part of the target rather than something the coordinator stamps for itself —
 // see the field's doc comment.
 type WarmTarget struct {
-	// Sink is the name of the sink whose history seeds this scope.
-	Sink string
+	// Sink is the typed identity of the sink whose history seeds this scope. The
+	// kind travels with it because warm state, like dedup state, is per backend:
+	// seeding a ClickHouseSink's scope from an S3Sink's history (or marking one
+	// warm on the other's behalf) is exactly the confusion typed identity exists
+	// to make unrepresentable.
+	Sink sink.ID
 
 	// Scope is the (group, kind, namespace) triple to warm, version-agnostic like
 	// every other in-process scope key.
@@ -115,14 +119,15 @@ type WarmTarget struct {
 // scopeRef identifies one (sink, scope) pair, the granularity at which warm-up,
 // GC and Snapshot-tagging readiness are all tracked.
 type scopeRef struct {
-	sink  string
+	sink  sink.ID
 	scope ScopeKey
 }
 
 // logValues returns this ref's fields as logr key/value pairs so every warm log
 // line carries the same scope context (Invariant 4).
 func (r scopeRef) logValues() []any {
-	return []any{"sink", r.sink, "group", r.scope.Group, "kind", r.scope.Kind, "namespace", r.scope.Namespace}
+	return []any{"sink", r.sink.String(), "group", r.scope.Group,
+		"kind", r.scope.Kind, "namespace", r.scope.Namespace}
 }
 
 // key builds the pipeline work key for one object in this scope. The namespace
@@ -194,17 +199,17 @@ type ScopeEventRouter interface {
 // path entirely, and keeping them apart means a fake for one is not forced to
 // implement the other.
 type ScopeStates interface {
-	// ScopeSynced reports whether every informer serving (sinkName, scope) has
+	// ScopeSynced reports whether every informer serving (id, scope) has
 	// completed its initial List. It gates the GC pass: before the sync, the watch
 	// cache legitimately holds nothing, so every seeded object would look like a
 	// zombie and the pass would emit a Deleted row for the entire scope.
-	ScopeSynced(sinkName string, scope ScopeKey) bool
+	ScopeSynced(id sink.ID, scope ScopeKey) bool
 
-	// ScopeDesired reports whether any rule currently wants (sinkName, scope).
+	// ScopeDesired reports whether any rule currently wants (id, scope).
 	// Boot reconciliation uses it as the authority on "nothing in this process
 	// wants this scope any more", which is what turns a scope left open in the
 	// sink's history into an orphan to close.
-	ScopeDesired(sinkName string, scope ScopeKey) bool
+	ScopeDesired(id sink.ID, scope ScopeKey) bool
 
 	// Settled is closed once the desired state this process starts from is in
 	// place. It gates the first boot-reconciliation pass, which must not run
@@ -308,7 +313,7 @@ type WarmCoordinator struct {
 	// bootDone records the sinks whose boot pass has completed successfully, so a
 	// pass runs once per sink rather than once per tick. A failed pass is left
 	// unmarked and retried.
-	bootDone map[string]struct{}
+	bootDone map[sink.ID]struct{}
 	stopped  bool
 	// wg tracks the warm goroutines, so Start returns only once every one of them
 	// has exited (a goleak-verified property).
@@ -355,7 +360,7 @@ func NewWarmCoordinator(opts WarmOptions) (*WarmCoordinator, error) {
 		syncPollInterval: poll,
 		bootInterval:     boot,
 		runs:             make(map[scopeRef]*warmRun),
-		bootDone:         make(map[string]struct{}),
+		bootDone:         make(map[sink.ID]struct{}),
 	}, nil
 }
 
@@ -438,8 +443,8 @@ func (c *WarmCoordinator) WarmScope(target WarmTarget) {
 // the scope log, never by Deleted rows for the objects it covered — and a warm
 // that is still mid-GC when its scope stops must be cancelled precisely so it
 // cannot write those rows.
-func (c *WarmCoordinator) StopScope(sinkName string, scope ScopeKey) {
-	ref := scopeRef{sink: sinkName, scope: scope}
+func (c *WarmCoordinator) StopScope(id sink.ID, scope ScopeKey) {
+	ref := scopeRef{sink: id, scope: scope}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -468,26 +473,22 @@ func (c *WarmCoordinator) StopScope(sinkName string, scope ScopeKey) {
 // stopped working.
 //
 // It is safe to call for a sink the coordinator never saw, which is what lets the
-// teardown path call it unconditionally.
-//
-// The coordinator's own bookkeeping is still keyed by sink *name* until Task 4.2
-// types Key.Sink, so only id.Name is consulted here; the two agree exactly while
-// ClickHouseSink is the only sink kind (see sinkIDFor).
+// teardown path call it unconditionally. Matching is on the whole identity, so
+// deleting one of two same-named sinks of different kinds leaves the other's warm
+// state and boot mark exactly as they were.
 func (c *WarmCoordinator) ForgetSink(id sink.ID) {
-	name := id.Name
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(c.bootDone, name)
+	delete(c.bootDone, id)
 	for ref, run := range c.runs {
-		if ref.sink == name {
+		if ref.sink == id {
 			run.cancel()
 			delete(c.runs, ref)
 		}
 	}
 	c.pending = slices.DeleteFunc(c.pending, func(t WarmTarget) bool {
-		return t.Sink == name
+		return t.Sink == id
 	})
 }
 
@@ -843,11 +844,11 @@ func splitIncarnations(group []sink.KnownState) (current sink.KnownState, unclos
 // Conflating them would either spin a goroutine forever on a Writer-only sink or
 // permanently disable warm-up for a sink that was merely a second late to become
 // ready.
-func (c *WarmCoordinator) readerFor(sinkName string) (sink.StateReader, error) {
-	if reader, ok := c.readers.StateReaderFor(sinkIDFor(sinkName)); ok {
+func (c *WarmCoordinator) readerFor(id sink.ID) (sink.StateReader, error) {
+	if reader, ok := c.readers.StateReaderFor(id); ok {
 		return reader, nil
 	}
-	if _, live := c.p.router.WriterFor(sinkIDFor(sinkName)); live {
+	if _, live := c.p.router.WriterFor(id); live {
 		return nil, errNoStateReader
 	}
 	return nil, errSinkNotLive
@@ -964,7 +965,7 @@ func (c *WarmCoordinator) emitCloseOuts(ctx context.Context, log logr.Logger,
 	err := backoff.Retry(func() error {
 		recovered = 0
 
-		writer, ok := c.p.router.WriterFor(sinkIDFor(ref.sink))
+		writer, ok := c.p.router.WriterFor(ref.sink)
 		if !ok {
 			// Nothing to write through yet. Retried as a whole rather than per
 			// record, exactly like the GC pass, so a sink that comes back
@@ -1186,7 +1187,7 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger,
 	ref scopeRef, seeded []gcTarget) (gcResult, error) {
 	var result gcResult
 
-	writer, ok := c.p.router.WriterFor(sinkIDFor(ref.sink))
+	writer, ok := c.p.router.WriterFor(ref.sink)
 	if !ok {
 		// Nothing to write through yet; the whole pass is retried rather than
 		// each object individually, so a sink that comes back mid-sweep does not
@@ -1303,21 +1304,19 @@ func (c *WarmCoordinator) reconcileEpochsUntilDone(ctx context.Context, log logr
 //
 //nolint:logcheck // Takes Start's already-named logger.
 func (c *WarmCoordinator) reconcileScopeEpochs(ctx context.Context, log logr.Logger) {
-	// The pass's own bookkeeping is keyed by sink name until Task 4.2 types
-	// Key.Sink, so the enumeration's IDs are consumed through id.Name.
 	for _, id := range c.readers.SinkIDs() {
-		name := id.Name
-		if c.bootReconciled(name) {
+		if c.bootReconciled(id) {
 			continue
 		}
-		if err := c.closeOrphanedScopes(ctx, log, name); err != nil {
+		if err := c.closeOrphanedScopes(ctx, log, id); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Error(err, "Failed to reconcile watch-scope epochs for a sink, will retry", "sink", name)
+			log.Error(err, "Failed to reconcile watch-scope epochs for a sink, will retry",
+				"sink", id.String())
 			continue
 		}
-		c.markBootReconciled(name)
+		c.markBootReconciled(id)
 	}
 }
 
@@ -1332,21 +1331,22 @@ func (c *WarmCoordinator) reconcileScopeEpochs(ctx context.Context, log logr.Log
 // looks like a mass deletion event.
 //
 //nolint:logcheck // Takes Start's already-named logger.
-func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logger, sinkName string) error {
-	reader, err := c.readerFor(sinkName)
+func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logger, id sink.ID) error {
+	reader, err := c.readerFor(id)
 	if err != nil {
 		if errors.Is(err, errNoStateReader) {
 			// No history to reconcile against. Marked done by the caller so this
 			// is decided once per sink, not once per tick.
-			log.V(1).Info("Sink cannot read its own history; skipping scope-epoch reconciliation", "sink", sinkName)
+			log.V(1).Info("Sink cannot read its own history; skipping scope-epoch reconciliation",
+				"sink", id.String())
 			return nil
 		}
 		return err
 	}
 
-	events, ok := c.events.ScopeEventWriterFor(sinkIDFor(sinkName))
+	events, ok := c.events.ScopeEventWriterFor(id)
 	if !ok {
-		return fmt.Errorf("sink %s has no live scope-log writer", sinkIDFor(sinkName))
+		return fmt.Errorf("sink %s has no live scope-log writer", id)
 	}
 
 	scopes, err := reader.ActiveScopes(ctx, c.p.clusterID)
@@ -1357,7 +1357,7 @@ func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logg
 	closed := 0
 	for _, filter := range scopes {
 		scope := ScopeKey{Group: filter.APIGroup, Kind: filter.Kind, Namespace: filter.Namespace}
-		if c.scopes.ScopeDesired(sinkName, scope) {
+		if c.scopes.ScopeDesired(id, scope) {
 			// Still wanted: this is an ordinary restart of a scope that was never
 			// stopped, and its epoch legitimately stays open.
 			continue
@@ -1374,25 +1374,26 @@ func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logg
 		}
 		closed++
 		log.Info("Closed a watch scope left open by a previous process; no Deleted rows were written for it",
-			"sink", sinkName, "group", filter.APIGroup, "kind", filter.Kind, "namespace", filter.Namespace)
+			"sink", id.String(), "group", filter.APIGroup, "kind", filter.Kind,
+			"namespace", filter.Namespace)
 	}
 
 	log.Info("Reconciled watch-scope epochs for a sink",
-		"sink", sinkName, "open_scopes", len(scopes), "closed", closed)
+		"sink", id.String(), "open_scopes", len(scopes), "closed", closed)
 	return nil
 }
 
-func (c *WarmCoordinator) bootReconciled(sinkName string) bool {
+func (c *WarmCoordinator) bootReconciled(id sink.ID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, done := c.bootDone[sinkName]
+	_, done := c.bootDone[id]
 	return done
 }
 
-func (c *WarmCoordinator) markBootReconciled(sinkName string) {
+func (c *WarmCoordinator) markBootReconciled(id sink.ID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.bootDone[sinkName] = struct{}{}
+	c.bootDone[id] = struct{}{}
 }
 
 // compile-time proof that a WarmCoordinator is usable as a leader-election-gated

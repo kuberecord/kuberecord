@@ -55,7 +55,7 @@ type fakeLister struct {
 }
 
 type stoppedScope struct {
-	sink  string
+	sink  sink.ID
 	scope ScopeKey
 }
 
@@ -95,10 +95,10 @@ func (f *fakeLister) remove(key Key) {
 }
 
 // stopScope simulates a watch target being deactivated for one sink.
-func (f *fakeLister) stopScope(sinkName string, scope ScopeKey) {
+func (f *fakeLister) stopScope(id sink.ID, scope ScopeKey) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.stopped[stoppedScope{sink: sinkName, scope: scope}] = struct{}{}
+	f.stopped[stoppedScope{sink: id, scope: scope}] = struct{}{}
 }
 
 func (f *fakeLister) setErr(err error) {
@@ -163,8 +163,7 @@ func (f *fakeRedactions) drop(scope ScopeKey) {
 //
 // It is keyed by sink.ID, exactly as the real SinkManager's routing table is, so
 // a lookup carrying the wrong kind misses here too rather than being quietly
-// answered by whatever shares its name. The setters take a name because the keys
-// the pipeline itself still holds are names (see sinkIDFor).
+// answered by whatever shares its name.
 type fakeRouter struct {
 	mu      sync.RWMutex
 	writers map[sink.ID]sink.Writer
@@ -181,16 +180,16 @@ func (f *fakeRouter) WriterFor(id sink.ID) (sink.Writer, bool) {
 	return w, ok
 }
 
-func (f *fakeRouter) set(name string, w sink.Writer) {
+func (f *fakeRouter) set(id sink.ID, w sink.Writer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.writers[sinkIDFor(name)] = w
+	f.writers[id] = w
 }
 
-func (f *fakeRouter) remove(name string) {
+func (f *fakeRouter) remove(id sink.ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.writers, sinkIDFor(name))
+	delete(f.writers, id)
 }
 
 // fakeWriter is a sink.Writer that records every accepted job and settles it
@@ -377,18 +376,18 @@ type testHarness struct {
 // registry (Prometheus panics on duplicate registration, so a shared instance
 // would make repeated test setups fatal) and a fast rate limiter so retry
 // assertions don't wait on production backoff.
-func newHarness(t *testing.T, sinkNames ...string) *testHarness {
+func newHarness(t *testing.T, sinks ...sink.ID) *testHarness {
 	t.Helper()
-	if len(sinkNames) == 0 {
-		sinkNames = []string{testSink}
+	if len(sinks) == 0 {
+		sinks = []sink.ID{testSink}
 	}
 
 	lister := newFakeLister()
 	router := newFakeRouter()
 	writer := newFakeWriter()
 	redactions := newFakeRedactions()
-	for _, name := range sinkNames {
-		router.set(name, writer)
+	for _, id := range sinks {
+		router.set(id, writer)
 	}
 
 	p := newTestPipeline(t, lister, router, redactions)
@@ -468,7 +467,20 @@ func (h *testHarness) run(t *testing.T) (stop func()) {
 	return stop
 }
 
-const testSink = "default"
+// testSink is the sink every fixture in this package streams to unless a test
+// says otherwise.
+//
+// It is a sink.ID rather than a name because that is what a work key carries: the
+// kind is part of the identity the pipeline routes and partitions state on.
+var testSink = clickHouseSink("default")
+
+// clickHouseSink builds the identity of a named ClickHouseSink — the kind every
+// authored rule names today, so it is the right default for a fixture that only
+// needs *a* sink. A test about kind separation names its second kind explicitly
+// (see TestPipelineSameNameDifferentKindsAreSeparateSinks).
+func clickHouseSink(name string) sink.ID {
+	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
+}
 
 // testUID is the object UID the fixtures below stamp when a spec does not care
 // which incarnation it is looking at (a spec that *does* care — the

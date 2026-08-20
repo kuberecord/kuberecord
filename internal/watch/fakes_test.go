@@ -36,6 +36,24 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/yelzhy/kuberecord/internal/sink"
+)
+
+// clickHouseSink builds the identity of a named ClickHouseSink — the only sink
+// kind an authored rule can name today, so it is the right shape for a fixture
+// that just needs *a* sink. A test about kind separation names its second kind
+// explicitly (see TestInterestTableSeparatesSinksOfDifferentKinds).
+func clickHouseSink(name string) sink.ID {
+	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
+}
+
+// sinkA and sinkB are the two sinks these tests fan out to. Two sinks rather than
+// one because the per-sink half of the interest map — one event becoming two work
+// keys, one rule's scope stopping while another sink still holds it — is only
+// observable with both.
+var (
+	sinkA = clickHouseSink("sink-a")
+	sinkB = clickHouseSink("sink-b")
 )
 
 // The doubles in this file stand in for the two components the WatchManager hands
@@ -79,7 +97,7 @@ type fakePipeline struct {
 
 // evictedScope is one EvictScope call, recorded in order.
 type evictedScope struct {
-	sink  string
+	sink  sink.ID
 	scope pipeline.ScopeKey
 }
 
@@ -89,10 +107,10 @@ func (f *fakePipeline) Add(key pipeline.Key) {
 	f.keys = append(f.keys, key)
 }
 
-func (f *fakePipeline) EvictScope(sinkName string, scope pipeline.ScopeKey) {
+func (f *fakePipeline) EvictScope(id sink.ID, scope pipeline.ScopeKey) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.evicted = append(f.evicted, evictedScope{sink: sinkName, scope: scope})
+	f.evicted = append(f.evicted, evictedScope{sink: id, scope: scope})
 }
 
 // enqueued returns the keys seen so far, in order.

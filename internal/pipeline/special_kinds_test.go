@@ -315,7 +315,7 @@ func TestProcessEventCacheMissIsAddedWhileCold(t *testing.T) {
 			// must never publish 1 for it.
 			scope := key.Scope()
 			if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(
-				sinkIDFor(key.Sink).String(), scope.Group, scope.Kind, scope.Namespace)); got != 0 {
+				key.Sink.String(), scope.Group, scope.Kind, scope.Namespace)); got != 0 {
 				t.Errorf("safe_mode = %v, want 0 for an Events scope", got)
 			}
 		})

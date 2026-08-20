@@ -390,9 +390,9 @@ func (p *Pipeline) Process(ctx context.Context, key Key) error {
 	// stale instance. A missing sink is transient (deleted CR, mid-recycle), so
 	// the item is retried rather than dropped — the change it describes is real
 	// and still unrecorded.
-	writer, ok := p.router.WriterFor(sinkIDFor(key.Sink))
+	writer, ok := p.router.WriterFor(key.Sink)
 	if !ok {
-		if p.unavailableSinkLog.allow(key.Sink) {
+		if p.unavailableSinkLog.allow(key.Sink.String()) {
 			log.Error(errSinkUnavailable, "Sink has no live writer, re-queueing this and any further items for it")
 		}
 		return errSinkUnavailable

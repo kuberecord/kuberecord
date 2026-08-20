@@ -69,12 +69,20 @@ type ID struct {
 // off a dashboard knows which of two same-named backends it describes.
 func (id ID) String() string { return id.Kind + "/" + id.Name }
 
-// compareIDs orders IDs by kind, then by name.
+// Compare orders IDs by kind, then by name, returning the usual negative / zero
+// / positive triple.
 //
-// It exists so the two places that iterate the sink registry for a human — the
-// start-up pass over pending sinks and SinkIDs — stay deterministic now that
-// their keys are structs rather than sortable strings. Ordering by the fields
-// rather than by String() keeps the sort independent of the rendering.
-func compareIDs(a, b ID) int {
-	return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name))
+// It exists because every component that iterates a sink-keyed collection for a
+// human needs a deterministic order now that its keys are structs rather than
+// sortable strings: the start-up pass over pending sinks, SinkIDs, and the watch
+// layer's interest sort, whose log output and test expectations must not depend on
+// map iteration order. Ordering by the fields rather than by String() keeps the
+// sort independent of the rendering.
+//
+// It is a method rather than a package function so that the one ordering
+// definition is reachable from every package holding an ID — passed straight to
+// slices.SortFunc as the method expression ID.Compare — instead of each of them
+// re-deriving "kind, then name" and drifting.
+func (id ID) Compare(other ID) int {
+	return cmp.Or(cmp.Compare(id.Kind, other.Kind), cmp.Compare(id.Name, other.Name))
 }

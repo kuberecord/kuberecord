@@ -523,7 +523,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	// the answer cannot differ between them.
 	redaction := canonicalRedaction(chSink.Spec.Policy.Redaction, spec.ExtraRedaction)
 
-	targets, denials, err := r.reviewTargets(ctx, chSink.Name, resolved, redaction)
+	targets, denials, err := r.reviewTargets(ctx, clickHouseSinkID(chSink.Name), resolved, redaction)
 	if err != nil {
 		status.set(v1alpha1.ConditionRBACGranted, metav1.ConditionUnknown, ReasonAccessReviewFailed, err.Error())
 		return planOutcome{verdict: verdict, err: err}
@@ -777,7 +777,14 @@ func (r *RuleReconciler) targetNamespaces(ctx context.Context, obj client.Object
 //
 // redaction is the rule's canonical merged redaction policy (see
 // canonicalRedaction), stamped identically onto every target it produces.
-func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkName string,
+//
+// sinkID is the typed identity every produced target streams to. It is this
+// reconciler that turns the rule's unqualified `spec.sinkRef` into one, and it is
+// the last place in the operator that does: the whole data plane below is keyed on
+// sink.ID, and the lift is legitimate here only because the resolution above
+// already loaded a *ClickHouseSink* under that name, so the kind is known rather
+// than assumed (see sink.DefaultSinkKind).
+func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkID sink.ID,
 	resolved []resolvedResource, redaction string) ([]plan.WatchTarget, []string, error) {
 	targets := make([]plan.WatchTarget, 0, len(resolved))
 	var denials []string
@@ -807,7 +814,7 @@ func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkName string,
 			}
 
 			targets = append(targets, plan.WatchTarget{
-				Sink:      sinkName,
+				Sink:      sinkID,
 				GVK:       res.gvk,
 				Namespace: namespace,
 				Selector:  res.selector,

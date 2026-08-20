@@ -36,17 +36,14 @@ import (
 	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
-const (
-	// testSinkName is the one sink every record in this file is destined for. The
-	// per-sink dedup separation is internal/pipeline's own subject; here one sink
-	// keeps the metric lookups unambiguous.
-	testSinkName = "sink-a"
+// eventTypeDeleted is the row type these tests assert on most, in both
+// directions: it must appear for an object that really was deleted, and must
+// never appear for one whose scope merely stopped being watched.
+const eventTypeDeleted = "Deleted"
 
-	// eventTypeDeleted is the row type these tests assert on most, in both
-	// directions: it must appear for an object that really was deleted, and must
-	// never appear for one whose scope merely stopped being watched.
-	eventTypeDeleted = "Deleted"
-)
+// Every record in this file is destined for sinkA (see fakes_test.go). The
+// per-sink separation is internal/pipeline's and internal/watch/interest_test's
+// own subject; here one sink keeps the metric lookups unambiguous.
 
 // This file is the whole data plane running against a real API server: registry →
 // WatchManager → informers → workqueue → pipeline → sink. Everything else in the
@@ -67,12 +64,12 @@ func (d *deferredLister) Get(ref pipeline.Key) (*unstructured.Unstructured, bool
 // The scope-level half of the same binding, for the warm/GC coordinator. In
 // production one WatchManager answers both interfaces, so one deferred wrapper
 // stands in for both here too.
-func (d *deferredLister) ScopeSynced(sinkName string, scope pipeline.ScopeKey) bool {
-	return d.manager.ScopeSynced(sinkName, scope)
+func (d *deferredLister) ScopeSynced(id sink.ID, scope pipeline.ScopeKey) bool {
+	return d.manager.ScopeSynced(id, scope)
 }
 
-func (d *deferredLister) ScopeDesired(sinkName string, scope pipeline.ScopeKey) bool {
-	return d.manager.ScopeDesired(sinkName, scope)
+func (d *deferredLister) ScopeDesired(id sink.ID, scope pipeline.ScopeKey) bool {
+	return d.manager.ScopeDesired(id, scope)
 }
 
 // Settled is read only when the coordinator's own Start runs, by which time the
@@ -191,14 +188,14 @@ func TestWatchManagerStreamsAndEvictsThroughTheRealPipeline(t *testing.T) {
 	// Snapshot: warm-up itself is Task 1.6's, and this test is about what the watch
 	// layer delivers.
 	for _, namespace := range []string{nsA, nsB} {
-		pipe.MarkScopeWarm(testSinkName, pipeline.ScopeKey{Kind: "Pod", Namespace: namespace})
+		pipe.MarkScopeWarm(sinkA, pipeline.ScopeKey{Kind: "Pod", Namespace: namespace})
 	}
 
 	// --- Activate both targets ---
-	if err := registry.Upsert("rule-a", []plan.WatchTarget{podTarget(testSinkName, nsA, "")}); err != nil {
+	if err := registry.Upsert("rule-a", []plan.WatchTarget{podTarget(sinkA, nsA, "")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if err := registry.Upsert("rule-b", []plan.WatchTarget{podTarget(testSinkName, nsB, "")}); err != nil {
+	if err := registry.Upsert("rule-b", []plan.WatchTarget{podTarget(sinkA, nsB, "")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	waitFor(t, func() bool { return watchMgr.PoolSize() == 2 },
@@ -280,7 +277,7 @@ func TestWatchManagerStreamsAndEvictsThroughTheRealPipeline(t *testing.T) {
 		t.Errorf("the evicted object produced %d records, want 1 (an Added and no Deleted)", got)
 	}
 	if _, _, active, err := watchMgr.Get(pipeline.Key{
-		Sink: testSinkName, Kind: "Pod", Namespace: nsA, Name: "second",
+		Sink: sinkA, Kind: "Pod", Namespace: nsA, Name: "second",
 	}); err != nil || active {
 		t.Errorf("the stopped scope reports active=%t (err %v), want false", active, err)
 	}
@@ -307,14 +304,14 @@ func TestInformerStoreHoldsTransformedObjects(t *testing.T) {
 	h := newManagerHarness(t)
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 
-	h.upsert(t, "rule-1", podTarget("sink-a", namespace, ""))
+	h.upsert(t, "rule-1", podTarget(sinkA, namespace, ""))
 
 	created := createPod(t, h.dyn, newPod(namespace, "web", nil))
 	if _, found, _ := unstructured.NestedFieldNoCopy(created.Object, "metadata", "managedFields"); !found {
 		t.Fatal("the API server did not set managedFields, so this test would prove nothing")
 	}
 
-	ref := pipeline.Key{Sink: "sink-a", Kind: "Pod", Namespace: namespace, Name: "web"}
+	ref := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: namespace, Name: "web"}
 	var cached *unstructured.Unstructured
 	waitFor(t, func() bool {
 		obj, found, _, err := h.manager.Get(ref)
@@ -373,7 +370,7 @@ func hashcacheEntries(t *testing.T, reg *prometheus.Registry) float64 {
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
 				// The label carries sink.ID.String(), not the bare CR name (Task 4.1).
-				if label.GetName() == "sink" && label.GetValue() == sinkIDFor(testSinkName).String() {
+				if label.GetName() == "sink" && label.GetValue() == sinkA.String() {
 					return metric.GetGauge().GetValue()
 				}
 			}

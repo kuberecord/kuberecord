@@ -122,7 +122,8 @@ func TestCheckpointStateReconstructionIntegration(t *testing.T) {
 		t.Fatalf("pipeline.New: %v", err)
 	}
 
-	key := pipeline.Key{Sink: testSinkName, Group: "apps", Kind: "Deployment", Namespace: "default", Name: "replayed"}
+	key := pipeline.Key{Sink: testSinkID, Group: "apps", Kind: "Deployment",
+		Namespace: "default", Name: "replayed"}
 	// Warmed, so the object's first sighting is an Added rather than a Snapshot.
 	// Both carry full data and either would do for the replay; Added simply makes
 	// the recorded history the ordinary steady-state one.

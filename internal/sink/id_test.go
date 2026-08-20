@@ -82,10 +82,11 @@ func TestDefaultSinkKindIsTheFirstBackend(t *testing.T) {
 	}
 }
 
-// TestCompareIDsOrdersByKindThenName covers the ordering the two human-facing
-// iterations (the start-up pass over pending sinks, and SinkIDs) rely on for
-// stable output now that their keys are structs rather than sortable strings.
-func TestCompareIDsOrdersByKindThenName(t *testing.T) {
+// TestIDCompareOrdersByKindThenName covers the ordering every human-facing
+// iteration (the start-up pass over pending sinks, SinkIDs, and the watch layer's
+// interest sort) relies on for stable output now that its keys are structs
+// rather than sortable strings.
+func TestIDCompareOrdersByKindThenName(t *testing.T) {
 	tests := []struct {
 		name string
 		a, b ID
@@ -98,8 +99,8 @@ func TestCompareIDsOrdersByKindThenName(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := compareIDs(tc.a, tc.b); got != tc.want {
-				t.Errorf("compareIDs(%s, %s) = %d, want %d", tc.a, tc.b, got, tc.want)
+			if got := tc.a.Compare(tc.b); got != tc.want {
+				t.Errorf("%s.Compare(%s) = %d, want %d", tc.a, tc.b, got, tc.want)
 			}
 		})
 	}

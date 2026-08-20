@@ -29,6 +29,7 @@ import (
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/plan"
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // informerKey identifies one running informer: a resource plus the namespace it
@@ -68,22 +69,29 @@ func (k informerKey) String() string {
 // regardless of how many rules contributed it.
 type interestID struct {
 	informer informerKey
-	sink     string
+	sink     sink.ID
 }
 
 // identityKey is the shape a pipeline.Key arrives in when the pipeline asks the
 // watch cache what it holds: version-agnostic identity minus the object name,
-// plus the sink.
+// plus the sink's typed identity.
 //
 // It exists because the pipeline's world is version-agnostic (Invariant 7:
 // apps/v1 and apps/v2 Deployments are one object) while the pool's world is
 // GVR-keyed. This is the index that crosses that gap without the pipeline ever
 // learning what a GVR is.
+//
+// The sink is the whole sink.ID rather than its name, and that is load-bearing
+// for both readers of this index: Get answers "is this scope still active", and
+// RedactionFor answers "what must be scrubbed". Keyed on the name alone, an
+// S3Sink and a ClickHouseSink both named "default" would collide on one entry,
+// and one sink's interest would then vouch for the other's scope activity and
+// hand out the other's redaction policy.
 type identityKey struct {
 	Group     string
 	Kind      string
 	Namespace string
-	Sink      string
+	Sink      sink.ID
 }
 
 // scopeInterest is one sink's interest in one informer's stream: which rules
@@ -103,8 +111,8 @@ type scopeInterest struct {
 	// object it replaced.
 	gvk schema.GroupVersionKind
 
-	// sink is the ClickHouseSink name every work key from this interest carries.
-	sink string
+	// sink is the typed sink identity every work key from this interest carries.
+	sink sink.ID
 
 	// scope is the (group, kind, namespace) triple the pipeline evicts and warms
 	// by. It is derived from gvk and the informer's namespace, so it is
@@ -369,7 +377,7 @@ func (t *interestTable) replace(desired map[interestID]*scopeInterest) (removed 
 		t.byIdentity[in.identity()] = append(t.byIdentity[in.identity()], in)
 	}
 	for _, interests := range t.byInformer {
-		slices.SortFunc(interests, func(a, b *scopeInterest) int { return cmp.Compare(a.sink, b.sink) })
+		slices.SortFunc(interests, func(a, b *scopeInterest) int { return a.sink.Compare(b.sink) })
 	}
 
 	sortInterests(removed)
@@ -447,8 +455,8 @@ func (t *interestTable) lookupIdentity(ref pipeline.Key) []*scopeInterest {
 // version-agnostic scope (Invariant 7).
 //
 // The returned slice is the table's own backing array and must not be mutated.
-func (t *interestTable) interestsForScope(sinkName string, scope pipeline.ScopeKey) []*scopeInterest {
-	key := identityKey{Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace, Sink: sinkName}
+func (t *interestTable) interestsForScope(id sink.ID, scope pipeline.ScopeKey) []*scopeInterest {
+	key := identityKey{Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace, Sink: id}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.byIdentity[key]
@@ -467,7 +475,7 @@ func (t *interestTable) size() int {
 func sortInterests(interests []*scopeInterest) {
 	slices.SortFunc(interests, func(a, b *scopeInterest) int {
 		return cmp.Or(
-			cmp.Compare(a.sink, b.sink),
+			a.sink.Compare(b.sink),
 			cmp.Compare(a.scope.Group, b.scope.Group),
 			cmp.Compare(a.scope.Kind, b.scope.Kind),
 			cmp.Compare(a.scope.Namespace, b.scope.Namespace),

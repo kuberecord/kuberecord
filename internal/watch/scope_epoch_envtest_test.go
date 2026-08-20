@@ -173,7 +173,7 @@ func TestScopeEpochsThroughTheRealDataPlane(t *testing.T) {
 	lister := &deferredLister{}
 	writer := &recordingWriter{}
 	events := &fakeScopeEventWriter{}
-	backends := singleSinkBackends{id: sinkIDFor(testSinkName), reader: history, events: events}
+	backends := singleSinkBackends{id: sinkA, reader: history, events: events}
 
 	pipe, err := pipeline.New(pipeline.Options{
 		ClusterID: clusterID,
@@ -204,7 +204,7 @@ func TestScopeEpochsThroughTheRealDataPlane(t *testing.T) {
 	recorder, err := NewScopeEpochRecorder(ScopeRecorderOptions{
 		ClusterID: clusterID,
 		Events: &fakeScopeEventRouter{
-			writers: map[sink.ID]sink.ScopeEventWriter{sinkIDFor(testSinkName): events},
+			writers: map[sink.ID]sink.ScopeEventWriter{sinkA: events},
 		},
 		Warmer:        coordinator,
 		FlushInterval: 10 * time.Millisecond,
@@ -258,7 +258,7 @@ func TestScopeEpochsThroughTheRealDataPlane(t *testing.T) {
 	createPod(t, dyn, newPod(nsA, "survivor", nil))
 
 	// --- The rule appears ---
-	if err := registry.Upsert("rule-a", []plan.WatchTarget{podTarget(testSinkName, nsA, "")}); err != nil {
+	if err := registry.Upsert("rule-a", []plan.WatchTarget{podTarget(sinkA, nsA, "")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -352,38 +352,38 @@ func TestWatchManagerScopeStateReflectsRealInformers(t *testing.T) {
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
 	scope := pipeline.ScopeKey{Kind: "Pod", Namespace: namespace}
 
-	if h.manager.ScopeDesired("sink-a", scope) {
+	if h.manager.ScopeDesired(sinkA, scope) {
 		t.Error("a scope no rule names reports desired")
 	}
-	if h.manager.ScopeSynced("sink-a", scope) {
+	if h.manager.ScopeSynced(sinkA, scope) {
 		t.Error("a scope with no informer reports synced")
 	}
 
-	h.upsert(t, "rule-a", podTarget("sink-a", namespace, ""))
+	h.upsert(t, "rule-a", podTarget(sinkA, namespace, ""))
 
-	if !h.manager.ScopeDesired("sink-a", scope) {
+	if !h.manager.ScopeDesired(sinkA, scope) {
 		t.Error("a scope a rule names reports not desired")
 	}
-	waitFor(t, func() bool { return h.manager.ScopeSynced("sink-a", scope) },
+	waitFor(t, func() bool { return h.manager.ScopeSynced(sinkA, scope) },
 		func() string { return "the scope's informer to report synced" })
 
 	// A different sink's view of the same scope is independent: interests are
 	// per-(sink, scope), so one sink's rule says nothing about another's.
-	if h.manager.ScopeDesired("other-sink", scope) || h.manager.ScopeSynced("other-sink", scope) {
+	if h.manager.ScopeDesired(clickHouseSink("other-sink"), scope) || h.manager.ScopeSynced(clickHouseSink("other-sink"), scope) {
 		t.Error("another sink inherited this scope's state")
 	}
 	// So is a different namespace's scope, including the cluster-wide one: an empty
 	// namespace is its own scope with its own epoch, never a wildcard.
 	clusterWide := pipeline.ScopeKey{Kind: "Pod"}
-	if h.manager.ScopeDesired("sink-a", clusterWide) || h.manager.ScopeSynced("sink-a", clusterWide) {
+	if h.manager.ScopeDesired(sinkA, clusterWide) || h.manager.ScopeSynced(sinkA, clusterWide) {
 		t.Error("a namespaced rule made the cluster-wide scope look desired or synced")
 	}
 
 	h.remove(t, "rule-a")
-	if h.manager.ScopeDesired("sink-a", scope) {
+	if h.manager.ScopeDesired(sinkA, scope) {
 		t.Error("a scope whose rule was removed still reports desired")
 	}
-	if h.manager.ScopeSynced("sink-a", scope) {
+	if h.manager.ScopeSynced(sinkA, scope) {
 		t.Error("a scope whose interest is gone still reports synced")
 	}
 }
@@ -403,7 +403,7 @@ func TestWatchManagerSettledWaitsForAQuietRegistry(t *testing.T) {
 	// throughout, because rules are still arriving.
 	deadline := time.Now().Add(600 * time.Millisecond)
 	for i := 0; time.Now().Before(deadline); i++ {
-		h.upsert(t, fmt.Sprintf("rule-%d", i), podTarget("sink-a", namespace, ""))
+		h.upsert(t, fmt.Sprintf("rule-%d", i), podTarget(sinkA, namespace, ""))
 		select {
 		case <-h.manager.Settled():
 			t.Fatal("the desired state was declared settled while rules were still arriving")
