@@ -148,8 +148,8 @@ func (r scopeRef) filter(clusterID string) sink.ScopeFilter {
 	}
 }
 
-// StateReaderRouter resolves a sink name to the StateReader currently serving it,
-// and enumerates the sinks that are live.
+// StateReaderRouter resolves a sink identity to the StateReader currently serving
+// it, and enumerates the sinks that are live.
 //
 // Task 1.8's SinkManager is the production implementation; resolution happens per
 // use (rather than being captured at wiring time) so a sink recycled after a
@@ -159,28 +159,28 @@ func (r scopeRef) filter(clusterID string) sink.ScopeFilter {
 // more — and therefore cannot be driven by the scopes this process happens to
 // warm.
 type StateReaderRouter interface {
-	// StateReaderFor returns the StateReader for name. ok=false means either that
+	// StateReaderFor returns the StateReader for id. ok=false means either that
 	// no live instance exists (transient) or that this sink cannot read its own
 	// history back at all (permanent); the caller distinguishes the two by asking
 	// SinkRouter whether the sink is live.
-	StateReaderFor(name string) (sink.StateReader, bool)
+	StateReaderFor(id sink.ID) (sink.StateReader, bool)
 
-	// SinkNames returns the names of the sinks currently live, in any order.
-	SinkNames() []string
+	// SinkIDs returns the identities of the sinks currently live, in any order.
+	SinkIDs() []sink.ID
 }
 
-// ScopeEventRouter resolves a sink name to the live ScopeEventWriter for it, so
-// the coordinator can close a scope epoch some earlier process left open.
+// ScopeEventRouter resolves a sink identity to the live ScopeEventWriter for it,
+// so the coordinator can close a scope epoch some earlier process left open.
 //
 // It is separate from the recorder that writes ordinary transition rows
 // (internal/watch): those follow live rule edges, this one follows history, and
 // the two must not depend on each other — the recorder drives the coordinator, so
 // a dependency back would be a cycle.
 type ScopeEventRouter interface {
-	// ScopeEventWriterFor returns the scope-log writer for name, or ok=false when
+	// ScopeEventWriterFor returns the scope-log writer for id, or ok=false when
 	// no live instance exists (deleted CR, mid-recycle, or a sink that does not
 	// record scope epochs).
-	ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool)
+	ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool)
 }
 
 // ScopeStates is what the watch layer tells the warm/GC coordinator about scopes
@@ -467,9 +467,15 @@ func (c *WarmCoordinator) StopScope(sinkName string, scope ScopeKey) {
 // collect, which is the safe direction), but a self-heal that had silently
 // stopped working.
 //
-// It is safe to call for a name the coordinator never saw, which is what lets the
+// It is safe to call for a sink the coordinator never saw, which is what lets the
 // teardown path call it unconditionally.
-func (c *WarmCoordinator) ForgetSink(name string) {
+//
+// The coordinator's own bookkeeping is still keyed by sink *name* until Task 4.2
+// types Key.Sink, so only id.Name is consulted here; the two agree exactly while
+// ClickHouseSink is the only sink kind (see sinkIDFor).
+func (c *WarmCoordinator) ForgetSink(id sink.ID) {
+	name := id.Name
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -838,10 +844,10 @@ func splitIncarnations(group []sink.KnownState) (current sink.KnownState, unclos
 // permanently disable warm-up for a sink that was merely a second late to become
 // ready.
 func (c *WarmCoordinator) readerFor(sinkName string) (sink.StateReader, error) {
-	if reader, ok := c.readers.StateReaderFor(sinkName); ok {
+	if reader, ok := c.readers.StateReaderFor(sinkIDFor(sinkName)); ok {
 		return reader, nil
 	}
-	if _, live := c.p.router.WriterFor(sinkName); live {
+	if _, live := c.p.router.WriterFor(sinkIDFor(sinkName)); live {
 		return nil, errNoStateReader
 	}
 	return nil, errSinkNotLive
@@ -958,7 +964,7 @@ func (c *WarmCoordinator) emitCloseOuts(ctx context.Context, log logr.Logger,
 	err := backoff.Retry(func() error {
 		recovered = 0
 
-		writer, ok := c.p.router.WriterFor(ref.sink)
+		writer, ok := c.p.router.WriterFor(sinkIDFor(ref.sink))
 		if !ok {
 			// Nothing to write through yet. Retried as a whole rather than per
 			// record, exactly like the GC pass, so a sink that comes back
@@ -1180,7 +1186,7 @@ func (c *WarmCoordinator) gcPass(ctx context.Context, log logr.Logger,
 	ref scopeRef, seeded []gcTarget) (gcResult, error) {
 	var result gcResult
 
-	writer, ok := c.p.router.WriterFor(ref.sink)
+	writer, ok := c.p.router.WriterFor(sinkIDFor(ref.sink))
 	if !ok {
 		// Nothing to write through yet; the whole pass is retried rather than
 		// each object individually, so a sink that comes back mid-sweep does not
@@ -1297,7 +1303,10 @@ func (c *WarmCoordinator) reconcileEpochsUntilDone(ctx context.Context, log logr
 //
 //nolint:logcheck // Takes Start's already-named logger.
 func (c *WarmCoordinator) reconcileScopeEpochs(ctx context.Context, log logr.Logger) {
-	for _, name := range c.readers.SinkNames() {
+	// The pass's own bookkeeping is keyed by sink name until Task 4.2 types
+	// Key.Sink, so the enumeration's IDs are consumed through id.Name.
+	for _, id := range c.readers.SinkIDs() {
+		name := id.Name
 		if c.bootReconciled(name) {
 			continue
 		}
@@ -1335,9 +1344,9 @@ func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logg
 		return err
 	}
 
-	events, ok := c.events.ScopeEventWriterFor(sinkName)
+	events, ok := c.events.ScopeEventWriterFor(sinkIDFor(sinkName))
 	if !ok {
-		return fmt.Errorf("sink %q has no live scope-log writer", sinkName)
+		return fmt.Errorf("sink %s has no live scope-log writer", sinkIDFor(sinkName))
 	}
 
 	scopes, err := reader.ActiveScopes(ctx, c.p.clusterID)

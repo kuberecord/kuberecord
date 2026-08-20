@@ -1083,8 +1083,8 @@ func TestForgetSinkRestoresBootReconciliationAndCancelsWarms(t *testing.T) {
 
 	// The sink is deleted: the SinkManager evicts its pipeline state and, next to
 	// that call, forgets it here.
-	h.coord.ForgetSink(testSink)
-	h.coord.ForgetSink("a-sink-that-never-existed") // safe by contract
+	h.coord.ForgetSink(sinkIDFor(testSink))
+	h.coord.ForgetSink(sinkIDFor("a-sink-that-never-existed")) // safe by contract
 	release()
 
 	// The boot pass runs again for the re-created sink, closing the scope that was

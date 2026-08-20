@@ -84,21 +84,21 @@ func (f *fakeScopeEventWriter) failNext(n int) {
 	f.failures = n
 }
 
-// fakeScopeEventRouter maps sink names to scope-log writers. A name that is absent
-// reproduces a sink that is not live yet.
+// fakeScopeEventRouter maps sink identities to scope-log writers. An identity that
+// is absent reproduces a sink that is not live yet.
 type fakeScopeEventRouter struct {
 	mu      sync.Mutex
-	writers map[string]sink.ScopeEventWriter
+	writers map[sink.ID]sink.ScopeEventWriter
 }
 
 func newFakeScopeEventRouter() *fakeScopeEventRouter {
-	return &fakeScopeEventRouter{writers: make(map[string]sink.ScopeEventWriter)}
+	return &fakeScopeEventRouter{writers: make(map[sink.ID]sink.ScopeEventWriter)}
 }
 
-func (f *fakeScopeEventRouter) ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool) {
+func (f *fakeScopeEventRouter) ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	w, ok := f.writers[name]
+	w, ok := f.writers[id]
 	return w, ok
 }
 
@@ -107,13 +107,13 @@ func (f *fakeScopeEventRouter) ScopeEventWriterFor(name string) (sink.ScopeEvent
 func (f *fakeScopeEventRouter) attach(w sink.ScopeEventWriter) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.writers[recorderSink] = w
+	f.writers[sinkIDFor(recorderSink)] = w
 }
 
 func (f *fakeScopeEventRouter) detach() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.writers, recorderSink)
+	delete(f.writers, sinkIDFor(recorderSink))
 }
 
 // warmCall is one WarmScope / StopScope invocation.

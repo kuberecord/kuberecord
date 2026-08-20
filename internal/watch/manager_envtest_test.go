@@ -117,10 +117,10 @@ func (w *recordingWriter) recordsFor(name string) []sink.Record {
 	return out
 }
 
-// singleSinkRouter resolves every sink name to one writer.
+// singleSinkRouter resolves every sink identity to one writer.
 type singleSinkRouter struct{ writer sink.Writer }
 
-func (r singleSinkRouter) WriterFor(string) (sink.Writer, bool) { return r.writer, true }
+func (r singleSinkRouter) WriterFor(sink.ID) (sink.Writer, bool) { return r.writer, true }
 
 // TestWatchManagerStreamsAndEvictsThroughTheRealPipeline is the envtest acceptance
 // criterion, end to end.
@@ -372,7 +372,8 @@ func hashcacheEntries(t *testing.T, reg *prometheus.Registry) float64 {
 		}
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "sink" && label.GetValue() == testSinkName {
+				// The label carries sink.ID.String(), not the bare CR name (Task 4.1).
+				if label.GetName() == "sink" && label.GetValue() == sinkIDFor(testSinkName).String() {
 					return metric.GetGauge().GetValue()
 				}
 			}

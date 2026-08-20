@@ -30,6 +30,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 const (
@@ -53,12 +55,15 @@ var (
 	gvkPod        = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 )
 
-func target(sink string, gvk schema.GroupVersionKind, namespace, selector string) WatchTarget {
-	return WatchTarget{Sink: sink, GVK: gvk, Namespace: namespace, Selector: selector}
+// The parameter is sinkName, not sink: WatchTarget.Sink is still a bare name
+// until Task 4.2 types it, and this file now imports internal/sink for the
+// identity RulesForSink takes.
+func target(sinkName string, gvk schema.GroupVersionKind, namespace, selector string) WatchTarget {
+	return WatchTarget{Sink: sinkName, GVK: gvk, Namespace: namespace, Selector: selector}
 }
 
-func tkey(sink string, gvk schema.GroupVersionKind, namespace string) TargetKey {
-	return TargetKey{Sink: sink, GVK: gvk, Namespace: namespace}
+func tkey(sinkName string, gvk schema.GroupVersionKind, namespace string) TargetKey {
+	return TargetKey{Sink: sinkName, GVK: gvk, Namespace: namespace}
 }
 
 func state(key TargetKey, ruleKeys, selectors []string) TargetState {
@@ -519,10 +524,17 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 
 // TestPackageImportsRemainMinimal enforces the dependency budget stated in the
 // task: internal/plan is the operator's shared state and must never be able to
-// reach a Kubernetes client, a sink, or a clock. Parsing the package's own
-// source (rather than shelling out to `go list -deps`) keeps the check hermetic
-// and constrains what this package *writes*, which is the property under
+// reach a Kubernetes client, a sink *instance*, or a clock. Parsing the package's
+// own source (rather than shelling out to `go list -deps`) keeps the check
+// hermetic and constrains what this package *writes*, which is the property under
 // review; transitive dependencies of apimachinery are not ours to police.
+//
+// internal/sink joined the budget in Task 4.1, for sink.ID and nothing else: a
+// target has to say *which* sink it streams to, and once identity is typed that
+// statement can only be made in the type the runtime keys on. What the budget
+// still forbids is the thing it was written for — this package resolving,
+// holding or writing to a backend — and isAllowedImport keeps that narrow by
+// naming the one package rather than the whole internal tree.
 func TestPackageImportsRemainMinimal(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -546,8 +558,8 @@ func TestPackageImportsRemainMinimal(t *testing.T) {
 			if isAllowedImport(path) {
 				continue
 			}
-			t.Errorf("%s imports %q: internal/plan may only import the standard library and k8s.io/apimachinery",
-				entry.Name(), path)
+			t.Errorf("%s imports %q: internal/plan may only import the standard library, "+
+				"k8s.io/apimachinery, and internal/sink (for sink.ID)", entry.Name(), path)
 		}
 	}
 }
@@ -561,7 +573,13 @@ func isAllowedImport(path string) bool {
 	if !strings.Contains(root, ".") {
 		return true
 	}
-	return path == "k8s.io/apimachinery" || strings.HasPrefix(path, "k8s.io/apimachinery/")
+	if path == "k8s.io/apimachinery" || strings.HasPrefix(path, "k8s.io/apimachinery/") {
+		return true
+	}
+	// internal/sink, exactly — for sink.ID (see TestPackageImportsRemainMinimal).
+	// Not a prefix match: internal/sink/clickhouse is a driver, and the whole point
+	// of this budget is that this package can never reach one.
+	return path == "github.com/yelzhy/kuberecord/internal/sink"
 }
 
 // TestRulesForSink covers the accessor the sink runtime uses to name a vanished
@@ -627,8 +645,11 @@ func TestRulesForSink(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := New()
 			tc.setup(reg)
-			if got := reg.RulesForSink(tc.sink); !slices.Equal(got, tc.want) {
-				t.Errorf("RulesForSink(%q) = %v, want %v", tc.sink, got, tc.want)
+			// A target is authored with a bare sink name (WatchTarget.Sink is typed in
+			// Task 4.2) while the sink runtime asks with the typed identity it keys on.
+			asked := sink.ID{Kind: sink.DefaultSinkKind, Name: tc.sink}
+			if got := reg.RulesForSink(asked); !slices.Equal(got, tc.want) {
+				t.Errorf("RulesForSink(%s) = %v, want %v", asked, got, tc.want)
 			}
 		})
 	}

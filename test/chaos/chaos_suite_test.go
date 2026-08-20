@@ -111,6 +111,12 @@ const (
 	// sinkName is the ClickHouseSink the suite installs. "default" is the name a
 	// rule's spec.sinkRef defaults to, which is why no rule here spells one.
 	sinkName = "default"
+	// sinkLabel is how that sink appears in the `sink` label of every write-path
+	// metric: sink.ID.String(), i.e. "<Kind>/<Name>" rather than the bare CR name
+	// (Task 4.1). Matching on the name alone silently matches nothing, which reads
+	// exactly like a metric sitting at zero — the failure mode the metric-name
+	// constants below exist to avoid, so the label value gets the same treatment.
+	sinkLabel = "ClickHouseSink/" + sinkName
 )
 
 // The stoppable ClickHouse fixture (test/chaos/manifests/clickhouse.yaml).

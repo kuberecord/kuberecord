@@ -244,7 +244,7 @@ func TestPipelineSnapshotTaggingUntilScopeWarm(t *testing.T) {
 
 	// The gauge must be observable in both states, or "is this scope still
 	// warming?" is unanswerable from metrics alone.
-	gauge := h.pipeline.metrics.safeMode.WithLabelValues(testSink, "", "Pod", "default")
+	gauge := h.pipeline.metrics.safeMode.WithLabelValues(sinkIDFor(testSink).String(), "", "Pod", "default")
 	if got := testutil.ToFloat64(gauge); got != 0 {
 		t.Errorf("safe_mode = %v after warming, want 0", got)
 	}
@@ -255,7 +255,8 @@ func TestPipelineSnapshotTaggingUntilScopeWarm(t *testing.T) {
 	if err := h.pipeline.Process(h.ctx, cold2); err != nil {
 		t.Fatalf("Process(cold again): %v", err)
 	}
-	if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(testSink, "", "Pod", "default")); got != 1 {
+	if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(
+		sinkIDFor(testSink).String(), "", "Pod", "default")); got != 1 {
 		t.Errorf("safe_mode = %v while the scope is un-warmed, want 1", got)
 	}
 }
@@ -508,7 +509,7 @@ func TestPipelineRemoveSink(t *testing.T) {
 		t.Fatalf("Process: %v", err)
 	}
 
-	h.pipeline.RemoveSink(testSink)
+	h.pipeline.RemoveSink(sinkIDFor(testSink))
 	if _, ok := h.pipeline.sinks.lookup(testSink); ok {
 		t.Fatal("RemoveSink left the sink's state behind")
 	}

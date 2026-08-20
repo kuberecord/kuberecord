@@ -1095,19 +1095,22 @@ func NewParker(reconcilers ...*RuleReconciler) *Parker {
 // rule keeps its stale Ready=True until its own resync, at most one resync period
 // later. Blocking the drain would be worse — it would hold up every other sink's
 // lifecycle behind one busy reconciler.
-func (p *Parker) SinkGone(sinkName string, ruleKeys []string) {
+func (p *Parker) SinkGone(id sink.ID, ruleKeys []string) {
 	log := logf.Log.WithName("sink-park")
+	// The whole identity, not just the name: a park log line has to say which
+	// backend went away when two kinds may share a name.
+	sinkRef := id.String()
 	for _, key := range ruleKeys {
 		kind, ref, ok := parseRuleKey(key)
 		if !ok {
 			log.Error(errUnparseableRuleKey, "Cannot park a rule whose registry key is unrecognised",
-				"sink", sinkName, "rule", key)
+				"sink", sinkRef, "rule", key)
 			continue
 		}
 		events, known := p.channels[kind]
 		if !known {
 			log.Error(errUnparseableRuleKey, "No reconciler is registered for a rule kind that must be parked",
-				"sink", sinkName, "rule", key, "kind", kind)
+				"sink", sinkRef, "rule", key, "kind", kind)
 			continue
 		}
 
@@ -1115,7 +1118,7 @@ func (p *Parker) SinkGone(sinkName string, ruleKeys []string) {
 		case events <- event.GenericEvent{Object: newRuleStub(kind, ref)}:
 		default:
 			log.Error(errParkChannelFull, "Dropping a park trigger; the rule re-reconciles on its next resync",
-				"sink", sinkName, "rule", key)
+				"sink", sinkRef, "rule", key)
 		}
 	}
 }

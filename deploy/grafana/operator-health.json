@@ -33,7 +33,7 @@
         "type": "query",
         "name": "sink",
         "label": "Sink",
-        "description": "Which ClickHouseSink to chart. One operator can serve several, and every write-path series is labelled by sink so a backend falling behind is attributable to that backend.",
+        "description": "Which sink to chart, as <Kind>/<Name> (e.g. ClickHouseSink/default). One operator can serve several, and every write-path series is labelled by sink so a backend falling behind is attributable to that backend.",
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"

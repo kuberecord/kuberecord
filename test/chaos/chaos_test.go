@@ -562,12 +562,12 @@ var _ = Describe("Phase 2 chaos scenarios", Ordered, Serial, func() {
 
 // failedSeries pins the writes_total family to this sink's failure outcome.
 func failedSeries() map[string]string {
-	return map[string]string{"sink": sinkName, "outcome": "failed"}
+	return map[string]string{"sink": sinkLabel, "outcome": "failed"}
 }
 
 // blockBucket pins the enqueue_block_seconds histogram to one cumulative bucket.
 func blockBucket(le string) map[string]string {
-	return map[string]string{"sink": sinkName, "le": le}
+	return map[string]string{"sink": sinkLabel, "le": le}
 }
 
 // latestScopeAction returns the most recent transition recorded for a

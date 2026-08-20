@@ -39,12 +39,17 @@ import (
 // insertArgs; the fakes use it to identify a specific "poison" row.
 const nameArgIndex = 7
 
-// testSinkName is the sink label every writer built by these tests reports its
+// testSinkName is the sink every writer built by these tests reports its
 // write-path metrics under (Task 1.8 made those series per-sink). The value is
 // irrelevant to what the tests assert — writesTotalValue matches on the outcome
-// label — but a named constant keeps the label consistent across the package's
-// test files.
+// label — but a named constant keeps it consistent across the package's test
+// files.
 const testSinkName = "test-sink"
+
+// testSinkID is that sink's identity, which is what ForSink takes since Task 4.1
+// (and what its label value renders as: "ClickHouseSink/test-sink"). These tests
+// build ClickHouse writers, so the kind is not in doubt.
+var testSinkID = sink.ID{Kind: sink.DefaultSinkKind, Name: testSinkName}
 
 // erroringConn is a driver.Conn whose batch and single-row writes always fail,
 // used to prove the failure-outcome accounting. Embedding the interface
@@ -243,7 +248,7 @@ func TestBatchFlushBoundsSendCalls(t *testing.T) {
 	conn := &fakeConn{} // healthy: nil hooks
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	// Large batchMaxWait so only row-count and drain drive flushes, never the timer.
 	w := NewCHWriter(conn, jobs, workers, batchMaxRows, 5*time.Millisecond, time.Second, time.Second, 30*time.Second, time.Second, m)
 
@@ -292,7 +297,7 @@ func TestPoisonRowIsolation(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	// One worker so all ten jobs land in one batch; tiny retry cap so the batch
 	// exhausts quickly; large batchMaxWait so row-count (not the timer) flushes.
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, 5*time.Millisecond, 20*time.Millisecond, time.Second, 30*time.Second, time.Second, m)
@@ -345,7 +350,7 @@ func TestLoneJobFlushesOnWait(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	// batchMaxRows well above 1 so only the wait timer can flush the lone job.
 	w := NewCHWriter(conn, 100, 1, 100, 5*time.Millisecond, time.Second, time.Second, batchMaxWait, time.Second, m)
 
@@ -384,7 +389,7 @@ func TestShutdownFlushesPartialBatch(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	// One worker, batchMaxRows=10, large batchMaxWait: the 5 jobs never reach a
 	// row-count or timer flush, so only the drain can flush them.
 	w := NewCHWriter(conn, 100, 1, 10, 5*time.Millisecond, time.Second, time.Second, 30*time.Second, time.Second, m)
@@ -429,7 +434,7 @@ func TestConcurrentEnqueueStorm(t *testing.T) {
 	conn := &fakeConn{} // healthy
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	w := NewCHWriter(conn, jobs, 4, 10, 5*time.Millisecond, time.Second, time.Second, 20*time.Millisecond, time.Second, m)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -477,7 +482,7 @@ func TestCancelMidBatchCommitsOnce(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, time.Second, time.Second, time.Second, 30*time.Second, time.Second, m)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -517,7 +522,7 @@ func TestCancelMidBatchCommitsOnce(t *testing.T) {
 // writes_total{outcome="failed"}.
 func TestWritesTotalFailedIncrements(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 
 	// Tiny per-attempt timeout and retry cap so the job exhausts retries and
 	// settles quickly; small batchMaxWait so the lone job flushes on the timer.
@@ -679,7 +684,7 @@ func TestIsolationPhaseBoundedOnHungBackend(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	// One worker so all rows land in one batch; tiny retry cap so the batch phase
 	// exhausts fast and the isolation phase dominates; large batchMaxWait so only
 	// the row-count flush fires.
@@ -749,7 +754,7 @@ func TestIsolationPhaseDoesNotTruncateSlowBackend(t *testing.T) {
 	}
 
 	reg := prometheus.NewRegistry()
-	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkName)
+	m := pipeline.NewPipelineMetrics(reg).ForSink(testSinkID)
 	w := NewCHWriter(conn, 100, 1, batchMaxRows, insertTimeout, 20*time.Millisecond, time.Second, 30*time.Second, time.Second, m)
 	w.maxIsolationPhase = maxIsolationPhase
 

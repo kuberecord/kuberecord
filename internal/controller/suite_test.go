@@ -391,7 +391,7 @@ func (h *harness) createReadySink(name string, policy v1alpha1.SinkPolicy) {
 	// The first reconcile resolves the credential and declares the sink; the probe
 	// is what flips SchemaValid and therefore Ready.
 	h.waitForSinkCondition(name, v1alpha1.ConditionCredentialsResolved, metav1.ConditionTrue, ReasonSecretResolved)
-	h.pushProbe(sink.ProbeResult{Sink: name, At: time.Now().UTC()})
+	h.pushProbe(sink.ProbeResult{Sink: clickHouseSinkID(name), At: time.Now().UTC()})
 	h.waitForSinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonConnected)
 }
 
@@ -613,55 +613,62 @@ func (f *fakeReviewer) Create(_ context.Context, review *authzv1.SelfSubjectAcce
 }
 
 // fakeSinkRuntime records the configurations the sink reconciler declared and the
-// names it withdrew. It never builds anything and never dials anything, which is
+// sinks it withdrew. It never builds anything and never dials anything, which is
 // the point: the reconciler's whole interaction with a backend is a struct
 // hand-off.
+//
+// It is keyed by sink.ID, as the real runtime is, so these tests also assert that
+// the reconciler declares its sinks under the ClickHouseSink kind rather than
+// under a bare name (Task 4.1): a wrong kind would simply not be found by the
+// accessors below.
 type fakeSinkRuntime struct {
 	mu       sync.Mutex
-	ensured  map[string][]string // sink name → fingerprints, in order
-	deleted  []string
+	ensured  map[sink.ID][]string // sink → fingerprints, in order
+	deleted  []sink.ID
 	ensueErr error
 }
 
 func newFakeSinkRuntime() *fakeSinkRuntime {
-	return &fakeSinkRuntime{ensured: make(map[string][]string)}
+	return &fakeSinkRuntime{ensured: make(map[sink.ID][]string)}
 }
 
-func (f *fakeSinkRuntime) Ensure(name string, cfg sink.InstanceConfig) error {
+func (f *fakeSinkRuntime) Ensure(id sink.ID, cfg sink.InstanceConfig) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.ensueErr != nil {
 		return f.ensueErr
 	}
-	fingerprints := f.ensured[name]
+	fingerprints := f.ensured[id]
 	fingerprint := cfg.Fingerprint()
 	// Only a *change* is recorded, so a test asserting "the password rotation
 	// recycled the instance" is asserting the same thing the production runtime
 	// would act on rather than counting reconciles.
 	if len(fingerprints) == 0 || fingerprints[len(fingerprints)-1] != fingerprint {
-		f.ensured[name] = append(fingerprints, fingerprint)
+		f.ensured[id] = append(fingerprints, fingerprint)
 	}
 	return nil
 }
 
-func (f *fakeSinkRuntime) Delete(name string) {
+func (f *fakeSinkRuntime) Delete(id sink.ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.deleted = append(f.deleted, name)
+	f.deleted = append(f.deleted, id)
 }
 
-// fingerprints returns the distinct configurations declared for one sink, in order.
+// fingerprints returns the distinct configurations declared for one sink, in
+// order. It takes a name and resolves the ID itself, because every sink these
+// tests create is a ClickHouseSink.
 func (f *fakeSinkRuntime) fingerprints(name string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.ensured[name]...)
+	return append([]string(nil), f.ensured[clickHouseSinkID(name)]...)
 }
 
 // deletions returns the sinks withdrawn so far.
-func (f *fakeSinkRuntime) deletions() []string {
+func (f *fakeSinkRuntime) deletions() []sink.ID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.deleted...)
+	return append([]sink.ID(nil), f.deleted...)
 }
 
 // fakeConfig is a minimal sink.InstanceConfig: a fingerprint and nothing else, since

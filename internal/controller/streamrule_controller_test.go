@@ -476,7 +476,7 @@ func TestRuleSinkMissingParksAndWithdraws(t *testing.T) {
 	// The registry is the sink runtime's dependent-rule oracle, so it must name this
 	// rule while the rule is streaming — that is what makes the park callback able
 	// to reach it.
-	if got := h.Registry.RulesForSink(sinkName); !slicesEqual(got, []string{ruleKey}) {
+	if got := h.Registry.RulesForSink(clickHouseSinkID(sinkName)); !slicesEqual(got, []string{ruleKey}) {
 		t.Errorf("RulesForSink(%q) = %v, want [%s]", sinkName, got, ruleKey)
 	}
 
@@ -516,7 +516,7 @@ func TestRuleSinkNotReadyKeepsWatches(t *testing.T) {
 	// The sink goes unreachable. The rule's own gates all still pass, so its
 	// specific conditions stay True and only the roll-up degrades.
 	h.pushProbe(sink.ProbeResult{
-		Sink:   sinkName,
+		Sink:   clickHouseSinkID(sinkName),
 		At:     time.Now().UTC(),
 		Err:    errors.New("connection refused"),
 		Reason: sink.ProbeReasonUnreachable,
@@ -530,7 +530,7 @@ func TestRuleSinkNotReadyKeepsWatches(t *testing.T) {
 	h.waitForRuleCondition(rule, v1alpha1.ConditionRBACGranted, metav1.ConditionTrue, ReasonAllVerbsGranted)
 
 	// Recovery flips both back.
-	h.pushProbe(sink.ProbeResult{Sink: sinkName, At: time.Now().UTC()})
+	h.pushProbe(sink.ProbeResult{Sink: clickHouseSinkID(sinkName), At: time.Now().UTC()})
 	h.waitForSinkCondition(sinkName, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonConnected)
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
 	if got := h.targetsFor(ruleKey); !slicesEqual(got, installed) {
@@ -631,7 +631,7 @@ func TestParkerWakesDependentRules(t *testing.T) {
 	if err := h.Client.Delete(context.Background(), &chSink); err != nil {
 		t.Fatalf("delete the sink: %v", err)
 	}
-	h.Parker.SinkGone(sinkName, []string{ruleKey})
+	h.Parker.SinkGone(clickHouseSinkID(sinkName), []string{ruleKey})
 
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
 	h.waitForTargets(ruleKey, nil)
@@ -645,7 +645,7 @@ func TestParkerRejectsUnknownKeys(t *testing.T) {
 	reconciler.events = make(chan event.GenericEvent, 4)
 	parker := NewParker(reconciler)
 
-	parker.SinkGone("sink", []string{
+	parker.SinkGone(clickHouseSinkID("sink"), []string{
 		"garbage",                // not a key at all
 		"deployment/ns/name",     // a well-formed key naming a kind we do not serve
 		"clusterstreamrule//csr", // a kind this Parker has no reconciler for

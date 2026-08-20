@@ -23,6 +23,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // TestPipelineMetricsRegistration builds an isolated PipelineMetrics on a fresh
@@ -38,9 +40,9 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	// that for the whole write path in one call (which is also how production
 	// reaches them), leaving only the two pipeline-owned label sets. The
 	// pipeline_dropped_total series is already seeded by the constructor.
-	m.ForSink("default")
-	m.hashcacheEntries.WithLabelValues("default")
-	m.safeMode.WithLabelValues("default", "apps", "Deployment", "demo")
+	m.ForSink(sinkIDFor("default"))
+	m.hashcacheEntries.WithLabelValues(sinkIDFor("default").String())
+	m.safeMode.WithLabelValues(sinkIDFor("default").String(), "apps", "Deployment", "demo")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -115,12 +117,17 @@ func seriesLabels(t *testing.T, reg prometheus.Gatherer) map[string][]string {
 // not one series overwritten by whichever writer reported last. It asserts the
 // label sets directly, and that the pipeline-owned counters deliberately stay
 // unlabelled.
+//
+// The label *values* are sink.ID.String() — "<Kind>/<Name>", not the bare CR name
+// (Task 4.1, a breaking change for any dashboard that matched on the old value).
+// Asserting them in full is what makes that format a tested contract rather than
+// an incidental rendering.
 func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPipelineMetrics(reg)
 
-	primary := m.ForSink("primary")
-	audit := m.ForSink("audit")
+	primary := m.ForSink(sinkIDFor("primary"))
+	audit := m.ForSink(sinkIDFor("audit"))
 
 	primary.SetWriteQueueDepth(7)
 	primary.SetWriteQueueCapacity(100)
@@ -132,20 +139,27 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 
 	labels := seriesLabels(t, reg)
 
+	// Spelled out rather than derived, so the expected label format is visible here
+	// and a change to ID.String() fails this test instead of silently passing it.
+	const (
+		auditSeries   = "sink=ClickHouseSink/audit"
+		primarySeries = "sink=ClickHouseSink/primary"
+	)
+
 	tests := []struct {
 		metric string
 		want   []string
 	}{
-		{"kuberecord_write_queue_depth", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_write_queue_capacity", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_write_latency_seconds", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_write_retry_attempts_total", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_write_batch_rows", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_enqueue_block_seconds", []string{"sink=audit", "sink=primary"}},
-		{"kuberecord_enqueue_timeouts_total", []string{"sink=audit", "sink=primary"}},
+		{"kuberecord_write_queue_depth", []string{auditSeries, primarySeries}},
+		{"kuberecord_write_queue_capacity", []string{auditSeries, primarySeries}},
+		{"kuberecord_write_latency_seconds", []string{auditSeries, primarySeries}},
+		{"kuberecord_write_retry_attempts_total", []string{auditSeries, primarySeries}},
+		{"kuberecord_write_batch_rows", []string{auditSeries, primarySeries}},
+		{"kuberecord_enqueue_block_seconds", []string{auditSeries, primarySeries}},
+		{"kuberecord_enqueue_timeouts_total", []string{auditSeries, primarySeries}},
 		{"kuberecord_writes_total", []string{
-			"outcome=failed,sink=audit", "outcome=failed,sink=primary",
-			"outcome=success,sink=audit", "outcome=success,sink=primary",
+			"outcome=failed," + auditSeries, "outcome=failed," + primarySeries,
+			"outcome=success," + auditSeries, "outcome=success," + primarySeries,
 		}},
 		// Pipeline-owned, and deliberately not per-sink: dedup is a property of the
 		// shared workqueue's short-circuit rate, not of a backend.
@@ -160,10 +174,10 @@ func TestSinkMetricsAreLabelledPerSink(t *testing.T) {
 	}
 
 	// Both sinks' values survive independently — the point of the label.
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "primary"); got != 7 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("primary")); got != 7 {
 		t.Errorf("primary write_queue_depth = %v, want 7", got)
 	}
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "audit"); got != 3 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("audit")); got != 3 {
 		t.Errorf("audit write_queue_depth = %v, want 3", got)
 	}
 }
@@ -180,15 +194,16 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	gone := m.ForSink("gone")
+	goneID := sinkIDFor("gone")
+	gone := m.ForSink(goneID)
 	gone.SetWriteQueueDepth(9)
 	gone.IncWrite("success")
-	m.hashcacheEntries.WithLabelValues("gone").Set(4)
-	m.safeMode.WithLabelValues("gone", "apps", "Deployment", "demo").Set(1)
-	// A second sink proves the eviction is scoped to the name, not a wipe.
-	m.ForSink("kept").SetWriteQueueDepth(2)
+	m.hashcacheEntries.WithLabelValues(goneID.String()).Set(4)
+	m.safeMode.WithLabelValues(goneID.String(), "apps", "Deployment", "demo").Set(1)
+	// A second sink proves the eviction is scoped to the one sink, not a wipe.
+	m.ForSink(sinkIDFor("kept")).SetWriteQueueDepth(2)
 
-	p.RemoveSink("gone")
+	p.RemoveSink(goneID)
 
 	labels := seriesLabels(t, reg)
 	for _, metric := range []string{
@@ -198,19 +213,19 @@ func TestRemoveSinkDeletesSinkSeries(t *testing.T) {
 		"kuberecord_enqueue_timeouts_total", "kuberecord_hashcache_entries", "kuberecord_safe_mode",
 	} {
 		for _, series := range labels[metric] {
-			if strings.Contains(series, "sink=gone") {
+			if strings.Contains(series, "sink="+goneID.String()) {
 				t.Errorf("%s still has a series for the removed sink: %q", metric, series)
 			}
 		}
 	}
-	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", "kept"); got != 2 {
+	if got := gaugeValue(t, reg, "kuberecord_write_queue_depth", sinkIDFor("kept")); got != 2 {
 		t.Errorf("the surviving sink's write_queue_depth = %v, want 2", got)
 	}
 }
 
-// gaugeValue returns the value of metric{sink=sinkName}, failing the test if the
-// series is absent.
-func gaugeValue(t *testing.T, reg prometheus.Gatherer, metric, sinkName string) float64 {
+// gaugeValue returns the value of metric{sink=id}, failing the test if the series
+// is absent. It matches on ID.String(), which is what the label carries.
+func gaugeValue(t *testing.T, reg prometheus.Gatherer, metric string, id sink.ID) float64 {
 	t.Helper()
 	families, err := reg.Gather()
 	if err != nil {
@@ -222,12 +237,12 @@ func gaugeValue(t *testing.T, reg prometheus.Gatherer, metric, sinkName string) 
 		}
 		for _, mtc := range mf.GetMetric() {
 			for _, lp := range mtc.GetLabel() {
-				if lp.GetName() == sinkLabel && lp.GetValue() == sinkName {
+				if lp.GetName() == sinkLabel && lp.GetValue() == id.String() {
 					return mtc.GetGauge().GetValue()
 				}
 			}
 		}
 	}
-	t.Fatalf("gauge %s{sink=%q} not found", metric, sinkName)
+	t.Fatalf("gauge %s{sink=%q} not found", metric, id)
 	return 0
 }

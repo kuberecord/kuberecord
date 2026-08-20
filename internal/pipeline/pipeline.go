@@ -128,17 +128,35 @@ type ListerRegistry interface {
 	Get(ref Key) (obj *unstructured.Unstructured, found bool, scopeActive bool, err error)
 }
 
-// SinkRouter resolves a key's sink name to the live Writer currently serving it.
-// Task 1.8's SinkManager is the production implementation; resolution happens
+// SinkRouter resolves a key's sink identity to the live Writer currently serving
+// it. Task 1.8's SinkManager is the production implementation; resolution happens
 // per work item (rather than being captured once at wiring time) so a sink that
 // is recycled after a credential rotation swaps in without the pipeline holding
 // a stale Writer.
 type SinkRouter interface {
-	// WriterFor returns the Writer for name, or ok=false when no live instance
+	// WriterFor returns the Writer for id, or ok=false when no live instance
 	// exists — the sink's CR was deleted, or the instance is mid-recycle. False
 	// is an ordinary, transient answer, never a reason to panic: the caller
 	// re-queues the key on the rate limiter and retries.
-	WriterFor(name string) (sink.Writer, bool)
+	WriterFor(id sink.ID) (sink.Writer, bool)
+}
+
+// sinkIDFor lifts a bare sink name onto the typed identity the sink runtime
+// routes on and the per-sink metric series are labelled by (Task 4.1).
+//
+// It exists only for as long as this package still holds sink *names*: Task 4.2
+// retypes Key.Sink (and the per-sink state registry's keys) to sink.ID, at which
+// point every call site below passes the typed value straight through and this
+// function goes away.
+//
+// The lift is exact rather than a guess, and that distinction is the whole reason
+// it lives here rather than inside the manager: ClickHouseSink is the only sink
+// CRD that exists, so every name this process can hold belongs to one, and the
+// kind is *known*. SinkManager.Ensure refuses to make the same substitution
+// precisely because there the kind would be *invented* — see
+// sink.DefaultSinkKind.
+func sinkIDFor(name string) sink.ID {
+	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
 }
 
 // RedactionRegistry answers "what must be scrubbed out of this key's objects
@@ -415,9 +433,9 @@ func (p *Pipeline) redactionFor(key Key) (*RedactionPolicy, bool) {
 // empty cache and re-warms from that sink's own history (Invariant 6: in-memory
 // state is always reconstructible from the API plus the sink).
 //
-// It is safe to call for a name the pipeline never saw.
-func (p *Pipeline) RemoveSink(name string) {
-	p.sinks.remove(name)
+// It is safe to call for a sink the pipeline never saw.
+func (p *Pipeline) RemoveSink(id sink.ID) {
+	p.sinks.remove(id)
 }
 
 // EvictScope drops the cached baselines and warm marker for one watch scope on
@@ -521,15 +539,21 @@ func (r *sinkStateRegistry) lookup(name string) (*sinkState, bool) {
 	return st, ok
 }
 
-func (r *sinkStateRegistry) remove(name string) {
+// remove drops a sink's state and every series that described it.
+//
+// The states map is still keyed by name until Task 4.2 types Key.Sink, so the
+// entry is dropped by id.Name — the same key every other hook here uses — while
+// the metric series are dropped by id.String(), which is what they are labelled
+// with.
+func (r *sinkStateRegistry) remove(id sink.ID) {
 	r.mu.Lock()
-	delete(r.states, name)
+	delete(r.states, id.Name)
 	r.mu.Unlock()
 	// Delete the sink's series too: leaving them behind would report a stale entry
 	// count, queue depth and capacity for a sink that no longer exists — which
 	// reads as a live-but-idle backend rather than an absent one.
-	r.metrics.hashcacheEntries.DeleteLabelValues(name)
-	r.metrics.deleteSinkSeries(name)
+	r.metrics.hashcacheEntries.DeleteLabelValues(id.String())
+	r.metrics.deleteSinkSeries(id)
 }
 
 func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
@@ -541,14 +565,15 @@ func (r *sinkStateRegistry) evictScope(name string, scope ScopeKey) {
 	st.mu.Lock()
 	delete(st.warm, scope)
 	st.mu.Unlock()
-	r.metrics.safeMode.DeleteLabelValues(name, scope.Group, scope.Kind, scope.Namespace)
+	sinkSeries := sinkIDFor(name).String()
+	r.metrics.safeMode.DeleteLabelValues(sinkSeries, scope.Group, scope.Kind, scope.Namespace)
 
 	// Entry removal happens outside every lock the metric touches: DeletePrefix
 	// takes and releases the cache's own mutex, and the gauge Set below runs
 	// strictly after it (no metric call ever runs while a hashCache lock is
 	// held — a Task 0.1 acceptance criterion).
 	removed := st.cache.DeletePrefix(scope.scopeKeyPrefix())
-	r.metrics.hashcacheEntries.WithLabelValues(name).Set(float64(st.cache.Len()))
+	r.metrics.hashcacheEntries.WithLabelValues(sinkSeries).Set(float64(st.cache.Len()))
 
 	logf.Log.WithName("pipeline").V(1).Info("Evicted watch scope from pipeline cache",
 		"sink", name, "group", scope.Group, "kind", scope.Kind, "namespace", scope.Namespace,
@@ -560,7 +585,7 @@ func (r *sinkStateRegistry) markScopeWarm(name string, scope ScopeKey) {
 	st.mu.Lock()
 	st.warm[scope] = struct{}{}
 	st.mu.Unlock()
-	r.metrics.safeMode.WithLabelValues(name, scope.Group, scope.Kind, scope.Namespace).Set(0)
+	r.metrics.safeMode.WithLabelValues(sinkIDFor(name).String(), scope.Group, scope.Kind, scope.Namespace).Set(0)
 }
 
 // recordScopeUnwarmed publishes safe_mode=1 for a (sink, scope) pair the pipeline
@@ -572,7 +597,7 @@ func (r *sinkStateRegistry) markScopeWarm(name string, scope ScopeKey) {
 // warming?" unanswerable from metrics alone.
 func (p *Pipeline) recordScopeUnwarmed(key Key) {
 	scope := key.Scope()
-	p.metrics.safeMode.WithLabelValues(key.Sink, scope.Group, scope.Kind, scope.Namespace).Set(1)
+	p.metrics.safeMode.WithLabelValues(sinkIDFor(key.Sink).String(), scope.Group, scope.Kind, scope.Namespace).Set(1)
 }
 
 // recordCacheEntries publishes a sink's current hashCache size to the
@@ -580,7 +605,7 @@ func (p *Pipeline) recordScopeUnwarmed(key Key) {
 // the gauge Set happens here, strictly outside it — no metric call ever runs
 // while a hashCache lock is held (a Task 0.1 acceptance criterion).
 func (p *Pipeline) recordCacheEntries(sinkName string, st *sinkState) {
-	p.metrics.hashcacheEntries.WithLabelValues(sinkName).Set(float64(st.cache.Len()))
+	p.metrics.hashcacheEntries.WithLabelValues(sinkIDFor(sinkName).String()).Set(float64(st.cache.Len()))
 }
 
 // logThrottle allows one event per interval per key, so a condition affecting

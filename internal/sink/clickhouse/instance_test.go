@@ -35,7 +35,7 @@ import (
 // but NewCHWriter's contract is that its metrics are never nil, and a test that
 // passed nil would be asserting against a writer production never builds.
 func probeMetrics() *pipeline.SinkMetrics {
-	return pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkName)
+	return pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkID)
 }
 
 // baseConfig is the reference configuration the fingerprint tests mutate one

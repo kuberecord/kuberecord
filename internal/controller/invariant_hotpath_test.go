@@ -138,11 +138,11 @@ func TestInvariant1NoReconcilerPathDialsTheSink(t *testing.T) {
 	// A failing probe, a recovery, a rotated credential and a deletion: every event
 	// the two reconcilers respond to.
 	h.pushProbe(sink.ProbeResult{
-		Sink: sinkName, At: time.Now().UTC(),
+		Sink: clickHouseSinkID(sinkName), At: time.Now().UTC(),
 		Err: errors.New("unreachable"), Reason: sink.ProbeReasonUnreachable,
 	})
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkNotReady)
-	h.pushProbe(sink.ProbeResult{Sink: sinkName, At: time.Now().UTC()})
+	h.pushProbe(sink.ProbeResult{Sink: clickHouseSinkID(sinkName), At: time.Now().UTC()})
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
 
 	var chSink v1alpha1.ClickHouseSink
@@ -163,7 +163,7 @@ func TestInvariant1NoReconcilerPathDialsTheSink(t *testing.T) {
 	// dialled, so the zero count means "the reconcilers did not" rather than "nothing
 	// could".
 	runtime, err := sink.NewSinkManager(sink.ManagerOptions{
-		Factory:         func(string, sink.InstanceConfig) (sink.Writer, error) { return &dialingWriter{dialer: dialer}, nil },
+		Factory:         func(sink.ID, sink.InstanceConfig) (sink.Writer, error) { return &dialingWriter{dialer: dialer}, nil },
 		Pipeline:        nopPipeline{},
 		ProbeInterval:   10 * time.Millisecond,
 		ProbeMinBackoff: 10 * time.Millisecond,
@@ -180,7 +180,7 @@ func TestInvariant1NoReconcilerPathDialsTheSink(t *testing.T) {
 			t.Errorf("the sink runtime stopped with an error: %v", err)
 		}
 	}()
-	if err := runtime.Ensure(sinkName, fakeConfig{fingerprint: "phase-two"}); err != nil {
+	if err := runtime.Ensure(clickHouseSinkID(sinkName), fakeConfig{fingerprint: "phase-two"}); err != nil {
 		t.Fatalf("declare a sink to the runtime: %v", err)
 	}
 
@@ -206,4 +206,4 @@ func TestInvariant1NoReconcilerPathDialsTheSink(t *testing.T) {
 // exercise.
 type nopPipeline struct{}
 
-func (nopPipeline) RemoveSink(string) {}
+func (nopPipeline) RemoveSink(sink.ID) {}

@@ -184,8 +184,10 @@ type harnessRouter struct {
 	writer sink.Writer
 }
 
-func (r harnessRouter) WriterFor(name string) (sink.Writer, bool) {
-	if name != loadgenSink {
+func (r harnessRouter) WriterFor(id sink.ID) (sink.Writer, bool) {
+	// The pipeline routes on sink.ID (Task 4.1); Key.Sink is still the bare name
+	// the harness authors its keys with, lifted onto the ClickHouseSink kind.
+	if id != (sink.ID{Kind: sink.DefaultSinkKind, Name: loadgenSink}) {
 		return nil, false
 	}
 	return r.writer, true

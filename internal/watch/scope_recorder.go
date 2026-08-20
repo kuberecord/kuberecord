@@ -54,17 +54,31 @@ const (
 // response to a sink that has been unreachable for a very long time.
 var errScopeQueueOverflow = errors.New("scope event queue overflowed, oldest transitions dropped")
 
-// ScopeEventRouter resolves a sink name to the live scope-log writer serving it.
+// ScopeEventRouter resolves a sink identity to the live scope-log writer serving
+// it.
 //
 // Task 1.8's SinkManager is the production implementation. Resolution happens per
 // flush attempt rather than being captured at wiring time, so a sink recycled
 // after a credential rotation is picked up without the recorder holding a stale
 // instance — and a sink that is not live yet simply leaves its events queued.
 type ScopeEventRouter interface {
-	// ScopeEventWriterFor returns the scope-log writer for name, or ok=false when
+	// ScopeEventWriterFor returns the scope-log writer for id, or ok=false when
 	// no live instance exists (the sink's CR was deleted, it is mid-recycle, or it
 	// does not record scope epochs at all).
-	ScopeEventWriterFor(name string) (sink.ScopeEventWriter, bool)
+	ScopeEventWriterFor(id sink.ID) (sink.ScopeEventWriter, bool)
+}
+
+// sinkIDFor lifts a bare sink name onto the typed identity the sink runtime
+// routes on (Task 4.1).
+//
+// This package still holds sink *names* — the interest map, and the queued scope
+// events derived from it, are keyed by one — so the lift happens at the routing
+// boundary. Task 4.2 types those keys and the lift disappears. It is exact rather
+// than a guess: ClickHouseSink is the only sink CRD, so every name held here
+// belongs to one (see sink.DefaultSinkKind for why the manager still refuses to
+// make the same substitution itself).
+func sinkIDFor(name string) sink.ID {
+	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
 }
 
 // ScopeWarmer is the per-scope warm/GC coordinator as the recorder needs it.
@@ -410,7 +424,7 @@ func (r *ScopeEpochRecorder) flush(ctx context.Context, log logr.Logger) {
 			"namespace", next.event.Scope.Namespace, "rule_ref", next.event.RuleRef,
 		}
 
-		writer, ok := r.events.ScopeEventWriterFor(next.sink)
+		writer, ok := r.events.ScopeEventWriterFor(sinkIDFor(next.sink))
 		if !ok {
 			// Not an anomaly: the sink may simply not be live yet (a rule applied
 			// before its ClickHouseSink became ready) or be mid-recycle. The events

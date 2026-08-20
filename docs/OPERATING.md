@@ -34,13 +34,22 @@ Everything kuberecord exports is prefixed `kuberecord_`, alongside the standard
 its own — the two `workqueue_*` families are worth a look too, since the pipeline's
 own queue is a client-go workqueue.
 
-Every metric a single sink instance reports carries a `sink=<name>` label naming
-the `ClickHouseSink` it belongs to: one operator can run several sinks at once,
-and without the label two writers would overwrite each other's series. Metrics
-the shared pipeline owns (`dedup_skips_total`, `pipeline_dropped_total`) carry no
+Every metric a single sink instance reports carries a `sink=<Kind>/<Name>` label
+naming the sink CR it belongs to — `sink="ClickHouseSink/default"`, not
+`sink="default"`. One operator can run several sinks at once, and without the
+label two writers would overwrite each other's series; the *kind* is in the value
+because a name is only unique within a kind, so two same-named sinks of different
+kinds would otherwise merge into one series describing neither. Metrics the
+shared pipeline owns (`dedup_skips_total`, `pipeline_dropped_total`) carry no
 `sink` label, because they describe the workqueue rather than any one backend. A
 sink's series are deleted when the sink is deleted, so an absent backend does not
 linger as a live-but-idle one.
+
+The label *format* changed in v0.2.0: before it, the value was the bare CR name.
+Expressions that group or sum `by (sink)` keep working unchanged — only the
+rendered value differs — but anything that matches a value exactly
+(`sink="default"`) must be updated to the new form or it silently matches
+nothing.
 
 | Metric | Type | Labels | What it tells you |
 |---|---|---|---|

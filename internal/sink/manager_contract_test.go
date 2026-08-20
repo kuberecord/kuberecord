@@ -119,7 +119,7 @@ func (l *staticLister) Get(ref pipeline.Key) (*unstructured.Unstructured, bool, 
 // pipeline of its own to evict from.
 type nopPipeline struct{}
 
-func (nopPipeline) RemoveSink(string) {}
+func (nopPipeline) RemoveSink(sink.ID) {}
 
 // newPod builds one Pod as the watch cache would hold it.
 func newPod(name, uid, image string) *unstructured.Unstructured {
@@ -146,17 +146,21 @@ func newPod(name, uid, image string) *unstructured.Unstructured {
 // content hash is identical), while a repeat for the first sink must still
 // deduplicate (proving each sink genuinely has a cache, rather than none at all).
 func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
-	writers := map[string]*recordingWriter{"primary": {}, "audit": {}}
+	// Keyed by identity, as the runtime is: a rule streams to a (kind, name) pair,
+	// never to a bare name (Task 4.1).
+	primaryID := sink.ID{Kind: sink.DefaultSinkKind, Name: "primary"}
+	auditID := sink.ID{Kind: sink.DefaultSinkKind, Name: "audit"}
+	writers := map[sink.ID]*recordingWriter{primaryID: {}, auditID: {}}
 
 	mgr, err := sink.NewSinkManager(sink.ManagerOptions{
 		Pipeline: nopPipeline{},
 		// A long probe interval: these writers have no Prober, but a short interval
 		// would be misleading to a later reader of this test.
 		ProbeInterval: time.Hour,
-		Factory: func(name string, _ sink.InstanceConfig) (sink.Writer, error) {
-			w, ok := writers[name]
+		Factory: func(id sink.ID, _ sink.InstanceConfig) (sink.Writer, error) {
+			w, ok := writers[id]
 			if !ok {
-				return nil, fmt.Errorf("unexpected sink %q", name)
+				return nil, fmt.Errorf("unexpected sink %s", id)
 			}
 			return w, nil
 		},
@@ -176,20 +180,23 @@ func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
 	})
 
 	// Both sinks live, routed by the manager the pipeline resolves through.
-	for name := range writers {
-		if err := mgr.Ensure(name, staticConfig(name)); err != nil {
-			t.Fatalf("Ensure(%q): %v", name, err)
+	for id := range writers {
+		if err := mgr.Ensure(id, staticConfig(id.Name)); err != nil {
+			t.Fatalf("Ensure(%s): %v", id, err)
 		}
 	}
 	waitForCond(t, "both sinks to be routed", func() bool {
-		_, primary := mgr.WriterFor("primary")
-		_, audit := mgr.WriterFor("audit")
+		_, primary := mgr.WriterFor(primaryID)
+		_, audit := mgr.WriterFor(auditID)
 		return primary && audit
 	})
 
 	lister := newStaticLister()
-	primaryKey := pipeline.Key{Sink: "primary", Kind: "Pod", Namespace: "default", Name: "web"}
-	auditKey := pipeline.Key{Sink: "audit", Kind: "Pod", Namespace: "default", Name: "web"}
+	// Key.Sink is still a bare name until Task 4.2 types it; the pipeline lifts it
+	// onto the ID the manager routes on, which is why these resolve to the two
+	// instances declared above.
+	primaryKey := pipeline.Key{Sink: primaryID.Name, Kind: "Pod", Namespace: "default", Name: "web"}
+	auditKey := pipeline.Key{Sink: auditID.Name, Kind: "Pod", Namespace: "default", Name: "web"}
 	lister.set(primaryKey, newPod("web", "uid-1", "nginx:1"))
 
 	pipe, err := pipeline.New(pipeline.Options{
@@ -218,13 +225,13 @@ func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
 	// One observation for the first sink.
 	pipe.Add(primaryKey)
 	waitForCond(t, "the primary sink to receive the object", func() bool {
-		return len(writers["primary"].received()) == 1
+		return len(writers[primaryID].received()) == 1
 	})
 
 	// A repeat for the same sink deduplicates: the content hash is unchanged.
 	pipe.Add(primaryKey)
 	time.Sleep(100 * time.Millisecond)
-	if n := len(writers["primary"].received()); n != 1 {
+	if n := len(writers[primaryID].received()); n != 1 {
 		t.Errorf("the primary sink received %d records for an unchanged object, want 1 (dedup)", n)
 	}
 
@@ -232,16 +239,16 @@ func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
 	// suppressed by the first sink's identical write.
 	pipe.Add(auditKey)
 	waitForCond(t, "the audit sink to receive the object independently", func() bool {
-		return len(writers["audit"].received()) == 1
+		return len(writers[auditID].received()) == 1
 	})
 
-	for name, w := range writers {
+	for id, w := range writers {
 		records := w.received()
 		if len(records) != 1 {
-			t.Fatalf("sink %q received %d records, want 1", name, len(records))
+			t.Fatalf("sink %s received %d records, want 1", id, len(records))
 		}
 		if records[0].Name != "web" || records[0].UID != "uid-1" {
-			t.Errorf("sink %q received %+v, want the web/uid-1 object", name, records[0])
+			t.Errorf("sink %s received %+v, want the web/uid-1 object", id, records[0])
 		}
 	}
 
@@ -249,7 +256,7 @@ func TestTwoSinksReceiveIndependentStreams(t *testing.T) {
 	// two caches, not zero.
 	pipe.Add(auditKey)
 	time.Sleep(100 * time.Millisecond)
-	if n := len(writers["audit"].received()); n != 1 {
+	if n := len(writers[auditID].received()); n != 1 {
 		t.Errorf("the audit sink received %d records for an unchanged object, want 1 (dedup)", n)
 	}
 }

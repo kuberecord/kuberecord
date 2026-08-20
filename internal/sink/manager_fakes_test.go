@@ -257,25 +257,25 @@ type fakePipeline struct {
 	clock *atomic.Int64
 
 	mu       sync.Mutex
-	removed  []string
-	removeAt map[string]int64
+	removed  []ID
+	removeAt map[ID]int64
 }
 
 func newFakePipeline(clock *atomic.Int64) *fakePipeline {
-	return &fakePipeline{clock: clock, removeAt: make(map[string]int64)}
+	return &fakePipeline{clock: clock, removeAt: make(map[ID]int64)}
 }
 
-func (f *fakePipeline) RemoveSink(name string) {
+func (f *fakePipeline) RemoveSink(id ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.removed = append(f.removed, name)
-	f.removeAt[name] = f.clock.Add(1)
+	f.removed = append(f.removed, id)
+	f.removeAt[id] = f.clock.Add(1)
 }
 
-func (f *fakePipeline) removals() ([]string, map[string]int64) {
+func (f *fakePipeline) removals() ([]ID, map[ID]int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.removed...), maps.Clone(f.removeAt)
+	return append([]ID(nil), f.removed...), maps.Clone(f.removeAt)
 }
 
 // fakeWarmHooks records ForgetSink calls and when they happened, so the deletion
@@ -285,33 +285,33 @@ type fakeWarmHooks struct {
 	clock *atomic.Int64
 
 	mu        sync.Mutex
-	forgotten []string
-	forgetAt  map[string]int64
+	forgotten []ID
+	forgetAt  map[ID]int64
 }
 
 func newFakeWarmHooks(clock *atomic.Int64) *fakeWarmHooks {
-	return &fakeWarmHooks{clock: clock, forgetAt: make(map[string]int64)}
+	return &fakeWarmHooks{clock: clock, forgetAt: make(map[ID]int64)}
 }
 
-func (f *fakeWarmHooks) ForgetSink(name string) {
+func (f *fakeWarmHooks) ForgetSink(id ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.forgotten = append(f.forgotten, name)
-	f.forgetAt[name] = f.clock.Add(1)
+	f.forgotten = append(f.forgotten, id)
+	f.forgetAt[id] = f.clock.Add(1)
 }
 
-func (f *fakeWarmHooks) forgets() ([]string, map[string]int64) {
+func (f *fakeWarmHooks) forgets() ([]ID, map[ID]int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.forgotten...), maps.Clone(f.forgetAt)
+	return append([]ID(nil), f.forgotten...), maps.Clone(f.forgetAt)
 }
 
 // fakeDependents is the rule index the parking callback consults.
 type fakeDependents struct {
-	rules map[string][]string
+	rules map[ID][]string
 }
 
-func (f fakeDependents) RulesForSink(sinkName string) []string { return f.rules[sinkName] }
+func (f fakeDependents) RulesForSink(id ID) []string { return f.rules[id] }
 
 // parkLog is the fake consumer of the parking callback: it records which rules
 // were parked for which sink, and when.
@@ -319,26 +319,26 @@ type parkLog struct {
 	clock *atomic.Int64
 
 	mu     sync.Mutex
-	parked map[string][]string
-	at     map[string]int64
+	parked map[ID][]string
+	at     map[ID]int64
 }
 
 func newParkLog(clock *atomic.Int64) *parkLog {
-	return &parkLog{clock: clock, parked: make(map[string][]string), at: make(map[string]int64)}
+	return &parkLog{clock: clock, parked: make(map[ID][]string), at: make(map[ID]int64)}
 }
 
-func (p *parkLog) park(sinkName string, ruleKeys []string) {
+func (p *parkLog) park(id ID, ruleKeys []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.parked[sinkName] = ruleKeys
-	p.at[sinkName] = p.clock.Add(1)
+	p.parked[id] = ruleKeys
+	p.at[id] = p.clock.Add(1)
 }
 
 // snapshot returns what has been parked so far: the rule keys per sink, and the
 // clock stamp of each parking. Both maps are copies, so a test may read them
 // without holding the log's lock — and an unexpected sink showing up in them is
 // itself a failure worth seeing.
-func (p *parkLog) snapshot() (rules map[string][]string, at map[string]int64) {
+func (p *parkLog) snapshot() (rules map[ID][]string, at map[ID]int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return maps.Clone(p.parked), maps.Clone(p.at)
@@ -347,6 +347,13 @@ func (p *parkLog) snapshot() (rules map[string][]string, at map[string]int64) {
 // errFactory is the sentinel a factory returns when a test wants the build to
 // fail (a bad address, an unresolvable credential).
 var errFactory = errors.New("cannot build this sink")
+
+// testID names a ClickHouseSink in these tests.
+//
+// The runtime keys on ID rather than on a bare name (Task 4.1), and every sink
+// these tests declare is a ClickHouseSink — the kind only varies where a test is
+// *about* two kinds sharing one name, which spells its IDs out in full.
+func testID(name string) ID { return ID{Kind: DefaultSinkKind, Name: name} }
 
 // waitFor polls cond until it holds or the deadline passes, so a test asserts on
 // a settled state rather than on a sleep. The manager does its draining and

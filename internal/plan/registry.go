@@ -24,11 +24,18 @@ limitations under the License.
 // free of any notion of CRs and the control plane free of any notion of
 // informers.
 //
-// The package is deliberately dependency-free beyond the standard library and
-// k8s.io/apimachinery: it holds *the* shared mutable state of the operator, so
-// it must stay trivially reviewable for correctness under concurrency and must
-// never be able to reach a Kubernetes client, a sink, or a clock. It is pure
-// bookkeeping — no goroutines, no I/O, no blocking.
+// The package is deliberately dependency-free beyond the standard library,
+// k8s.io/apimachinery and internal/sink's *identity* type: it holds *the* shared
+// mutable state of the operator, so it must stay trivially reviewable for
+// correctness under concurrency and must never be able to reach a Kubernetes
+// client, a sink instance, or a clock. It is pure bookkeeping — no goroutines, no
+// I/O, no blocking.
+//
+// internal/sink is imported for sink.ID alone — two strings naming which backend
+// a target streams to (Task 4.1) — because the registry is the component the sink
+// runtime asks "who depends on this sink?". Nothing here ever holds a Writer,
+// resolves one, or dials a backend, and that is the line the sentence above
+// draws.
 package plan
 
 import (
@@ -40,6 +47,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // WatchTarget is one rule's request for a single watch scope: "stream this
@@ -365,7 +374,7 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 }
 
 // RulesForSink returns the keys of the rules currently contributing at least one
-// target that streams to sinkName, sorted and deduplicated.
+// target that streams to id, sorted and deduplicated.
 //
 // It is the registry's answer to "who depends on this sink?", which is what the
 // sink runtime needs when a sink goes away for good so the rules that streamed to
@@ -379,13 +388,19 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 // reported: its own reconcile already wrote the condition explaining why it is
 // inert, and re-parking it would only overwrite a more specific verdict with a
 // less specific one.
-func (r *Registry) RulesForSink(sinkName string) []string {
+//
+// TargetKey.Sink is still a bare name until Task 4.2 types WatchTarget.Sink, so
+// the match is on id.Name. That is exact rather than lossy today — every target
+// this registry can hold names a ClickHouseSink, the only sink kind — and Task
+// 4.2 replaces it with a whole-ID comparison, at which point a rule naming
+// {S3Sink, default} stops matching targets on {ClickHouseSink, default}.
+func (r *Registry) RulesForSink(id sink.ID) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	rules := make(map[string]struct{})
 	for key, entry := range r.targets {
-		if key.Sink != sinkName {
+		if key.Sink != id.Name {
 			continue
 		}
 		for ruleKey := range entry.rules {

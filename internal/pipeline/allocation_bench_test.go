@@ -211,7 +211,7 @@ func (w *benchWriter) Start(ctx context.Context) error {
 // benchRouter routes everything to one writer.
 type benchRouter struct{ writer sink.Writer }
 
-func (r benchRouter) WriterFor(string) (sink.Writer, bool) { return r.writer, true }
+func (r benchRouter) WriterFor(sink.ID) (sink.Writer, bool) { return r.writer, true }
 
 // benchLister serves one object for one key, swappable between iterations so
 // each Process call sees genuinely changed content.
