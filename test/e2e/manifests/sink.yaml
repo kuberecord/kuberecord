@@ -1,8 +1,9 @@
 # The ClickHouseSink every e2e scenario streams to.
 #
-# It is named "default" because that is the name a rule's spec.sinkRef defaults
-# to, so the suite's rules carry no sinkRef boilerplate — the same shape a real
-# single-sink install has.
+# It is named "default" only because a single-sink install has to call its sink
+# something; every rule the suite renders names it in spec.sink.name. The kind
+# half of that reference is left to the CRD default, so the suite covers the
+# defaulting a real single-backend install relies on.
 #
 # credentialsSecretRef omits a namespace on purpose: it resolves to the
 # operator's own namespace, the only place the operator holds Secret read rights

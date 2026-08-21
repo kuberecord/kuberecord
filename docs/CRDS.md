@@ -27,7 +27,7 @@ apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata: {name: team-payments-workloads, namespace: payments}
 spec:
-  sinkRef: default          # immutable — see below
+  sink: {kind: ClickHouseSink, name: default}   # immutable as a pair — see below
   resources:
   - {group: apps, version: v1, kind: Deployment}
   - group: ""
@@ -44,12 +44,27 @@ spec:
 - `kind` must be the Kind (`Deployment`), not the plural resource
   (`deployments`); `version` must look like `v1` / `v2beta1`; `group` must be
   empty (core) or a DNS-1123 subdomain. `resources` must be non-empty.
-- `spec.sinkRef` defaults to `default` and is **immutable**. Moving a rule to
-  another sink is delete + recreate: re-pointing a live rule would strand the
-  dedup/diff baseline the pipeline built for every object in scope, so records
-  would either re-emit as duplicates or be written as diffs against a baseline
-  the new sink never received. Recreating re-warms the cache from the new sink's
-  own history instead.
+- `spec.sink` is **required** and names the target backend as a `{kind, name}`
+  pair. `kind` defaults to `ClickHouseSink` and is constrained to the sink kinds
+  this build actually serves, so a rule naming a kind no reconciler implements is
+  rejected where it was typed rather than admitted and then parked forever with
+  nothing to bind to. `name` has no default: a rule names one specific backend out
+  of however many a cluster runs, and guessing which one its author meant is the
+  kind of convenience that quietly streams an audit trail somewhere nobody chose.
+  Both halves are the identity, because a name is only unique *within* a kind — a
+  `ClickHouseSink` named `default` and an `S3Sink` named `default` are two
+  unrelated backends.
+- `spec.sink` is **immutable**, and the CEL rule guards the whole pair rather than
+  each field, since changing the name and changing the kind are the same mistake
+  with the same consequence. Moving a rule to another sink is delete + recreate:
+  re-pointing a live rule would strand the dedup/diff baseline the pipeline built
+  for every object in scope, so records would either re-emit as duplicates or be
+  written as diffs against a baseline the new sink never received. Recreating
+  re-warms the cache from the new sink's own history instead.
+- A rule targets exactly one sink, permanently. To stream one resource set to two
+  backends, author two rules naming the same resources and different sinks — each
+  then carries its own dedup state, its own conditions and its own watch
+  accounting, so one unreachable backend degrades one rule.
 - `spec.connection.credentialsSecretRef.namespace` defaults to the **operator's
   own namespace**, and that default is a security boundary rather than a
   convenience: the operator's Secret read grant is a namespaced `Role` in that
@@ -85,10 +100,11 @@ spec:
   cadence (unless it is off). See
   [`docs/SCHEMA.md`](SCHEMA.md#checkpoint-rows) for the reconstruction recipe.
 
-`kubectl get` renders `READY`, `SINK`, `WATCHES`, `AGE` for both rule kinds, and
-`READY`, `ADDR`, `AGE` for sinks. `ADDR` shows the full `host:port`: CRD printer
-columns are plain JSONPath with no string functions, so the host cannot be split
-out declaratively.
+`kubectl get` renders `READY`, `SINK`, `SINK-KIND`, `WATCHES`, `AGE` for both rule
+kinds, and `READY`, `ADDR`, `AGE` for sinks. The sink's kind gets a column of its
+own rather than being folded into `SINK`, for the same reason `ADDR` shows a full
+`host:port`: CRD printer columns are plain JSONPath with no string functions, so
+neither a pair can be joined nor a host split out declaratively.
 
 ## Status conditions
 
@@ -122,7 +138,7 @@ nothing else.
 | `PolicyAllowed` | `SecretsDenied` (the rule names `v1/Secret`, denied in code — no sink policy can admit it) or `NotInAllowList` (outside a non-empty `spec.policy.allowedGVKs`). A refused rule contributes **nothing** to the watch plan: the refusal is enforced, not merely reported. |
 | `ResourceResolved` | `KindsUnresolved`, with a per-kind message: a kind whose CRD is not installed **yet** (self-heals, no restart), or a cluster-scoped kind named by a namespaced `StreamRule` (permanent until the rule is edited — use a `ClusterStreamRule`). |
 | `RBACGranted` | `MissingPermissions`, naming the resource, which of `get`/`list`/`watch` are missing, and the scope. The operator can never self-escalate: an administrator adds the grant and the rule activates on its own within one resync (~2m), no restart. `AccessReviewFailed` is `Unknown` — the review itself did not complete, which is not a verdict about the rule. |
-| `Ready` | Rolls the three up, and additionally reports `SinkMissing` (its `sinkRef` names no sink — targets are withdrawn) or `SinkNotReady` (the sink exists but is unhealthy — targets are **kept**, see below). |
+| `Ready` | Rolls the three up, and additionally reports `SinkMissing` (its `spec.sink` names no sink that exists — targets are withdrawn), `SinkNotReady` (the sink exists but is unhealthy — targets are **kept**, see below) or `LegacySinkRef` (the rule names no sink at all, which is what a rule authored against v0.1.0 looks like after an upgrade — see [`docs/UPGRADING.md`](UPGRADING.md)). |
 
 Failures are per-target wherever they can be: a rule naming five kinds, one of
 which is not installed, streams the other four and says so in `ResourceResolved`.
@@ -158,3 +174,5 @@ because the operator that must release it is not running.
 - [`docs/RBAC.md`](RBAC.md) — what a rule is allowed to watch, and how to grant more.
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — the operator-level settings that
   back a sink's omitted writer fields.
+- [`docs/UPGRADING.md`](UPGRADING.md) — what to do when a `v0.x` minor changes one
+  of these fields, the v0.2.0 sink-reference rename included.

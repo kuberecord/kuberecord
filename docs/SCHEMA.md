@@ -583,6 +583,9 @@ metadata:
   name: app-config
   namespace: demo
 spec:
+  sink:
+    kind: ClickHouseSink
+    name: default
   resources:
   - group: ""
     version: v1

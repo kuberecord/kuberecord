@@ -63,6 +63,98 @@ than a summary of them.
   database warms from it and de-duplicates as before rather than rewriting
   every row.
 
+- **A rule's `spec.sinkRef` string is replaced by `spec.sink {kind, name}`**
+  (breaking, D10). A sink is now referenced by *which kind of backend* and
+  *which CR of that kind*:
+
+  ```yaml
+  spec:
+    sink:
+      kind: ClickHouseSink   # optional; this is the default
+      name: default
+  ```
+
+  The kind belongs in the reference because a name is only unique **within** a
+  kind. A `ClickHouseSink` named `default` and an `S3Sink` named `default` are
+  both legal in etcd and are two entirely unrelated backends; keyed on the name
+  alone, whichever reconciled second would have displaced the first, and rules
+  would then have streamed to a backend carrying another one's dedup cache and
+  warm state — re-emitting every object, or suppressing genuine changes, with
+  nothing in the logs to say so. This release makes that unrepresentable rather
+  than merely unlikely, which is why it lands *before* a second sink kind exists
+  to collide with.
+
+  The field is **renamed, not retyped**, and that is a deliberate choice about how
+  the break is discovered. A renamed field is an *unknown* field, so the API
+  server prunes it and a v0.1.0 rule decodes with `sink` absent — loudly wrong
+  rather than quietly defaulted. kuberecord registers no admission webhooks and
+  needs no cert-manager (D4), so there is no conversion hook available to migrate
+  the stored object either; the alternative would have been to keep accepting a
+  bare name and guess its kind, which is exactly the guess that streams a
+  cluster's audit trail somewhere nobody chose.
+
+  `spec.sink` is required, `name` has no default, `kind` defaults to
+  `ClickHouseSink` and is constrained by an enum to the kinds this build actually
+  serves. The pair is immutable as a pair — changing the name and changing the
+  kind are the same mistake with the same consequence.
+
+  **Migration is delete-and-recreate**, per rule; there is no in-place edit. The
+  exact sequence is in [`docs/UPGRADING.md`](docs/UPGRADING.md) and summarised
+  under **Migration** below. Every other field — `resources`, `labelSelector`,
+  `extraRedaction`, `namespaceSelector` — is re-applied unchanged.
+
+  **If you skip it, the rule parks rather than misbehaves.** A rule that names no
+  sink reports `Ready=False` with reason **`LegacySinkRef`**, withdraws its watch
+  targets, and logs at `Error` level; the message names both spellings and the
+  fix. Nothing else degrades: other rules keep streaming, the process does not
+  exit, and no data is lost — the rule simply streams nothing until it is
+  recreated. `kubectl get streamrule -A` also gains a `SINK-KIND` column beside
+  `SINK`, because printer columns are plain JSONPath and a pair cannot be joined
+  declaratively.
+
+- **The `sink=` metric label value is now `<Kind>/<Name>`** (breaking). Every
+  write-path metric a single sink reports — `kuberecord_write_queue_depth`,
+  `kuberecord_writes_total`, `kuberecord_write_latency_seconds` and the rest —
+  carries `sink="ClickHouseSink/default"` where it used to carry
+  `sink="default"`. The kind is in the value for the same reason it is in the
+  reference: two same-named sinks of different kinds would otherwise merge into
+  one series describing neither.
+
+  Expressions that group or sum `by (sink)` keep working unchanged — only the
+  rendered value differs. Expressions that **match a value exactly** must be
+  updated, and that is the case to watch: a selector matching nothing looks
+  exactly like a metric sitting at zero. The shipped Grafana dashboards and
+  `deploy/prometheus/alerts.yaml` need no edits (they group by the label and
+  template it rather than pinning a value); only expressions you wrote yourself
+  are affected. See [`docs/OPERATING.md`](docs/OPERATING.md).
+
+### Migration
+
+Upgrading from v0.1.0 requires one manual step, because a rule's sink reference
+cannot be converted in place (see **Changed** above). The full walkthrough,
+including what a skipped migration looks like in `kubectl describe`, is
+[`docs/UPGRADING.md`](docs/UPGRADING.md).
+
+Steps 1 and 2 run **before** the upgrade, while the old schema still serves the
+old field:
+
+1. Record which sink each rule names —
+   `kubectl get streamrules.kuberecord.io -A -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,SINK:.spec.sinkRef`
+   (and the same for `clusterstreamrules.kuberecord.io`).
+2. Keep the whole bodies: `kubectl get streamrules.kuberecord.io -A -o yaml > rules-v0.1.0.yaml`.
+3. Delete the rules. Neither kind uses finalizers, so this is immediate: each
+   watch scope closes with a `Stopped` row and **no** `Deleted` rows for the
+   objects it covered.
+4. Upgrade the CRDs **and** the operator. With Helm the CRDs are a separate step
+   (`kubectl apply -f deploy/charts/kuberecord/crds/`) because Helm installs
+   `crds/` and never upgrades it; `dist/install.yaml` and `make deploy` carry
+   them.
+5. Re-apply each rule with `sink: {kind: ClickHouseSink, name: <the old sinkRef>}`.
+   A recreated rule warms its dedup cache from the sink's own history, so
+   unchanged objects are not re-recorded.
+
+Then update any Prometheus expression that matched a `sink` label value exactly.
+
 ## [0.1.0] - 2026-08-03
 
 The first tagged release, and the one that sets the shape of the project. Phase 1

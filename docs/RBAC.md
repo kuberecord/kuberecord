@@ -247,9 +247,9 @@ condition on the CR that wanted it:
 
 ```console
 $ kubectl get streamrule
-NAME             READY   SINK      WATCHES   AGE
-pod-audit        True    default   3         6d
-ingress-audit    False   default   0         4m
+NAME             READY   SINK      SINK-KIND         WATCHES   AGE
+pod-audit        True    default   ClickHouseSink    3         6d
+ingress-audit    False   default   ClickHouseSink    0         4m
 ```
 
 `RBACGranted=False/MissingPermissions` names the resource, which of

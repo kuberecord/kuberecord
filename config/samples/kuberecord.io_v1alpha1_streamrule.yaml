@@ -7,9 +7,16 @@ metadata:
     app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # sinkRef is immutable: to move this rule to another sink, delete and
-  # recreate it (avoids a cross-sink dedup/diff cache migration).
-  sinkRef: default
+  # Which backend, and which CR of that backend: a name is only unique within a
+  # kind, so both halves are the reference. `kind` may be omitted (it defaults to
+  # ClickHouseSink); it is spelled here because that is the shape a cluster with
+  # more than one sink kind has to write anyway.
+  #
+  # The pair is immutable: to move this rule to another sink, delete and recreate
+  # it (avoids a cross-sink dedup/diff cache migration).
+  sink:
+    kind: ClickHouseSink
+    name: default
   resources:
   - group: apps
     version: v1

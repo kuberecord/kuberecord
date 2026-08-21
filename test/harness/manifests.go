@@ -33,6 +33,19 @@ type RuleResource struct {
 	Kind    string
 }
 
+// sinkYAML renders a rule's spec.sink block at the given indent.
+//
+// It spells the name and leaves `kind` to the CRD's default, which is what carries
+// that default all the way through a real cluster rather than only through
+// envtest: the chaos suite asserts on the metric label "ClickHouseSink/<name>"
+// (see its sinkLabel), so a default that stopped being applied surfaces as a
+// failing assertion rather than as a rule nobody noticed was pointed elsewhere.
+// A scenario needing a non-default kind passes it explicitly once a second sink
+// kind exists to name.
+func sinkYAML(sinkName, indent string) string {
+	return fmt.Sprintf("%ssink:\n%s  name: %q\n", indent, indent, sinkName)
+}
+
 // resourcesYAML renders a rule's spec.resources list at the given indent.
 func resourcesYAML(resources []RuleResource, indent string) string {
 	var b strings.Builder
@@ -43,18 +56,20 @@ func resourcesYAML(resources []RuleResource, indent string) string {
 	return b.String()
 }
 
-// StreamRuleYAML renders a namespaced StreamRule. sinkRef is left out on
-// purpose: it defaults to "default", which is the sink both suites install, and
-// spelling it would only hide that the default works.
-func StreamRuleYAML(namespace, name string, resources []RuleResource) string {
+// StreamRuleYAML renders a namespaced StreamRule streaming to sinkName.
+//
+// The sink is a parameter rather than a constant here because which sink a
+// scenario streams to is the suite's decision, not the vocabulary's — the two
+// suites install their own, tuned differently on purpose.
+func StreamRuleYAML(namespace, name, sinkName string, resources []RuleResource) string {
 	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
   name: %s
   namespace: %s
 spec:
-  resources:
-%s`, name, namespace, resourcesYAML(resources, "  "))
+%s  resources:
+%s`, name, namespace, sinkYAML(sinkName, "  "), resourcesYAML(resources, "  "))
 }
 
 // RedactionEntry is one entry of a rule's spec.extraRedaction (or a sink's
@@ -85,7 +100,7 @@ func redactionYAML(entries []RedactionEntry, indent string) string {
 // It is a separate renderer rather than a variadic on StreamRuleYAML so that the
 // scenarios which say nothing about redaction keep rendering byte-identical
 // manifests to the ones they rendered before redaction existed.
-func RedactingStreamRuleYAML(namespace, name string, resources []RuleResource,
+func RedactingStreamRuleYAML(namespace, name, sinkName string, resources []RuleResource,
 	redaction []RedactionEntry) string {
 	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
@@ -93,21 +108,22 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  resources:
+%s  resources:
 %s  extraRedaction:
-%s`, name, namespace, resourcesYAML(resources, "  "), redactionYAML(redaction, "  "))
+%s`, name, namespace, sinkYAML(sinkName, "  "),
+		resourcesYAML(resources, "  "), redactionYAML(redaction, "  "))
 }
 
 // ClusterStreamRuleYAML renders a cluster-scoped ClusterStreamRule with no
 // namespaceSelector, i.e. one all-namespaces target per named resource.
-func ClusterStreamRuleYAML(name string, resources []RuleResource) string {
+func ClusterStreamRuleYAML(name, sinkName string, resources []RuleResource) string {
 	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: ClusterStreamRule
 metadata:
   name: %s
 spec:
-  resources:
-%s`, name, resourcesYAML(resources, "  "))
+%s  resources:
+%s`, name, sinkYAML(sinkName, "  "), resourcesYAML(resources, "  "))
 }
 
 // DeploymentYAML renders the object the workload scenarios stream.

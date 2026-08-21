@@ -22,9 +22,10 @@ exist. Three steps from here.
    `extraArgs` to let the operator apply the shipped DDL itself.
 {{- else }}
 
-2. A sink. Create a ClickHouseSink named `default` (the name every rule's
-   spec.sinkRef defaults to), or set `createDefaultSink=true` and
-   `defaultSink.connection.addr` and let this chart create it:
+2. A sink. Create a ClickHouseSink and name it whatever the rules below will name
+   in spec.sink, or set `createDefaultSink=true` and
+   `defaultSink.connection.addr` and let this chart create one called
+   `{{ .Values.defaultSink.name }}`:
 
      helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} --reuse-values \
        --set createDefaultSink=true \
@@ -51,6 +52,9 @@ exist. Three steps from here.
        name: my-workloads
        namespace: default
      spec:
+       sink:
+         kind: ClickHouseSink
+         name: {{ .Values.defaultSink.name }}
        resources:
        - group: apps
          version: v1

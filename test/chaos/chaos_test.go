@@ -144,9 +144,10 @@ var _ = Describe("Phase 2 chaos scenarios", Ordered, Serial, func() {
 		// Not applyConfigMapRule: that waits for Ready and for a Started row, and
 		// neither can happen yet — the sink is unreachable and the scope log lives
 		// in the very database that is down.
-		harness.ApplyYAML(fieldManager, harness.StreamRuleYAML(bootNamespace, bootRule, []ruleResource{
-			{Group: groupCore, Version: "v1", Kind: kindConfigMap},
-		}))
+		harness.ApplyYAML(fieldManager, harness.StreamRuleYAML(bootNamespace, bootRule, sinkName,
+			[]ruleResource{
+				{Group: groupCore, Version: "v1", Kind: kindConfigMap},
+			}))
 
 		By("asserting the rule went active anyway, and reports only the sink as unhealthy")
 		// Invariant 5 and the rule reconciler's one deliberate exception to

@@ -108,8 +108,10 @@ const (
 	// and scope event the operator writes is stamped with it, so every query in
 	// the suite filters on it.
 	clusterID = "local-kind-cluster"
-	// sinkName is the ClickHouseSink the suite installs. "default" is the name a
-	// rule's spec.sinkRef defaults to, which is why no rule here spells one.
+	// sinkName is the ClickHouseSink the suite installs, and the name every rule it
+	// renders puts in spec.sink.name. The kind half of that reference is left to the
+	// CRD default (see harness.sinkYAML), which is what sinkLabel below then proves
+	// was actually applied.
 	sinkName = "default"
 	// sinkLabel is how that sink appears in the `sink` label of every write-path
 	// metric: sink.ID.String(), i.e. "<Kind>/<Name>" rather than the bare CR name
