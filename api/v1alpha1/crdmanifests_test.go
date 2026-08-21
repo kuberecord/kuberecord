@@ -88,8 +88,12 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 			mustContain: []string{
 				`jsonPath: .status.conditions[?(@.type=="Ready")].status`,
 				"name: READY",
-				"jsonPath: .spec.sinkRef",
-				"name: SINK",
+				"jsonPath: .spec.sink.name",
+				// Matched with the trailing newline so the SINK-KIND column below
+				// cannot satisfy this assertion on its own.
+				"name: SINK\n",
+				"jsonPath: .spec.sink.kind",
+				"name: SINK-KIND",
 				"jsonPath: .status.activeWatches",
 				"name: WATCHES",
 				"name: AGE",
@@ -100,8 +104,15 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"pattern: ^[A-Z][A-Za-z0-9]{0,62}$",
 				`pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$`,
 				`pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
-				// sinkRef defaulted, non-empty and immutable.
-				"default: default",
+				// The sink reference (Task 4.3): required as a whole, its kind
+				// defaulted and restricted to the kinds this build serves, its name
+				// non-empty, and the pair immutable. The enum is matched with its
+				// list item so that widening it — which is a release decision, not a
+				// refactor — has to be made here too.
+				"\n            - sink\n",
+				"default: ClickHouseSink",
+				"enum:\n                    - ClickHouseSink\n",
+				"minLength: 1",
 				"rule: self == oldSelf",
 				// Redaction path syntax, and the one rule a pattern cannot
 				// express: exactly one of the two spellings.
@@ -110,6 +121,11 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"rule: has(self.fieldPath) != has(self.annotation)",
 			},
 			mustNotExist: []string{
+				// The retired v0.1.0 field. It is not merely absent from the Go
+				// struct: it must be absent from the *schema*, because a pruned
+				// unknown field is what makes a legacy rule decode with a zero sink
+				// instead of silently keeping a name nothing reads.
+				"sinkRef:",
 				// A namespaced rule must not gain a namespaceSelector *field*:
 				// it can only ever see its own namespace. Matched with the
 				// trailing colon so a passing mention inside a description
@@ -123,7 +139,9 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 			file: "kuberecord.io_clusterstreamrules.yaml",
 			mustContain: []string{
 				`jsonPath: .status.conditions[?(@.type=="Ready")].status`,
-				"name: SINK",
+				"jsonPath: .spec.sink.name",
+				"name: SINK\n",
+				"name: SINK-KIND",
 				"name: WATCHES",
 				"scope: Cluster",
 				"minItems: 1",
@@ -131,13 +149,19 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				`pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$`,
 				// Inlining StreamRuleSpec must carry its field rules across —
 				// this is the assertion that catches controller-gen dropping
-				// an inherited rule.
+				// an inherited rule. The sink reference is the whole point of the
+				// check now: its default, its enum and its transition rule all live
+				// on the embedded spec.
+				"\n            - sink\n",
+				"default: ClickHouseSink",
+				"enum:\n                    - ClickHouseSink\n",
 				"rule: self == oldSelf",
 				// Inlining must carry the redaction rules across too.
 				"pattern: " + RedactionFieldPathPattern,
 				"rule: has(self.fieldPath) != has(self.annotation)",
 				"namespaceSelector:",
 			},
+			mustNotExist: []string{"sinkRef:"},
 		},
 	}
 

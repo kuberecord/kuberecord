@@ -34,7 +34,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:printcolumn:name="READY",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="SINK",type=string,JSONPath=`.spec.sinkRef`
+// +kubebuilder:printcolumn:name="SINK",type=string,JSONPath=`.spec.sink.name`
+// +kubebuilder:printcolumn:name="SINK-KIND",type=string,JSONPath=`.spec.sink.kind`
 // +kubebuilder:printcolumn:name="WATCHES",type=integer,JSONPath=`.status.activeWatches`
 // +kubebuilder:printcolumn:name="AGE",type=date,JSONPath=`.metadata.creationTimestamp`
 type StreamRule struct {

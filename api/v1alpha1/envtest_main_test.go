@@ -115,7 +115,7 @@ type clientObject = client.Object
 // A case either checks *creation* (mutate == nil) or a *transition* (mutate
 // non-nil: the object is created valid, then edited). Transition cases are the
 // only way to exercise a CEL rule referencing oldSelf, which is exactly what
-// sinkRef's immutability rule is.
+// the sink reference's immutability rule is.
 type apiCase struct {
 	// name doubles as the object's name, so every case gets a fresh object
 	// without the table having to invent unique names by hand.

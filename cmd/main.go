@@ -778,7 +778,7 @@ func main() {
 	// The operator boots idle: with no ClickHouseSink and no rules it watches
 	// nothing, writes nothing and reports healthy. Streaming starts when a
 	// ClickHouseSink (conventionally named "default", which is what the shipped
-	// samples' spec.sinkRef points at) and a StreamRule or ClusterStreamRule
+	// samples' spec.sink.name points at) and a StreamRule or ClusterStreamRule
 	// appear — no restart, and no configuration on this process.
 	setupLog.Info("Starting manager",
 		"cluster_id", cfg.clusterID, "operator_namespace", cfg.operatorNamespace,
