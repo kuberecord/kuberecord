@@ -58,10 +58,19 @@ func resourceEntry(group, kind string) v1alpha1.WatchedResource {
 func (h *harness) newStreamRule(namespace, name, sinkName string,
 	resources ...v1alpha1.WatchedResource) *v1alpha1.StreamRule {
 	h.t.Helper()
+	return h.newStreamRuleWithSink(namespace, name, v1alpha1.SinkReference{Name: sinkName}, resources...)
+}
+
+// newStreamRuleWithSink is newStreamRule with the sink reference spelled out, for
+// the tests that are *about* the reference: the kind an author wrote is the input
+// under test there, so leaving it to the CRD default would test nothing.
+func (h *harness) newStreamRuleWithSink(namespace, name string, ref v1alpha1.SinkReference,
+	resources ...v1alpha1.WatchedResource) *v1alpha1.StreamRule {
+	h.t.Helper()
 	rule := &v1alpha1.StreamRule{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: v1alpha1.StreamRuleSpec{
-			Sink:      v1alpha1.SinkReference{Name: sinkName},
+			Sink:      ref,
 			Resources: resources,
 		},
 	}
@@ -70,6 +79,34 @@ func (h *harness) newStreamRule(namespace, name, sinkName string,
 	}
 	h.t.Cleanup(func() { h.deleteIfExists(rule) })
 	return rule
+}
+
+// stageLegacyRule stores a rule of either kind exactly as an upgrade from v0.1.0
+// leaves one behind: `sinkRef` named the sink, and after the rename (D10) that field
+// is pruned as unknown and `sink` is simply absent.
+//
+// The legacy name is still written even though the apiserver drops it, because that
+// is the document an operator actually has in etcd — and asserting the reconciler's
+// verdict on a *fabricated* shape rather than on the real one would prove less.
+func (h *harness) stageLegacyRule(ruleKind, namespace, name, legacySinkRef string,
+	resources ...v1alpha1.WatchedResource) client.Object {
+	h.t.Helper()
+	return h.stageRule(ruleKind, namespace, name, map[string]any{
+		"sinkRef":   legacySinkRef,
+		"resources": unstructuredResources(resources),
+	}, dropRequiredSink)
+}
+
+// stageRuleNamingSinkKind stores a rule naming a sink kind this build does not
+// serve, which admission refuses (the CRD's enum lists only the served kinds) and
+// only a newer operator — or a downgraded one — could have written.
+func (h *harness) stageRuleNamingSinkKind(ruleKind, namespace, name, sinkKind, sinkName string,
+	resources ...v1alpha1.WatchedResource) client.Object {
+	h.t.Helper()
+	return h.stageRule(ruleKind, namespace, name, map[string]any{
+		"sink":      map[string]any{"kind": sinkKind, "name": sinkName},
+		"resources": unstructuredResources(resources),
+	}, dropSinkKindEnum)
 }
 
 // newClusterStreamRule builds a cluster-scoped rule. The sink reference's kind is
@@ -467,6 +504,173 @@ func TestClusterRuleAccessReviewShortCircuit(t *testing.T) {
 			!strings.HasSuffix(question, "||watch") {
 			t.Errorf("review %q was asked per namespace even though cluster scope allowed it", question)
 		}
+	}
+}
+
+// TestRuleTargetsCarryTheTypedSinkIdentity is Task 4.4 criterion (a): a rule with a
+// valid `sink` activates, and the targets it installs are keyed on the typed
+// identity the author wrote — kind included.
+//
+// The kind matters here and not merely the name: everything the data plane owns per
+// sink (the dedup cache, warm state, the metric series) hangs off this key, so a
+// target keyed on the name alone would be the collision this phase exists to close.
+// The second half of the assertion is the negative one — the same name under another
+// kind names nothing — because that is what "the kind is part of the key" actually
+// means.
+func TestRuleTargetsCarryTheTypedSinkIdentity(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+	sinkName := uniqueName("typedsink")
+	h.createReadySink(sinkName, v1alpha1.SinkPolicy{})
+
+	namespace := uniqueName("ns")
+	h.createNamespace(namespace, nil)
+	rule := h.newStreamRuleWithSink(namespace, "typed",
+		v1alpha1.SinkReference{Kind: "ClickHouseSink", Name: sinkName}, resourceEntry("", "ConfigMap"))
+	ruleKey := RuleKey(kindStreamRule, namespace, "typed")
+
+	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	h.waitForTargets(ruleKey, []string{fmt.Sprintf("%s@%s", coreGVK("ConfigMap"), namespace)})
+
+	want := []sink.ID{{Kind: "ClickHouseSink", Name: sinkName}}
+	if got := h.targetSinksFor(ruleKey); !slices.Equal(got, want) {
+		t.Errorf("target sink identities = %v, want %v", got, want)
+	}
+	if got := h.Registry.RulesForSink(sink.ID{Kind: "S3Sink", Name: sinkName}); len(got) != 0 {
+		t.Errorf("a sink of another kind with the same name claims %v as dependents", got)
+	}
+}
+
+// TestLegacyRuleIsReportedAndRegistersNothing is Task 4.4 criterion (b): a rule whose
+// decoded sink reference is the zero value — a rule written against v0.1.0's
+// `sinkRef` — is parked on Ready=False/LegacySinkRef and contributes nothing.
+//
+// This is the failure mode the whole guard exists for, and it is unreachable through
+// admission by construction: the rule was stored under a schema that had no `sink`
+// field, and CRD validation only ever runs on write. So the object is staged the way
+// an upgrade produces it (see harness.stageRule) and the shipped schema is back in
+// place before the verdict is read — which also proves the more subtle half, that the
+// operator can still *write status* onto an object the current schema would reject.
+//
+// A healthy sink of the right name exists throughout. That is the point: the rule
+// must not resolve to it. A guard that merely reported the problem while quietly
+// streaming to the obvious candidate would be worse than no guard, because the
+// stream would look correct and nobody would read the condition.
+func TestLegacyRuleIsReportedAndRegistersNothing(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+	sinkName := uniqueName("legacysink")
+	h.createReadySink(sinkName, v1alpha1.SinkPolicy{})
+	namespace := uniqueName("ns")
+	h.createNamespace(namespace, nil)
+
+	for _, tc := range []struct {
+		name     string
+		ruleKind string
+		// namespace is empty for the cluster-scoped kind.
+		namespace string
+	}{
+		{name: "namespaced rule", ruleKind: kindStreamRule, namespace: namespace},
+		{name: "cluster rule", ruleKind: kindClusterStreamRule},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ruleName := uniqueName("legacy")
+			rule := h.stageLegacyRule(tc.ruleKind, tc.namespace, ruleName, sinkName,
+				resourceEntry("", "ConfigMap"))
+			ruleKey := RuleKey(tc.ruleKind, tc.namespace, ruleName)
+
+			ready := h.waitForRuleCondition(rule, v1alpha1.ConditionReady,
+				metav1.ConditionFalse, ReasonLegacySinkRef)
+			// The message has to carry the author's own vocabulary and the one action
+			// that fixes it; a reason alone is not actionable for a field that no
+			// longer appears in `kubectl explain`.
+			for _, want := range []string{"sinkRef", "spec.sink", "delete this rule"} {
+				if !strings.Contains(ready.Message, want) {
+					t.Errorf("LegacySinkRef message %q does not mention %q", ready.Message, want)
+				}
+			}
+
+			// No gate could run, so none of the three claims a verdict.
+			for _, condType := range []string{
+				v1alpha1.ConditionPolicyAllowed,
+				v1alpha1.ConditionResourceResolved,
+				v1alpha1.ConditionRBACGranted,
+			} {
+				h.waitForRuleCondition(rule, condType, metav1.ConditionUnknown, ReasonNotEvaluated)
+			}
+
+			if got := h.targetsFor(ruleKey); len(got) != 0 {
+				t.Errorf("a legacy rule installed targets %v; it must contribute none", got)
+			}
+			if got := h.Registry.RulesForSink(clickHouseSinkID(sinkName)); slices.Contains(got, ruleKey) {
+				t.Errorf("a legacy rule bound to sink %q anyway (dependents: %v)", sinkName, got)
+			}
+		})
+	}
+}
+
+// TestSinkResolutionComparesTypedIdentities is Task 4.4 criteria (c) and (d): a rule
+// naming a kind/name pair with no matching sink CR parks on SinkMissing, and two
+// references sharing a *name* across two kinds resolve independently — the one naming
+// the served kind streams, the other parks without ever touching that backend.
+//
+// The second half is the corruption this phase closes, tested from the control plane:
+// a ClickHouseSink and an S3Sink named "default" are both legal in etcd, and a
+// reconciler that resolved by name alone would bind the S3Sink's rules to the
+// ClickHouse instance, handing them a dedup baseline and warm state built for someone
+// else. The lower tiers guard the same property on their own keys (sink.ID, the
+// pipeline's per-sink state, plan.Registry.RulesForSink); this is the last hop.
+//
+// A *resolvable* second kind cannot be tested yet — S3Sink has no CRD and no
+// reconciler until Task 6.1 — so the second rule here parks rather than streaming to
+// its own backend. Extending it to assert two live backends is that task's job.
+func TestSinkResolutionComparesTypedIdentities(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+	sharedName := uniqueName("shared")
+	h.createReadySink(sharedName, v1alpha1.SinkPolicy{})
+
+	namespace := uniqueName("ns")
+	h.createNamespace(namespace, nil)
+	configMaps := []string{fmt.Sprintf("%s@%s", coreGVK("ConfigMap"), namespace)}
+
+	// The kind this build serves, under the shared name: streams.
+	bound := h.newStreamRuleWithSink(namespace, "bound",
+		v1alpha1.SinkReference{Kind: "ClickHouseSink", Name: sharedName}, resourceEntry("", "ConfigMap"))
+	boundKey := RuleKey(kindStreamRule, namespace, "bound")
+	h.waitForRuleCondition(bound, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	h.waitForTargets(boundKey, configMaps)
+
+	// Another kind, the same name: parks, and the message names the kind rather than
+	// only the name, since the name alone would describe a sink that does exist.
+	elsewhere := h.stageRuleNamingSinkKind(kindStreamRule, namespace, "elsewhere",
+		"S3Sink", sharedName, resourceEntry("", "ConfigMap"))
+	elsewhereKey := RuleKey(kindStreamRule, namespace, "elsewhere")
+	parked := h.waitForRuleCondition(elsewhere, v1alpha1.ConditionReady,
+		metav1.ConditionFalse, ReasonSinkMissing)
+	if !strings.Contains(parked.Message, "S3Sink") {
+		t.Errorf("SinkMissing message %q does not name the kind that is missing", parked.Message)
+	}
+	if got := h.targetsFor(elsewhereKey); len(got) != 0 {
+		t.Errorf("a rule naming an unserved sink kind installed targets %v", got)
+	}
+
+	// The served sink's dependents are exactly the rule that named its kind — which
+	// is what decides whose rules get parked when it is deleted.
+	if got := h.Registry.RulesForSink(clickHouseSinkID(sharedName)); !slicesEqual(got, []string{boundKey}) {
+		t.Errorf("RulesForSink(%s) = %v, want [%s]",
+			clickHouseSinkID(sharedName), got, boundKey)
+	}
+	// And the rule that streams is unaffected by the parked one sharing its name.
+	if got := h.targetsFor(boundKey); !slicesEqual(got, configMaps) {
+		t.Errorf("targets = %v, want the bound rule still streaming at %v", got, configMaps)
+	}
+
+	// Criterion (c) in its plainest form: the served kind, a name nothing answers to.
+	missing := h.newStreamRuleWithSink(namespace, "nosink",
+		v1alpha1.SinkReference{Kind: "ClickHouseSink", Name: uniqueName("absent")},
+		resourceEntry("", "ConfigMap"))
+	missingKey := RuleKey(kindStreamRule, namespace, "nosink")
+	h.waitForRuleCondition(missing, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
+	if got := h.targetsFor(missingKey); len(got) != 0 {
+		t.Errorf("a rule naming no existing sink installed targets %v", got)
 	}
 }
 

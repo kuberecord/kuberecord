@@ -143,9 +143,16 @@ const (
 	// ClusterStreamRule owns.
 	ReasonNamespacesUnavailable = "NamespacesUnavailable"
 
-	// ReasonSinkMissing marks a rule whose spec.sink names a ClickHouseSink
-	// that does not exist. Its targets are withdrawn: a target without a sink is
-	// not a watch anybody could write the result of.
+	// ReasonSinkMissing marks a rule whose spec.sink names a sink that does not
+	// exist. Its targets are withdrawn: a target without a sink is not a watch
+	// anybody could write the result of.
+	//
+	// The verdict is reached by comparing the whole typed identity, so it also
+	// covers a rule naming a *kind* this build does not serve — an S3Sink while
+	// only a ClickHouseSink of that name exists. That is the same answer for the
+	// same reason: the sink the rule asked for is not here. Resolving it to the
+	// same-named sink of another kind would be far worse than parking, since the
+	// rule would stream to a backend carrying another sink's dedup baseline.
 	ReasonSinkMissing = "SinkMissing"
 
 	// ReasonSinkNotReady marks a rule whose sink exists but is not currently
@@ -156,6 +163,24 @@ const (
 	// requeue path exists to absorb, and tearing every watch down over it would
 	// cost a false scope epoch per scope plus a full re-emission on recovery.
 	ReasonSinkNotReady = "SinkNotReady"
+
+	// ReasonLegacySinkRef marks a rule that names no sink at all, because it was
+	// authored against v0.1.0 where the sink was a bare string field
+	// (spec.sinkRef). That field was renamed rather than retyped (D10), so the old
+	// spelling is pruned as an unknown field and the new one decodes as the zero
+	// value — which is the only trace such a rule leaves, and therefore the only
+	// thing a reconciler can detect.
+	//
+	// It is a reconciler verdict rather than a CRD validation rule because it has
+	// to be: validation runs on write, and these objects are already stored, so
+	// the API server will never re-examine them. Admission does reject a *new*
+	// rule with no sink (Task 4.3) — this is the other half, for the ones an
+	// upgrade inherited.
+	//
+	// It never self-heals and the rule contributes nothing meanwhile. spec.sink is
+	// immutable, so there is no edit that repairs such a rule; the message names
+	// the rename and says to delete and recreate it, which is the whole fix.
+	ReasonLegacySinkRef = "LegacySinkRef"
 
 	// ReasonKindsUnresolved marks ResourceResolved=False. The per-kind verdicts —
 	// a kind that is not installed yet, a cluster-scoped kind under a namespaced

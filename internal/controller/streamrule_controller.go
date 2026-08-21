@@ -235,8 +235,11 @@ var clusterStreamRuleKind = ruleKind{
 // NewClusterStreamRuleReconciler). Reconcile is a pipeline of gates, and each gate
 // owns exactly one condition:
 //
-//   - the sink must exist (Ready / SinkMissing) and be healthy (Ready /
-//     SinkNotReady);
+//   - the rule must name a sink at all (Ready / LegacySinkRef): a rule inherited
+//     from v0.1.0's `spec.sinkRef` decodes with an empty reference, which admission
+//     cannot reject because the object is already stored;
+//   - that sink — kind *and* name — must exist (Ready / SinkMissing) and be healthy
+//     (Ready / SinkNotReady);
 //   - every named resource must be admitted by the sink's policy and must not be
 //     v1/Secret (PolicyAllowed);
 //   - every named kind must resolve to a resource of a scope this rule may watch
@@ -432,6 +435,10 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // sinkVerdict is what the sink gate concluded, carried forward because the roll-up
 // condition needs it and it is not expressible as one of the rule's own specific
 // conditions — a rule's sink being unreachable says nothing about the rule.
+//
+// The legacy-reference verdict rides the same field for the same reason: "this rule
+// names no sink" is a statement about the reference, not about policy, resolution or
+// RBAC, and those three go Unknown when it holds.
 type sinkVerdict struct {
 	// reason is empty when the sink is present and Ready.
 	reason  string
@@ -468,8 +475,26 @@ type planOutcome struct {
 func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *statusWriter) planOutcome {
 	log := logf.FromContext(ctx)
 	spec := r.kind.spec(obj)
+	ruleKey := RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName())
 
-	chSink, verdict, err := r.resolveSink(ctx, spec.Sink.Name)
+	if spec.Sink == (v1alpha1.SinkReference{}) {
+		// A rule inherited from v0.1.0, where the sink was the string field
+		// spec.sinkRef: renaming the field (D10) means the old spelling is pruned
+		// as unknown and the new one decodes empty, so an empty reference is
+		// exactly and only this. Admission cannot have caught it — the object was
+		// stored under a schema that did not have the field — so this is the
+		// loudest report available: an Error log here, a Warning event from the
+		// Ready transition, and not one target installed.
+		log.Error(errLegacySinkRef, "Rule names no sink and must be deleted and recreated", "rule", ruleKey)
+		r.setUnevaluated(status, legacySinkRefMessage)
+		return planOutcome{
+			verdict: sinkVerdict{reason: ReasonLegacySinkRef, message: legacySinkRefMessage},
+			install: true,
+		}
+	}
+
+	sinkID := sinkIDFrom(spec.Sink)
+	chSink, verdict, err := r.resolveSink(ctx, sinkID)
 	if err != nil {
 		return planOutcome{err: err}
 	}
@@ -478,15 +503,14 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		// watch worth running, and its scope rows would name a sink that does not
 		// exist.
 		log.Info("Rule references a sink that does not exist; withdrawing its watch targets",
-			"rule", RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName()), "sink", spec.Sink.Name)
+			"rule", ruleKey, "sink", sinkID.String())
 		r.setUnevaluated(status, verdict.message)
 		return planOutcome{verdict: verdict, install: true}
 	}
 
 	if denied := checkPolicy(spec.Resources, chSink.Spec.Policy); denied != nil {
 		log.Info("Rule is not admitted by its sink's policy; withdrawing its watch targets",
-			"rule", RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName()),
-			"sink", chSink.Name, "reason", denied.reason)
+			"rule", ruleKey, "sink", sinkID.String(), "reason", denied.reason)
 		status.set(v1alpha1.ConditionPolicyAllowed, metav1.ConditionFalse, denied.reason, denied.message)
 		// The two later gates never ran, and saying nothing about them is more
 		// honest than implying they passed.
@@ -497,7 +521,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		return planOutcome{verdict: verdict, install: true}
 	}
 	status.set(v1alpha1.ConditionPolicyAllowed, metav1.ConditionTrue, ReasonAllResourcesPermitted,
-		fmt.Sprintf("Every resource this rule names is admitted by sink %q", chSink.Name))
+		fmt.Sprintf("Every resource this rule names is admitted by sink %s", sinkID))
 
 	namespaces, err := r.targetNamespaces(ctx, obj)
 	if err != nil {
@@ -528,7 +552,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	// the answer cannot differ between them.
 	redaction := canonicalRedaction(chSink.Spec.Policy.Redaction, spec.ExtraRedaction)
 
-	targets, denials, err := r.reviewTargets(ctx, clickHouseSinkID(chSink.Name), resolved, redaction)
+	targets, denials, err := r.reviewTargets(ctx, sinkID, resolved, redaction)
 	if err != nil {
 		status.set(v1alpha1.ConditionRBACGranted, metav1.ConditionUnknown, ReasonAccessReviewFailed, err.Error())
 		return planOutcome{verdict: verdict, err: err}
@@ -540,21 +564,82 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	return planOutcome{targets: targets, verdict: verdict, install: true}
 }
 
-// resolveSink loads the rule's sink and judges its health.
+// errLegacySinkRef gives the legacy guard's log line a non-nil error value. Nothing
+// branches on it: the verdict it accompanies is already in the rule's conditions,
+// and the only repair is an author deleting and recreating the rule.
+var errLegacySinkRef = errors.New("rule names no sink; it was authored against v0.1.0's spec.sinkRef")
+
+// legacySinkRefMessage is the LegacySinkRef condition message: what is wrong, why
+// it cannot be repaired in place, and the one action that repairs it.
+//
+// It names both spellings deliberately. The author of such a rule wrote `sinkRef`
+// and will search for that word, while `kubectl explain` now only knows `sink`, so
+// a message naming just one of the two leaves half the readers unable to connect it
+// to anything they have seen.
+const legacySinkRefMessage = "This rule names no sink: spec.sink is empty, which is what a rule written " +
+	"against v0.1.0's spec.sinkRef string field looks like once that field is pruned as unknown. " +
+	"There is no conversion webhook and spec.sink is immutable, so it cannot be migrated in place: " +
+	"delete this rule and recreate it with spec.sink: {kind: ClickHouseSink, name: <the old sinkRef>}."
+
+// sinkIDFrom lifts a rule's authored sink reference onto the identity the whole
+// data plane is keyed on.
+//
+// It is the only lift in the operator, which is what makes "where does a watch
+// target's sink kind come from?" answerable in one hop: the rule author's own
+// spelling, never a kind guessed further down.
+//
+// An empty kind on an otherwise complete reference is lifted to
+// sink.DefaultSinkKind — the "legacy unqualified name" use that constant
+// documents. CRD defaulting fills the field in long before a reconciler sees it, so
+// this is belt and braces for an object stored before the field existed; the reason
+// to do it here rather than pass the empty kind on is that an ID with no kind is a
+// meaningless key in every map below this line. A *fully* empty reference is not
+// defaulted at all — it is the legacy rule plan refuses outright, and inventing a
+// kind for it would be exactly the silent defaulting this phase exists to prevent.
+func sinkIDFrom(ref v1alpha1.SinkReference) sink.ID {
+	kind := ref.Kind
+	if kind == "" {
+		kind = sink.DefaultSinkKind
+	}
+	return sink.ID{Kind: kind, Name: ref.Name}
+}
+
+// resolveSink loads the sink a rule names and judges its health.
+//
+// The *kind* is checked before anything is fetched, and that check is the whole
+// point of a typed reference. A ClickHouseSink named "default" and an S3Sink named
+// "default" are both legal in etcd (D6), so a reference to a kind this build does
+// not serve must park rather than fall through to the same-named sink of the kind
+// it does: binding a rule to the wrong backend would hand it another sink's dedup
+// baseline and warm state, re-emitting every object or suppressing genuine changes,
+// with nothing in the logs to say so.
 //
 // A missing sink returns a nil sink with the SinkMissing verdict. A present but
 // unhealthy sink returns the sink *and* a SinkNotReady verdict, because the rule's
 // targets stay installed in that case — see RuleReconciler's doc comment for why.
-func (r *RuleReconciler) resolveSink(ctx context.Context, name string) (*v1alpha1.ClickHouseSink, sinkVerdict, error) {
+func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*v1alpha1.ClickHouseSink, sinkVerdict, error) {
+	if id.Kind != clickHouseSinkKind {
+		// Not reachable through admission — the CRD's enum lists only the kinds this
+		// build serves — but perfectly reachable in etcd: a rule stored by a newer
+		// operator, or one whose kind this binary was downgraded out of serving.
+		// SinkMissing is the honest verdict for both: the sink the rule asked for is
+		// not here, and no other sink may stand in for it.
+		return nil, sinkVerdict{
+			reason: ReasonSinkMissing,
+			message: fmt.Sprintf("Sink %s does not exist: this operator serves no sink of kind %q",
+				id, id.Kind),
+		}, nil
+	}
+
 	var chSink v1alpha1.ClickHouseSink
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: name}, &chSink); err != nil {
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: id.Name}, &chSink); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, sinkVerdict{
 				reason:  ReasonSinkMissing,
-				message: fmt.Sprintf("ClickHouseSink %q does not exist", name),
+				message: fmt.Sprintf("Sink %s does not exist", id),
 			}, nil
 		}
-		return nil, sinkVerdict{}, fmt.Errorf("get ClickHouseSink %q: %w", name, err)
+		return nil, sinkVerdict{}, fmt.Errorf("get %s: %w", id, err)
 	}
 
 	ready := findCondition(chSink.Status.Conditions, v1alpha1.ConditionReady)
@@ -562,12 +647,12 @@ func (r *RuleReconciler) resolveSink(ctx context.Context, name string) (*v1alpha
 	case ready == nil:
 		return &chSink, sinkVerdict{
 			reason:  ReasonSinkNotReady,
-			message: fmt.Sprintf("ClickHouseSink %q has not reported its health yet", name),
+			message: fmt.Sprintf("Sink %s has not reported its health yet", id),
 		}, nil
 	case ready.Status != metav1.ConditionTrue:
 		return &chSink, sinkVerdict{
 			reason:  ReasonSinkNotReady,
-			message: fmt.Sprintf("ClickHouseSink %q is not ready (%s: %s)", name, ready.Reason, ready.Message),
+			message: fmt.Sprintf("Sink %s is not ready (%s: %s)", id, ready.Reason, ready.Message),
 		}, nil
 	default:
 		return &chSink, sinkVerdict{}, nil
@@ -783,12 +868,11 @@ func (r *RuleReconciler) targetNamespaces(ctx context.Context, obj client.Object
 // redaction is the rule's canonical merged redaction policy (see
 // canonicalRedaction), stamped identically onto every target it produces.
 //
-// sinkID is the typed identity every produced target streams to. It is this
-// reconciler that turns the rule's `spec.sink` into one, and it is the last place
-// in the operator that does: the whole data plane below is keyed on sink.ID, and
-// the lift is legitimate here only because the resolution above already loaded a
-// *ClickHouseSink* under that name, so the kind is known rather than assumed (see
-// sink.DefaultSinkKind).
+// sinkID is the typed identity every produced target streams to, lifted from the
+// rule's own `spec.sink` by sinkIDFrom and already matched against a real sink CR of
+// that kind by resolveSink. Nothing below this line re-derives it: the whole data
+// plane is keyed on sink.ID, and the kind travelling with the name is what keeps two
+// same-named backends' dedup baselines apart.
 func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkID sink.ID,
 	resolved []resolvedResource, redaction string) ([]plan.WatchTarget, []string, error) {
 	targets := make([]plan.WatchTarget, 0, len(resolved))
