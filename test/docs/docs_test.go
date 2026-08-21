@@ -95,11 +95,12 @@ var bannedConfig = []struct {
 // short, explicit list rather than a pattern, so adding to it is a decision
 // somebody makes on purpose.
 var allowedToNameBannedConfig = map[string]string{
-	"CHANGELOG.md":           "the removal record and its migration table",
-	"kuberecord-backlog.md":  "the roadmap that specified the removal",
-	"CLAUDE.md":              "the contributor guide, where D5 records what was removed",
-	"task.txt":               "the task brief handed to the agent",
-	"test/docs/docs_test.go": "this test",
+	"CHANGELOG.md":               "the removal record and its migration table",
+	"kuberecord-backlog-v0.1.md": "the roadmap that specified the removal",
+	"kuberecord-backlog-v0.2.md": "the roadmap that carries it forward",
+	"CLAUDE.md":                  "the contributor guide, where D5 records what was removed",
+	"task.txt":                   "the task brief handed to the agent",
+	"test/docs/docs_test.go":     "this test",
 }
 
 // skippedDirs are directories with nothing user-facing in them: build output,
@@ -120,9 +121,16 @@ var skippedPaths = map[string]bool{
 	"dist/release": true,
 }
 
-// TestNoEnvVarEraConfiguration is the grep check Task 3.4 asks for, as a test
-// rather than as a command somebody has to remember to run.
-func TestNoEnvVarEraConfiguration(t *testing.T) {
+// walkRepositoryText calls visit once per file worth reading as an instruction,
+// with a slash-separated repository-relative path and the file's contents.
+//
+// It walks the *filesystem* rather than `git ls-files`, deliberately: generated
+// output that shadows a source file, and an untracked file a contributor is about
+// to commit, are both exactly what a tracked-files-only scan misses. That is the
+// lesson the v0.1.0 rename left behind, and the reason CLAUDE.md's definition of
+// done specifies `rg --no-ignore`.
+func walkRepositoryText(t *testing.T, visit func(rel, content string)) {
+	t.Helper()
 	root := repoPath()
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -141,11 +149,8 @@ func TestNoEnvVarEraConfiguration(t *testing.T) {
 			}
 			return nil
 		}
-		if _, exempt := allowedToNameBannedConfig[rel]; exempt {
-			return nil
-		}
 		// Coverage profiles and other large build artifacts are not instructions,
-		// and reading them costs more than the check is worth.
+		// and reading them costs more than the checks are worth.
 		if rel == "cover.out" {
 			return nil
 		}
@@ -161,19 +166,94 @@ func TestNoEnvVarEraConfiguration(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		content := string(raw)
-		for _, banned := range bannedConfig {
-			if loc := banned.pattern.FindStringIndex(content); loc != nil {
-				line := 1 + strings.Count(content[:loc[0]], "\n")
-				t.Errorf("%s:%d names %s, which Phase 1 removed with no compatibility shim (D5). It is now %s.",
-					rel, line, banned.name, banned.became)
-			}
-		}
+		visit(rel, string(raw))
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk repository: %v", err)
 	}
+}
+
+// lineOf reports the 1-based line number of a byte offset, for a message that
+// points at the occurrence rather than at the file.
+func lineOf(content string, offset int) int {
+	return 1 + strings.Count(content[:offset], "\n")
+}
+
+// TestNoEnvVarEraConfiguration is the grep check Task 3.4 asks for, as a test
+// rather than as a command somebody has to remember to run.
+func TestNoEnvVarEraConfiguration(t *testing.T) {
+	walkRepositoryText(t, func(rel, content string) {
+		if _, exempt := allowedToNameBannedConfig[rel]; exempt {
+			return
+		}
+		for _, banned := range bannedConfig {
+			if loc := banned.pattern.FindStringIndex(content); loc != nil {
+				t.Errorf("%s:%d names %s, which Phase 1 removed with no compatibility shim (D5). It is now %s.",
+					rel, lineOf(content, loc[0]), banned.name, banned.became)
+			}
+		}
+	})
+}
+
+//
+// The v0.1.0 sink reference is gone from everywhere that authors one (D10)
+//
+
+// legacySinkRefField matches the retired `sinkRef` field name and nothing else.
+//
+// Both word boundaries are load-bearing, because `\b` treats `_` as a word
+// character but not a letter: without the trailing one this would match the type
+// `SinkReference`, and without the leading one it would match `ReasonLegacySinkRef`
+// and `legacySinkRefMessage` — the very symbols that exist to *report* the retired
+// field, and whose whole job is to keep naming it.
+var legacySinkRefField = regexp.MustCompile(`\bsinkRef\b`)
+
+// allowedToNameLegacySinkRef are the files whose job is to say what the field
+// became, or to prove that it is gone.
+//
+// It is the same bargain as allowedToNameBannedConfig above: "the old name appears
+// nowhere" would be satisfied by deleting the migration instructions, which would
+// leave an upgrading user holding a parked rule and no way to find out why. So the
+// exemption is a short, explicit list rather than a pattern — adding to it is a
+// decision somebody makes on purpose, and each entry says what earns it.
+var allowedToNameLegacySinkRef = map[string]string{
+	"CHANGELOG.md":                                      "the release record and its migration steps",
+	"docs/UPGRADING.md":                                 "the upgrade page: it must name what to replace",
+	"CLAUDE.md":                                         "the contributor guide, where D10 records the rename",
+	"kuberecord-backlog-v0.1.md":                        "the roadmap that specified the field",
+	"kuberecord-backlog-v0.2.md":                        "the roadmap that specified its removal",
+	"task.md":                                           "the task brief handed to the agent",
+	"internal/controller/conditions.go":                 "the LegacySinkRef reason, documented",
+	"internal/controller/streamrule_controller.go":      "the legacy guard's condition message",
+	"internal/controller/streamrule_controller_test.go": "asserts that message names it",
+	"internal/controller/suite_test.go":                 "stages what an upgrade leaves in etcd",
+	"api/v1alpha1/crdmanifests_test.go":                 "asserts the schema does *not* contain it",
+	"api/v1alpha1/streamrule_envtest_test.go":           "asserts the apiserver rejects it",
+	"test/docs/docs_test.go":                            "this test",
+}
+
+// TestNoLegacySinkRefAuthoring is the `rg --no-ignore` scan Task 4.5 asks for, as
+// a test.
+//
+// A stale `sinkRef:` in a sample, a chart template or a doc is worse than a stale
+// sentence: `spec.sink` is required now, so the manifest a reader copies is
+// rejected outright — and the ones a suite renders are rejected in CI, at which
+// point the failure is a rule that never appeared rather than a field that was
+// renamed. Every occurrence that legitimately remains is naming the field in order
+// to explain what replaced it, which is what the exemption list above enumerates.
+func TestNoLegacySinkRefAuthoring(t *testing.T) {
+	walkRepositoryText(t, func(rel, content string) {
+		if _, exempt := allowedToNameLegacySinkRef[rel]; exempt {
+			return
+		}
+		for _, loc := range legacySinkRefField.FindAllStringIndex(content, -1) {
+			t.Errorf("%s:%d names the retired `sinkRef` field, which v0.2.0 replaced with "+
+				"`spec.sink {kind, name}` (D10). A rule authored against it is rejected: "+
+				"`spec.sink` is required and has no name default. See docs/UPGRADING.md.",
+				rel, lineOf(content, loc[0]))
+		}
+	})
 }
 
 // TestMigrationRecordStillNamesThem is the other half of the check above, and

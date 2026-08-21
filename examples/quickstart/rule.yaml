@@ -6,10 +6,12 @@
 # holding cluster-level privileges — writes a StreamRule instead; see
 # config/samples/kuberecord.io_v1alpha1_streamrule.yaml.
 #
-# `sinkRef` is omitted: it defaults to `default`, which is the sink next to this
-# file. It is also immutable — moving a rule to another sink is delete and
-# recreate, because re-pointing a live rule would strand the dedup and diff
-# baselines the pipeline built for every object in scope.
+# `sink` names the backend by kind and name — a name is only unique within a kind,
+# so both halves are the reference. `kind` is spelled out here rather than left to
+# its default, because this file is the one a reader copies. The pair is immutable:
+# moving a rule to another sink is delete and recreate, because re-pointing a live
+# rule would strand the dedup and diff baselines the pipeline built for every
+# object in scope.
 apiVersion: kuberecord.io/v1alpha1
 kind: ClusterStreamRule
 metadata:
@@ -18,6 +20,9 @@ metadata:
     app.kubernetes.io/name: kuberecord
     app.kubernetes.io/component: quickstart
 spec:
+  sink:
+    kind: ClickHouseSink
+    name: default
   resources:
   # `kind` is the Kind, not the plural resource: Deployment, not deployments.
   - group: apps

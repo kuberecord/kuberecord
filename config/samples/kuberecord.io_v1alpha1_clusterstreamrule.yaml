@@ -6,7 +6,9 @@ metadata:
     app.kubernetes.io/name: kuberecord
     app.kubernetes.io/managed-by: kustomize
 spec:
-  sinkRef: default
+  sink:
+    kind: ClickHouseSink
+    name: default
   # ClusterStreamRule is the only rule type permitted to name cluster-scoped
   # kinds; Node below is one.
   resources:

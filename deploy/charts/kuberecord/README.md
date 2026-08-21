@@ -194,7 +194,7 @@ create the schema v1 tables itself instead of you applying the DDL.
 | Value | Type | Default | Description |
 |---|---|---|---|
 | `createDefaultSink` | bool | `false` | Render a `ClickHouseSink`. Off by default: a sink needs an address and a password, and the password is yours to create. |
-| `defaultSink.name` | string | `default` | The sink's name. `default` is what a rule's `spec.sinkRef` defaults to, so a single-backend install needs no `sinkRef` anywhere. |
+| `defaultSink.name` | string | `default` | The sink's name — what a rule names in `spec.sink.name`. The `spec.sink.kind` half defaults to `ClickHouseSink`, which is what this chart creates. |
 | `defaultSink.connection.addr` | string | `""` | `host:port` of ClickHouse's native protocol (9000). **Required** when `createDefaultSink` is true. |
 | `defaultSink.connection.database` | string | `kuberecord` | Database holding the schema v1 tables. |
 | `defaultSink.connection.username` | string | `kuberecord` | ClickHouse user. |

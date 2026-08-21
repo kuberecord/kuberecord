@@ -150,15 +150,21 @@ func theOperatorPod(g Gomega) operatorPodInfo {
 	return harness.SolePod(g, operatorPodSelector, operatorNamespace)
 }
 
+// streamRuleYAML renders a StreamRule pointed at this suite's sink.
+//
+// The sink is bound here rather than at each scenario for the reason this whole
+// file exists: which backend the suite streams to is a property of the suite, and
+// a scenario that had to name it would be stating something it does not care
+// about.
 func streamRuleYAML(namespace, name string, resources []ruleResource) string {
-	return harness.StreamRuleYAML(namespace, name, resources)
+	return harness.StreamRuleYAML(namespace, name, sinkName, resources)
 }
 
 // redactingStreamRuleYAML renders a StreamRule that scrubs the given paths out
 // of every object it streams (Task 3.3).
 func redactingStreamRuleYAML(namespace, name string, resources []ruleResource,
 	redaction []redactionEntry) string {
-	return harness.RedactingStreamRuleYAML(namespace, name, resources, redaction)
+	return harness.RedactingStreamRuleYAML(namespace, name, sinkName, resources, redaction)
 }
 
 func configMapYAML(namespace, name string, data map[string]string) string {
@@ -166,7 +172,7 @@ func configMapYAML(namespace, name string, data map[string]string) string {
 }
 
 func clusterStreamRuleYAML(name string, resources []ruleResource) string {
-	return harness.ClusterStreamRuleYAML(name, resources)
+	return harness.ClusterStreamRuleYAML(name, sinkName, resources)
 }
 
 func deploymentYAML(namespace, name string, replicas int) string {

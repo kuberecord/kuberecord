@@ -321,6 +321,7 @@ apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata: {name: payments-workloads, namespace: payments}
 spec:
+  sink: {kind: ClickHouseSink, name: default}   # a name is unique within a kind
   resources:
   - {group: apps, version: v1, kind: Deployment}
 ```
@@ -362,6 +363,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Building, the make targets, and what each test suite proves. |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | What a version number promises: the operator's `v0.x` (pre-1.0, a minor may break), the CRDs' `v1alpha1`, and the frozen schema `v1` — three numbers that move independently. Plus what a tagged release publishes and how to cut one. |
+| [`docs/UPGRADING.md`](docs/UPGRADING.md) | What to do when a `v0.x` minor breaks: the version-by-version upgrade steps, with the exact `kubectl` sequence for each. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Including the migration table from the removed environment-variable configuration to the custom resources that replaced it. |
 
 ## Use cases

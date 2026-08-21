@@ -1,8 +1,8 @@
 # Where the quickstart's state history goes.
 #
-# The name `default` is what a rule's `spec.sinkRef` defaults to, so
-# examples/quickstart/rule.yaml carries no sinkRef at all — the shape a
-# single-backend install actually has.
+# It is named `default` because that is a name, not a default: a rule names its
+# sink explicitly, and examples/quickstart/rule.yaml names this one. Every sink
+# reference is a (kind, name) pair, since a name is only unique within a kind.
 #
 # `credentialsSecretRef` names no namespace on purpose: it resolves to the
 # operator's own, the only namespace the operator can read Secrets in. That is

@@ -1,10 +1,12 @@
 # The ClickHouseSink every chaos scenario streams to.
 #
-# Named "default" because that is the name a rule's spec.sinkRef defaults to, so
-# the suite's rules carry no sinkRef boilerplate — the same shape a real
-# single-sink install has. credentialsSecretRef omits a namespace on purpose: it
-# resolves to the operator's own namespace, the only place the operator holds
-# Secret read rights (Task 1.9).
+# Named "default" only because a single-sink install has to call its sink
+# something; every rule the suite renders names it in spec.sink.name, leaving the
+# kind half to the CRD default — which is what makes the "ClickHouseSink/default"
+# metric label this suite asserts on a real end-to-end check of that default.
+#
+# credentialsSecretRef omits a namespace on purpose: it resolves to the operator's
+# own namespace, the only place the operator holds Secret read rights (Task 1.9).
 #
 # The writer knobs are tuned to make failure *reachable and deterministic*, which
 # is the opposite of how a production sink is tuned and the opposite of the e2e

@@ -414,7 +414,7 @@ func expectRuleStreaming(name, namespace string) {
 // Scenarios that assert on Added specifically depend on having crossed it.
 func applyConfigMapRule(namespace, name string) {
 	GinkgoHelper()
-	harness.ApplyYAML(fieldManager, harness.StreamRuleYAML(namespace, name, []ruleResource{
+	harness.ApplyYAML(fieldManager, harness.StreamRuleYAML(namespace, name, sinkName, []ruleResource{
 		{Group: groupCore, Version: "v1", Kind: kindConfigMap},
 	}))
 	expectRuleStreaming(name, namespace)

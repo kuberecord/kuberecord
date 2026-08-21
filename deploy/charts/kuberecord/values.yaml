@@ -157,8 +157,9 @@ terminationGracePeriodSeconds: 10
 # defaultSink.connection.addr is required.
 createDefaultSink: false
 defaultSink:
-  # `default` is the name a rule's spec.sinkRef defaults to, so a single-backend
-  # install needs no sinkRef on any rule.
+  # The name rules name in spec.sink. A sink reference is a (kind, name) pair —
+  # a name is only unique within a kind — and the kind half defaults to
+  # ClickHouseSink, which is what this chart creates.
   name: default
   connection:
     addr: ""
