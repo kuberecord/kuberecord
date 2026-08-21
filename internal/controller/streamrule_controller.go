@@ -478,6 +478,11 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	ruleKey := RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName())
 
 	if spec.Sink == (v1alpha1.SinkReference{}) {
+		// Reachable only because neither spec.sink nor spec.sink.name carries a
+		// schema default: defaulting is applied on read from etcd, so either one
+		// would materialize a reference here and make this branch dead code.
+		// api/v1alpha1.TestSinkReferenceHasNoMaterializingDefault asserts that.
+		//
 		// A rule inherited from v0.1.0, where the sink was the string field
 		// spec.sinkRef: renaming the field (D10) means the old spelling is pruned
 		// as unknown and the new one decodes empty, so an empty reference is

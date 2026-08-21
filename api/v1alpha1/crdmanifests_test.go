@@ -19,8 +19,11 @@ package v1alpha1
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 )
 
 // crdBasesDir is where `make manifests` writes the generated CRDs.
@@ -171,14 +174,17 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reading generated CRD (did you run `make manifests`?): %v", err)
 			}
-			yaml := string(raw)
+			// Named `manifest` rather than `yaml`: this file now imports
+			// sigs.k8s.io/yaml for the parsed assertions below, and a local of
+			// that name would shadow the package.
+			manifest := string(raw)
 			for _, want := range tt.mustContain {
-				if !strings.Contains(yaml, want) {
+				if !strings.Contains(manifest, want) {
 					t.Errorf("generated CRD %s is missing %q", tt.file, want)
 				}
 			}
 			for _, unwanted := range tt.mustNotExist {
-				if strings.Contains(yaml, unwanted) {
+				if strings.Contains(manifest, unwanted) {
 					t.Errorf("generated CRD %s unexpectedly contains %q", tt.file, unwanted)
 				}
 			}
@@ -218,4 +224,168 @@ func TestCRDPatternConstantsMatchMarkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ruleCRDFiles are the two generated CRDs that serve a rule.
+//
+// Both are always asserted, never one as a representative: ClusterStreamRuleSpec
+// embeds StreamRuleSpec inline, so a single marker edit lands in both files, and a
+// test that checked only one would report half a regression.
+var ruleCRDFiles = []string{
+	"kuberecord.io_streamrules.yaml",
+	"kuberecord.io_clusterstreamrules.yaml",
+}
+
+// TestSinkReferenceHasNoMaterializingDefault pins the *absence* of a schema default
+// on `spec.sink` and on `spec.sink.name`, which is the sole reason the
+// ReasonLegacySinkRef guard in RuleReconciler.plan is reachable at all.
+//
+// The mechanism, in full, because nothing else in the tree writes it down:
+//
+//   - Structural-schema defaulting is applied by the API server on every *read* from
+//     etcd, not only at admission. An object stored years ago is defaulted afresh
+//     each time it is served, against whatever schema is installed today.
+//   - Defaulting descends into a field only when that field's parent is present. A
+//     default declared on a child never fires while the parent is absent.
+//
+// Put together: a rule stored under v0.1.0's `spec.sinkRef` is served with its
+// unknown field pruned and no `sink` key at all, so it decodes into a true zero
+// `SinkReference` — and `spec.Sink == (v1alpha1.SinkReference{})` catches it. Add an
+// object-level default to `sink` (`+kubebuilder:default={kind:"ClickHouseSink",name:"default"}`
+// is the obvious-looking convenience) and the API server materializes that reference
+// on read instead. Every legacy rule then binds to a backend nobody chose, inherits
+// that sink's dedup and warm state, reports Ready=True, and the guard becomes dead
+// code that nothing exercises. Silent rebinding to the wrong backend is precisely the
+// failure D10 exists to prevent, and it is invisible from the rule's status.
+//
+// `spec.sink.name` is held to the same rule for the compounding case rather than the
+// immediate one. A default on `name` alone cannot fire for a legacy rule — its parent
+// is absent, exactly as with `kind` — but it removes the property that makes the pair
+// safe: with it in place, any path that materializes an empty `sink` yields a
+// complete, plausible-looking reference instead of one the required/MinLength rules
+// or this guard would still catch. It also contradicts what SinkReference.Name's own
+// comment promises, which is the more durable reason not to have one.
+//
+// `spec.sink.kind`'s default is correct and is asserted positively here, so this test
+// pins the whole arrangement rather than half of it: removing the kind default is a
+// separate regression (rules in a ClickHouse-only cluster would have to spell a kind
+// they have no alternative for), and a vacuity test that only forbids things would
+// pass just as happily after someone deleted it.
+//
+// The assertions run against the generated YAML rather than the Go markers because
+// the marker-to-schema translation is exactly what could change: controller-gen
+// deciding to hoist a child default onto its parent would satisfy any marker-level
+// check and still break the guard. And unlike this file's other tests they parse the
+// document instead of matching substrings, because the property is the absence of a
+// key at one specific node — `default: ClickHouseSink` legitimately appears in both
+// files, so no negative substring can express it.
+func TestSinkReferenceHasNoMaterializingDefault(t *testing.T) {
+	for _, file := range ruleCRDFiles {
+		t.Run(strings.TrimSuffix(file, ".yaml"), func(t *testing.T) {
+			specSchema := ruleSpecSchema(t, file)
+
+			if !specRequires(t, specSchema, "sink") {
+				t.Errorf("generated CRD %s no longer lists `sink` in spec.required.\n"+
+					"A rule that names no sink must be rejected at admission; the LegacySinkRef guard in "+
+					"RuleReconciler.plan exists only for the rules already in etcd that admission never saw.",
+					file)
+			}
+
+			sinkSchema := schemaNode(t, file, specSchema, "properties", "sink")
+			if got, defaulted := sinkSchema["default"]; defaulted {
+				t.Errorf("generated CRD %s gives spec.sink a schema default (%v) — remove it.\n"+
+					"Defaulting is applied on every read from etcd, not only at admission, so this default "+
+					"materializes a sink reference for rules that never named one: every rule inherited from "+
+					"v0.1.0's spec.sinkRef silently binds to that backend, carrying another sink's dedup and "+
+					"warm state, and reports Ready=True while doing it.\n"+
+					"It also makes RuleReconciler.plan's `spec.Sink == (v1alpha1.SinkReference{})` guard "+
+					"(ReasonLegacySinkRef) unreachable, so nothing anywhere would report the rebinding. "+
+					"This is the failure D10 exists to prevent.",
+					file, got)
+			}
+
+			nameSchema := schemaNode(t, file, sinkSchema, "properties", "name")
+			if got, defaulted := nameSchema["default"]; defaulted {
+				t.Errorf("generated CRD %s gives spec.sink.name a schema default (%v) — remove it.\n"+
+					"Guessing which of a cluster's sinks an author meant is how an audit trail quietly ends "+
+					"up somewhere nobody chose. It cannot fire on its own while spec.sink is absent, but it "+
+					"removes the property that keeps the pair safe: with a name default in place, anything "+
+					"that materializes an empty spec.sink produces a complete, plausible reference rather "+
+					"than one the required/MinLength rules or the LegacySinkRef guard would still catch.",
+					file, got)
+			}
+
+			kindSchema := schemaNode(t, file, sinkSchema, "properties", "kind")
+			if got := kindSchema["default"]; got != defaultSinkKind {
+				t.Errorf("generated CRD %s defaults spec.sink.kind to %v, want %q.\n"+
+					"This half of the arrangement is deliberate and must stay: a child default never fires "+
+					"while its parent is absent, so it cannot rebind a legacy rule, and without it every rule "+
+					"in a ClickHouse-only cluster would have to spell a kind it has no alternative for.",
+					file, got, defaultSinkKind)
+			}
+		})
+	}
+}
+
+// ruleSpecSchema decodes one generated rule CRD and returns the schema of its
+// `spec` — the node every assertion in TestSinkReferenceHasNoMaterializingDefault
+// hangs off.
+func ruleSpecSchema(t *testing.T, file string) map[string]any {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(crdBasesDir, file))
+	if err != nil {
+		t.Fatalf("reading generated CRD (did you run `make manifests`?): %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decoding generated CRD %s: %v", file, err)
+	}
+
+	versions, ok := schemaNode(t, file, doc, "spec")["versions"].([]any)
+	if !ok || len(versions) != 1 {
+		// One served version is not incidental: v1alpha1 is the only version these
+		// CRDs have, and a second one would mean this helper had to pick which one
+		// the guard's reachability depends on.
+		t.Fatalf("generated CRD %s does not serve exactly one version", file)
+	}
+	version, ok := versions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("generated CRD %s version 0 is not an object", file)
+	}
+	return schemaNode(t, file, version, "schema", "openAPIV3Schema", "properties", "spec")
+}
+
+// schemaNode descends a decoded CRD by map key.
+//
+// It fails rather than returning an empty map, because every key on the paths above
+// is one controller-gen has always emitted: a missing one means the document's shape
+// changed, and an absence assertion against a node that does not exist is the exact
+// shape of a test that passes while proving nothing.
+func schemaNode(t *testing.T, file string, node map[string]any, path ...string) map[string]any {
+	t.Helper()
+
+	for i, key := range path {
+		next, found := node[key]
+		if !found {
+			t.Fatalf("generated CRD %s has no %s", file, strings.Join(path[:i+1], "."))
+		}
+		typed, ok := next.(map[string]any)
+		if !ok {
+			t.Fatalf("generated CRD %s node %s is not an object", file, strings.Join(path[:i+1], "."))
+		}
+		node = typed
+	}
+	return node
+}
+
+// specRequires reports whether a decoded `spec` schema lists field as required.
+func specRequires(t *testing.T, specSchema map[string]any, field string) bool {
+	t.Helper()
+
+	required, ok := specSchema["required"].([]any)
+	if !ok {
+		t.Fatalf("the generated spec schema has no required list")
+	}
+	return slices.Contains(required, any(field))
 }
