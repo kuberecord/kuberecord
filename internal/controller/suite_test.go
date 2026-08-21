@@ -54,6 +54,21 @@ import (
 	"github.com/yelzhy/kuberecord/internal/watch"
 )
 
+// Tests in this package run sequentially. No test here may call t.Parallel(), and
+// TestNoTestInThisPackageRunsInParallel (sequential_test.go) fails the build if one
+// does.
+//
+// This is a rule, not an observation about how the package happens to be written
+// today. harness.stageRule below relaxes a rule CRD's schema for the duration of a
+// single write and restores it immediately, and every test here shares one envtest
+// apiserver — so a test running concurrently with that window can have its own object
+// admitted against the relaxed schema, and the resulting failure names a file that
+// has nothing to do with the cause.
+//
+// It is a boundary rather than an obstacle: a test that genuinely needs parallelism
+// belongs in a package that does not use stageRule, where the shared relaxation
+// window does not exist and t.Parallel() costs nothing.
+
 // The control-plane reconcilers are almost entirely *about* the API server: what
 // the REST mapper resolves, what a status subresource accepts, whether a field
 // index and a map function actually re-enqueue what they claim to. Testing them
@@ -583,8 +598,9 @@ var crdGVK = schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1
 // writes onto the staged object, which is the property that makes a condition on an
 // invalid object a real signal rather than a test artefact.
 //
-// Tests in this package share one apiserver and run sequentially, so the window in
-// which the schema is relaxed cannot admit another test's object.
+// The window in which the schema is relaxed cannot admit another test's object
+// because this package runs sequentially — see the package comment at the top of
+// this file, which states that rule and names the test that enforces it.
 func (h *harness) stageRule(ruleKind, namespace, name string,
 	spec map[string]any, relax func(specSchema map[string]any) error) client.Object {
 	h.t.Helper()
