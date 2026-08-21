@@ -26,8 +26,8 @@ import (
 
 // TestClusterStreamRuleValidation runs the shared rule table against
 // ClusterStreamRule. Passing it is the proof that inlining StreamRuleSpec
-// carried every field rule — including sinkRef's oldSelf transition rule —
-// into this CRD's generated schema.
+// carried every field rule — including the sink reference's oldSelf transition
+// rule — into this CRD's generated schema.
 func TestClusterStreamRuleValidation(t *testing.T) {
 	runAPICases(t, ruleValidationCases(ruleEditor{
 		kind: "ClusterStreamRule",
@@ -38,8 +38,11 @@ func TestClusterStreamRuleValidation(t *testing.T) {
 				Spec:       ClusterStreamRuleSpec{StreamRuleSpec: spec},
 			}
 		},
-		setSinkRef: func(o clientObject) {
-			o.(*ClusterStreamRule).Spec.SinkRef = otherSinkRef
+		setSinkName: func(o clientObject) {
+			o.(*ClusterStreamRule).Spec.Sink.Name = otherSinkName
+		},
+		setSinkKind: func(o clientObject) {
+			o.(*ClusterStreamRule).Spec.Sink.Kind = unknownSinkKind
 		},
 		appendResource: func(o clientObject) {
 			r := o.(*ClusterStreamRule)

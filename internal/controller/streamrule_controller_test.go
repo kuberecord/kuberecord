@@ -49,13 +49,21 @@ func resourceEntry(group, kind string) v1alpha1.WatchedResource {
 	return v1alpha1.WatchedResource{Group: group, Version: "v1", Kind: kind}
 }
 
-// newStreamRule builds a namespaced rule in a fresh namespace.
-func (h *harness) newStreamRule(namespace, name, sinkRef string,
+// newStreamRule builds a namespaced rule in a fresh namespace, streaming to the
+// ClickHouseSink of the given name.
+//
+// The sink reference's kind is left unset on purpose: these rules are created
+// through a real apiserver, so omitting it exercises the CRD default every rule
+// in a ClickHouse-only cluster relies on.
+func (h *harness) newStreamRule(namespace, name, sinkName string,
 	resources ...v1alpha1.WatchedResource) *v1alpha1.StreamRule {
 	h.t.Helper()
 	rule := &v1alpha1.StreamRule{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       v1alpha1.StreamRuleSpec{SinkRef: sinkRef, Resources: resources},
+		Spec: v1alpha1.StreamRuleSpec{
+			Sink:      v1alpha1.SinkReference{Name: sinkName},
+			Resources: resources,
+		},
 	}
 	if err := h.Client.Create(context.Background(), rule); err != nil {
 		h.t.Fatalf("create StreamRule %s/%s: %v", namespace, name, err)
@@ -64,14 +72,18 @@ func (h *harness) newStreamRule(namespace, name, sinkRef string,
 	return rule
 }
 
-// newClusterStreamRule builds a cluster-scoped rule.
-func (h *harness) newClusterStreamRule(name, sinkRef string, selector *metav1.LabelSelector,
+// newClusterStreamRule builds a cluster-scoped rule. The sink reference's kind is
+// left to the CRD default, exactly as in newStreamRule.
+func (h *harness) newClusterStreamRule(name, sinkName string, selector *metav1.LabelSelector,
 	resources ...v1alpha1.WatchedResource) *v1alpha1.ClusterStreamRule {
 	h.t.Helper()
 	rule := &v1alpha1.ClusterStreamRule{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: v1alpha1.ClusterStreamRuleSpec{
-			StreamRuleSpec:    v1alpha1.StreamRuleSpec{SinkRef: sinkRef, Resources: resources},
+			StreamRuleSpec: v1alpha1.StreamRuleSpec{
+				Sink:      v1alpha1.SinkReference{Name: sinkName},
+				Resources: resources,
+			},
 			NamespaceSelector: selector,
 		},
 	}

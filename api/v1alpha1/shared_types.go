@@ -259,6 +259,52 @@ type GVKSelector struct {
 	Kinds []string `json:"kinds"`
 }
 
+// SinkReference names one sink instance: which kind of backend, and which CR of
+// that kind. It is the authored spelling of the runtime's own sink identity, and
+// the two are deliberately the same shape.
+//
+// The kind is part of the reference because a name is only unique *within* a
+// kind: a ClickHouseSink named "default" and an S3Sink named "default" are both
+// legal in etcd and are two entirely unrelated backends. Keyed on the name
+// alone, whichever reconciled second would displace the first, and rules would
+// then stream to a backend carrying another one's dedup cache and warm state —
+// re-emitting every object, or suppressing genuine changes, with nothing in the
+// logs to say so. Naming the kind makes that unrepresentable rather than merely
+// unlikely.
+//
+// Sink CRs are cluster-scoped (D6), so a kind and a name are a complete
+// reference: there is no namespace to carry, and a rule names its sink the same
+// way from any namespace.
+type SinkReference struct {
+	// Kind is the sink CR's kind, spelled as the API server spells it —
+	// "ClickHouseSink". Omitting it means ClickHouseSink, which is the default
+	// only because ClickHouse was the first backend and is what every rule
+	// written before the kind existed meant; nothing in the runtime treats that
+	// kind specially, and no path falls back to it when another kind fails to
+	// resolve.
+	//
+	// The enum lists only the kinds this build actually serves, which is the
+	// point of having one: a rule naming a kind no reconciler implements would
+	// otherwise be admitted and then park forever with nothing to bind to, and
+	// its author's only clue would be a condition on an object they may not think
+	// to read. Rejecting the spelling at admission puts the error where they
+	// typed it. Each new backend adds itself here as it lands.
+	// +optional
+	// +kubebuilder:default="ClickHouseSink"
+	// +kubebuilder:validation:Enum=ClickHouseSink
+	Kind string `json:"kind,omitempty"`
+
+	// Name is the sink CR's name.
+	//
+	// Unlike the kind it has no default. An author writing a sink reference is
+	// naming one specific backend out of however many a cluster runs, and
+	// guessing which one they meant is the kind of convenience that quietly
+	// streams a cluster's audit trail somewhere nobody chose.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+}
+
 // StreamRuleSpec is the intent shared by StreamRule and ClusterStreamRule:
 // which sink to write to, and which resources to stream there.
 //
@@ -266,8 +312,9 @@ type GVKSelector struct {
 // so the two CRDs cannot drift apart field-by-field — and every validation rule
 // below is written at *field* level precisely so that inlining preserves it.
 type StreamRuleSpec struct {
-	// SinkRef names the ClickHouseSink (cluster-scoped, so no namespace) that
-	// this rule's records are written to.
+	// Sink names the sink this rule's records are written to: which kind of
+	// backend, and which CR of that kind (sinks are cluster-scoped, so no
+	// namespace).
 	//
 	// It is immutable. Re-pointing a live rule at a different sink would strand
 	// the dedup/diff baseline the pipeline has built for every object in scope:
@@ -277,16 +324,19 @@ type StreamRuleSpec struct {
 	// rare operation, moving a rule is delete + recreate — which re-warms the
 	// cache from the new sink's own history, correctly and by construction.
 	//
-	// Omitting the field defaults it to "default", so rules in a single-sink
-	// cluster carry no boilerplate. Spelling it as an explicit empty string is
-	// rejected rather than defaulted: an author who typed the key meant to
-	// name a sink.
-	// +kubebuilder:default="default"
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="sinkRef is immutable: delete and recreate this rule to point it at a different sink"
-	SinkRef string `json:"sinkRef,omitempty"`
+	// The rule guards the whole reference rather than each field, because the
+	// identity is the pair: changing the name and changing the kind are the same
+	// mistake with the same consequence, and one rule says so once.
+	//
+	// A rule targets exactly one sink, permanently (D14). To stream one resource
+	// set to two backends — a queryable timeline and a cheap immutable archive,
+	// say — author two rules naming the same resources and different sinks. That
+	// is the supported shape rather than a workaround: each rule then carries its
+	// own dedup state, its own conditions and its own watch accounting, so one
+	// unreachable backend degrades one rule.
+	// +required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="sink is immutable: delete and recreate this rule to point it at a different sink"
+	Sink SinkReference `json:"sink"`
 
 	// Resources are the resource types this rule streams. At least one is
 	// required — an empty rule is always an authoring mistake, and rejecting it

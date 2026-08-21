@@ -25,8 +25,8 @@ import (
 //
 // StreamRuleSpec is embedded inline rather than copied so the two rule CRDs
 // cannot drift apart field-by-field, and so every validation rule written on
-// StreamRuleSpec's fields (including sinkRef's immutability) is inherited
-// verbatim by this CRD's generated schema.
+// StreamRuleSpec's fields (including the sink reference's immutability) is
+// inherited verbatim by this CRD's generated schema.
 type ClusterStreamRuleSpec struct {
 	StreamRuleSpec `json:",inline"`
 
@@ -59,7 +59,8 @@ type ClusterStreamRuleSpec struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="READY",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="SINK",type=string,JSONPath=`.spec.sinkRef`
+// +kubebuilder:printcolumn:name="SINK",type=string,JSONPath=`.spec.sink.name`
+// +kubebuilder:printcolumn:name="SINK-KIND",type=string,JSONPath=`.spec.sink.kind`
 // +kubebuilder:printcolumn:name="WATCHES",type=integer,JSONPath=`.status.activeWatches`
 // +kubebuilder:printcolumn:name="AGE",type=date,JSONPath=`.metadata.creationTimestamp`
 type ClusterStreamRule struct {

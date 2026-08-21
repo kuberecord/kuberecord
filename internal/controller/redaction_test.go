@@ -244,7 +244,7 @@ func TestRuleRedactionReachesTheRegistry(t *testing.T) {
 	rule := &v1alpha1.StreamRule{
 		ObjectMeta: metav1.ObjectMeta{Name: "redacting", Namespace: namespace},
 		Spec: v1alpha1.StreamRuleSpec{
-			SinkRef:   sinkName,
+			Sink:      v1alpha1.SinkReference{Name: sinkName},
 			Resources: []v1alpha1.WatchedResource{resourceEntry("", "ConfigMap")},
 			ExtraRedaction: []v1alpha1.RedactionRule{
 				{Annotation: "my.company.io/api-token"},

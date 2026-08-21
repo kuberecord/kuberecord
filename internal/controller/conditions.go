@@ -143,7 +143,7 @@ const (
 	// ClusterStreamRule owns.
 	ReasonNamespacesUnavailable = "NamespacesUnavailable"
 
-	// ReasonSinkMissing marks a rule whose spec.sinkRef names a ClickHouseSink
+	// ReasonSinkMissing marks a rule whose spec.sink names a ClickHouseSink
 	// that does not exist. Its targets are withdrawn: a target without a sink is
 	// not a watch anybody could write the result of.
 	ReasonSinkMissing = "SinkMissing"

@@ -59,9 +59,14 @@ import (
 // traffic is negligible.
 const defaultRuleResyncPeriod = 2 * time.Minute
 
-// sinkRefIndexKey is the field-index name under which both rule kinds are indexed
-// by spec.sinkRef, so a sink event maps straight to the rules that stream to it.
-const sinkRefIndexKey = ".spec.sinkRef"
+// sinkNameIndexKey is the field-index name under which both rule kinds are indexed
+// by spec.sink.name, so a sink event maps straight to the rules that stream to it.
+//
+// It indexes the name alone rather than the whole typed identity because a sink
+// event carries a CR of one known kind: the ClickHouseSink watch that feeds this
+// index can only ever announce ClickHouseSinks, so a name is enough to find the
+// candidates, and the reconcile pass that follows compares the full identity.
+const sinkNameIndexKey = ".spec.sink.name"
 
 // accessVerbs are the verbs a watch actually needs.
 //
@@ -464,7 +469,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	log := logf.FromContext(ctx)
 	spec := r.kind.spec(obj)
 
-	chSink, verdict, err := r.resolveSink(ctx, spec.SinkRef)
+	chSink, verdict, err := r.resolveSink(ctx, spec.Sink.Name)
 	if err != nil {
 		return planOutcome{err: err}
 	}
@@ -473,7 +478,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		// watch worth running, and its scope rows would name a sink that does not
 		// exist.
 		log.Info("Rule references a sink that does not exist; withdrawing its watch targets",
-			"rule", RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName()), "sink", spec.SinkRef)
+			"rule", RuleKey(r.kind.kind, obj.GetNamespace(), obj.GetName()), "sink", spec.Sink.Name)
 		r.setUnevaluated(status, verdict.message)
 		return planOutcome{verdict: verdict, install: true}
 	}
@@ -779,11 +784,11 @@ func (r *RuleReconciler) targetNamespaces(ctx context.Context, obj client.Object
 // canonicalRedaction), stamped identically onto every target it produces.
 //
 // sinkID is the typed identity every produced target streams to. It is this
-// reconciler that turns the rule's unqualified `spec.sinkRef` into one, and it is
-// the last place in the operator that does: the whole data plane below is keyed on
-// sink.ID, and the lift is legitimate here only because the resolution above
-// already loaded a *ClickHouseSink* under that name, so the kind is known rather
-// than assumed (see sink.DefaultSinkKind).
+// reconciler that turns the rule's `spec.sink` into one, and it is the last place
+// in the operator that does: the whole data plane below is keyed on sink.ID, and
+// the lift is legitimate here only because the resolution above already loaded a
+// *ClickHouseSink* under that name, so the kind is known rather than assumed (see
+// sink.DefaultSinkKind).
 func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkID sink.ID,
 	resolved []resolvedResource, redaction string) ([]plan.WatchTarget, []string, error) {
 	targets := make([]plan.WatchTarget, 0, len(resolved))
@@ -991,9 +996,9 @@ func (r *RuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.events = make(chan event.GenericEvent, parkChannelCapacity)
 	}
 
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), r.kind.newObject(), sinkRefIndexKey,
-		func(obj client.Object) []string { return []string{r.kind.spec(obj).SinkRef} }); err != nil {
-		return fmt.Errorf("index %s by spec.sinkRef: %w", r.kind.kind, err)
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), r.kind.newObject(), sinkNameIndexKey,
+		func(obj client.Object) []string { return []string{r.kind.spec(obj).Sink.Name} }); err != nil {
+		return fmt.Errorf("index %s by spec.sink.name: %w", r.kind.kind, err)
 	}
 
 	builder := ctrl.NewControllerManagedBy(mgr).
@@ -1016,10 +1021,10 @@ func (r *RuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 const parkChannelCapacity = 128
 
 // rulesForSink maps a ClickHouseSink event onto the rules that stream to it, via
-// the spec.sinkRef field index.
+// the spec.sink.name field index.
 func (r *RuleReconciler) rulesForSink(ctx context.Context, obj client.Object) []reconcile.Request {
 	list := r.kind.newList()
-	if err := r.Client.List(ctx, list, client.MatchingFields{sinkRefIndexKey: obj.GetName()}); err != nil {
+	if err := r.Client.List(ctx, list, client.MatchingFields{sinkNameIndexKey: obj.GetName()}); err != nil {
 		logf.FromContext(ctx).Error(err, "Failed to list the rules referencing a sink",
 			"sink", obj.GetName(), "kind", r.kind.kind)
 		return nil
@@ -1106,18 +1111,18 @@ func (p *Parker) SinkGone(id sink.ID, ruleKeys []string) {
 	log := logf.Log.WithName("sink-park")
 	// The whole identity, not just the name: a park log line has to say which
 	// backend went away when two kinds may share a name.
-	sinkRef := id.String()
+	sinkLabel := id.String()
 	for _, key := range ruleKeys {
 		kind, ref, ok := parseRuleKey(key)
 		if !ok {
 			log.Error(errUnparseableRuleKey, "Cannot park a rule whose registry key is unrecognised",
-				"sink", sinkRef, "rule", key)
+				"sink", sinkLabel, "rule", key)
 			continue
 		}
 		events, known := p.channels[kind]
 		if !known {
 			log.Error(errUnparseableRuleKey, "No reconciler is registered for a rule kind that must be parked",
-				"sink", sinkRef, "rule", key, "kind", kind)
+				"sink", sinkLabel, "rule", key, "kind", kind)
 			continue
 		}
 
@@ -1125,7 +1130,7 @@ func (p *Parker) SinkGone(id sink.ID, ruleKeys []string) {
 		case events <- event.GenericEvent{Object: newRuleStub(kind, ref)}:
 		default:
 			log.Error(errParkChannelFull, "Dropping a park trigger; the rule re-reconciles on its next resync",
-				"sink", sinkRef, "rule", key)
+				"sink", sinkLabel, "rule", key)
 		}
 	}
 }
