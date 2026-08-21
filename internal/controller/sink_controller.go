@@ -94,16 +94,27 @@ type SinkRuntime interface {
 	Delete(id sink.ID)
 }
 
+// clickHouseSinkKind is the one sink CR kind this build serves.
+//
+// It equals sink.DefaultSinkKind because ClickHouse is the first backend and, so
+// far, the only one — this is that constant's "a ClickHouseSink-specific
+// component naming its own kind" use, not a fallback being applied to a reference
+// that failed to resolve. It is named separately from the constant it equals
+// because the two answer different questions: what an unqualified legacy name
+// means, and which kinds this binary can actually resolve. D6's next backend adds
+// a kind beside this one, which is when the rule reconciler's single comparison
+// becomes a lookup.
+const clickHouseSinkKind = sink.DefaultSinkKind
+
 // clickHouseSinkID is the runtime identity of one ClickHouseSink CR.
 //
 // It is not a default being applied: this reconciler reconciles exactly one kind
 // and therefore *knows* its own, which is the only condition under which naming
-// sink.DefaultSinkKind is legitimate (see its doc comment). Keeping the
-// construction in one function is what makes "which kind does the ClickHouseSink
-// reconciler register under?" a single, greppable answer rather than a literal
-// repeated at every call site.
+// the kind outright is legitimate. Keeping the construction in one function is
+// what makes "which kind does the ClickHouseSink reconciler register under?" a
+// single, greppable answer rather than a literal repeated at every call site.
 func clickHouseSinkID(name string) sink.ID {
-	return sink.ID{Kind: sink.DefaultSinkKind, Name: name}
+	return sink.ID{Kind: clickHouseSinkKind, Name: name}
 }
 
 // SinkConfigBuilder turns a resolved ClickHouseSink plus its credential into the

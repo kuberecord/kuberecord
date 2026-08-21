@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,10 +34,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -525,6 +529,220 @@ func (h *harness) targetsFor(ruleKey string) []string {
 	}
 	slices.Sort(got)
 	return got
+}
+
+// targetSinksFor returns the distinct sink identities one rule's installed targets
+// stream to, ordered by ID.Compare.
+//
+// It is a separate accessor from targetsFor rather than another field in its
+// rendering, because the two answer different questions: targetsFor asks "which
+// scopes is this rule watching?", which every rule test cares about, and this asks
+// "which backend do those scopes write to?", which only the typed-identity tests do.
+func (h *harness) targetSinksFor(ruleKey string) []sink.ID {
+	seen := make(map[sink.ID]struct{})
+	for key, state := range h.Registry.Snapshot() {
+		for _, rule := range state.RuleKeys {
+			if rule == ruleKey {
+				seen[key.Sink] = struct{}{}
+			}
+		}
+	}
+	ids := slices.Collect(maps.Keys(seen))
+	slices.SortFunc(ids, sink.ID.Compare)
+	return ids
+}
+
+// ruleCRDNames maps a rule kind discriminator onto the CRD that serves it, for the
+// staging helpers below.
+var ruleCRDNames = map[string]string{
+	kindStreamRule:        "streamrules.kuberecord.io",
+	kindClusterStreamRule: "clusterstreamrules.kuberecord.io",
+}
+
+// crdGVK identifies a CustomResourceDefinition for the unstructured client below.
+//
+// The CRD is read and written as an unstructured object on purpose: importing
+// apiextensions-apiserver for its typed API would promote an indirect dependency to
+// a direct one, and this needs two field edits in a schema, not an API.
+var crdGVK = schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}
+
+// stageRule stores a rule the API server would refuse to admit today, by relaxing
+// its CRD for exactly as long as the write takes.
+//
+// It exists because the two guards this file's tests exercise are guards on objects
+// that are *already in etcd*: a rule written against v0.1.0's spec.sinkRef, and a
+// rule naming a sink kind this build does not serve. Admission rejects both — the
+// required field and the kind enum are Task 4.3's job and they work — so writing the
+// object under a schema that admitted it and then restoring the shipped one is not a
+// trick to get around validation, it *is* the situation being tested: exactly what an
+// operator upgrade leaves behind.
+//
+// relax is handed the CRD's `spec` schema (properties.spec) to edit in place. The
+// shipped CRD is restored before this returns, so every reconcile the test then
+// observes runs against precisely the schema production runs — including the status
+// writes onto the staged object, which is the property that makes a condition on an
+// invalid object a real signal rather than a test artefact.
+//
+// Tests in this package share one apiserver and run sequentially, so the window in
+// which the schema is relaxed cannot admit another test's object.
+func (h *harness) stageRule(ruleKind, namespace, name string,
+	spec map[string]any, relax func(specSchema map[string]any) error) client.Object {
+	h.t.Helper()
+	ctx := context.Background()
+	crdName, known := ruleCRDNames[ruleKind]
+	if !known {
+		h.t.Fatalf("no CRD is registered for rule kind %q", ruleKind)
+	}
+
+	crd := h.getCRD(crdName)
+	// The whole spec is kept, not just the field being relaxed: restoring by
+	// replaying an inverse edit would quietly leave the schema wrong if the edit and
+	// its inverse ever disagreed.
+	original, ok := runtime.DeepCopyJSONValue(crd.Object["spec"]).(map[string]any)
+	if !ok {
+		h.t.Fatalf("CRD %s has no spec object", crdName)
+	}
+	if err := relax(h.ruleSpecSchema(crd, crdName)); err != nil {
+		h.t.Fatalf("relax the %s schema: %v", crdName, err)
+	}
+	if err := h.Client.Update(ctx, crd); err != nil {
+		h.t.Fatalf("relax CRD %s: %v", crdName, err)
+	}
+	defer h.restoreCRD(crdName, original)
+
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.GroupVersion.String(),
+		"kind":       ruleKindToCRKind[ruleKind],
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec":       spec,
+	}}
+	// Polled rather than attempted once: a CRD schema update reaches the apiserver's
+	// request path through its own informer, so the first write after the relaxation
+	// can still be judged by the strict schema.
+	waitFor(h.t, fmt.Sprintf("the relaxed %s schema to admit %s/%s", crdName, namespace, name),
+		func() (bool, string) {
+			err := h.Client.Create(ctx, obj)
+			if err == nil {
+				return true, ""
+			}
+			return false, err.Error()
+		})
+
+	stub := newRuleStub(ruleKind, types.NamespacedName{Namespace: namespace, Name: name})
+	h.t.Cleanup(func() { h.deleteIfExists(stub) })
+	return stub
+}
+
+// ruleKindToCRKind maps a rule kind discriminator onto the Kind an API object of it
+// carries, which is what an unstructured write has to spell.
+var ruleKindToCRKind = map[string]string{
+	kindStreamRule:        "StreamRule",
+	kindClusterStreamRule: "ClusterStreamRule",
+}
+
+// getCRD reads one CRD as an unstructured object.
+func (h *harness) getCRD(name string) *unstructured.Unstructured {
+	h.t.Helper()
+	crd := &unstructured.Unstructured{}
+	crd.SetGroupVersionKind(crdGVK)
+	if err := h.Client.Get(context.Background(), client.ObjectKey{Name: name}, crd); err != nil {
+		h.t.Fatalf("get CRD %s: %v", name, err)
+	}
+	return crd
+}
+
+// ruleSpecSchema returns the `spec` schema of a rule CRD's single served version,
+// for in-place editing. NestedFieldNoCopy is what makes the edit land on the object
+// that is about to be sent, rather than on a copy of it.
+func (h *harness) ruleSpecSchema(crd *unstructured.Unstructured, crdName string) map[string]any {
+	h.t.Helper()
+	raw, found, err := unstructured.NestedFieldNoCopy(crd.Object, "spec", "versions")
+	if err != nil || !found {
+		h.t.Fatalf("CRD %s has no versions: %v", crdName, err)
+	}
+	list, ok := raw.([]any)
+	if !ok || len(list) != 1 {
+		// One served version is not incidental: v1alpha1 is the only version these
+		// CRDs have, and a second one would mean this helper had to pick.
+		h.t.Fatalf("CRD %s does not serve exactly one version: %#v", crdName, raw)
+	}
+	version, ok := list[0].(map[string]any)
+	if !ok {
+		h.t.Fatalf("CRD %s version 0 is not an object", crdName)
+	}
+	specSchema, found, err := unstructured.NestedFieldNoCopy(version,
+		"schema", "openAPIV3Schema", "properties", "spec")
+	if err != nil || !found {
+		h.t.Fatalf("CRD %s has no spec schema: %v", crdName, err)
+	}
+	typed, ok := specSchema.(map[string]any)
+	if !ok {
+		h.t.Fatalf("CRD %s spec schema is not an object", crdName)
+	}
+	return typed
+}
+
+// restoreCRD puts the shipped schema back, retrying the conflict that the
+// apiextensions controllers' own status writes make routine.
+func (h *harness) restoreCRD(name string, spec map[string]any) {
+	h.t.Helper()
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		crd := &unstructured.Unstructured{}
+		crd.SetGroupVersionKind(crdGVK)
+		if getErr := h.Client.Get(context.Background(), client.ObjectKey{Name: name}, crd); getErr != nil {
+			return getErr
+		}
+		crd.Object["spec"] = runtime.DeepCopyJSONValue(spec)
+		return h.Client.Update(context.Background(), crd)
+	})
+	if err != nil {
+		// Fatal rather than reported: a CRD left relaxed would silently weaken every
+		// admission assertion made after this point in the package.
+		h.t.Fatalf("restore CRD %s: %v", name, err)
+	}
+}
+
+// dropRequiredSink removes `sink` from a rule spec's required fields, which is what
+// makes a v0.1.0-shaped rule storable.
+func dropRequiredSink(specSchema map[string]any) error {
+	required, found, err := unstructured.NestedStringSlice(specSchema, "required")
+	if err != nil || !found {
+		return fmt.Errorf("read the spec's required fields (found=%v): %w", found, err)
+	}
+	kept := slices.DeleteFunc(required, func(field string) bool { return field == "sink" })
+	if len(kept) == len(required) {
+		return fmt.Errorf("required = %v, expected it to list \"sink\"", required)
+	}
+	return unstructured.SetNestedStringSlice(specSchema, kept, "required")
+}
+
+// dropSinkKindEnum removes the enum from spec.sink.kind, which is what makes a rule
+// naming a sink kind this build does not serve storable.
+func dropSinkKindEnum(specSchema map[string]any) error {
+	kindSchema, found, err := unstructured.NestedFieldNoCopy(specSchema, "properties", "sink", "properties", "kind")
+	if err != nil || !found {
+		return fmt.Errorf("read the sink kind schema (found=%v): %w", found, err)
+	}
+	typed, ok := kindSchema.(map[string]any)
+	if !ok {
+		return fmt.Errorf("the sink kind schema is %T, not an object", kindSchema)
+	}
+	if _, enumerated := typed["enum"]; !enumerated {
+		return fmt.Errorf("spec.sink.kind carries no enum to relax")
+	}
+	delete(typed, "enum")
+	return nil
+}
+
+// unstructuredResources renders a rule's resource list for an unstructured write.
+// Label selectors are not rendered: no staged rule needs one, and the selector path
+// is covered by the rules the tests create through the typed client.
+func unstructuredResources(resources []v1alpha1.WatchedResource) []any {
+	out := make([]any, 0, len(resources))
+	for _, res := range resources {
+		out = append(out, map[string]any{"group": res.Group, "version": res.Version, "kind": res.Kind})
+	}
+	return out
 }
 
 // uniqueName builds a DNS-1123 name unique within one apiserver's lifetime, so
