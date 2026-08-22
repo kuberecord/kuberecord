@@ -399,6 +399,86 @@ func enqueueWithin(ctx context.Context, w sink.Writer, job sink.Job, bound time.
 	}
 }
 
+// seedHistory makes records into history the backend really holds, by writing
+// them through its own Writer and waiting for every one to settle true.
+//
+// The read properties could have been given a hook that planted rows behind the
+// Writer's back, and that would have been faster. It would also have tested the
+// wrong thing: what a warm-up reads back is what the write path actually wrote,
+// so a backend whose reader and writer disagree about a field — a timestamp
+// rounded on the way in, a UID stored under a different column — must fail the
+// read properties, and it only can if the same path produced the history.
+//
+// A record that settles false here is a harness problem, not a contract failure:
+// the property below would be asserting against history that was never written,
+// so it stops immediately and says so.
+func seedHistory(t conformanceT, r *runner, h Harness, records []sink.Record) {
+	t.Helper()
+	const when = "seeding history"
+
+	c := newCommitCounter(len(records))
+	for i, rec := range records {
+		mustEnqueue(t, r.ctx, h.Writer, c, i, rec)
+	}
+	waitSettled(t, c, len(records), h.SettleWithin, when)
+	for i, rec := range records {
+		if !c.ok(i) {
+			t.Fatalf("%s: record %d %s settled false against a backend with no fault installed; "+
+				"the read properties would be reading history that was never written", when, i, describe(rec))
+		}
+	}
+}
+
+// seedScopeHistory does the same for the scope log: it hands the transitions to
+// the backend's own ScopeEventWriter and waits for them to be recorded.
+//
+// It takes the writer as an argument rather than re-asserting it from the harness
+// so that a caller cannot reach this with a backend that has no scope log — the
+// suite decides that once, in runOptionalSuite, and not again per property.
+func seedScopeHistory(t conformanceT, r *runner, h Harness, w sink.ScopeEventWriter, events []sink.ScopeEvent) {
+	t.Helper()
+	const when = "seeding scope history"
+
+	for i, event := range events {
+		if err := w.EnqueueScopeEvent(r.ctx, event); err != nil {
+			t.Fatalf("%s: EnqueueScopeEvent(%d, %s) was refused: %v; the epoch properties need every "+
+				"transition accepted here", when, i, describeScope(event), err)
+		}
+	}
+	waitScopeWrites(t, h, len(events), h.SettleWithin, when)
+}
+
+// waitScopeWrites waits until the backend has recorded want scope transitions,
+// failing with the shortfall when it does not. A shortfall means an accepted
+// transition never landed, which is the audit hole the scope log exists to close.
+func waitScopeWrites(t conformanceT, h Harness, want int, timeout time.Duration, when string) {
+	t.Helper()
+	if waitFor(func() bool { return len(h.ScopeWrites()) >= want }, timeout) {
+		return
+	}
+	t.Errorf("%s: the backend recorded %d of %d scope transitions within %s; an accepted transition that "+
+		"never lands is an epoch nothing can re-derive", when, len(h.ScopeWrites()), want, timeout)
+}
+
+// describeScope renders a transition compactly for a failure message.
+func describeScope(event sink.ScopeEvent) string {
+	return fmt.Sprintf("%s %s/%s/%s ns=%q@%s (rule %q)", event.Action, event.Scope.ClusterID,
+		event.Scope.APIGroup, event.Scope.Kind, event.Scope.Namespace,
+		event.TS.UTC().Format(time.RFC3339Nano), event.RuleRef)
+}
+
+// scopeEventsEqual compares two transitions field by field, on the same footing
+// as recordsEqual: an instant is compared as an instant, so a backend that
+// round-trips it through its physical form is not failed for the location or the
+// monotonic reading it came back with.
+func scopeEventsEqual(a, b sink.ScopeEvent) bool {
+	return a.Action == b.Action &&
+		a.Scope == b.Scope &&
+		a.APIVersion == b.APIVersion &&
+		a.RuleRef == b.RuleRef &&
+		a.TS.Equal(b.TS)
+}
+
 // countCloses returns how many EventClose entries the log holds and the index of
 // the first, or -1 when there is none.
 func countCloses(events []Event) (int, int) {

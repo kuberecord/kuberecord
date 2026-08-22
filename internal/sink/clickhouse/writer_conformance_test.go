@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// This file is where the ClickHouse backend is measured against the sink.Writer
-// contract rather than against its own history. It asserts nothing itself: every
-// assertion lives in internal/sink/conformance (Task 5.1), so the properties
+// This file is where the ClickHouse backend is measured against the sink contract
+// rather than against its own history. It asserts nothing itself: every assertion
+// lives in internal/sink/conformance (Tasks 5.1 and 5.3), so the properties
 // ClickHouse passes here are the same ones the next backend will have to pass,
 // worded once (D11).
 //
@@ -44,8 +44,31 @@ limitations under the License.
 //   - ConcurrentEnqueueStorm — many producers handing off at once still settle
 //     every job exactly once (its value is under -race).
 //
-// Backend-specific, and therefore in writer_test.go (the suite is deliberately
-// silent about all of it, since none of it is an obligation of the contract):
+// CHWriter also implements all three optional halves, so RunWriterSuite discovers
+// them by type assertion and runs their properties too (see
+// optional_conformance_test.go for the stand-in that backs them):
+//
+//   - StateReader/PerIncarnationResults — the warm-up read answers per (identity,
+//     UID), so an incarnation whose death went unrecorded is still visible.
+//   - StateReader/TombstonedIncarnationsExcluded — an incarnation whose own latest
+//     event is a deletion is gone, and closing one out does not close its identity.
+//   - StateReader/PartialReadIsAnError — a read that dies mid-stream is an error,
+//     never a short success.
+//   - StateReaderScopeEpoch/ScopeWasActiveHonoursAsOf — the epoch probe is strict
+//     about the cutoff and exact about the scope, empty namespace included.
+//   - StateReaderScopeEpoch/ActiveScopesEnumeratesOpenScopes — the boot-
+//     reconciliation enumeration returns the scopes left open and only those.
+//   - ScopeEventWriter/EpochTransitionsRecordedExactlyOnce — one row per accepted
+//     transition, fields intact, order preserved.
+//   - ScopeEventWriter/RejectionIsSurfaced — a transition the sink will not take
+//     is refused to the caller and leaves no trace.
+//   - Prober/{HealthyBackendPasses,SchemaMismatchIsClassified,
+//     OtherFailuresReadAsUnreachable} — the probe's classification, which is the
+//     whole of what the manager reads.
+//
+// Backend-specific, and therefore in writer_test.go, scopewriter_test.go,
+// instance_test.go and schema_test.go (the suite is deliberately silent about all
+// of it, since none of it is an obligation of the contract):
 //
 //   - Client-side batching bounds: how many Send calls a job count produces, that
 //     a lone job flushes on batchMaxWait, and that a partial batch is held until
@@ -58,9 +81,15 @@ limitations under the License.
 //   - Metrics accounting: the per-outcome writes_total series. The suite observes
 //     commit callbacks, never metrics.
 //   - Timezone binding: insertArgs binds an instant, not a formatted string, and
-//     is deterministic and zone-independent.
-//   - Schema validation, StateReader query shape, scope-event writing, and the
-//     Checkpoint cadence — none of which the Writer contract speaks about.
+//     is deterministic and zone-independent; the epoch cutoff is the opposite, and
+//     for a reason.
+//   - The read queries' SQL shape (which columns are grouped, which are filtered)
+//     and the exact system.columns contract validateSchema enforces: the suite
+//     asks what the reader must *answer*, never how it asks.
+//   - Scope-path mechanics: that rows target watch_scopes and not the record
+//     path's table, the dedicated batcher, and the retry queue that carries an
+//     epoch across an outage.
+//   - The Checkpoint cadence, which the sink contract does not speak about.
 package clickhouse
 
 import (
@@ -73,6 +102,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/yelzhy/kuberecord/internal/pipeline"
@@ -129,6 +159,10 @@ const (
 	// attempt: the permanently-failing property waits for every job to settle
 	// against a backend that refuses each of them.
 	conformanceSettleWithin = 15 * time.Second
+	// conformanceScopeRetryBackoff shortens the scope path's own retry window from
+	// its production 30s. Nothing faults a scope insert here, so this only bounds
+	// how long a property would wait before failing rather than hanging.
+	conformanceScopeRetryBackoff = 500 * time.Millisecond
 )
 
 // TestWriterConformance runs the backend-agnostic Writer suite against CHWriter.
@@ -149,22 +183,24 @@ func newConformanceHarness(t *testing.T) conformance.Harness {
 
 	backend := &conformanceBackend{}
 	conn := recordingConn{
-		fakeConn: &fakeConn{
-			// Both hooks, one handler: fakeBatch consults rowErr for a one-row send
-			// (the poison-isolation attempt) and sendErr for anything larger, and the
-			// suite's fault applies to every attempt whichever shape it takes.
-			sendErr: backend.attempt,
-			rowErr: func(ctx context.Context, args []any) error {
-				return backend.attempt(ctx, [][]any{args})
-			},
-		},
-		backend: backend,
+		// One handler for every send, told which statement it is answering:
+		// resource_states rows (a batch attempt or a one-row poison-isolation
+		// attempt alike) and watch_scopes rows both reach the backend here, and
+		// fifteen versus eight positional args is not something to guess at.
+		fakeConn: &fakeConn{batchErr: backend.attempt},
+		backend:  backend,
 	}
 
 	w := NewCHWriter(conn, conformanceQueueCapacity, conformanceWorkers, conformanceBatchMaxRows,
 		conformanceInsertTimeout, conformanceMaxRetryBackoff, conformanceDrainTimeout,
 		conformanceBatchMaxWait, conformanceEnqueueTimeout,
 		pipeline.NewPipelineMetrics(prometheus.NewRegistry()).ForSink(testSinkID))
+	// The two fields NewCHWriter does not take, and that the optional halves need:
+	// Probe validates against a named database, and the scope path's retry window
+	// is production-sized (30s) where the suite needs a transition to settle inside
+	// one property.
+	w.database = conformanceDatabase
+	w.scopeMaxRetryBackoff = conformanceScopeRetryBackoff
 
 	// A decode failure is not a contract violation, so it is reported here rather
 	// than through the suite: it would otherwise surface as a property comparing
@@ -187,6 +223,13 @@ func newConformanceHarness(t *testing.T) conformance.Harness {
 		QueueCapacity:  conformanceQueueCapacity,
 		EnqueueTimeout: conformanceEnqueueTimeout,
 		SettleWithin:   conformanceSettleWithin,
+
+		// The optional halves. CHWriter implements all three, so the suite
+		// discovers them by type assertion and runs their properties too; see
+		// optional_conformance_test.go for what backs each lever.
+		ScopeWrites:     backend.scopeSnapshot,
+		SetReadFault:    backend.setReadFault,
+		SetProbeOutcome: backend.setProbeOutcome,
 	}
 }
 
@@ -203,6 +246,11 @@ type conformanceBackend struct {
 	// than returned because a Send runs on a worker goroutine with no test to fail;
 	// the harness asserts it in a t.Cleanup instead.
 	decodeErr error
+	// read is the storage the optional halves answer from, and the levers that
+	// break them. It lives in optional_conformance_test.go, guarded by the same mu
+	// as everything else here: the read half is called from the suite's goroutine
+	// while the write half is still appending from the writer's.
+	read conformanceReadState
 }
 
 // setFault implements Harness.SetFault. The suite only ever calls it before Start,
@@ -213,12 +261,28 @@ func (b *conformanceBackend) setFault(f conformance.FaultFunc) {
 	b.fault = f
 }
 
-// attempt is one durable-write attempt: the rows are decoded back to Records, the
-// installed fault decides the outcome, and the attempt is logged with whatever it
-// returned. It is logged *after* the fault returns so the log reads in completion
-// order — which is what makes "a write that ran after the connection closed"
-// visible to the drain-ordering property at all.
-func (b *conformanceBackend) attempt(ctx context.Context, rows [][]any) error {
+// attempt is one durable-write attempt on either insert path, routed by the
+// statement the batch was prepared with. Guessing from the row shape would work
+// today and break the first time a column is added to either table.
+func (b *conformanceBackend) attempt(ctx context.Context, query string, rows [][]any) error {
+	switch {
+	case strings.Contains(query, "INSERT INTO "+tableResourceStates):
+		return b.attemptRecords(ctx, rows)
+	case strings.Contains(query, "INSERT INTO "+tableWatchScopes):
+		return b.attemptScopeEvents(rows)
+	}
+	err := fmt.Errorf("insert targets neither %s nor %s, so its rows cannot be decoded: %s",
+		tableResourceStates, tableWatchScopes, collapseSpace(query))
+	b.noteDecodeErr(err)
+	return err
+}
+
+// attemptRecords is one resource_states insert attempt: the rows are decoded back
+// to Records, the installed fault decides the outcome, and the attempt is logged
+// with whatever it returned. It is logged *after* the fault returns so the log
+// reads in completion order — which is what makes "a write that ran after the
+// connection closed" visible to the drain-ordering property at all.
+func (b *conformanceBackend) attemptRecords(ctx context.Context, rows [][]any) error {
 	records := make([]sink.Record, 0, len(rows))
 	for _, args := range rows {
 		rec, err := recordFromInsertArgs(args)
@@ -241,10 +305,17 @@ func (b *conformanceBackend) attempt(ctx context.Context, rows [][]any) error {
 	return err
 }
 
+// record appends to the observation log and, for an attempt whose rows reached
+// storage, to the set the read half answers from. Event.Durable draws that line
+// rather than this backend, so a lost acknowledgement leaves its rows readable
+// here exactly as it would leave them in a real table.
 func (b *conformanceBackend) record(ev conformance.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.events = append(b.events, ev)
+	if ev.Durable() {
+		b.read.rows = append(b.read.rows, ev.Records...)
+	}
 }
 
 // snapshot implements Harness.Events. The copy is mandatory: the suite reads the
@@ -270,12 +341,16 @@ func (b *conformanceBackend) firstDecodeErr() error {
 }
 
 // recordingConn is a fakeConn whose Close lands in the same ordered log as its
-// writes, which is what lets the drain-ordering property compare the two.
+// writes, which is what lets the drain-ordering property compare the two, and
+// which answers the reads and pings the optional halves make.
 //
 // It wraps rather than extends the shared fake: PrepareBatch and fakeBatch are
 // inherited untouched, so the suite's attempts reach the backend through exactly
-// the encoder the rest of this package's tests drive, and no other test's fake has
-// to grow a field for this one's benefit.
+// the encoder the rest of this package's tests drive. Query and Ping are declared
+// here rather than on fakeConn because no other test in the package needs a
+// connection that reads back what it wrote, and the embedded driver.Conn is nil —
+// so a method that is not shadowed here panics rather than lying, which is the
+// right failure for a call this stand-in has not thought about.
 type recordingConn struct {
 	*fakeConn
 	backend *conformanceBackend
@@ -285,6 +360,12 @@ func (c recordingConn) Close() error {
 	err := c.fakeConn.Close()
 	c.backend.record(conformance.Event{Kind: conformance.EventClose, Err: err})
 	return err
+}
+
+func (c recordingConn) Ping(ctx context.Context) error { return c.backend.ping(ctx) }
+
+func (c recordingConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	return c.backend.query(ctx, query, args...)
 }
 
 // resourceStatesKey implements Harness.LogicalKey: resource_states' ORDER BY tuple

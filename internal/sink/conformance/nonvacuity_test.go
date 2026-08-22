@@ -169,6 +169,66 @@ func TestWriterSuiteIsNonVacuous(t *testing.T) {
 			what:    "re-stamps each record as it stores it, so a replay never collapses",
 			catches: []string{propIdempotency},
 		},
+		{
+			name:    "collapseIncarnations",
+			opts:    fakeOpts{collapseIncarnations: true},
+			what:    "folds an identity's incarnations into one last-known state",
+			catches: []string{propPerIncarnation},
+		},
+		{
+			name:    "keepTombstones",
+			opts:    fakeOpts{keepTombstones: true},
+			what:    "reports incarnations whose own latest event is a deletion",
+			catches: []string{propTombstoned},
+		},
+		{
+			name:    "shortRead",
+			opts:    fakeOpts{shortRead: true},
+			what:    "returns the rows a broken read delivered, with a nil error",
+			catches: []string{propPartialRead},
+		},
+		{
+			name:    "ignoreAsOf",
+			opts:    fakeOpts{ignoreAsOf: true},
+			what:    "answers the epoch probe from the whole scope log, ignoring the caller's cutoff",
+			catches: []string{propScopeAsOf},
+		},
+		{
+			name:    "keepStoppedScopesActive",
+			opts:    fakeOpts{keepStoppedScopesActive: true},
+			what:    "enumerates every scope it ever saw started, closed ones included",
+			catches: []string{propActiveScopes},
+		},
+		{
+			name:    "coalesceScopeEvents",
+			opts:    fakeOpts{coalesceScopeEvents: true},
+			what:    "records only the first transition per scope, losing the Stopped that followed",
+			catches: []string{propScopeEventsRecordedOnce},
+		},
+		{
+			name:    "swallowScopeRejection",
+			opts:    fakeOpts{swallowScopeRejection: true},
+			what:    "tells the caller a transition it dropped was accepted",
+			catches: []string{propScopeRejectionSurfaced},
+		},
+		{
+			name:    "unclassifiedSchemaError",
+			opts:    fakeOpts{unclassifiedSchemaError: true},
+			what:    "reports a schema mismatch as a bare error the manager cannot classify",
+			catches: []string{propProbeSchema},
+		},
+		{
+			name:    "schemaErrorForEverything",
+			opts:    fakeOpts{schemaErrorForEverything: true},
+			what:    "classifies an unreachable backend as a schema failure",
+			catches: []string{propProbeUnreachable},
+		},
+		{
+			name:    "probeAlwaysFails",
+			opts:    fakeOpts{probeAlwaysFails: true},
+			what:    "refuses the probe even against a healthy backend",
+			catches: []string{propProbeHealthy},
+		},
 	}
 
 	covered := map[string]bool{}
@@ -199,11 +259,106 @@ func TestWriterSuiteIsNonVacuous(t *testing.T) {
 	}
 
 	// A property with no fixture behind it is untested machinery: it could be
-	// asserting nothing and this file would never notice.
-	for _, p := range writerProperties() {
+	// asserting nothing and this file would never notice. The walk covers the
+	// optional halves too — a property that only some backends run is exactly the
+	// one nobody would think to check.
+	for _, p := range allProperties() {
 		if !covered[p.name] {
 			t.Errorf("property %s has no fixture proving it can fail; add one to the table above", p.name)
 		}
+	}
+}
+
+// TestPropertyNamesAreUnique guards the assumption both the non-vacuity table and
+// propertyByName rest on. Names became addressable across five tables when the
+// optional halves landed, and two tables agreeing on one would mean a fixture
+// silently exercising the wrong property — proving the obligation it names to be
+// untested while reporting the opposite.
+func TestPropertyNamesAreUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, p := range allProperties() {
+		if seen[p.name] {
+			t.Errorf("two properties are named %q; propertyByName resolves only the first, so the "+
+				"non-vacuity fixture for the other proves nothing", p.name)
+		}
+		seen[p.name] = true
+	}
+}
+
+// TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend is the other half of the
+// capability-detection argument, and the one the acceptance criteria single out:
+// a Writer-only backend must be skipped, not failed — and the skip must say so.
+//
+// The two halves are checked separately because neither is visible from the
+// other. That the suites run green over a backend implementing none of the
+// optional contracts is observable from here; what the skip actually *said* is
+// not, since a skipped subtest reports nothing a parent can inspect. So the
+// message is built by a function this test can call directly, and it is checked
+// against the one thing a reader needs from it: the name of the interface that
+// is missing, and the properties that consequently certify nothing.
+func TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend(t *testing.T) {
+	newHarness := func(*testing.T) Harness { return newWriterOnlyHarness(newFakeWriter(fakeOpts{})) }
+
+	// Green, not red: omitting an optional half is a legitimate design (D12), so
+	// the suites must have nothing to fail it for.
+	RunStateReaderSuite(t, newHarness)
+	RunScopeEventWriterSuite(t, newHarness)
+	RunProberSuite(t, newHarness)
+
+	writerOnlyBackend := newWriterOnlyHarness(newFakeWriter(fakeOpts{})).Writer
+	for _, s := range optionalSuites() {
+		t.Run(s.group, func(t *testing.T) {
+			if s.implements(writerOnlyBackend) {
+				t.Fatalf("a Writer-only backend was detected as implementing %s; the suites would have run "+
+					"against a backend that does not have that half", s.capability)
+			}
+			msg := missingCapabilityMessage(s)
+			if !strings.Contains(msg, s.capability) {
+				t.Errorf("the skip message does not name %s: %q; a skip that does not say what is missing "+
+					"is indistinguishable from a pass", s.capability, msg)
+			}
+			for _, p := range s.properties() {
+				if !strings.Contains(msg, p.name) {
+					t.Errorf("the skip message does not name the unchecked property %s: %q", p.name, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestOptionalHarnessValidationRejectsAMissingLever covers the way a backend that
+// *does* implement an optional half could still be certified without being
+// tested: a harness that never wired up the lever the half's properties need.
+// Each omission must be fatal and must name the field.
+func TestOptionalHarnessValidationRejectsAMissingLever(t *testing.T) {
+	cases := []struct {
+		name     string
+		validate func(conformanceT, Harness)
+		mutBy    func(h *Harness)
+		want     string
+	}{
+		{"noScopeWrites", requireScopeWrites, func(h *Harness) { h.ScopeWrites = nil }, "Harness.ScopeWrites"},
+		{"noReadFault", requireReadFault, func(h *Harness) { h.SetReadFault = nil }, "Harness.SetReadFault"},
+		{"noProbeOutcome", requireProbeOutcome, func(h *Harness) { h.SetProbeOutcome = nil }, "Harness.SetProbeOutcome"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeHarness(fakeOpts{})
+			tc.mutBy(&h)
+			rec := &recordingT{}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tc.validate(rec, h)
+			}()
+			<-done
+			if !rec.failed() {
+				t.Fatalf("the validator accepted a harness with no %s", tc.want)
+			}
+			if !strings.Contains(rec.first(), tc.want) {
+				t.Fatalf("the validator failed with %q, want it to name %s", rec.first(), tc.want)
+			}
+		})
 	}
 }
 
