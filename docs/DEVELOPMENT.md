@@ -52,6 +52,19 @@ sink.
 Anything touching goroutines, mutexes or channels carries a `-race` test, and
 long-lived goroutines carry a `goleak`-style shutdown test.
 
+### The sink conformance suite
+
+`internal/sink/conformance` holds the properties every `sink.Writer` must uphold
+— commit-exactly-once on all four settling paths, no lost jobs, drain before
+close, a bounded `Enqueue`, and a replay that collapses to one logical record —
+written against the contract in `internal/sink` and against no backend in
+particular. A new backend adopts it from its own test package by calling
+`conformance.RunWriterSuite` with a `Harness` describing how to observe it, how
+to make one of its writes fail, and how it deduplicates a record written twice.
+The suite is tested in both directions: it passes a compliant in-memory writer
+and is proven to *fail*, property by property, against writers built to violate
+each obligation.
+
 ## Integration tests — `make test-integration`
 
 Two suites run against a real, dockerized ClickHouse (build tag `integration`),
