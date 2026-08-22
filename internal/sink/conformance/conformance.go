@@ -14,9 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package conformance is the executable form of the sink.Writer contract: the
-// properties every backend must uphold, written against internal/sink alone so
-// that a backend passes or fails them on its own merits.
+// Package conformance is the executable form of the sink contract: the properties
+// every backend must uphold, written against internal/sink alone so that a backend
+// passes or fails them on its own merits.
+//
+// sink.Writer is the mandatory half and every property in writer_suite.go applies
+// to every backend. sink.StateReader, sink.ScopeEventWriter and sink.Prober are
+// optional and duck-typed by the SinkManager, so the suite duck-types them too:
+// it runs each half's properties when the Writer satisfies the interface and says
+// out loud, naming the interface, when it does not (see optional.go).
 //
 // It exists because those properties were, until now, provable only for
 // ClickHouse. With one backend that is merely redundant; with three it is
@@ -175,10 +181,11 @@ const (
 // how it deduplicates.
 //
 // It is a struct of fields rather than an interface so the optional halves of the
-// contract (StateReader, ScopeEventWriter, Prober) can be added as further fields
-// without invalidating a backend harness that predates them — the same reason the
-// sink contract splits its optional halves into separate interfaces instead of
-// growing Writer.
+// contract (StateReader, ScopeEventWriter, Prober) could be added as further
+// fields without invalidating a backend harness that predates them — the same
+// reason the sink contract splits its optional halves into separate interfaces
+// instead of growing Writer. Those fields now exist, and a backend implementing
+// none of the optional halves still leaves every one of them nil.
 //
 // A fresh Harness is built per property, so no property can inherit another's
 // backend state, and the Writer it carries must not have been started: the suite
@@ -238,6 +245,41 @@ type Harness struct {
 	// attempt — so it must exceed the Writer's whole retry budget, not just one
 	// attempt. Zero means defaultSettleWithin.
 	SettleWithin time.Duration
+
+	// The fields below serve the *optional* halves of the sink contract, and each
+	// is required only when this backend's Writer implements the half it belongs
+	// to (see optional.go). A backend that implements none of them — the
+	// Writer-only archive tier of D12 — leaves all three nil and is skipped
+	// loudly rather than silently certified.
+
+	// ScopeWrites returns, in order, the watch-scope transitions the backend has
+	// durably recorded so far. Required when the Writer implements
+	// sink.ScopeEventWriter.
+	//
+	// It is an ordered log rather than a set because the epoch design turns on
+	// order: a Started that overtook its own Stopped inverts the epoch, and a set
+	// cannot see that. Like Events it is read while the backend's own goroutines
+	// are still appending, so it must return a copy.
+	ScopeWrites func() []sink.ScopeEvent
+
+	// SetReadFault breaks the backend's next read part-way through; nil clears it.
+	// Required when the Writer implements sink.StateReader.
+	//
+	// It is the only lever that can produce the failure the read contract singles
+	// out — a stream that delivered some rows and then died — and no observation
+	// of a healthy backend can produce it. The suite installs it, reads, and
+	// clears it again.
+	SetReadFault func(*ReadFault)
+
+	// SetProbeOutcome arranges what this backend's next Probe will encounter.
+	// Required when the Writer implements sink.Prober.
+	//
+	// The outcome is declared rather than injected as an error, because "your
+	// schema is not the one the operator writes" is a backend-specific state (a
+	// drifted column type, a missing table, an object-format version) that the
+	// suite cannot construct and must not have to know about. What the suite does
+	// know is how each state must be *classified*.
+	SetProbeOutcome func(ProbeOutcome)
 }
 
 // withDefaults fills in the fields a harness may leave zero.
@@ -298,12 +340,18 @@ type conformanceT interface {
 }
 
 // property is one named contract obligation and the code that checks it. The
-// table (writerProperties) is addressable by name so the non-vacuity tests can
-// run a single property against a deliberately broken Writer and assert it
-// objects.
+// tables (writerProperties and the optional halves' own) are addressable by name
+// so the non-vacuity tests can run a single property against a deliberately
+// broken Writer and assert it objects.
 type property struct {
 	name string
-	run  func(t conformanceT, h Harness)
+	// needs, when non-nil, checks the harness levers this particular property
+	// requires beyond the mandatory ones — the optional halves each need a lever
+	// the Writer contract has no use for. It is per property rather than per
+	// suite so a harness is only ever failed for a field the property it is
+	// running actually reaches for.
+	needs func(t conformanceT, h Harness)
+	run   func(t conformanceT, h Harness)
 }
 
 // runProperty is the single entry point both RunWriterSuite and the non-vacuity
@@ -313,11 +361,22 @@ func runProperty(t conformanceT, p property, h Harness) {
 	t.Helper()
 	h = h.withDefaults()
 	h.validate(t)
+	if p.needs != nil {
+		p.needs(t, h)
+	}
 	p.run(t, h)
 }
 
 // RunWriterSuite asserts every mandatory sink.Writer property against the backend
-// newWriter builds, one separately named subtest per property.
+// newWriter builds, one separately named subtest per property, and then runs the
+// optional halves of the contract the backend turned out to implement.
+//
+// The optional halves are reached from here rather than left to each backend to
+// remember, because "we never wired that one up" and "we do not implement that
+// one" are indistinguishable from the outside — and the first is how a backend
+// quietly ships an unchecked StateReader. Capability detection mirrors what
+// SinkManager itself does (a type assertion on the Writer), so the suite runs
+// exactly the halves the runtime will use, and logs the ones it does not.
 //
 // newWriter is called once per property with that subtest's *testing.T — never
 // once for the whole suite — because several properties end by shutting the
@@ -334,4 +393,7 @@ func RunWriterSuite(t *testing.T, newWriter func(t *testing.T) Harness) {
 			runProperty(t, p, newWriter(t))
 		})
 	}
+	RunStateReaderSuite(t, newWriter)
+	RunScopeEventWriterSuite(t, newWriter)
+	RunProberSuite(t, newWriter)
 }

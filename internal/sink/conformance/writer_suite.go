@@ -71,10 +71,11 @@ func writerProperties() []property {
 	}
 }
 
-// propertyByName finds a property in the table. It exists for the non-vacuity
-// tests, which run one property at a time against a Writer built to violate it.
+// propertyByName finds a property in any of the tables — mandatory or optional.
+// It exists for the non-vacuity tests, which run one property at a time against a
+// Writer built to violate it.
 func propertyByName(name string) (property, bool) {
-	for _, p := range writerProperties() {
+	for _, p := range allProperties() {
 		if p.name == name {
 			return p, true
 		}

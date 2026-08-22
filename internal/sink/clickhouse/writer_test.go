@@ -105,6 +105,17 @@ type fakeConn struct {
 	sendErr func(ctx context.Context, rows [][]any) error
 	rowErr  func(ctx context.Context, args []any) error
 
+	// batchErr, if set, decides the outcome of *every* Send and is additionally
+	// told which statement the batch was prepared with. It takes precedence over
+	// sendErr and rowErr.
+	//
+	// It exists for the conformance harness, which drives both insert paths
+	// through a single backend stand-in: resource_states rows and watch_scopes
+	// rows are fifteen and eight positional args with no self-description, so
+	// without the statement the stand-in would have to guess which it was decoding
+	// — and a wrong guess is a mis-decoded row that reads as a mangled record.
+	batchErr func(ctx context.Context, query string, rows [][]any) error
+
 	// queryMu guards batchQueries, which records the statement each PrepareBatch
 	// was called with. The scope-event tests use it to prove their rows target
 	// watch_scopes rather than the record path's resource_states.
@@ -116,7 +127,7 @@ func (c *fakeConn) PrepareBatch(ctx context.Context, query string, _ ...driver.P
 	c.queryMu.Lock()
 	c.batchQueries = append(c.batchQueries, query)
 	c.queryMu.Unlock()
-	return &fakeBatch{conn: c, ctx: ctx}, nil
+	return &fakeBatch{conn: c, ctx: ctx, query: query}, nil
 }
 
 // preparedQueries returns the statements PrepareBatch has been called with.
@@ -147,7 +158,10 @@ type fakeBatch struct {
 
 	conn *fakeConn
 	ctx  context.Context
-	rows [][]any
+	// query is the statement this batch was prepared with, carried so batchErr can
+	// tell resource_states rows from watch_scopes ones.
+	query string
+	rows  [][]any
 }
 
 func (b *fakeBatch) Append(v ...any) error {
@@ -158,6 +172,9 @@ func (b *fakeBatch) Append(v ...any) error {
 func (b *fakeBatch) Send() error {
 	b.conn.sendCount.Add(1)
 	b.conn.lastSend.Store(b.conn.seq.Add(1))
+	if b.conn.batchErr != nil {
+		return b.conn.batchErr(b.ctx, b.query, b.rows)
+	}
 	if len(b.rows) == 1 && b.conn.rowErr != nil {
 		return b.conn.rowErr(b.ctx, b.rows[0])
 	}
