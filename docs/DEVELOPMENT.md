@@ -65,6 +65,13 @@ The suite is tested in both directions: it passes a compliant in-memory writer
 and is proven to *fail*, property by property, against writers built to violate
 each obligation.
 
+ClickHouse is its first adopter: `internal/sink/clickhouse/writer_conformance_test.go`
+holds the harness (and nothing else — every assertion is the suite's), and its
+header comment is the inventory of which claims come from the suite and which are
+backend-specific, so a new assertion has one obvious home. What stays in
+`writer_test.go` is what the contract is silent about: batching bounds, poison-row
+isolation, the isolation-phase budget, metrics accounting, and timestamp binding.
+
 ## Integration tests — `make test-integration`
 
 Two suites run against a real, dockerized ClickHouse (build tag `integration`),
