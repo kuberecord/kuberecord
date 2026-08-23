@@ -126,7 +126,7 @@ func prober(t conformanceT, h Harness) sink.Prober {
 	t.Helper()
 	p, ok := h.Writer.(sink.Prober)
 	if !ok {
-		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", capProber)
+		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", CapProber)
 	}
 	return p
 }

@@ -20,6 +20,28 @@ limitations under the License.
 // ClickHouse passes here are the same ones the next backend will have to pass,
 // worded once (D11).
 //
+// What "ClickHouse passes conformance" does and does not mean — read this before
+// quoting the badge, because once several backends carry it the phrase will be
+// read as "verified end-to-end", and it is not that:
+//
+//   - What is proven here is the *Go* logic, against a stand-in connection: the
+//     batching, the retry and poison-isolation paths, which filter values reach
+//     which placeholder, how rows are scanned, how a commit is settled, how a
+//     mid-stream failure propagates. That is the shipped writer's own behaviour,
+//     and a bug in it fails these tests.
+//   - The stand-in does not execute SQL. It *emulates* query semantics by
+//     detecting the load-bearing fragments of each statement the reader is
+//     supposed to emit (the per-incarnation GROUP BY, the tombstone HAVING, the
+//     strict ts cutoff, the scope-identity grouping) and then evaluating the
+//     intended meaning over the rows the writer really inserted. A statement it
+//     does not recognise is a loud harness failure, never a quiet pass — but a
+//     recognised fragment is an assumption about what ClickHouse does with it.
+//   - That remaining assumption is discharged elsewhere, not left unchecked: the
+//     *_integration_test.go files run the same queries against a real ClickHouse
+//     under `make test-integration`. Neither layer is sufficient alone, and a
+//     green conformance run is a statement about this package's Go code plus the
+//     contract, not about the engine.
+//
 // Which assertion belongs where — read this before adding one:
 //
 // From the suite (contract obligations; never re-assert them in this package):
@@ -44,9 +66,10 @@ limitations under the License.
 //   - ConcurrentEnqueueStorm — many producers handing off at once still settle
 //     every job exactly once (its value is under -race).
 //
-// CHWriter also implements all three optional halves, so RunWriterSuite discovers
-// them by type assertion and runs their properties too (see
-// optional_conformance_test.go for the stand-in that backs them):
+// CHWriter also implements all three optional halves, and the harness declares
+// them, so RunWriterSuite checks the claim against its own type assertion and runs
+// their properties too (see optional_conformance_test.go for the stand-in that
+// backs them):
 //
 //   - StateReader/PerIncarnationResults — the warm-up read answers per (identity,
 //     UID), so an incarnation whose death went unrecorded is still visible.
@@ -224,9 +247,15 @@ func newConformanceHarness(t *testing.T) conformance.Harness {
 		EnqueueTimeout: conformanceEnqueueTimeout,
 		SettleWithin:   conformanceSettleWithin,
 
-		// The optional halves. CHWriter implements all three, so the suite
-		// discovers them by type assertion and runs their properties too; see
+		// The optional halves. CHWriter implements all three, and says so: the suite
+		// compares this declaration against the type assertion SinkManager.newLiveSink
+		// makes and fails on either disagreement, so a CHWriter method that drifted
+		// out of one of those interfaces is a build failure here rather than a sink
+		// the runtime quietly builds degraded. Withdrawing a name from this list to
+		// make the suite green would be hiding exactly that. See
 		// optional_conformance_test.go for what backs each lever.
+		Capabilities: conformance.DeclareCapabilities(
+			conformance.CapStateReader, conformance.CapScopeEventWriter, conformance.CapProber),
 		ScopeWrites:     backend.scopeSnapshot,
 		SetReadFault:    backend.setReadFault,
 		SetProbeOutcome: backend.setProbeOutcome,

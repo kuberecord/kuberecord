@@ -42,7 +42,11 @@ limitations under the License.
 // this file assumes they mean. That is not testable without ClickHouse, and it is
 // not left untested: statereader_integration_test.go and
 // scopewriter_integration_test.go run the same queries against a real server under
-// `make test-integration`. Neither layer is sufficient alone.
+// `make test-integration`. Neither layer is sufficient alone, and "this backend
+// passes conformance" must never be read as "verified end-to-end" — a distinction
+// that only gets easier to lose once several backends carry the same badge. The
+// same boundary is stated at the top of writer_conformance_test.go, where a reader
+// arriving at the suite meets it first.
 
 package clickhouse
 
