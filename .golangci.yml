@@ -51,6 +51,28 @@ linters:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
               desc: "the data plane and control plane must depend on internal/sink, not the ClickHouse driver (Task 0.5)"
 
+        # Task 6.4: the object-store client is confined to the one package that
+        # exists to hold it (internal/sink/s3/awsstore). The control plane and the
+        # data plane must not reach an SDK — Invariant 1 is what says a reconciler
+        # cannot dial a backend, and the S3 reconciler's configuration builder is
+        # injected from the wiring precisely so that this stays a property of the
+        # import graph rather than of the control flow. internal/sink/s3 itself is
+        # listed because the write path is tested against a stand-in object store,
+        # not a mocked HTTP client, and an SDK import there would quietly make that
+        # untrue (see internal/sink/s3/client.go).
+        object-store-client-is-confined:
+          files:
+            - "**/internal/pipeline/**"
+            - "**/internal/controller/**"
+            - "**/internal/watch/**"
+            - "**/internal/sink/*.go"
+            - "**/internal/sink/clickhouse/**"
+            - "**/internal/sink/conformance/**"
+            - "**/internal/sink/s3/*.go"
+          deny:
+            - pkg: github.com/aws/aws-sdk-go-v2
+              desc: "the AWS SDK belongs to internal/sink/s3/awsstore alone; everything else speaks the s3.ObjectStore interface (Task 6.4)"
+
         # Task 5.1 acceptance criterion: the Writer conformance suite is built
         # around the contract in internal/sink, not around any backend's
         # implementation of it. internal/pipeline is denied because it imports

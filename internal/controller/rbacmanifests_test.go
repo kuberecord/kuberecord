@@ -183,10 +183,16 @@ func TestBaseClusterRoleGrantsOnlyControlPlaneRights(t *testing.T) {
 		"authorization.k8s.io/selfsubjectaccessreviews": {"create"},
 		"kuberecord.io/clickhousesinks":                 {"get", "list", "watch"},
 		"kuberecord.io/clusterstreamrules":              {"get", "list", "watch"},
-		"kuberecord.io/streamrules":                     {"get", "list", "watch"},
-		"kuberecord.io/clickhousesinks/status":          {"get", "patch", "update"},
-		"kuberecord.io/clusterstreamrules/status":       {"get", "patch", "update"},
-		"kuberecord.io/streamrules/status":              {"get", "patch", "update"},
+		// The S3Sink grants are read plus status, and nothing more: the archive
+		// backend's credentials come from the *existing* namespaced Secret Role, so
+		// adding a second sink kind widened the operator's cluster-wide reach by
+		// exactly its own CRD (Task 6.4).
+		"kuberecord.io/s3sinks":                   {"get", "list", "watch"},
+		"kuberecord.io/streamrules":               {"get", "list", "watch"},
+		"kuberecord.io/clickhousesinks/status":    {"get", "patch", "update"},
+		"kuberecord.io/clusterstreamrules/status": {"get", "patch", "update"},
+		"kuberecord.io/s3sinks/status":            {"get", "patch", "update"},
+		"kuberecord.io/streamrules/status":        {"get", "patch", "update"},
 	}
 
 	got := map[string][]string{}

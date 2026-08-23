@@ -240,7 +240,6 @@ func TestParseRuleKeyRejects(t *testing.T) {
 // true: any non-True specific condition must make the roll-up non-True and carry
 // that condition's own reason forward.
 func TestReadyFor(t *testing.T) {
-	const readyType = v1alpha1.ConditionReady
 
 	tests := []struct {
 		name        string
@@ -321,7 +320,7 @@ func TestReadyFor(t *testing.T) {
 				status.set(c.Type, c.Status, c.Reason, c.Message)
 			}
 
-			got := readyFor(status, readyType, tc.order, ReasonStreaming, "all good")
+			got := readyFor(status, tc.order, ReasonStreaming, "all good")
 			if got.Status != tc.wantStatus {
 				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
 			}

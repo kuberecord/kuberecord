@@ -86,6 +86,24 @@ const (
 	// will not fix itself with time — it needs an operator to migrate the schema —
 	// whereas an unreachable backend usually will.
 	ProbeReasonSchemaInvalid = "SchemaInvalid"
+
+	// ProbeReasonCredentialsInvalid marks a probe that never reached the backend
+	// because no usable credential could be produced for it.
+	//
+	// It is separate from ProbeReasonUnreachable because the two send an operator
+	// to opposite ends of their infrastructure. "Unreachable" is a statement about
+	// the network and the backend; this is a statement about identity — an IRSA
+	// annotation that was never applied, an instance role that carries no policy,
+	// an expired session — and reporting it as unreachable would have somebody
+	// reading firewall rules to explain a broken role binding.
+	//
+	// It exists for the credential a sink resolves *itself* rather than from a
+	// Secret. A Secret that cannot be read is a control-plane fact the reconciler
+	// establishes synchronously, with no probe involved; an ambient credential
+	// chain (IRSA, workload identity, an instance role) can only be exercised by
+	// attempting a request, so the probe is the only place its failure can
+	// surface. See ErrCredentialsUnavailable.
+	ProbeReasonCredentialsInvalid = "CredentialsInvalid"
 )
 
 // ErrSchemaInvalid is the classifier a backend wraps around a schema-mismatch
@@ -97,6 +115,23 @@ const (
 // "wrong shape, call a human" — is a property of the sink contract, not of any
 // one backend.
 var ErrSchemaInvalid = errors.New("sink schema does not match the schema the operator writes")
+
+// ErrCredentialsUnavailable is the classifier a backend wraps around a probe
+// failure that never got as far as the backend because it could not produce a
+// credential to sign the attempt with.
+//
+// It lives here, beside ErrSchemaInvalid, for the same reason that one does: the
+// distinction it draws — "I cannot reach it" versus "I do not know who I am" —
+// is a property of the sink contract rather than of any one backend's error
+// vocabulary, and the manager must be able to classify it without importing an
+// SDK's error types.
+//
+// A backend that resolves its credential from a Kubernetes Secret has no use for
+// it: an unreadable Secret is decided by the reconciler, synchronously, before
+// any instance exists. It is for the ambient chains — IRSA, workload identity, an
+// instance role — whose only honest test is an attempted request, which is
+// exactly what a probe is.
+var ErrCredentialsUnavailable = errors.New("sink could not obtain a credential to authenticate with")
 
 // errManagerStopped is returned by Ensure once the manager has begun shutting
 // down. A reconciler seeing it should do nothing: the process is exiting, and the
@@ -906,9 +941,15 @@ func (m *SinkManager) probe(ctx context.Context, inst *liveSink) ProbeResult {
 		return result
 	}
 
+	// Ordered most-specific first, and the two classifiers are disjoint by
+	// construction: a probe that never obtained a credential cannot have reached
+	// the backend to disagree with its schema.
 	result.Reason = ProbeReasonUnreachable
-	if errors.Is(err, ErrSchemaInvalid) {
+	switch {
+	case errors.Is(err, ErrSchemaInvalid):
 		result.Reason = ProbeReasonSchemaInvalid
+	case errors.Is(err, ErrCredentialsUnavailable):
+		result.Reason = ProbeReasonCredentialsInvalid
 	}
 	// Logged here, with the sink's identity, so the condition the reconciler
 	// eventually writes is never the only record of the failure (Invariant 4).

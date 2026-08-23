@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
@@ -27,9 +28,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/yelzhy/kuberecord/internal/controller"
 	"github.com/yelzhy/kuberecord/internal/pipeline"
 	"github.com/yelzhy/kuberecord/internal/sink"
 	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/internal/sink/s3"
 )
 
 // parseWriterFlags registers the --writer-* flags on a throwaway FlagSet and
@@ -475,13 +478,13 @@ func TestBuildSinkConfigFingerprintsThePassword(t *testing.T) {
 }
 
 // TestSinkFactoryRejectsAForeignConfig covers the D6 seam: the factory is the
-// only place that knows ClickHouse exists, and a configuration built for some
-// future backend must be refused with a legible error rather than panic in a
-// type assertion on a lifecycle goroutine.
+// only place that knows which backends exist, and a configuration built for some
+// future one must be refused with a legible error rather than panic in a type
+// assertion on a lifecycle goroutine.
 func TestSinkFactoryRejectsAForeignConfig(t *testing.T) {
 	factory := newSinkFactory(pipeline.NewPipelineMetrics(prometheus.NewRegistry()))
 	if _, err := factory(sink.ID{Kind: sink.DefaultSinkKind, Name: "default"}, foreignConfig{}); err == nil {
-		t.Fatal("factory accepted a non-ClickHouse configuration, want an error")
+		t.Fatal("factory accepted a configuration no backend in this build serves, want an error")
 	}
 }
 
@@ -489,6 +492,165 @@ func TestSinkFactoryRejectsAForeignConfig(t *testing.T) {
 type foreignConfig struct{}
 
 func (foreignConfig) Fingerprint() string { return "foreign" }
+
+// TestSinkFactoryBuildsAnS3Writer is the other half of that seam: an S3
+// configuration must produce a running-capable writer, built through the real
+// object-store constructor.
+//
+// It is the one test that proves the wiring actually reaches the AWS client, and it
+// needs no network to do so: constructing the store resolves configuration and
+// assembles a lazy credential chain, which is precisely why the factory is allowed
+// to run inline on a reconcile (Invariant 1). A factory that dialled anything would
+// hang here on an endpoint that does not exist.
+func TestSinkFactoryBuildsAnS3Writer(t *testing.T) {
+	factory := newSinkFactory(pipeline.NewPipelineMetrics(prometheus.NewRegistry()))
+	build := newS3SinkConfigBuilder(writerTuning{})
+	cfg, err := build("audit", v1alpha1.S3SinkSpec{
+		Bucket:         "kuberecord-audit",
+		Region:         "us-east-1",
+		Endpoint:       "http://minio.kuberecord-system.svc:9000",
+		ForcePathStyle: true,
+	}, controller.S3Credentials{AccessKeyID: "AKIA", SecretAccessKey: "secret"})
+	if err != nil {
+		t.Fatalf("build the S3 configuration: %v", err)
+	}
+
+	writer, err := factory(sink.ID{Kind: "S3Sink", Name: "audit"}, cfg)
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if writer == nil {
+		t.Fatal("factory returned no writer and no error")
+	}
+	// The archive backend is Writer-only by decision (D12), and the factory must not
+	// quietly hand back something that claims otherwise: the manager discovers the
+	// optional halves by type assertion, so a StateReader here would switch cache
+	// warm-up back on for a sink that cannot answer it.
+	if _, ok := writer.(sink.StateReader); ok {
+		t.Error("the S3 writer claims to implement sink.StateReader; D12 says it cannot")
+	}
+	if _, ok := writer.(sink.Prober); !ok {
+		t.Error("the S3 writer does not implement sink.Prober, so its bucket would never be checked")
+	}
+}
+
+// TestBuildS3SinkConfig pins the spec-to-configuration mapping, field by field: it
+// is the one place a CRD field can be silently dropped, and a dropped field means a
+// sink running with a configuration nobody wrote.
+func TestBuildS3SinkConfig(t *testing.T) {
+	defaults := writerTuning{queueSize: 111, workers: 3, enqueueTimeout: 4 * time.Second,
+		drainTimeout: 9 * time.Second}
+	build := newS3SinkConfigBuilder(defaults)
+
+	spec := v1alpha1.S3SinkSpec{
+		Bucket:         "kuberecord-audit",
+		Prefix:         "clusters/kind",
+		Region:         "eu-central-1",
+		Endpoint:       "https://minio.example:9000",
+		ForcePathStyle: true,
+		Rotation: v1alpha1.S3RotationSpec{
+			MaxObjectBytes: ptr(int64(2 << 20)),
+			MaxObjectAge:   &metav1.Duration{Duration: 45 * time.Second},
+		},
+		ObjectLock: &v1alpha1.S3ObjectLockSpec{
+			Mode:       v1alpha1.ObjectLockModeCompliance,
+			RetainDays: 400,
+		},
+		Writer: v1alpha1.S3WriterSpec{Workers: ptr(int32(8))},
+	}
+
+	built, err := build("audit", spec, controller.S3Credentials{
+		AccessKeyID: "AKIA", SecretAccessKey: "secret", SessionToken: "token",
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg, ok := built.(s3.SinkConfig)
+	if !ok {
+		t.Fatalf("builder produced a %T, want an s3.SinkConfig", built)
+	}
+
+	want := s3.SinkConfig{
+		Client: s3.ClientConfig{
+			Region:         "eu-central-1",
+			Endpoint:       "https://minio.example:9000",
+			ForcePathStyle: true,
+			Credentials: s3.Credentials{
+				AccessKeyID: "AKIA", SecretAccessKey: "secret", SessionToken: "token",
+			},
+		},
+		Writer: s3.Config{
+			Bucket:         "kuberecord-audit",
+			Prefix:         "clusters/kind",
+			MaxObjectBytes: 2 << 20,
+			MaxObjectAge:   45 * time.Second,
+			ObjectLock:     &s3.ObjectLock{Mode: "COMPLIANCE", RetainDays: 400},
+			// The one knob the spec states wins; the three it omits fall back to the
+			// operator-level --writer-* values, not to the package defaults.
+			QueueSize:      111,
+			Workers:        8,
+			EnqueueTimeout: 4 * time.Second,
+			DrainTimeout:   9 * time.Second,
+		},
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("configuration mismatch\n got: %+v\nwant: %+v", cfg, want)
+	}
+}
+
+// TestBuildS3SinkConfigAmbientCredentials covers the shape that has no Secret at
+// all: an omitted spec.credentials must produce a configuration the client reads as
+// "use the ambient chain", not one carrying an empty key it would try to sign with.
+func TestBuildS3SinkConfigAmbientCredentials(t *testing.T) {
+	build := newS3SinkConfigBuilder(writerTuning{})
+	built, err := build("audit", v1alpha1.S3SinkSpec{Bucket: "audit", Region: "us-east-1"},
+		controller.S3Credentials{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	cfg, ok := built.(s3.SinkConfig)
+	if !ok {
+		t.Fatalf("builder produced a %T, want an s3.SinkConfig", built)
+	}
+	if !cfg.Client.Credentials.IsAmbient() {
+		t.Errorf("credentials %+v are not the ambient chain", cfg.Client.Credentials)
+	}
+	// Rotation and the object lock are left at their zero values, which the writer
+	// reads as "use the shipped defaults" and "no retention of this sink's own" —
+	// both of which are the CRD's own defaults for an omitted block.
+	if cfg.Writer.MaxObjectBytes != 0 || cfg.Writer.MaxObjectAge != 0 {
+		t.Errorf("omitted rotation produced %d/%s, want the writer's own defaults",
+			cfg.Writer.MaxObjectBytes, cfg.Writer.MaxObjectAge)
+	}
+	if cfg.Writer.ObjectLock != nil {
+		t.Errorf("omitted objectLock produced %+v, want no per-object retention", cfg.Writer.ObjectLock)
+	}
+}
+
+// TestBuildS3SinkConfigFingerprintsTheAccessKey guards credential rotation from
+// this side, exactly as TestBuildSinkConfigFingerprintsThePassword does for
+// ClickHouse: a builder that dropped the key would leave a rotated Secret producing
+// an identical fingerprint, and a sink still signing with the old credential until
+// the process restarted.
+func TestBuildS3SinkConfigFingerprintsTheAccessKey(t *testing.T) {
+	build := newS3SinkConfigBuilder(writerTuning{})
+	spec := v1alpha1.S3SinkSpec{Bucket: "audit", Region: "us-east-1"}
+
+	before, err := build("audit", spec, controller.S3Credentials{AccessKeyID: "AKIA", SecretAccessKey: "old"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	after, err := build("audit", spec, controller.S3Credentials{AccessKeyID: "AKIA", SecretAccessKey: "new"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if before.Fingerprint() == after.Fingerprint() {
+		t.Error("fingerprint is unchanged after an access-key rotation; the sink would never be recycled")
+	}
+}
+
+// ptr is the address-of helper the optional CRD fields need.
+func ptr[T any](v T) *T { return &v }
 
 // TestManagerCacheOptionsConfineSecretsToTheOperatorNamespace guards the one
 // wiring detail that decides whether the operator can run under its own RBAC.

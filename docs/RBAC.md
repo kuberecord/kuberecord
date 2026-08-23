@@ -32,8 +32,8 @@ control-plane reconcilers, so it cannot drift from what the code actually calls:
 
 | Grant | Why |
 |---|---|
-| `kuberecord.io/{clickhousesinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
-| the same three `/status` — `get,update,patch` | Report conditions back |
+| `kuberecord.io/{clickhousesinks,s3sinks,streamrules,clusterstreamrules}` — `get,list,watch` | Read the intent it reconciles |
+| the same four `/status` — `get,update,patch` | Report conditions back |
 | `namespaces` — `get,list,watch` | `ClusterStreamRule.spec.namespaceSelector` expansion |
 | `authorization.k8s.io/selfsubjectaccessreviews` — `create` | The per-target RBAC check behind `RBACGranted` |
 | `events` — `create,patch` | Surface degradation to `kubectl describe`. Write-only, and unrelated to *watching* Events — that is the [`events` preset](#watch-rights-the-aggregated-role) and needs `get,list,watch` |
@@ -46,6 +46,13 @@ Two absences are load-bearing:
   standing reach with zero presets installed is *its own CRDs plus namespace
   names*. This is asserted by a test, not just by review
   (`internal/controller/rbacmanifests_test.go`).
+- **No cluster-wide Secret access, whatever the sink kind.** An `S3Sink` reads its
+  access key through the same namespaced `Role` a `ClickHouseSink` reads its
+  password through, so adding a second backend widened the operator's standing
+  cluster-wide reach by exactly one CRD and its status. Sink CRs are cluster-scoped
+  and therefore editable by anyone with cluster-level write access to them — if this
+  grant were cluster-wide, creating a sink would be a way to make the operator read
+  any Secret in the cluster and ship it to a bucket.
 - **No write access to `clusterroles` or `clusterrolebindings`.** See
   [No self-escalation](#no-self-escalation).
 

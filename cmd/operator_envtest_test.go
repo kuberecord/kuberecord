@@ -127,14 +127,20 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 
 	// Wait for every type the control plane watches to be cached before probing.
 	// A cache-backed List blocks until its informer has synced, so this both
-	// asserts that all five come up against a cluster holding none of them, and
+	// asserts that all six come up against a cluster holding none of them, and
 	// closes the window in which cancelling below would interrupt a sync in
 	// flight — an interrupted sync logs at Error, and the assertion at the end of
 	// this test is that nothing does.
+	//
+	// Every watched type has to be here, sink kinds included: a type left out is
+	// one whose informer may still be syncing when the cancellation lands, and the
+	// error it then logs looks like a fault in whatever *other* source that
+	// controller was still bringing up.
 	for _, list := range []client.ObjectList{
 		&corev1.SecretList{},
 		&corev1.NamespaceList{},
 		&v1alpha1.ClickHouseSinkList{},
+		&v1alpha1.S3SinkList{},
 		&v1alpha1.StreamRuleList{},
 		&v1alpha1.ClusterStreamRuleList{},
 	} {

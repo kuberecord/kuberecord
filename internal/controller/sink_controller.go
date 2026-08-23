@@ -53,7 +53,7 @@ const DefaultCredentialsSecretKey = "password"
 // defaultSinkResyncPeriod is how often a ClickHouseSink is reconciled even when
 // nothing about it changed.
 //
-// The sink's health is push-driven (the probe watcher wakes the reconciler on
+// The sink's health is push-driven (the probe hub wakes the reconciler on
 // every probe result), so this is only the backstop that re-asserts the sink
 // runtime's configuration — it is what brings a sink back up if an Ensure ever
 // failed transiently. Two minutes matches the rule reconciler's resync so the two
@@ -203,12 +203,14 @@ type SinkReconciler struct {
 	// than something guessed from the environment at read time.
 	OperatorNamespace string
 
-	// Probes holds the latest probe verdict per sink, filled by the ProbeWatcher.
-	Probes *probeStore
+	// Probes is the shared health-verdict hub this reconciler reads its sink's
+	// latest probe result from, and is woken by. Required.
+	Probes *SinkProbeHub
 
-	// events is the generic-event channel the ProbeWatcher pushes onto so a probe
-	// result wakes this reconciler for the sink it concerns. Wired in through
-	// WatchesRawSource(source.Channel(...)) by SetupWithManager.
+	// events is the generic-event channel the probe hub pushes onto so a probe
+	// result wakes this reconciler for the sink it concerns. Claimed from the hub
+	// and wired in through WatchesRawSource(source.Channel(...)) by
+	// SetupWithManager.
 	events chan event.GenericEvent
 
 	// ResyncPeriod overrides defaultSinkResyncPeriod. Tests shorten it.
@@ -281,7 +283,7 @@ func (r *SinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	r.setHealthConditions(status, &chSink, credErr)
 
 	previousReady := findCondition(chSink.Status.Conditions, v1alpha1.ConditionReady)
-	ready := readyFor(status, v1alpha1.ConditionReady, sinkReadyOrder, ReasonConnected,
+	ready := readyFor(status, sinkReadyOrder, ReasonConnected,
 		"ClickHouse is reachable, authenticated and carries the expected schema")
 	status.set(v1alpha1.ConditionReady, ready.Status, ready.Reason, ready.Message)
 
@@ -415,8 +417,8 @@ func (r *SinkReconciler) setHealthConditions(status *statusWriter, chSink *v1alp
 // to hear about the Secret, not about the schema they cannot check yet.
 var sinkReadyOrder = []string{v1alpha1.ConditionCredentialsResolved, v1alpha1.ConditionSchemaValid}
 
-// readyFor computes a roll-up condition from the specific conditions decided this
-// pass.
+// readyFor computes the Ready roll-up condition from the specific conditions
+// decided this pass.
 //
 // The roll-up is derived rather than set by hand at each decision site, which is
 // what keeps the Kubernetes convention that True means healthy mechanically true:
@@ -428,7 +430,7 @@ var sinkReadyOrder = []string{v1alpha1.ConditionCredentialsResolved, v1alpha1.Co
 // carrying that condition's own status and reason forward: an unreachable sink is
 // Ready=False (it is definitely not usable), while a sink no probe has settled for
 // is Ready=Unknown (nothing is known to be wrong yet).
-func readyFor(status *statusWriter, readyType string, order []string, trueReason, trueMessage string) metav1.Condition {
+func readyFor(status *statusWriter, order []string, trueReason, trueMessage string) metav1.Condition {
 	for _, condType := range order {
 		c := findCondition(status.conditions, condType)
 		if c == nil || c.Status == metav1.ConditionTrue {
@@ -441,9 +443,9 @@ func readyFor(status *statusWriter, readyType string, order []string, trueReason
 			// written to.
 			readyStatus = metav1.ConditionFalse
 		}
-		return condition(readyType, readyStatus, c.Reason, c.Message, status.generation)
+		return condition(v1alpha1.ConditionReady, readyStatus, c.Reason, c.Message, status.generation)
 	}
-	return condition(readyType, metav1.ConditionTrue, trueReason, trueMessage, status.generation)
+	return condition(v1alpha1.ConditionReady, metav1.ConditionTrue, trueReason, trueMessage, status.generation)
 }
 
 // resyncPeriod is the configured resync or the package default.
@@ -454,8 +456,8 @@ func (r *SinkReconciler) resyncPeriod() time.Duration {
 	return defaultSinkResyncPeriod
 }
 
-// ProbeWatcher drains the sink runtime's probe results into the reconciler's store
-// and wakes the reconciler for each sink a result concerns.
+// SinkProbeHub drains the sink runtime's probe results into a verdict store shared
+// by every sink reconciler, and wakes the right reconciler for each result.
 //
 // It exists as its own runnable because the two ends of the probe path have
 // different owners: the sink runtime posts results whenever a backend answers, and
@@ -463,24 +465,124 @@ func (r *SinkReconciler) resyncPeriod() time.Duration {
 // observedGeneration, and emits one event per transition). Writing status directly
 // from this goroutine would put a Kubernetes client on the sink runtime's health
 // path and lose all three of those properties.
-type ProbeWatcher struct {
-	// Results is the sink runtime's probe-result channel.
-	Results <-chan sink.ProbeResult
+//
+// It is *one* hub for every kind rather than one per reconciler because the sink
+// runtime has one result channel, carrying verdicts for every kind of sink it runs
+// (sink.SinkManager.ProbeResults). Two drainers over that channel would steal each
+// other's results — a ClickHouseSink's verdict consumed by the S3Sink reconciler is
+// a verdict nothing ever writes — so the fan-out has to happen after the receive,
+// keyed on the verdict's own kind. Each reconciler registers its kind and takes the
+// wake-up channel it will be watched through.
+type SinkProbeHub struct {
+	// results is the sink runtime's probe-result channel. A nil channel is legal
+	// and means no runtime feeds this hub (a test, or a deployment assembled
+	// without one): Start then simply waits for its context.
+	results <-chan sink.ProbeResult
 
-	// Probes is the store each result is recorded in.
-	Probes *probeStore
+	// store holds the latest verdict per sink. It is shared across kinds, which is
+	// safe and correct because it is keyed on the whole sink.ID — an S3Sink and a
+	// ClickHouseSink sharing a name have separate entries (see probeStore.latest).
+	store *probeStore
 
-	// Events is the reconciler's generic-event channel. The send is blocking
-	// (bounded only by the channel's capacity and the reconciler draining it),
-	// because a dropped result would leave a CR claiming a health it no longer has
-	// (Invariant 4) — the source of truth for the verdict is the store, but
-	// nothing would ever read it again without the wake-up.
-	Events chan<- event.GenericEvent
+	// targets maps a sink kind onto the reconciler serving it. It is written only
+	// by register, which runs during setup — before Start — and read only by
+	// Start's goroutine, so the mutex guards the handover rather than concurrent
+	// traffic.
+	mu      sync.Mutex
+	targets map[string]probeTarget
+
+	// added records that this hub is already a manager runnable, so a second
+	// registration cannot start a second drainer over the same channel.
+	added bool
 }
+
+// probeTarget is one reconciler's end of the hub: where to send a wake-up, and how
+// to name the object it concerns.
+type probeTarget struct {
+	// events is the generic-event channel the reconciler is watched through.
+	events chan event.GenericEvent
+
+	// newObject builds the wake-up object for one sink name. Only the name reaches
+	// it: the kind is already fixed by which target was selected, and the object
+	// exists solely to tell controller-runtime which CR to reconcile.
+	newObject func(name string) client.Object
+}
+
+// NewSinkProbeHub builds a hub over the sink runtime's probe results.
+//
+// results may be nil, which is how a deployment (or a test) with no sink runtime
+// still gets a working verdict store and a reconciler that reports ProbePending
+// rather than one that cannot be constructed.
+func NewSinkProbeHub(results <-chan sink.ProbeResult) *SinkProbeHub {
+	return &SinkProbeHub{
+		results: results,
+		store:   newProbeStore(),
+		targets: make(map[string]probeTarget),
+	}
+}
+
+// SetupWithManager adds the hub to mgr. It must be called exactly once, and it is
+// the caller's job rather than a reconciler's precisely because the hub is shared:
+// a hub added once per registering reconciler would run one drainer per kind, and
+// they would compete for the same results.
+func (h *SinkProbeHub) SetupWithManager(mgr ctrl.Manager) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.added {
+		return errors.New("controller: the sink probe hub is already registered with a manager")
+	}
+	if err := mgr.Add(h); err != nil {
+		return fmt.Errorf("add the sink probe hub: %w", err)
+	}
+	h.added = true
+	return nil
+}
+
+// register claims the wake-up channel for one sink kind and returns it, for the
+// caller to watch as a raw source.
+//
+// Registering the same kind twice is a wiring bug — two reconcilers for one kind
+// would each write the other's conditions — so it is refused rather than
+// overwritten.
+func (h *SinkProbeHub) register(kind string, newObject func(name string) client.Object) (chan event.GenericEvent, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, exists := h.targets[kind]; exists {
+		return nil, fmt.Errorf("controller: sink kind %q is already registered with the probe hub", kind)
+	}
+	// Capacity absorbs a burst of results from many sinks while a reconcile is in
+	// flight. It is a wake-up channel, not a queue of verdicts — the store already
+	// holds the latest one per sink — so a modest buffer is enough.
+	events := make(chan event.GenericEvent, probeEventCapacity)
+	h.targets[kind] = probeTarget{events: events, newObject: newObject}
+	return events, nil
+}
+
+// latest returns the newest verdict for id, if any has settled yet.
+func (h *SinkProbeHub) latest(id sink.ID) (sink.ProbeResult, bool) { return h.store.latest(id) }
+
+// forget drops a deleted sink's verdict, so a sink recreated under the same ID
+// starts from ProbePending rather than inheriting its predecessor's health.
+func (h *SinkProbeHub) forget(id sink.ID) { h.store.forget(id) }
+
+// target resolves the reconciler serving one kind.
+func (h *SinkProbeHub) target(kind string) (probeTarget, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, ok := h.targets[kind]
+	return t, ok
+}
+
+// errUnroutableProbe reports a verdict for a kind no reconciler registered. It
+// gives the log line a non-nil error value; nothing branches on it.
+var errUnroutableProbe = errors.New("no reconciler is registered for this sink's kind, so its verdict cannot be reported")
 
 // Start drains probe results until ctx is cancelled. It satisfies
 // manager.Runnable.
-func (w *ProbeWatcher) Start(ctx context.Context) error {
+//
+// Every result is recorded before it is announced, so a wake-up can never arrive
+// at a reconciler that would then read a staler verdict than the one that woke it.
+func (h *SinkProbeHub) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("sink-probes")
 	log.Info("Watching sink health probe results")
 	for {
@@ -488,13 +590,24 @@ func (w *ProbeWatcher) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			log.Info("Stopped watching sink health probe results")
 			return nil
-		case result := <-w.Results:
-			w.Probes.record(result)
-			// Only the name reaches the wake-up: the object identifies which CR to
-			// reconcile, and the kind is already fixed by the type being constructed.
-			obj := &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: result.Sink.Name}}
+		case result := <-h.results:
+			h.store.record(result)
+			target, ok := h.target(result.Sink.Kind)
+			if !ok {
+				// The verdict is stored regardless, so a reconciler registered later
+				// in this process's life would still read it. Logged at Error because
+				// in a running operator it can only mean the wiring built a sink of a
+				// kind nothing reconciles (Invariant 4).
+				log.Error(errUnroutableProbe, "Dropping a sink health verdict's wake-up",
+					"sink", result.Sink.String())
+				continue
+			}
+			// The send is blocking (bounded only by the channel's capacity and the
+			// reconciler draining it), because a dropped wake-up would leave a CR
+			// claiming a health it no longer has: the store holds the verdict, but
+			// nothing would ever read it again.
 			select {
-			case w.Events <- event.GenericEvent{Object: obj}:
+			case target.events <- event.GenericEvent{Object: target.newObject(result.Sink.Name)}:
 			case <-ctx.Done():
 				return nil
 			}
@@ -502,20 +615,21 @@ func (w *ProbeWatcher) Start(ctx context.Context) error {
 	}
 }
 
-// NeedLeaderElection gates the watcher on leadership, matching the sink runtime
-// that feeds it: a non-leader runs no sink instances, so it has no probe results
-// to consume and no business writing another replica's verdicts into CR status.
-func (w *ProbeWatcher) NeedLeaderElection() bool { return true }
+// NeedLeaderElection gates the hub on leadership, matching the sink runtime that
+// feeds it: a non-leader runs no sink instances, so it has no probe results to
+// consume and no business writing another replica's verdicts into CR status.
+func (h *SinkProbeHub) NeedLeaderElection() bool { return true }
 
-// SetupWithManager registers the sink reconciler, its probe watcher, and the
-// Secret field index that makes credential rotation a watch.
+// SetupWithManager registers the sink reconciler, claims its wake-up channel from
+// the shared probe hub, and installs the Secret field index that makes credential
+// rotation a watch.
 //
 // The Secret watch is what closes the rotation loop end-to-end: an updated Secret
 // maps back through the index to every sink reading it, those sinks re-reconcile,
 // their configuration fingerprints change, and the sink runtime recycles each
 // instance without losing a queued write. Without the index this would be a poll,
 // and a rotated credential would take up to a resync period to take effect.
-func (r *SinkReconciler) SetupWithManager(mgr ctrl.Manager, results <-chan sink.ProbeResult) error {
+func (r *SinkReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.BuildConfig == nil {
 		return errors.New("controller: SinkReconciler.BuildConfig is required")
 	}
@@ -526,12 +640,15 @@ func (r *SinkReconciler) SetupWithManager(mgr ctrl.Manager, results <-chan sink.
 		return errors.New("controller: SinkReconciler.OperatorNamespace is required")
 	}
 	if r.Probes == nil {
-		r.Probes = newProbeStore()
+		return errors.New("controller: SinkReconciler.Probes is required")
 	}
-	// Capacity absorbs a burst of results from many sinks while a reconcile is in
-	// flight. It is a wake-up channel, not a queue of verdicts — the store already
-	// holds the latest one per sink — so a modest buffer is enough.
-	r.events = make(chan event.GenericEvent, probeEventCapacity)
+	events, err := r.Probes.register(clickHouseSinkKind, func(name string) client.Object {
+		return &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	})
+	if err != nil {
+		return err
+	}
+	r.events = events
 
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.ClickHouseSink{}, secretRefIndexKey,
 		func(obj client.Object) []string {
@@ -542,12 +659,6 @@ func (r *SinkReconciler) SetupWithManager(mgr ctrl.Manager, results <-chan sink.
 			return []string{r.secretRef(chSink).String()}
 		}); err != nil {
 		return fmt.Errorf("index ClickHouseSink by credentials Secret: %w", err)
-	}
-
-	if results != nil {
-		if err := mgr.Add(&ProbeWatcher{Results: results, Probes: r.Probes, Events: r.events}); err != nil {
-			return fmt.Errorf("add the sink probe watcher: %w", err)
-		}
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -576,13 +687,13 @@ func (r *SinkReconciler) sinksForSecret(ctx context.Context, obj client.Object) 
 	return requests
 }
 
-// Compile-time proof that the probe watcher is a leader-gated manager.Runnable and
+// Compile-time proof that the probe hub is a leader-gated manager.Runnable and
 // that the production sink runtime satisfies the narrow interface this reconciler
 // declares. Both are asserted here rather than discovered at wiring time, where a
 // signature drift would surface in a file that has nothing to do with either.
 var (
-	_ manager.Runnable               = (*ProbeWatcher)(nil)
-	_ manager.LeaderElectionRunnable = (*ProbeWatcher)(nil)
+	_ manager.Runnable               = (*SinkProbeHub)(nil)
+	_ manager.LeaderElectionRunnable = (*SinkProbeHub)(nil)
 	_ SinkRuntime                    = (*sink.SinkManager)(nil)
 	_ reconcile.Reconciler           = (*SinkReconciler)(nil)
 )

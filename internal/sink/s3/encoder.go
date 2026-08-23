@@ -19,7 +19,9 @@ limitations under the License.
 // zstd-compressed JSON Lines objects.
 //
 // This file defines the backend's *physical format* — how a batch of Records
-// becomes one object's bytes and one object's key. Per D15 that format is its
+// becomes one object's bytes and one object's key — in its one-shot, reference
+// form; object.go carries the accumulating form the write path uses, and the two
+// agree on every part of the format that is a contract. Per D15 that format is its
 // own versioned public contract, on its own timeline and entirely separate from
 // the frozen ClickHouse schema, which is why the version is stamped into the
 // object key itself (format=jsonl-v1) rather than living only in the S3Sink CR:
@@ -139,7 +141,18 @@ type Object struct {
 	Payload []byte
 }
 
-// Encode serializes a batch of records into one archive object.
+// Encode serializes a batch of records into one archive object, in one pass over
+// a finished batch.
+//
+// It is the format's reference form: given the records, this is the object. The
+// write path does not use it, and that is deliberate rather than an oversight —
+// rotation is specified on the encoded size, so a worker has to know how large
+// the object has become while it is still filling it, which a one-shot encoder
+// cannot answer. It therefore builds the same object incrementally (see
+// object.go), and the two agree on the key and the content hash because both hash
+// the uncompressed payload. Do not "unify" them by making the writer buffer a
+// whole batch and call this: that is what would put an object's worth of
+// uncompressed JSON in each worker's memory.
 //
 // The record layout is a direct serialization of sink.Record (D9): one JSON
 // object per line, terminated by "\n" including the final line, with fields
@@ -199,13 +212,11 @@ func Encode(prefix string, records []sink.Record) (Object, error) {
 	}
 
 	// One pass validates and marshals: the encoder appends "\n" after each value,
-	// so a stream of Encode calls over a shared buffer *is* the JSONL payload.
-	// HTML escaping is off because these bytes are read by humans and by query
-	// engines rather than embedded in a page, and `<` noise inside a `data`
-	// payload helps neither; the two forms decode identically.
+	// so a stream of Encode calls over a shared buffer *is* the JSONL payload. It
+	// is the shared lineEncoder, so this one-shot path and the writer's
+	// accumulating one (object.go) cannot drift on how a line is rendered.
 	var jsonl bytes.Buffer
-	enc := json.NewEncoder(&jsonl)
-	enc.SetEscapeHTML(false)
+	enc := lineEncoder(&jsonl)
 	for i := range records {
 		if records[i].ClusterID != clusterID {
 			return Object{}, fmt.Errorf("s3: batch mixes cluster_ids: record 0 is %q, record %d (%s) is %q", clusterID, i, recordRef(records[i]), records[i].ClusterID)
@@ -236,15 +247,9 @@ func Encode(prefix string, records []sink.Record) (Object, error) {
 // indistinguishable from a short one, and reporting it as success would turn
 // corruption into silent data loss.
 func Decode(payload []byte) ([]sink.Record, error) {
-	if !bytes.HasPrefix(payload, zstdMagic) {
-		return nil, fmt.Errorf("s3: payload is not a zstd frame (missing magic bytes, %d bytes)", len(payload))
-	}
-	if zstdDecoder == nil {
-		return nil, errNoDecoder
-	}
-	jsonl, err := zstdDecoder.DecodeAll(payload, nil)
+	jsonl, err := decompress(payload)
 	if err != nil {
-		return nil, fmt.Errorf("s3: decompress object payload (%d bytes): %w", len(payload), err)
+		return nil, err
 	}
 
 	var records []sink.Record
