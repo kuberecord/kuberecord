@@ -92,6 +92,12 @@ type SinkRuntime interface {
 	// Delete withdraws a sink for good. Draining happens on the runtime's own
 	// goroutines, so this returns immediately.
 	Delete(id sink.ID)
+
+	// CapabilitiesFor reports what the running instance for a sink can do, or
+	// ok=false when none is running yet. It is a read of the runtime's routing
+	// snapshot, not a backend round-trip, so it is safe to call inline
+	// (Invariant 1) — see sink.SinkManager.CapabilitiesFor.
+	CapabilitiesFor(id sink.ID) (sink.Capabilities, bool)
 }
 
 // clickHouseSinkKind is the one sink CR kind this build serves.

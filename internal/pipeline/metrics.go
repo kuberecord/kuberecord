@@ -115,6 +115,17 @@ type PipelineMetrics struct {
 	// sink history (cache-misses tagged Snapshot, not Added) and 0 once warm.
 	// Warm-up is per-scope now: a rule created hours after boot warms only its
 	// own scope, so readiness cannot be a single per-kind flag.
+	//
+	// On a Writer-only sink (D12) it stays at 1 for every scope, forever, because
+	// no scope is ever marked warm — and that is the intended reading, not a
+	// missing transition. This gauge is the metrics-side observation of the same
+	// fact the sink's HistoryUnavailable=True condition states, which is why there
+	// is deliberately no second series saying it: a parallel "writer-only" metric
+	// would be one more thing to keep in agreement with this one, and a dashboard
+	// that watched only the new one would stop noticing an *ordinary* sink stuck
+	// warming. An alert distinguishes the two cases by duration — a scope that has
+	// been in Snapshot mode for hours is either a broken sink or an archive tier,
+	// and the sink's own condition says which.
 	safeMode *prometheus.GaugeVec
 
 	// dropped counts work items the pipeline deliberately discarded, by reason.
@@ -212,7 +223,7 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		safeMode: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "safe_mode",
-			Help:      "1 while a (sink, scope) pair's cache is still warming (Snapshot mode), 0 once warm.",
+			Help:      "1 while a (sink, scope) pair's cache is still warming (Snapshot mode), 0 once warm; pinned at 1 for every scope on a Writer-only sink.",
 		}, []string{"sink", "group", "kind", "namespace"}),
 		dropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,

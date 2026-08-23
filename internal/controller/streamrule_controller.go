@@ -516,6 +516,13 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		return planOutcome{verdict: verdict, install: true}
 	}
 
+	// Before any gate: the sink's declared capability limit belongs on the rule
+	// whether the rule then passes or fails. An author whose rule is refused by
+	// policy still needs to know what their sink would have done with the records,
+	// and a pass that set this only on the happy path would drop the statement
+	// exactly when the rule's conditions are being read most closely.
+	setRuleHistoryUnavailable(status, sinkID, boundSink)
+
 	if denied := checkPolicy(spec.Resources, boundSink.policy); denied != nil {
 		log.Info("Rule is not admitted by its sink's policy; withdrawing its watch targets",
 			"rule", ruleKey, "sink", sinkID.String(), "reason", denied.reason)
@@ -717,9 +724,54 @@ func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*resolved
 // setUnevaluated marks the rule's own three conditions Unknown because no gate
 // could run without a sink: the sink's policy decides PolicyAllowed and the sink's
 // name is part of every target, so none of the three is answerable.
+//
+// HistoryUnavailable goes Unknown with them, and for a sharper reason than the
+// other three. It is a *mirror* of the bound sink's condition, and there is no
+// sink to mirror — so reporting False would be this reconciler inventing the
+// reassuring half of an inverted condition about a backend it never found.
 func (r *RuleReconciler) setUnevaluated(status *statusWriter, message string) {
 	for _, condType := range ruleReadyOrder {
 		status.set(condType, metav1.ConditionUnknown, ReasonNotEvaluated, message)
+	}
+	status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionUnknown, ReasonNotEvaluated, message)
+}
+
+// setRuleHistoryUnavailable mirrors the bound sink's HistoryUnavailable condition
+// onto the rule.
+//
+// It is a mirror rather than a second derivation: the sink's own reconciler is the
+// only component that reads the sink runtime's capability report, and a rule
+// reconciler that asked the runtime itself would be a second authority on the same
+// fact, free to disagree with the sink's own status. Reading the sink CR the rule
+// already fetched costs nothing and cannot drift.
+//
+// The rule needs it at all because the two objects usually have different owners.
+// A StreamRule's author may never look at the cluster-scoped S3Sink they named,
+// and a rule reporting only Ready=True would tell them their rule is streaming —
+// true — while leaving them to discover from row counts, months later, that the
+// stream contains no deletions. That is the exact failure mode D12 must not ship
+// with (Invariant 5), so the rule states it too.
+//
+// It is deliberately not in ruleReadyOrder: a declared capability limit of the
+// backend somebody chose is not a fault of the rule that uses it, and dragging
+// Ready False would make every S3-bound rule look broken.
+//
+// An *absent* condition on the sink reads as False rather than Unknown, because
+// only a sink that has not been reconciled yet lacks it, and that resolves within
+// one pass. A sink whose capabilities genuinely are unknown reports the condition
+// as Unknown and is mirrored as Unknown, which is the case worth distinguishing.
+func setRuleHistoryUnavailable(status *statusWriter, id sink.ID, boundSink *resolvedSink) {
+	reported := findCondition(boundSink.conditions, v1alpha1.ConditionHistoryUnavailable)
+	switch {
+	case reported != nil && reported.Status == metav1.ConditionTrue:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionTrue, ReasonWriterOnlySink,
+			writerOnlySinkRuleMessage(id.String()))
+	case reported != nil && reported.Status == metav1.ConditionUnknown:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionUnknown, reported.Reason,
+			fmt.Sprintf("Sink %s has not reported whether it can reconstruct history: %s", id, reported.Message))
+	default:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionFalse, ReasonHistoryReadable,
+			historyReadableRuleMessage(id.String()))
 	}
 }
 

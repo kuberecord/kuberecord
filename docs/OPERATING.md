@@ -63,9 +63,37 @@ nothing.
 | `kuberecord_enqueue_timeouts_total` | counter | `sink` | Enqueues that gave up because the queue stayed full. |
 | `kuberecord_dedup_skips_total` | counter | — | Work items short-circuited by an unchanged hash. |
 | `kuberecord_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
-| `kuberecord_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. |
+| `kuberecord_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. Pinned at 1 forever on a `Writer`-only sink — see below. |
 | `kuberecord_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
 | `kuberecord_rules` | gauge | `condition`, `status` | How many rules hold each condition at each status. |
+
+### `safe_mode` on a `Writer`-only sink
+
+An `S3Sink` cannot read its own history back (D12), so no scope on it is ever
+marked warm and `kuberecord_safe_mode` stays at **1** for every one of its scopes,
+permanently. That is the intended reading, not a stuck warm-up, and it is the only
+metric that reports it: there is deliberately **no** parallel "writer-only" series
+to keep in agreement with this one.
+
+So a `safe_mode` series that never falls has two meanings, and the sink's own
+status tells you which:
+
+```console
+$ kubectl get s3sink <name> -o jsonpath='{.status.conditions[?(@.type=="HistoryUnavailable")]}'
+```
+
+* `HistoryUnavailable=True` / `WriterOnlySink` — working as designed. Cache
+  warm-up, zombie garbage collection and boot reconciliation of scope epochs are
+  all off for this sink; every record it receives is a permanent `Snapshot`, and a
+  deletion that happens while the operator is down is never recorded. `Ready`
+  stays `True`, because a declared capability limit is not a fault. The rules
+  bound to the sink mirror the same condition, so a rule's author sees it without
+  having to read the sink.
+* Anything else — a genuine warm-up that is not completing, usually a sink that
+  cannot be read back. Check the sink's `Ready` condition and the operator log.
+
+Alerting on this gauge should therefore key on *duration plus the sink kind*, not
+on the value alone.
 
 `kuberecord_rules` is the control plane's only metric, and it is deliberately
 identity-free: it counts rules, it does not name them. Both `StreamRule` and

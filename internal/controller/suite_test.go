@@ -889,14 +889,27 @@ func (f *fakeReviewer) Create(_ context.Context, review *authzv1.SelfSubjectAcce
 // under a bare name (Task 4.1): a wrong kind would simply not be found by the
 // accessors below.
 type fakeSinkRuntime struct {
-	mu       sync.Mutex
-	ensured  map[sink.ID][]string // sink → fingerprints, in order
-	deleted  []sink.ID
+	mu      sync.Mutex
+	ensured map[sink.ID][]string // sink → fingerprints, in order
+	deleted []sink.ID
+	// caps is what the runtime says each sink's *running instance* turned out to
+	// be able to do. An absent entry means no instance is running, which is a
+	// distinct answer from "running and Writer-only" — the whole reason
+	// CapabilitiesFor exists rather than a bare bool (see sink.Capabilities).
+	//
+	// It is set by tests rather than derived from Ensure because the production
+	// runtime derives it from a type assertion on a *built writer*, and nothing in
+	// this package builds one: the fake stands in for the detection, not for the
+	// backend.
+	caps     map[sink.ID]sink.Capabilities
 	ensueErr error
 }
 
 func newFakeSinkRuntime() *fakeSinkRuntime {
-	return &fakeSinkRuntime{ensured: make(map[sink.ID][]string)}
+	return &fakeSinkRuntime{
+		ensured: make(map[sink.ID][]string),
+		caps:    make(map[sink.ID]sink.Capabilities),
+	}
 }
 
 func (f *fakeSinkRuntime) Ensure(id sink.ID, cfg sink.InstanceConfig) error {
@@ -920,6 +933,28 @@ func (f *fakeSinkRuntime) Delete(id sink.ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, id)
+	// A withdrawn sink has no running instance, so it can no longer report what it
+	// is able to do. Leaving a stale entry would let a deleted sink keep asserting
+	// a capability, which is exactly the stale claim the condition must not make.
+	delete(f.caps, id)
+}
+
+// setCapabilities declares what the running instance for id can do — the fake's
+// stand-in for the SinkManager having built a writer and type-asserted it.
+func (f *fakeSinkRuntime) setCapabilities(id sink.ID, caps sink.Capabilities) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.caps[id] = caps
+}
+
+// CapabilitiesFor reports the declared capabilities, or ok=false when no instance
+// is running for id — matching sink.SinkManager.CapabilitiesFor, where a missing
+// routing entry is exactly that answer.
+func (f *fakeSinkRuntime) CapabilitiesFor(id sink.ID) (sink.Capabilities, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	caps, ok := f.caps[id]
+	return caps, ok
 }
 
 // fingerprints returns the distinct configurations declared for one ClickHouseSink,

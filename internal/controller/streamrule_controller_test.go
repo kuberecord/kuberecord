@@ -986,3 +986,90 @@ func TestClusterRuleInvalidNamespaceSelector(t *testing.T) {
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonNamespaceSelectorInvalid)
 	h.waitForTargets(RuleKey(kindClusterStreamRule, "", name), nil)
 }
+
+// TestRuleMirrorsItsSinksHistoryLimit is Task 6.5's "an author reading only the
+// rule must not be misled".
+//
+// A StreamRule and the cluster-scoped sink it names usually have different owners.
+// A rule bound to a Writer-only archive is entirely healthy — it streams, its
+// records land, Ready is True — and yet what it produces is not what a reader of
+// the rule alone would assume: no Added, no Modified, and no deletion at all for
+// anything that disappears while the operator is down. So the rule says so itself,
+// rather than leaving its author to go and read a sink they may not own.
+func TestRuleMirrorsItsSinksHistoryLimit(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+
+	t.Run("a rule bound to a writer-only sink says so and still streams", func(t *testing.T) {
+		sinkName := uniqueName("s3mirror")
+		// Declared before the sink CR exists, so the sink's own condition is True by
+		// the time the rule resolves it — the ordering a real cluster has, where the
+		// instance is built by the reconcile that declares it.
+		h.Runtime.setCapabilities(s3SinkID(sinkName), sink.Capabilities{})
+		// A real allow-list, so the mirrored condition is asserted on a rule that
+		// passed a policy gate rather than on one nothing was ever checked about:
+		// the two verdicts are independent, and a pass that only ever saw the
+		// permissive default would not show that.
+		h.createReadyS3Sink(sinkName, v1alpha1.SinkPolicy{
+			AllowedGVKs: []v1alpha1.GVKSelector{{Version: "v1", Kinds: []string{"ConfigMap"}}},
+		})
+		h.waitForS3SinkCondition(sinkName, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRuleWithSink(namespace, "archived",
+			v1alpha1.SinkReference{Kind: s3SinkKind, Name: sinkName}, resourceEntry("", "ConfigMap"))
+		ruleKey := RuleKey(kindStreamRule, namespace, "archived")
+
+		mirrored := h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+		// The sink is named, because the fix — if the author wants a timeline — is
+		// to add a second rule pointing somewhere else (D14), and they need to know
+		// which sink is the one with the limit.
+		if !strings.Contains(mirrored.Message, s3SinkID(sinkName).String()) {
+			t.Errorf("the rule's message does not name its sink:\n%s", mirrored.Message)
+		}
+		for _, want := range []string{"permanent Snapshot", "while the operator is down is never recorded"} {
+			if !strings.Contains(mirrored.Message, want) {
+				t.Errorf("the rule's message does not state the consequence %q:\n%s", want, mirrored.Message)
+			}
+		}
+
+		// And the rule is *working*. This is the assertion that keeps the mirror from
+		// becoming a degrade: the limit belongs to the backend somebody chose, not to
+		// the rule that uses it, so its targets are installed and Ready is True.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+		h.waitForTargets(ruleKey, []string{fmt.Sprintf("%s@%s", coreGVK("ConfigMap"), namespace)})
+	})
+
+	t.Run("a rule bound to a sink that can read its history is unaffected", func(t *testing.T) {
+		sinkName := uniqueName("chmirror")
+		h.createReadySink(sinkName, v1alpha1.SinkPolicy{})
+
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRule(namespace, "timeline", sinkName, resourceEntry("", "ConfigMap"))
+
+		// A ClickHouseSink reports no HistoryUnavailable condition of its own — the
+		// condition belongs to the backend that has the limit — and an absent
+		// condition mirrors as False rather than Unknown. That is the difference
+		// between "this sink has no limitation" and "nobody has looked", and the
+		// rule's author is entitled to the former.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionFalse, ReasonHistoryReadable)
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	})
+
+	t.Run("a rule with no sink to mirror reports Unknown, never False", func(t *testing.T) {
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRule(namespace, "orphan", uniqueName("missing"), resourceEntry("", "ConfigMap"))
+
+		// False is the *reassuring* value of an inverted condition, so a rule whose
+		// sink does not exist must not report it: that would tell an author their
+		// records carry accurate event types on the strength of a sink nobody found.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionUnknown, ReasonNotEvaluated)
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
+	})
+}

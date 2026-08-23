@@ -186,12 +186,19 @@ func TestS3SinkProbeFailureAndRecovery(t *testing.T) {
 	if s3Sink.Status.ObservedGeneration != s3Sink.Generation {
 		t.Errorf("observedGeneration = %d, want %d", s3Sink.Status.ObservedGeneration, s3Sink.Generation)
 	}
-	// HistoryUnavailable is Task 6.5's, and must not be invented here: a condition
-	// this reconciler does not decide is one it must not write.
-	if c := findCondition(s3Sink.Status.Conditions, v1alpha1.ConditionHistoryUnavailable); c != nil {
-		t.Errorf("HistoryUnavailable is reported as %s/%s; deciding it is Task 6.5's",
-			c.Status, c.Reason)
+	// This sink's instance was never reported as running by the fake runtime, so its
+	// capabilities have not been detected. Unknown is the only honest answer: on an
+	// inverted condition, False is the *reassuring* value, so guessing it would
+	// claim this archive records deletions when nothing has looked.
+	history := h.waitForS3SinkCondition(name, v1alpha1.ConditionHistoryUnavailable,
+		metav1.ConditionUnknown, ReasonCapabilitiesUnknown)
+	if !strings.Contains(history.Message, "no running instance") {
+		t.Errorf("message %q does not say why nothing is known", history.Message)
 	}
+	// And it did not drag the roll-up: Ready is decided by BucketReachable and
+	// CredentialsResolved alone, which is what makes a capability limit reportable
+	// without making it look like a fault.
+	h.waitForS3SinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonArchiving)
 }
 
 // TestS3SinkBucketIncompatibleIsPermanent covers the one probe outcome that will
@@ -387,4 +394,105 @@ func TestS3SinkDeletionParksDependentRules(t *testing.T) {
 
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
 	h.waitForTargets(ruleKey, nil)
+}
+
+// TestS3SinkReportsWriterOnlyDegradation is Task 6.5's first and last acceptance
+// criteria together: a sink whose running instance implements no StateReader reports
+// HistoryUnavailable=True, one whose instance does is unaffected, and neither
+// answer touches Ready.
+//
+// The two halves belong in one test because the property is the *discrimination*,
+// not either verdict. A reconciler that hard-coded "an S3Sink cannot read history"
+// would pass the first subtest and be wrong in the way that matters: the condition
+// would keep asserting a limit the running backend no longer had, which is the one
+// thing a status condition must never do.
+func TestS3SinkReportsWriterOnlyDegradation(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+
+	t.Run("a writer with no StateReader is reported, and stays Ready", func(t *testing.T) {
+		name := uniqueName("s3writeronly")
+		h.createS3Secret(name, "AKIAEXAMPLE", "secret-access-key")
+		// Declared before the CR exists, so the very first reconcile already has an
+		// instance to ask about — the production ordering, where Ensure builds the
+		// instance synchronously and CapabilitiesFor is answered from the routing
+		// table it just swapped in.
+		h.Runtime.setCapabilities(s3SinkID(name), sink.Capabilities{})
+		h.createS3Sink(name, nil)
+
+		reported := h.waitForS3SinkCondition(name, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+		// All three disabled behaviours, by the names the operator will search for.
+		for _, want := range []string{
+			"cache warm-up", "zombie garbage collection", "boot reconciliation of scope epochs",
+		} {
+			if !strings.Contains(reported.Message, want) {
+				t.Errorf("message does not name the disabled behaviour %q:\n%s", want, reported.Message)
+			}
+		}
+		// And both consequences. The second is the one that cannot be recovered
+		// from the archive itself, which is why it has to be said here.
+		for _, want := range []string{"permanent Snapshot", "while the operator is down are never recorded"} {
+			if !strings.Contains(reported.Message, want) {
+				t.Errorf("message does not state the consequence %q:\n%s", want, reported.Message)
+			}
+		}
+
+		// The whole point: a declared capability limit is not a fault. The sink
+		// authenticated and its bucket answered, so it is Ready — and an operator
+		// must be able to tell this archive from a broken one.
+		h.pushProbe(sink.ProbeResult{Sink: s3SinkID(name), At: time.Now().UTC()})
+		h.waitForS3SinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonArchiving)
+
+		// Still True after the health verdict landed: the two are independent axes,
+		// and a resync must not talk itself out of the limit.
+		var s3Sink v1alpha1.S3Sink
+		if err := h.Client.Get(context.Background(), client.ObjectKey{Name: name}, &s3Sink); err != nil {
+			t.Fatalf("get the sink: %v", err)
+		}
+		if c := findCondition(s3Sink.Status.Conditions, v1alpha1.ConditionHistoryUnavailable); c == nil ||
+			c.Status != metav1.ConditionTrue {
+			t.Errorf("HistoryUnavailable = %v after the sink became Ready, want True", c)
+		}
+	})
+
+	t.Run("an unreachable bucket does not change the capability verdict", func(t *testing.T) {
+		// Health and capability are orthogonal, and this is the pairing that proves
+		// it: the sink is degraded *and* Writer-only, and each condition reports its
+		// own thing. A reconciler that derived one from the other would collapse
+		// here — the bucket outage would either hide the limit or masquerade as it.
+		name := uniqueName("s3writeronlydown")
+		h.createS3Secret(name, "AKIAEXAMPLE", "secret-access-key")
+		h.Runtime.setCapabilities(s3SinkID(name), sink.Capabilities{})
+		h.createS3Sink(name, nil)
+		// Waited on before the probe is pushed, and not for tidiness: a probe
+		// wake-up that arrives before the CR is in the reconciler's cache reconciles
+		// a NotFound, which withdraws the sink and drops the verdict with it.
+		h.waitForS3SinkCondition(name, v1alpha1.ConditionBucketReachable,
+			metav1.ConditionUnknown, ReasonProbePending)
+
+		h.pushProbe(sink.ProbeResult{
+			Sink:   s3SinkID(name),
+			At:     time.Now().UTC(),
+			Err:    errors.New("dial tcp 10.0.0.1:9000: connect: connection refused"),
+			Reason: sink.ProbeReasonUnreachable,
+		})
+		h.waitForS3SinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonBucketUnreachable)
+		h.waitForS3SinkCondition(name, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+	})
+
+	t.Run("a writer that can read its history is unaffected", func(t *testing.T) {
+		name := uniqueName("s3readable")
+		h.createS3Secret(name, "AKIAEXAMPLE", "secret-access-key")
+		h.Runtime.setCapabilities(s3SinkID(name), sink.Capabilities{HistoryReadable: true})
+		h.createS3Sink(name, nil)
+
+		reported := h.waitForS3SinkCondition(name, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionFalse, ReasonHistoryReadable)
+		if !strings.Contains(reported.Message, "can read its own history back") {
+			t.Errorf("message %q does not say the sink is unaffected", reported.Message)
+		}
+		h.pushProbe(sink.ProbeResult{Sink: s3SinkID(name), At: time.Now().UTC()})
+		h.waitForS3SinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonArchiving)
+	})
 }

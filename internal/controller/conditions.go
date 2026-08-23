@@ -134,6 +134,91 @@ const (
 	ReasonArchiving = "Archiving"
 )
 
+// Condition reasons for HistoryUnavailable, the one condition whose True is the
+// abnormal-sounding value on a perfectly healthy sink (see
+// v1alpha1.ConditionHistoryUnavailable).
+//
+// They are named for the *capability*, not for a failure, because that is what
+// they report: a backend either can read its own history back or it cannot, and
+// the one that cannot is doing exactly what it was designed to do (D12). None of
+// them ever reaches the Ready roll-up — HistoryUnavailable is deliberately absent
+// from every readyOrder list, so a declared limit can never be mistaken for a
+// fault.
+const (
+	// ReasonWriterOnlySink marks a sink whose running instance implements the
+	// write half of the sink contract and not the read half. It is the reason
+	// HistoryUnavailable is True, and the reason a rule bound to such a sink says
+	// so too.
+	ReasonWriterOnlySink = "WriterOnlySink"
+
+	// ReasonHistoryReadable marks a sink that *can* read its own history back, and
+	// therefore runs with warm-up, zombie GC and boot reconciliation all enabled.
+	//
+	// It is reported rather than left absent on purpose. An absent condition is
+	// indistinguishable from an operator build that never decided one, so a reader
+	// could not tell "this archive records deletions" from "nobody checked" —
+	// which is the precise ambiguity this whole condition exists to remove.
+	ReasonHistoryReadable = "HistoryReadable"
+
+	// ReasonCapabilitiesUnknown marks a sink with no running instance yet, so what
+	// it can do has not been detected. It is Unknown, never False: claiming a sink
+	// can reconstruct history because nothing has looked would be the most
+	// misleading of the three answers.
+	//
+	// It is transient by construction — the instance is built synchronously by the
+	// declaration this reconciler just made, or on the sink runtime's own start —
+	// and the first health probe wakes this reconciler again within a second or so.
+	// A sink whose credentials never resolve stays here, correctly: it was never
+	// handed to the runtime at all.
+	ReasonCapabilitiesUnknown = "CapabilitiesUnknown"
+)
+
+// writerOnlySinkMessage is what a Writer-only sink's HistoryUnavailable condition
+// says on the sink itself.
+//
+// It is one shared string rather than a sentence written at each site because the
+// sink's condition and the rules' mirrored conditions must not drift: an operator
+// comparing a rule against its sink has to see the same claim twice, not two
+// paraphrases they then have to reconcile. It names all three disabled behaviours
+// and both consequences, because the consequences are the part that is invisible
+// in the archive itself — an object store with no Deleted records in it looks
+// exactly like an archive of a cluster where nothing was deleted.
+const writerOnlySinkMessage = "This sink cannot read its own history back, so three behaviours are disabled " +
+	"for it: dedup cache warm-up, zombie garbage collection, and boot reconciliation of scope epochs. " +
+	"An object first seen by this operator process is therefore always a permanent Snapshot and never an " +
+	"Added, every object is re-snapshotted in full after each operator restart, and deletions that occur " +
+	"while the operator is down are never recorded. " +
+	"kuberecord_safe_mode stays at 1 for every scope on this sink, which is where the same fact is " +
+	"observable in metrics. This is a declared capability limit of this backend (D12) and not a fault, so " +
+	"Ready stays True; pair it with a ClickHouseSink over the same resources for a queryable timeline."
+
+// historyReadableMessage is the complement, for a sink that can read its history.
+const historyReadableMessage = "This sink can read its own history back, so dedup cache warm-up, zombie " +
+	"garbage collection and boot reconciliation of scope epochs all run for it."
+
+// writerOnlySinkRuleMessage is the same statement as writerOnlySinkMessage, said
+// to the author of a *rule* bound to such a sink.
+//
+// The rule needs its own wording for one reason: the author of a StreamRule may
+// well not own the sink it names, and may never look at it. A rule that reported
+// only Ready=True would tell them their rule is streaming — which is true — while
+// leaving them to discover from row counts, months later, that the stream has no
+// deletions in it. So the rule names the sink, states the limit, and points at
+// the sink's own condition for the detail.
+func writerOnlySinkRuleMessage(sinkID string) string {
+	return fmt.Sprintf("Sink %s cannot reconstruct history: an object this rule reports for the first time "+
+		"is always a permanent Snapshot and never an Added, every object is re-snapshotted in full after "+
+		"each operator restart, and a deletion that happens while the operator is down is never recorded. "+
+		"This is a declared limit of that sink's backend (D12), not a fault of this rule — see the sink's "+
+		"own HistoryUnavailable condition.", sinkID)
+}
+
+// historyReadableRuleMessage is the complement for a rule whose sink is fine.
+func historyReadableRuleMessage(sinkID string) string {
+	return fmt.Sprintf("Sink %s can reconstruct history, so this rule's records carry accurate event types "+
+		"and a deletion that happens while the operator is down is recovered on the next boot.", sinkID)
+}
+
 // Condition reasons for StreamRule and ClusterStreamRule.
 const (
 	// ReasonSecretsDenied marks a rule naming v1/Secret. The deny is hard-coded
@@ -259,6 +344,17 @@ const (
 
 	// EventReasonReady is emitted as a Normal event when a CR reaches Ready=True.
 	EventReasonReady = "Ready"
+
+	// EventReasonHistoryUnavailable is emitted as a Warning the first time a sink
+	// is found to be Writer-only.
+	//
+	// It is a Warning even though the sink is healthy, and it is *not*
+	// EventReasonDegraded. A Warning because an operator who did not read the
+	// backend's documentation must be told once, unprompted, that this archive
+	// will contain no deletions; a separate reason because `kubectl get events`
+	// groups on it, and filing a declared capability limit under "Degraded" would
+	// have somebody looking for the outage that never happened.
+	EventReasonHistoryUnavailable = "HistoryUnavailable"
 )
 
 // Rule kind discriminators used in a registry rule key. They are lowercase
@@ -419,4 +515,34 @@ func emitReadyEvent(recorder record.EventRecorder, obj client.Object, previous *
 		// an operator something is wrong at the exact moment nothing is known to
 		// be. The condition itself still reports it.
 	}
+}
+
+// emitCapabilityLimitEvent records a sink's declared capability limit as a
+// Warning, once, at the moment it is first established.
+//
+// It is deliberately not folded into emitReadyEvent. That function reports a
+// *change in health*, and this is the opposite: a sink whose Ready is True and
+// stays True, which nonetheless has something an operator must be told once. The
+// two also compare against different conditions, so one function taking both
+// would need to be told which it was reporting anyway.
+//
+// Only the edge is evented, and only in the True direction. A level-triggered
+// version would re-emit on every resync — a permanent limit producing a permanent
+// stream of identical Warnings, which is how an event log stops being read at all
+// — and the False direction is not news: a sink that gained a read half is a sink
+// that stopped having a limitation worth warning about.
+//
+// One consequence worth naming: because the comparison is against the *persisted*
+// condition, an operator restart does not re-emit this. The event is a nudge with
+// an expiry; the condition is the durable statement, and the condition is where a
+// reader is meant to end up.
+func emitCapabilityLimitEvent(recorder record.EventRecorder, obj client.Object,
+	previous *metav1.Condition, current metav1.Condition) {
+	if recorder == nil || current.Status != metav1.ConditionTrue {
+		return
+	}
+	if previous != nil && previous.Status == current.Status && previous.Reason == current.Reason {
+		return
+	}
+	recorder.Eventf(obj, "Warning", EventReasonHistoryUnavailable, "%s: %s", current.Reason, current.Message)
 }
