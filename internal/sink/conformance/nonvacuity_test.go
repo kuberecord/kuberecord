@@ -30,6 +30,7 @@ package conformance
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -286,8 +287,14 @@ func TestPropertyNamesAreUnique(t *testing.T) {
 }
 
 // TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend is the other half of the
-// capability-detection argument, and the one the acceptance criteria single out:
-// a Writer-only backend must be skipped, not failed — and the skip must say so.
+// capability argument, and the one the acceptance criteria single out: a
+// Writer-only backend that *declares* itself Writer-only must be skipped, not
+// failed — and the skip must say so.
+//
+// The harness it runs is built with an explicitly-declared empty capability set,
+// which is what the whole shape rests on: omitting an optional half is a
+// legitimate design under D12, whereas omitting the declaration is a harness
+// nobody reviewed, and only the first of those may pass.
 //
 // The two halves are checked separately because neither is visible from the
 // other. That the suites run green over a backend implementing none of the
@@ -295,7 +302,9 @@ func TestPropertyNamesAreUnique(t *testing.T) {
 // not, since a skipped subtest reports nothing a parent can inspect. So the
 // message is built by a function this test can call directly, and it is checked
 // against the one thing a reader needs from it: the name of the interface that
-// is missing, and the properties that consequently certify nothing.
+// is missing, and the properties that consequently certify nothing. That the skip
+// message is unreadable in the default `make test` run is exactly why it is the
+// explanation and not the mechanism — see the two proofs below.
 func TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend(t *testing.T) {
 	newHarness := func(*testing.T) Harness { return newWriterOnlyHarness(newFakeWriter(fakeOpts{})) }
 
@@ -305,10 +314,18 @@ func TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend(t *testing.T) {
 	RunScopeEventWriterSuite(t, newHarness)
 	RunProberSuite(t, newHarness)
 
-	writerOnlyBackend := newWriterOnlyHarness(newFakeWriter(fakeOpts{})).Writer
+	declaredWriterOnly := newWriterOnlyHarness(newFakeWriter(fakeOpts{}))
+	if !declaredWriterOnly.Capabilities.declared {
+		t.Fatalf("the Writer-only harness does not declare its (empty) capability set; the suites above " +
+			"would have been failing it for an undeclared harness rather than skipping a declared omission")
+	}
 	for _, s := range optionalSuites() {
 		t.Run(s.group, func(t *testing.T) {
-			if s.implements(writerOnlyBackend) {
+			if declaredWriterOnly.Capabilities.declares(s.requires...) {
+				t.Fatalf("the Writer-only harness declares %s; the empty declaration is the whole of what "+
+					"makes this a skip rather than a failure", s.capability)
+			}
+			if s.implements(declaredWriterOnly.Writer) {
 				t.Fatalf("a Writer-only backend was detected as implementing %s; the suites would have run "+
 					"against a backend that does not have that half", s.capability)
 			}
@@ -323,6 +340,131 @@ func TestOptionalSuitesSkipLoudlyForAWriterOnlyBackend(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The two tests below are the non-vacuity proof for the capability declaration
+// itself, in both directions: a claim the backend cannot honour, and a contract
+// the backend implements without ever claiming it.
+//
+// They sit outside TestWriterSuiteIsNonVacuous's fixture table on purpose, and
+// not because they were awkward to fit. That table pairs a *property* with a
+// Writer built to violate it, and the walk over allProperties() at its end is
+// what proves no obligation went unproved. These two are harness-level: they fail
+// before any property runs and there is no property they could be attached to, so
+// adding rows for them would put two non-obligations into allProperties() and
+// weaken the very coverage argument they would be joining. Written here they cost
+// that argument nothing.
+//
+// Both drive capabilityGate through the recorder rather than a *testing.T,
+// because a Fatalf on a real T is not observable from the test that provoked it —
+// the same reason the whole suite is written against conformanceT.
+
+// recordCapabilityGate runs the capability gate against a recorder on its own
+// goroutine, since Fatalf abandons the caller the way testing's does, and returns
+// what it recorded.
+func recordCapabilityGate(h Harness, s optionalSuite) *recordingT {
+	rec := &recordingT{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		capabilityGate(rec, h, s)
+	}()
+	<-done
+	return rec
+}
+
+// TestCapabilityGateRejectsADeclaredCapabilityTheBackendDoesNotHave is the
+// method-set-drift direction: a harness claiming sink.StateReader over a Writer
+// that does not satisfy the assertion.
+//
+// This is the case a skip can never catch, and the reason the declaration exists.
+// Detection alone sees a Writer-only backend and skips; the runtime's own
+// newLiveSink sees the same thing and builds the sink with its read half switched
+// off. A full-capability backend is then silently degraded — warm-up, zombie GC
+// and boot reconciliation all quietly disabled — with every test green.
+//
+// The halves this fixture did not claim must still skip: a fixture that failed
+// every suite would prove nothing about the one it is aimed at.
+func TestCapabilityGateRejectsADeclaredCapabilityTheBackendDoesNotHave(t *testing.T) {
+	h := newWriterOnlyHarness(newFakeWriter(fakeOpts{}))
+	h.Capabilities = DeclareCapabilities(CapStateReader)
+
+	for _, s := range optionalSuites() {
+		t.Run(s.group, func(t *testing.T) {
+			rec := recordCapabilityGate(h, s)
+			if !h.Capabilities.declares(s.requires...) {
+				if rec.failed() {
+					t.Fatalf("the gate failed the %s half, which this harness never claimed: %s",
+						s.capability, truncate(rec.first(), 220))
+				}
+				t.Logf("%s was neither claimed nor implemented, so it is skipped rather than failed", s.capability)
+				return
+			}
+			if !rec.failed() {
+				t.Fatalf("the gate accepted a harness declaring %s over a Writer that does not implement it; "+
+					"the runtime would run this sink degraded and nothing would say so", s.capability)
+			}
+			// The message has to name the interface (so it can be grepped), the
+			// runtime's own assertion (so the reader knows the degradation is real and
+			// not a test artefact) and the diagnosis, which is drift and not absence.
+			for _, want := range []string{s.capability, "newLiveSink", "drift"} {
+				if !strings.Contains(rec.first(), want) {
+					t.Errorf("the failure does not mention %q: %s", want, truncate(rec.first(), 400))
+				}
+			}
+			t.Logf("declared-but-absent %s rejected: %s", s.capability, truncate(rec.first(), 260))
+		})
+	}
+}
+
+// TestCapabilityGateRejectsAnImplementedCapabilityTheHarnessNeverDeclared is the
+// other direction: a backend implementing all three optional halves whose harness
+// claims none of them.
+//
+// Nothing about that is visible at runtime — the sink works — which is precisely
+// the problem: the suite would have run, and passed, obligations the author never
+// read, and a backend author's "we do not support that" would silently be a
+// backend that does. The declaration is the review artefact, so an undeclared
+// contract is a build failure.
+func TestCapabilityGateRejectsAnImplementedCapabilityTheHarnessNeverDeclared(t *testing.T) {
+	h := newFakeHarness(fakeOpts{})
+	h.Capabilities = DeclareCapabilities()
+
+	for _, s := range optionalSuites() {
+		t.Run(s.group, func(t *testing.T) {
+			rec := recordCapabilityGate(h, s)
+			if !rec.failed() {
+				t.Fatalf("the gate accepted a harness declaring nothing over a Writer that implements %s; "+
+					"the suite would have certified obligations nobody reviewed", s.capability)
+			}
+			for _, want := range []string{s.capability, "DeclareCapabilities"} {
+				if !strings.Contains(rec.first(), want) {
+					t.Errorf("the failure does not mention %q: %s", want, truncate(rec.first(), 400))
+				}
+			}
+			t.Logf("implemented-but-undeclared %s rejected: %s", s.capability, truncate(rec.first(), 260))
+		})
+	}
+}
+
+// TestEveryOptionalSuiteRequiresACapability guards the assumption capabilityGate
+// rests on: a suite whose requires list is empty is declared by every harness,
+// including one that declared nothing, so it would run its properties without ever
+// comparing a claim against the backend — the muted-channel hole reopened from the
+// inside, and by construction invisible to the two proofs above.
+func TestEveryOptionalSuiteRequiresACapability(t *testing.T) {
+	for _, s := range optionalSuites() {
+		if len(s.requires) == 0 {
+			t.Errorf("the %s suite names no required capability, so every harness declares it by "+
+				"default and its properties run unchecked against the declaration", s.group)
+		}
+		for _, c := range s.requires {
+			if !slices.Contains(declarableCapabilities(), c) {
+				t.Errorf("the %s suite requires %q, which no harness can declare: the half would be "+
+					"permanently skipped and nothing would say why", s.group, c)
+			}
+		}
 	}
 }
 
@@ -377,6 +519,16 @@ func TestHarnessValidationRejectsIncompleteHarness(t *testing.T) {
 		{"noFault", func(h *Harness) { h.SetFault = nil }, "Harness.SetFault"},
 		{"noLogicalKey", func(h *Harness) { h.LogicalKey = nil }, "Harness.LogicalKey"},
 		{"noDedup", func(h *Harness) { h.Dedup = "" }, "Harness.Dedup"},
+		// The zero CapabilitySet is the "I did not think about this" the declaration
+		// exists to make unrepresentable, so validate must refuse it exactly as it
+		// refuses a nil lever — an undeclared harness has not said what is under test.
+		{"noCapabilities", func(h *Harness) { h.Capabilities = CapabilitySet{} }, "Harness.Capabilities"},
+		// A misspelling is not a declaration of nothing, it is a declaration of
+		// something that does not exist. Left to the gate it would read as "not
+		// declared" and be reported as an undeclared capability, which is a correct
+		// rejection with a diagnosis pointing at the wrong file.
+		{"unknownCapability", func(h *Harness) { h.Capabilities = DeclareCapabilities("sink.Statereader") },
+			"Harness.Capabilities"},
 		{"noCapacity", func(h *Harness) { h.QueueCapacity = 0 }, "Harness.QueueCapacity"},
 		{"shortTimeout", func(h *Harness) { h.EnqueueTimeout = time.Millisecond }, "Harness.EnqueueTimeout"},
 	}

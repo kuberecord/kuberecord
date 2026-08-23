@@ -183,9 +183,15 @@ func newFakeWriter(opts fakeOpts) *fakeWriter {
 }
 
 // newFakeHarness wires a fakeWriter up as a Harness, optional halves included.
+//
+// The declaration names all three because the fake really does implement all
+// three, and the suite fails a harness whose claim and backend disagree — which is
+// exactly the guard this constructor would trip if a method of fakeWriter's ever
+// drifted out of one of the interfaces.
 func newFakeHarness(opts fakeOpts) Harness {
 	w := newFakeWriter(opts)
 	h := fakeHarnessOver(w, w)
+	h.Capabilities = DeclareCapabilities(CapStateReader, CapScopeEventWriter, CapProber)
 	h.ScopeWrites = w.scopeSnapshot
 	h.SetReadFault = w.setReadFault
 	h.SetProbeOutcome = w.setProbeOutcome
@@ -195,13 +201,20 @@ func newFakeHarness(opts fakeOpts) Harness {
 // newWriterOnlyHarness is the same backend seen through a facade that implements
 // none of the optional halves, with every optional lever left nil — the shape of
 // D12's archive tier, and what the skip path has to cope with.
+//
+// The empty declaration is explicit, and has to be: an omission this harness never
+// mentioned is one the suite cannot tell from an oversight, so DeclareCapabilities
+// with no arguments is how a Writer-only backend says it meant it.
 func newWriterOnlyHarness(w *fakeWriter) Harness {
-	return fakeHarnessOver(w, writerOnly{w})
+	h := fakeHarnessOver(w, writerOnly{w})
+	h.Capabilities = DeclareCapabilities()
+	return h
 }
 
 // fakeHarnessOver is the mandatory half of a harness over w, with the Writer the
 // suite sees supplied separately: the two harnesses above differ only in how much
-// of the backend they let the suite discover.
+// of the backend they let the suite discover, and in the declaration each makes
+// about it — which is why Capabilities is set by the caller and not here.
 func fakeHarnessOver(w *fakeWriter, facade sink.Writer) Harness {
 	return Harness{
 		Writer:         facade,

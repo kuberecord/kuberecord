@@ -20,9 +20,12 @@ limitations under the License.
 //
 // sink.Writer is the mandatory half and every property in writer_suite.go applies
 // to every backend. sink.StateReader, sink.ScopeEventWriter and sink.Prober are
-// optional and duck-typed by the SinkManager, so the suite duck-types them too:
-// it runs each half's properties when the Writer satisfies the interface and says
-// out loud, naming the interface, when it does not (see optional.go).
+// optional and duck-typed by the SinkManager, so every harness declares which of
+// them its backend implements (Harness.Capabilities) and the suite checks that
+// claim against the same type assertion the runtime makes: it runs each half's
+// properties when claim and backend agree it is there, says out loud — naming the
+// interface — when they agree it is not, and fails the build when they disagree
+// either way (see optional.go).
 //
 // It exists because those properties were, until now, provable only for
 // ClickHouse. With one backend that is merely redundant; with three it is
@@ -185,7 +188,9 @@ const (
 // fields without invalidating a backend harness that predates them — the same
 // reason the sink contract splits its optional halves into separate interfaces
 // instead of growing Writer. Those fields now exist, and a backend implementing
-// none of the optional halves still leaves every one of them nil.
+// none of the optional halves leaves every one of them nil — but says so in
+// Capabilities, because an omission the suite was never told about is one it
+// cannot tell from an oversight.
 //
 // A fresh Harness is built per property, so no property can inherit another's
 // backend state, and the Writer it carries must not have been started: the suite
@@ -246,11 +251,24 @@ type Harness struct {
 	// attempt. Zero means defaultSettleWithin.
 	SettleWithin time.Duration
 
-	// The fields below serve the *optional* halves of the sink contract, and each
-	// is required only when this backend's Writer implements the half it belongs
-	// to (see optional.go). A backend that implements none of them — the
-	// Writer-only archive tier of D12 — leaves all three nil and is skipped
-	// loudly rather than silently certified.
+	// The fields below serve the *optional* halves of the sink contract. Which of
+	// them this backend implements is declared, not inferred (see optional.go): a
+	// backend that implements none of them — the Writer-only archive tier of D12 —
+	// leaves the three levers nil and declares the empty set, and is then skipped
+	// with a reason rather than silently certified.
+
+	// Capabilities is which optional halves of the sink contract this backend
+	// claims to implement, and it is mandatory: every optional suite compares the
+	// claim against the type assertion SinkManager.newLiveSink makes and fails on
+	// either disagreement, which is what makes both a silently unchecked half and a
+	// method set that drifted out of an interface impossible to ship green.
+	//
+	// The mechanism is a constructor, not a plain slice: CapabilitySet carries an
+	// unexported marker that only DeclareCapabilities sets, so the zero value is
+	// "not declared" — rejected by validate — and cannot be mistaken for, or
+	// quietly turned into, an explicit "this backend implements none of them". Say
+	// the latter with DeclareCapabilities() and no arguments.
+	Capabilities CapabilitySet
 
 	// ScopeWrites returns, in order, the watch-scope transitions the backend has
 	// durably recorded so far. Required when the Writer implements
@@ -306,6 +324,11 @@ func (h Harness) validate(t conformanceT) {
 	case h.LogicalKey == nil:
 		t.Fatalf("conformance: Harness.LogicalKey is nil; the suite cannot tell one logical record from two")
 	}
+	// The same treatment, for the same reason, on the one lever that is a claim
+	// rather than a function: an undeclared harness has not said which halves of
+	// the contract are under test, and the optional suites cannot check a claim
+	// that was never made.
+	h.requireCapabilityDeclaration(t)
 	switch h.Dedup {
 	case DedupMergeCollapse, DedupUniqueConstraint, DedupObjectOverwrite:
 	default:
@@ -374,9 +397,10 @@ func runProperty(t conformanceT, p property, h Harness) {
 // The optional halves are reached from here rather than left to each backend to
 // remember, because "we never wired that one up" and "we do not implement that
 // one" are indistinguishable from the outside — and the first is how a backend
-// quietly ships an unchecked StateReader. Capability detection mirrors what
-// SinkManager itself does (a type assertion on the Writer), so the suite runs
-// exactly the halves the runtime will use, and logs the ones it does not.
+// quietly ships an unchecked StateReader. Detection mirrors what SinkManager
+// itself does (a type assertion on the Writer), so the suite runs exactly the
+// halves the runtime will use; the harness's own declaration is what decides
+// whether the runtime's answer was the intended one.
 //
 // newWriter is called once per property with that subtest's *testing.T — never
 // once for the whole suite — because several properties end by shutting the

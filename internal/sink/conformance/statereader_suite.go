@@ -435,7 +435,7 @@ func reader(t conformanceT, h Harness) sink.StateReader {
 	t.Helper()
 	r, ok := h.Writer.(sink.StateReader)
 	if !ok {
-		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", capStateReader)
+		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", CapStateReader)
 	}
 	return r
 }
@@ -445,7 +445,7 @@ func scopeWriter(t conformanceT, h Harness) sink.ScopeEventWriter {
 	t.Helper()
 	w, ok := h.Writer.(sink.ScopeEventWriter)
 	if !ok {
-		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", capScopeEventWriter)
+		t.Fatalf("conformance: a %s property ran against a Writer that does not implement it", CapScopeEventWriter)
 	}
 	return w
 }
