@@ -74,11 +74,42 @@ const (
 	clickHouseDatabase   = "kuberecord"
 )
 
+// The in-cluster MinIO fixture and the S3Sink over it (test/e2e/manifests/
+// minio.yaml and s3sink.yaml, Task 6.6).
+//
+// Unlike ClickHouse, this fixture is brought up by the one scenario that needs it
+// rather than in BeforeSuite: it is the whole of that scenario's runtime cost, and
+// confining it there is what keeps the install-path smokes — which focus a single
+// ClickHouse scenario — from paying for an object store they never touch.
+const (
+	minioNamespace  = "kuberecord-e2e-minio"
+	minioDeployment = "minio"
+	minioImage      = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
+	// minioSecret holds the server's root credentials, in the fixture's own
+	// namespace; s3CredentialsSecret holds the same key pair beside the operator,
+	// which is the only namespace it may read Secrets from (Task 1.9).
+	minioSecret         = "minio-credentials"
+	s3CredentialsSecret = "kuberecord-s3-credentials"
+	// s3AccessKeyID and s3SecretAccessKey are that key pair. MinIO requires a root
+	// password of at least eight characters, and the suite creates both Secrets
+	// from these two constants so the two sides of the connection cannot drift.
+	s3AccessKeyID     = "kuberecord"
+	s3SecretAccessKey = "kuberecord-e2e-secret"
+	// s3SinkName, s3Bucket and s3Prefix mirror test/e2e/manifests/s3sink.yaml. The
+	// read path needs all three: the bucket and prefix to find the archive, the
+	// name to assert on the sink's conditions.
+	s3SinkName = "archive"
+	s3Bucket   = "kuberecord-e2e"
+	s3Prefix   = "audit"
+)
+
 // Manifest paths, relative to the project root — the directory utils.Run
 // executes every command in.
 const (
 	clickHouseManifest  = "test/e2e/manifests/clickhouse.yaml"
 	sinkManifest        = "test/e2e/manifests/sink.yaml"
+	minioManifest       = "test/e2e/manifests/minio.yaml"
+	s3SinkManifest      = "test/e2e/manifests/s3sink.yaml"
 	nodeWatcherManifest = "test/e2e/manifests/watcher-nodes.yaml"
 	networkingPreset    = "config/rbac/presets/networking.yaml"
 )

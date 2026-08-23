@@ -3,11 +3,15 @@ run:
   allow-parallel-runners: true
   # Without this the tagged acceptance suites are invisible to the linter — and to
   # `go vet`, which `make build`/`make test` run over the default build only. The
-  # e2e suite is the Phase 1 gate (Task 1.11) and the chaos suite is the Phase 2
-  # failure-mode gate (Task 2.1); "make lint passes" has to mean something for both.
+  # e2e suite is the Phase 1 gate (Task 1.11), the chaos suite is the Phase 2
+  # failure-mode gate (Task 2.1), and the integration suites are what prove each
+  # backend against a real server rather than a fake (Task 3.2 for ClickHouse's
+  # published queries, Task 6.6 for the S3 writer against MinIO). "make lint
+  # passes" has to mean something for all three.
   build-tags:
     - e2e
     - chaos
+    - integration
 linters:
   default: none
   enable:

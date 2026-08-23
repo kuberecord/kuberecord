@@ -384,7 +384,7 @@ explains the suites.
 
 ```sh
 make build test lint      # build, unit + envtest suite, golangci-lint
-make test-integration     # against a throwaway dockerized ClickHouse
+make test-integration     # against throwaway dockerized ClickHouse and MinIO
 make test-e2e             # the acceptance suite on a kind cluster
 make test-chaos           # the failure-mode suite: outages, SIGKILL, saturation
 make quickstart           # the evaluation path above
