@@ -73,26 +73,42 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# Integration tests run against a real, dockerized ClickHouse (build tag
-# `integration`). The target boots a throwaway container, waits for it to
-# accept queries, runs the tagged tests, and always tears the container down.
-# Two suites run here: internal/sink exercises the writer and reader paths, and
-# test/queries executes every query kuberecord publishes — docs/QUERIES.md and
-# the Grafana dashboards — against tables built from the shipped DDL alone, which
-# is how Task 3.2's "only frozen-schema columns" criterion is asserted. The two
-# use separate databases, because `go test` runs package binaries concurrently.
-# Non-standard host ports so this never collides with a developer's local
-# ClickHouse bound to the usual 9000/8123. The image's default user is
+# Integration tests run against real, dockerized backends (build tag
+# `integration`). The target boots throwaway containers, waits for each to answer,
+# runs the tagged tests, and always tears them down.
+#
+# Three suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# and reader paths. test/queries executes every query kuberecord publishes —
+# docs/QUERIES.md and the Grafana dashboards — against tables built from the
+# shipped DDL alone, which is how Task 3.2's "only frozen-schema columns"
+# criterion is asserted; it uses a database of its own, because `go test` runs
+# package binaries concurrently and two suites recreating resource_states in one
+# database would delete each other's fixtures. And internal/sink/s3/awsstore
+# writes through the real S3 Writer to MinIO and reads the objects back (Task
+# 6.6): key layout, decode fidelity, retry idempotency, both rotation triggers and
+# the Object Lock headers, none of which a fake store can vouch for. It creates a
+# bucket per test, so it needs no database-style isolation.
+#
+# Non-standard host ports throughout, so this never collides with a developer's
+# own ClickHouse on 9000/8123 or MinIO on 9000. ClickHouse's image default user is
 # localhost-only; CLICKHOUSE_USER/PASSWORD create an any-network user the host
-# test can actually authenticate as through the port mapping.
+# test can actually authenticate as through the port mapping. MinIO requires a
+# root password of at least eight characters, which is why the shared credential
+# spells the project name rather than something shorter.
 CH_IT_IMAGE ?= clickhouse/clickhouse-server:24.8
 CH_IT_CONTAINER ?= kuberecord-it-clickhouse
 CH_IT_ADDR ?= 127.0.0.1:19000
 CH_IT_USER ?= kuberecord
 CH_IT_PASSWORD ?= kuberecord
 
+MINIO_IT_IMAGE ?= minio/minio:RELEASE.2025-04-22T22-12-26Z
+MINIO_IT_CONTAINER ?= kuberecord-it-minio
+MINIO_IT_ENDPOINT ?= http://127.0.0.1:19100
+MINIO_IT_USER ?= kuberecord
+MINIO_IT_PASSWORD ?= kuberecord
+
 .PHONY: test-integration
-test-integration: ## Run integration tests against a dockerized ClickHouse.
+test-integration: ## Run integration tests against a dockerized ClickHouse and MinIO.
 	@echo "Starting ClickHouse container '$(CH_IT_CONTAINER)'..."
 	@$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) >/dev/null 2>&1 || true
 	@$(CONTAINER_TOOL) run -d --name $(CH_IT_CONTAINER) \
@@ -100,7 +116,13 @@ test-integration: ## Run integration tests against a dockerized ClickHouse.
 		-e CLICKHOUSE_USER=$(CH_IT_USER) -e CLICKHOUSE_PASSWORD=$(CH_IT_PASSWORD) \
 		-p 19000:9000 -p 18123:8123 \
 		$(CH_IT_IMAGE) >/dev/null
-	@trap '$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
+	@echo "Starting MinIO container '$(MINIO_IT_CONTAINER)'..."
+	@$(CONTAINER_TOOL) rm -f $(MINIO_IT_CONTAINER) >/dev/null 2>&1 || true
+	@$(CONTAINER_TOOL) run -d --name $(MINIO_IT_CONTAINER) \
+		-e MINIO_ROOT_USER=$(MINIO_IT_USER) -e MINIO_ROOT_PASSWORD=$(MINIO_IT_PASSWORD) \
+		-p 19100:9000 \
+		$(MINIO_IT_IMAGE) server /data >/dev/null
+	@trap '$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) $(MINIO_IT_CONTAINER) >/dev/null 2>&1 || true' EXIT; \
 	echo "Waiting for ClickHouse to accept connections..."; \
 	for i in $$(seq 1 30); do \
 		if $(CONTAINER_TOOL) exec $(CH_IT_CONTAINER) clickhouse-client --user $(CH_IT_USER) --password $(CH_IT_PASSWORD) --query "SELECT 1" >/dev/null 2>&1; then \
@@ -110,7 +132,18 @@ test-integration: ## Run integration tests against a dockerized ClickHouse.
 		if [ $$i -eq 30 ]; then echo "ClickHouse did not become ready in time"; exit 1; fi; \
 		sleep 1; \
 	done; \
+	echo "Waiting for MinIO to accept requests..."; \
+	for i in $$(seq 1 30); do \
+		if $(CONTAINER_TOOL) exec $(MINIO_IT_CONTAINER) curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then \
+			echo "MinIO is ready."; \
+			break; \
+		fi; \
+		if [ $$i -eq 30 ]; then echo "MinIO did not become ready in time"; exit 1; fi; \
+		sleep 1; \
+	done; \
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
+	S3_TEST_ENDPOINT=$(MINIO_IT_ENDPOINT) \
+	S3_TEST_ACCESS_KEY_ID=$(MINIO_IT_USER) S3_TEST_SECRET_ACCESS_KEY=$(MINIO_IT_PASSWORD) \
 		go test -tags=integration ./internal/sink/... ./test/queries/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
@@ -177,6 +210,18 @@ bench-load: setup-envtest ## Run the load benchmark harness (PROFILE=small|mediu
 # reconciler's two-minute resync on purpose (an RBAC grant applied after the fact
 # must self-heal without a restart). Go's default 10-minute test timeout would
 # kill the suite mid-run, hence the explicit -timeout below.
+#
+# Task 6.6 added the archive scenario — a real in-cluster MinIO, an S3Sink, and
+# assertions read straight out of the bucket. Measured cost: **about 2 minutes**
+# with the MinIO image already pulled (a cold first run adds its `docker pull`),
+# against the ~4 minutes that task budgets. Where it goes: side-loading the image
+# and rolling MinIO out (~10s), the sink's first write probe and the rule's
+# reconcile (~25s), then ~110s for the lifecycle itself — three rotation windows at
+# the CRD's 10-second floor, the operator going down and coming back, and one
+# 35-second quiet window holding the "no Deleted record" claim open, which has to
+# outlast a rotation period or it would be asserting latency rather than absence.
+# The fixture is brought up by that scenario rather than in BeforeSuite, so a
+# focused run (the two install-path smokes below) pays none of it.
 #
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true

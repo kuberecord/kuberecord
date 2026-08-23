@@ -35,15 +35,24 @@ type RuleResource struct {
 
 // sinkYAML renders a rule's spec.sink block at the given indent.
 //
-// It spells the name and leaves `kind` to the CRD's default, which is what carries
-// that default all the way through a real cluster rather than only through
-// envtest: the chaos suite asserts on the metric label "ClickHouseSink/<name>"
-// (see its sinkLabel), so a default that stopped being applied surfaces as a
-// failing assertion rather than as a rule nobody noticed was pointed elsewhere.
-// A scenario needing a non-default kind passes it explicitly once a second sink
-// kind exists to name.
-func sinkYAML(sinkName, indent string) string {
-	return fmt.Sprintf("%ssink:\n%s  name: %q\n", indent, indent, sinkName)
+// An empty sinkKind leaves `kind` out of the manifest altogether, which is what
+// carries the CRD's default all the way through a real cluster rather than only
+// through envtest: the chaos suite asserts on the metric label
+// "ClickHouseSink/<name>" (see its sinkLabel), so a default that stopped being
+// applied surfaces as a failing assertion rather than as a rule nobody noticed
+// was pointed elsewhere. Every renderer below that takes only a name therefore
+// keeps omitting it.
+//
+// A non-empty sinkKind is spelled out, which is what a rule naming anything other
+// than a ClickHouseSink has to do — a rule meaning to archive to an S3Sink must
+// say so, since the default is not "whatever sink exists" (see
+// v1alpha1.SinkReference).
+func sinkYAML(sinkKind, sinkName, indent string) string {
+	if sinkKind == "" {
+		return fmt.Sprintf("%ssink:\n%s  name: %q\n", indent, indent, sinkName)
+	}
+	return fmt.Sprintf("%ssink:\n%s  kind: %q\n%s  name: %q\n",
+		indent, indent, sinkKind, indent, sinkName)
 }
 
 // resourcesYAML renders a rule's spec.resources list at the given indent.
@@ -56,12 +65,29 @@ func resourcesYAML(resources []RuleResource, indent string) string {
 	return b.String()
 }
 
-// StreamRuleYAML renders a namespaced StreamRule streaming to sinkName.
+// StreamRuleYAML renders a namespaced StreamRule streaming to sinkName, leaving
+// the sink's kind to the CRD default.
 //
 // The sink is a parameter rather than a constant here because which sink a
 // scenario streams to is the suite's decision, not the vocabulary's — the two
 // suites install their own, tuned differently on purpose.
 func StreamRuleYAML(namespace, name, sinkName string, resources []RuleResource) string {
+	return StreamRuleYAMLForSinkKind(namespace, name, "", sinkName, resources)
+}
+
+// StreamRuleYAMLForSinkKind renders a namespaced StreamRule naming its sink's
+// kind explicitly.
+//
+// It exists for the sinks the default does not cover: an S3Sink is reached by a
+// rule that says so, and a rule that omitted the kind would resolve to a
+// ClickHouseSink of the same name — which either does not exist (the rule parks
+// with SinkMissing) or does, and quietly streams to the wrong backend. That is
+// the failure this renderer's existence prevents in the S3 scenarios.
+//
+// StreamRuleYAML stays the way in for everything else, so the scenarios that say
+// nothing about a sink kind keep rendering byte-identical manifests and keep
+// covering the CRD's default (see sinkYAML).
+func StreamRuleYAMLForSinkKind(namespace, name, sinkKind, sinkName string, resources []RuleResource) string {
 	return fmt.Sprintf(`apiVersion: kuberecord.io/v1alpha1
 kind: StreamRule
 metadata:
@@ -69,7 +95,7 @@ metadata:
   namespace: %s
 spec:
 %s  resources:
-%s`, name, namespace, sinkYAML(sinkName, "  "), resourcesYAML(resources, "  "))
+%s`, name, namespace, sinkYAML(sinkKind, sinkName, "  "), resourcesYAML(resources, "  "))
 }
 
 // RedactionEntry is one entry of a rule's spec.extraRedaction (or a sink's
@@ -110,7 +136,7 @@ metadata:
 spec:
 %s  resources:
 %s  extraRedaction:
-%s`, name, namespace, sinkYAML(sinkName, "  "),
+%s`, name, namespace, sinkYAML("", sinkName, "  "),
 		resourcesYAML(resources, "  "), redactionYAML(redaction, "  "))
 }
 
@@ -123,7 +149,7 @@ metadata:
   name: %s
 spec:
 %s  resources:
-%s`, name, sinkYAML(sinkName, "  "), resourcesYAML(resources, "  "))
+%s`, name, sinkYAML("", sinkName, "  "), resourcesYAML(resources, "  "))
 }
 
 // DeploymentYAML renders the object the workload scenarios stream.

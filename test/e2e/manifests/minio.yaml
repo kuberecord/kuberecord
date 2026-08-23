@@ -1,0 +1,141 @@
+# Single-node MinIO for the e2e suite's S3 scenario (Task 6.6).
+#
+# This is a test fixture, not a deployment recipe: it exists so the S3 scenario
+# can assert against a *real* object store by reading it directly, and nothing
+# here is meant to be copied into a production install.
+#
+# Four choices are worth explaining:
+#
+#   - It lives in its own namespace, like the ClickHouse fixture, so the suite
+#     tears the whole backend down with one `delete namespace`, and so the
+#     `pod-security.kubernetes.io/enforce=restricted` label the operator's
+#     namespace carries does not have to be relaxed for a third-party image.
+#   - Storage is an emptyDir. Every assertion is about objects written during the
+#     run, so durability buys nothing while a PVC would add a StorageClass
+#     dependency and a slower teardown.
+#   - The suite reads the archive back by running `mc` *inside this pod*
+#     (see test/harness/minio.go), which is why /tmp is a writable emptyDir: mc
+#     wants a home directory, and the harness points HOME at it. The MinIO image
+#     ships mc and base64, so the read path needs no second image and no
+#     port-forward to drop mid-suite.
+#   - There is no console. `server /data` alone serves the S3 API on 9000, which
+#     is the only interface anything here uses.
+#
+# The root credentials are projected from a Secret the suite creates with the same
+# values it puts in the operator's S3 credentials Secret, so the two sides of the
+# connection cannot drift apart.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kuberecord-e2e-minio
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: e2e-fixture
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: kuberecord-e2e-minio
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two servers must never share the emptyDir, and
+  # there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Any non-root uid will do — the image does not bake one in — and fsGroup
+        # is what makes the emptyDir volumes writable for it without a root init
+        # container. MinIO refuses to start against a /data it cannot write, so
+        # this pairing is load bearing rather than decorative.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+        # The suite side-loads this image into the kind node, so it must never be
+        # re-pulled from a registry mid-run.
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - /data
+        env:
+        # mc, which the suite's read path runs in this container, writes a config
+        # directory under $HOME. The image's default home is not writable by the
+        # uid above; /tmp is (see the volumes below).
+        - name: HOME
+          value: /tmp
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: accessKeyId
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: secretAccessKey
+        ports:
+        - name: s3
+          containerPort: 9000
+        # /minio/health/ready is the endpoint that answers only once the server
+        # will actually serve object requests, which is the edge the suite must
+        # not race against: the sink's first health probe writes an object.
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: s3
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: kuberecord-e2e-minio
+  labels:
+    app: minio
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: s3
+    port: 9000
+    targetPort: s3

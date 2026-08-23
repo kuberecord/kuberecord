@@ -21,6 +21,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
+
+	"github.com/yelzhy/kuberecord/internal/sink"
 )
 
 // The row-shaped claims both suites make. They carry no timeouts of their own:
@@ -118,6 +120,74 @@ func (ch *ClickHouse) ExpectNoDuplicateDeletes() {
 	duplicates, err := ch.DuplicateDeletes()
 	Expect(err).NotTo(HaveOccurred(), "failed to check for duplicate Deleted rows")
 	Expect(duplicates).To(BeEmpty(), "an object's deletion was recorded more than once: %v", duplicates)
+}
+
+// The record-shaped claims, for a suite reading an S3 archive (see minio.go).
+//
+// They are the same claims as the row-shaped ones above, said of the same
+// ObjectFilter, and they are deliberately separate functions rather than one
+// generic pair: what a scenario reads is a property of the sink it is asserting
+// against, and a helper that took "either backend" would have to be told which,
+// at which point naming it is clearer.
+//
+// Two differences from the ClickHouse assertions are worth stating, because both
+// are the backend's rather than the harness's:
+//
+//   - There is no FINAL and no merge to wait out. An object store's answer is
+//     exact the moment the object is visible, because a retried PUT overwrites its
+//     own key (D15) instead of leaving a duplicate to collapse later.
+//   - A record only becomes visible when its object is *closed*, which rotation
+//     decides. So every "and no further records appear" claim has to outlast one
+//     rotation period, or it is asserting latency rather than absence — hence the
+//     optional window on ConsistentlyRecordCount, which the ClickHouse twin does
+//     not need.
+
+// EventuallyRecordCount waits until the filter matches exactly want records and
+// returns them.
+func (m *MinIO) EventuallyRecordCount(filter ObjectFilter, want int, timeout ...time.Duration) []sink.Record {
+	GinkgoHelper()
+	var records []sink.Record
+	assertion := Eventually(func(g Gomega) {
+		var err error
+		records, err = m.Records(filter)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(records).To(HaveLen(want))
+	})
+	if len(timeout) > 0 {
+		assertion = assertion.WithTimeout(timeout[0])
+	}
+	assertion.Should(Succeed())
+	return records
+}
+
+// EventuallyExactlyOneRecord waits until the filter matches exactly one record
+// and returns it. As with the row assertion, the count is exact rather than a
+// lower bound: "exactly one Snapshot" is the difference between an archive that
+// re-snapshotted an object once on restart and one that is re-snapshotting it in
+// a loop.
+func (m *MinIO) EventuallyExactlyOneRecord(filter ObjectFilter, timeout ...time.Duration) sink.Record {
+	GinkgoHelper()
+	return m.EventuallyRecordCount(filter, 1, timeout...)[0]
+}
+
+// ConsistentlyRecordCount asserts the match count stays at want for the quiet
+// window.
+//
+// The window is overridable, and for an absence claim it must be: a record the
+// operator wrote a moment ago is not visible until rotation closes the object
+// holding it, so a window shorter than the sink's maxObjectAge would report "no
+// such record" about a record already on its way.
+func (m *MinIO) ConsistentlyRecordCount(filter ObjectFilter, want int, window ...time.Duration) {
+	GinkgoHelper()
+	assertion := Consistently(func(g Gomega) {
+		records, err := m.Records(filter)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(records).To(HaveLen(want))
+	})
+	if len(window) > 0 {
+		assertion = assertion.WithTimeout(window[0])
+	}
+	assertion.Should(Succeed())
 }
 
 // EventuallyUID waits for an object to exist and returns its UID — the identity

@@ -457,7 +457,8 @@ func TestLoadGenChurn(t *testing.T) {
 	objects := planObjects(kinds, profile.Objects)
 	createStart := time.Now()
 	createObjects(ctx, t, writeClient, objects, profile)
-	t.Logf("created %d objects across %d kind(s) in %s", len(objects), len(kinds), time.Since(createStart).Round(time.Millisecond))
+	t.Logf("created %d objects across %d kind(s) in %s",
+		len(objects), len(kinds), time.Since(createStart).Round(time.Millisecond))
 
 	// Let the create phase's own records settle *before* the measurement window
 	// opens. Without this, 20,000 in-flight Added rows would land inside the churn
@@ -893,7 +894,10 @@ func peakRSSBytes() int64 {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
 		return 0
 	}
-	maxrss := int64(ru.Maxrss)
+	// The conversion is redundant where Rusage.Maxrss is already int64 (linux/amd64,
+	// darwin) and load bearing where it is int32 (linux/386, linux/arm), so it stays
+	// and the linter is told why rather than the build being narrowed to 64-bit.
+	maxrss := int64(ru.Maxrss) //nolint:unconvert
 	if runtime.GOOS == "linux" {
 		return maxrss * 1024
 	}
