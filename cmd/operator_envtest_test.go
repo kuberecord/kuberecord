@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +52,11 @@ import (
 // assertions map onto the three ways that could go wrong: the probes cover
 // "reports healthy", the error-log count covers "does nothing noisy", and goleak
 // covers "the runnables it started actually stop".
+//
+// The error-log count is taken while the operator is *idle*, before shutdown is
+// asked for, because that is the claim; the lines controller-runtime logs about
+// its own cancellation are held to a separate, narrower assertion — see
+// shutdownRaceLog.
 //
 // It deliberately dials no ClickHouse: with no sink CR, the sink runtime holds
 // no instances, so nothing in the process has a backend to reach.
@@ -92,9 +98,23 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 	errorLog := newCountingSink()
 	ctrl.SetLogger(logr.New(errorLog))
 
+	// The namespace the operator believes it runs in. It is one value rather than
+	// two literals because the manager's cache and the operator's own configuration
+	// have to agree about it: the cache confines the Secret informer to this
+	// namespace, and the reconcilers resolve credentialsSecretRef against it.
+	const operatorNamespace = "kuberecord-system"
+
 	probeAddr := freeLocalAddr(t)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		// The cache main() builds, not the default one. It matters here more than
+		// anywhere: managerCacheOptions confines the Secret informer to the
+		// operator's own namespace because the operator's Secret grant is a
+		// namespaced Role (Task 1.9, D7), and its doc comment notes that getting
+		// this wrong is invisible to envtest — whose client is an administrator. A
+		// test that claims to boot the real composition root should at least boot it
+		// with the real manager options.
+		Cache:                  managerCacheOptions(operatorNamespace),
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: probeAddr,
 	})
@@ -104,7 +124,7 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 
 	if err := setupOperator(mgr, operatorConfig{
 		clusterID:         "envtest-cluster",
-		operatorNamespace: "kuberecord-system",
+		operatorNamespace: operatorNamespace,
 		pipelineWorkers:   2,
 		writer: writerTuning{
 			queueSize: 16, workers: 1, batchMaxRows: 8,
@@ -154,6 +174,14 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 		assertProbeOK(t, fmt.Sprintf("http://%s/%s", probeAddr, probe))
 	}
 
+	// The central assertion, and it is made *here* — before shutdown is asked for —
+	// because "while idle" is what it is about. An idle operator logging at Error is
+	// a fault; a shutting-down one is judged by the narrower rule below.
+	idle := errorLog.errors()
+	if len(idle) > 0 {
+		t.Errorf("the operator logged %d error(s) while idle:\n\t%v", len(idle), idle)
+	}
+
 	cancel()
 	select {
 	case err := <-stopped:
@@ -164,9 +192,59 @@ func TestOperatorBootsIdleWithNoCRs(t *testing.T) {
 		t.Fatal("the manager did not stop within 30s of its context being cancelled")
 	}
 
-	if lines := errorLog.errors(); len(lines) > 0 {
-		t.Errorf("the operator logged %d error(s) while idle:\n\t%v", len(lines), lines)
+	// Shutdown is still held to an assertion, just a different one: everything
+	// logged from here on must be controller-runtime reporting its own cancellation,
+	// and nothing else. A real error on the way down — a sink client that could not
+	// be closed, a drain that failed, a runnable returning a fault — still fails.
+	for _, line := range errorLog.errors()[len(idle):] {
+		if shutdownRaceLog(line) {
+			continue
+		}
+		t.Errorf("the operator logged an error while shutting down:\n\t%s", line)
 	}
+}
+
+// shutdownRaceLog reports whether an error line is controller-runtime saying it was
+// cancelled in the middle of starting a watch, rather than anything the operator
+// did.
+//
+// All three are the framework's own, logged on the path between "a controller
+// starts its sources" and "those sources have synced":
+//
+//   - "failed to get informer from cache" (pkg/internal/source/kind.go): the
+//     source's start goroutine polls Cache.GetInformer, and a cancelled context
+//     turns its pending sync into a timeout error, which it logs before noticing
+//     that it is itself being shut down.
+//   - "Could not wait for Cache to sync" (pkg/internal/controller/controller.go):
+//     the same cancellation, seen by the controller that was waiting on the source.
+//   - "error received after stop sequence was engaged" (pkg/manager/internal.go):
+//     the manager's report of an error arriving from a runnable after shutdown had
+//     begun, which is how the first two reach it.
+//
+// They are classified rather than eliminated because there is nothing here to fix.
+// The operator watches Secrets and Namespaces, whose informers are created lazily
+// by their controllers rather than eagerly by a field index, so a process cancelled
+// milliseconds after electing itself leader can always land inside that window —
+// measured at roughly one run in eight, and present in this test since well before
+// the S3Sink reconciler added a second Secret watch. controller-runtime v0.23
+// exposes no "this controller has started" signal to wait on, so the only
+// alternative is a sleep: that would make the window narrower, not closed, and
+// would still be asserting on timing.
+//
+// The important half of the rule is what it does *not* forgive: an unrecognised
+// error during shutdown fails the test, which is what keeps this a classification
+// rather than a blanket exemption for the noisiest phase of the process's life.
+func shutdownRaceLog(line string) bool {
+	for _, framework := range []string{
+		"failed to get informer from cache",
+		"Could not wait for Cache to sync",
+		"error received after stop sequence was engaged",
+	} {
+		if strings.Contains(line, framework) {
+			return true
+		}
+	}
+	return false
 }
 
 // assertProbeOK requires the probe endpoint to answer 200. Readiness is a plain
@@ -266,6 +344,54 @@ func (s *countingSink) errors() []string {
 	s.record.mu.Lock()
 	defer s.record.mu.Unlock()
 	return append([]string(nil), s.record.lines...)
+}
+
+// TestShutdownRaceLogClassification keeps shutdownRaceLog from quietly becoming a
+// blanket exemption for the noisiest phase of the process's life.
+//
+// It is the risk that rule carries: a substring match, applied to the one window
+// where the operator does the most work, in a test whose whole subject is "nothing
+// is logged at Error". If the list ever grew a phrase broad enough to swallow a
+// real fault — or if the framework's wording drifted and the list stopped matching
+// anything at all — nothing would say so. So both directions are asserted, and
+// they are asserted here rather than inside the boot test because they are true
+// without a cluster.
+func TestShutdownRaceLogClassification(t *testing.T) {
+	// The lines controller-runtime really does emit when it is cancelled mid-start,
+	// copied verbatim from observed runs of the boot test.
+	forgiven := []string{
+		"[controller-runtime.source.Kind] failed to get informer from cache: " +
+			"Timeout: failed waiting for *v1.Secret Informer to sync []",
+		"[controller-runtime.source.Kind] failed to get informer from cache: " +
+			"Timeout: failed waiting for *v1.Namespace Informer to sync []",
+		"[] Could not wait for Cache to sync: failed to wait for clusterstreamrule caches to sync " +
+			"kind source: *v1.Namespace: cache did not sync []",
+		"[] error received after stop sequence was engaged: failed to wait for clusterstreamrule " +
+			"caches to sync kind source: *v1.Namespace: cache did not sync []",
+	}
+	for _, line := range forgiven {
+		if !shutdownRaceLog(line) {
+			t.Errorf("a known controller-runtime shutdown line is no longer recognised, so the boot "+
+				"test is flaky again:\n\t%s", line)
+		}
+	}
+
+	// The faults this test exists to keep catching: everything kuberecord itself
+	// would log on the way down. Each one is a real message from the shutdown paths
+	// of the sink writers and the pipeline.
+	fatal := []string{
+		"[s3writer] s3writer: failed to close the object store client: connection reset",
+		"[s3writer] s3writer: giving up on an object after retries",
+		"[chwriter] failed to close the ClickHouse connection",
+		"[pipeline] Failed to drain the workqueue before shutdown",
+		"[sinks] Sink instance did not stop within the drain timeout",
+	}
+	for _, line := range fatal {
+		if shutdownRaceLog(line) {
+			t.Errorf("shutdownRaceLog forgives an operator error, so a real shutdown fault would pass "+
+				"unnoticed:\n\t%s", line)
+		}
+	}
 }
 
 // firstEnvtestBinaryDir locates a downloaded envtest binary directory so this

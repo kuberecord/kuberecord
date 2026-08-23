@@ -1241,16 +1241,23 @@ func TestWarmScopeDisabledForASinkThatCannotReadItsHistory(t *testing.T) {
 		t.Errorf("ScopeWasActive was called for a sink with no StateReader: %+v", calls)
 	}
 
-	// Exactly one line, for three scopes plus the boot pass.
+	// Exactly one line, for three scopes plus the boot pass — waited for rather
+	// than read, for the same reason as in the restart test: the announcement is
+	// made on a warm goroutine. This one survives a single read today only because
+	// the stayFalse loops above happen to give it a second first, which makes it a
+	// property of the assertion order rather than of the code under test.
+	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 1 },
+		func() string {
+			return fmt.Sprintf("exactly one announcement across %d scopes, got %d",
+				len(scopes), len(h.writerOnlyAnnouncements()))
+		})
+	stayFalse(t, func() bool { return len(h.writerOnlyAnnouncements()) > 1 },
+		"the missing read half was announced more than once, so it is being announced per scope")
 	announced := h.writerOnlyAnnouncements()
-	if len(announced) != 1 {
-		t.Errorf("announced the missing read half %d times across %d scopes, want exactly 1:\n%v",
-			len(announced), len(scopes), announced)
-	}
 	// And it names all three behaviours it switches off, so the line is worth the
 	// one time it is printed.
 	for _, want := range []string{"cache warm-up", "zombie garbage collection", "boot reconciliation"} {
-		if len(announced) == 1 && !strings.Contains(announced[0], want) {
+		if !strings.Contains(announced[0], want) {
 			t.Errorf("the announcement does not name %q:\n%s", want, announced[0])
 		}
 	}
@@ -1657,6 +1664,12 @@ func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T
 
 	stop := h.run(t)
 	h.warmNow(podScope)
+	// The first process's announcement, waited for rather than assumed. It lands on
+	// the warm goroutine warmNow starts, and it is what the count after the restart
+	// is measured against, so reading it later without a barrier would make the
+	// two-process claim below depend on goroutine scheduling.
+	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 1 },
+		func() string { return "the first process to announce the missing read half" })
 
 	// Two first sightings, both Snapshot: the scope is never marked warm, so the
 	// hedge never lifts.
@@ -1721,8 +1734,17 @@ func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T
 	// And the announcement is still one line per sink: the restarted coordinator is
 	// a new object, so this also proves the dedup is per coordinator rather than
 	// accidentally global — the second process is entitled to say it once too.
-	if announced := h.writerOnlyAnnouncements(); len(announced) != 2 {
-		t.Errorf("announced the missing read half %d times across two processes, want 2:\n%v",
-			len(announced), announced)
-	}
+	//
+	// Waited for and then held, rather than read once. The announcement is made on
+	// the warm goroutine that the fire-and-forget warmNow above started, so a single
+	// read here races it; the two halves together are what keep the claim exact —
+	// waitFor establishes that each process said it, stayFalse that neither said it
+	// twice.
+	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 2 },
+		func() string {
+			return fmt.Sprintf("one announcement from each of the two processes, got %d:\n%v",
+				len(h.writerOnlyAnnouncements()), h.writerOnlyAnnouncements())
+		})
+	stayFalse(t, func() bool { return len(h.writerOnlyAnnouncements()) > 2 },
+		"the missing read half was announced more than once in a process, so the per-sink dedup is not holding")
 }
