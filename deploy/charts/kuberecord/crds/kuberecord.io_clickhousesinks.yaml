@@ -89,12 +89,13 @@ spec:
 
                           That default is a security property, not a convenience: the operator's
                           aggregated ClusterRole grants Secret read access *only* in its own
-                          namespace (Task 1.9, D7). A cluster-scoped ClickHouseSink is editable by
-                          anyone with cluster-level write access to the CRD, so if this field
-                          could freely name any namespace, creating a sink would become a way to
-                          make the operator read a Secret its RBAC never intended to expose. Left
-                          empty, a sink can only ever reach credentials an administrator has
-                          deliberately placed alongside the operator.
+                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          editable by anyone with cluster-level write access to the CRD, so if this
+                          field could freely name any namespace, creating a sink would become a way
+                          to make the operator read a Secret its RBAC never intended to expose —
+                          and, with a sink that ships the value straight to a bucket, to read it
+                          back out again. Left empty, a sink can only ever reach credentials an
+                          administrator has deliberately placed alongside the operator.
                         maxLength: 63
                         type: string
                     required:
@@ -187,10 +188,10 @@ spec:
                       every object any rule streams here, before hashing (Task 3.3).
 
                       It lives on the sink for the same reason AllowedGVKs does. Whoever owns
-                      the ClickHouse instance owns what may land in it, and that authority has
-                      to hold without reviewing every StreamRule anyone writes — so a rule may
-                      add paths through its own `spec.extraRedaction`, but nothing a rule
-                      declares can remove one listed here.
+                      the backend owns what may land in it, and that authority has to hold
+                      without reviewing every StreamRule anyone writes — so a rule may add paths
+                      through its own `spec.extraRedaction`, but nothing a rule declares can
+                      remove one listed here.
 
                       An empty list is not "no redaction": the data plane always scrubs
                       `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole

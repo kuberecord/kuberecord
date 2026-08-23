@@ -1,0 +1,69 @@
+# The S3Sink the e2e suite's archive scenario streams to (Task 6.6).
+#
+# It is named "archive" rather than "default" on purpose: the ClickHouseSink beside
+# it is the one called "default", and a rule reaches this one by naming
+# `kind: S3Sink` explicitly (see harness.StreamRuleYAMLForSinkKind). Two sinks of
+# different kinds may share a name, so having them differ here keeps the scenario's
+# manifests readable rather than proving anything.
+#
+# credentials.secretRef omits a namespace on purpose: it resolves to the operator's
+# own namespace, the only place the operator holds Secret read rights (Task 1.9).
+# The suite creates that Secret with the same key pair it gives the MinIO fixture,
+# so the two sides of the connection cannot drift apart.
+apiVersion: kuberecord.io/v1alpha1
+kind: S3Sink
+metadata:
+  name: archive
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: e2e-fixture
+spec:
+  bucket: kuberecord-e2e
+  # A prefix, not an empty one: an empty prefix is a supported configuration but
+  # the interesting one to cover is a bucket shared with other content, where every
+  # key the operator writes has to sit under the segment it was told to use.
+  prefix: audit
+  # MinIO ignores the region and the SDK insists on one. This is the CRD's default,
+  # spelled out because a reader of this fixture should not have to look it up to
+  # know what the client was built with.
+  region: us-east-1
+  endpoint: http://minio.kuberecord-e2e-minio.svc:9000
+  # Required for any in-cluster MinIO: a bucket-as-subdomain URL only resolves
+  # where DNS (and any TLS certificate) covers *.<endpoint>, which it does not for
+  # a Service name.
+  forcePathStyle: true
+  credentials:
+    secretRef:
+      name: kuberecord-s3-credentials
+  rotation:
+    # Both knobs sit at the floors the CRD allows, which is the fastest a real CR
+    # can be made to rotate. It matters because a record is not readable until the
+    # object holding it is closed: at the shipped defaults (64Mi / 5m) every
+    # assertion in the scenario would wait five minutes for an object that will
+    # never fill. 10s is what keeps the scenario inside its runtime budget while
+    # leaving the write path itself completely unchanged.
+    maxObjectBytes: 1048576
+    maxObjectAge: 10s
+  writer:
+    queueSize: 1000
+    # One worker, deliberately. Each worker accumulates its own object, so with
+    # several, which records share an object depends on which worker received them
+    # — and the scenario's per-record assertions would be reading the scheduler.
+    # Concurrency is covered where it belongs, by the write path's own -race tests.
+    workers: 1
+    enqueueTimeout: 2s
+    # Shorter than the manager pod's terminationGracePeriodSeconds, which
+    # config/manager sets to 10. The drain does not wait for rotation — it closes
+    # the object a worker is holding and PUTs it — so what this has to cover is one
+    # request, and anything past the grace period would be truncated by SIGKILL
+    # rather than honoured.
+    drainTimeout: 8s
+  policy:
+    # Exactly the kind the scenario streams. Spelled out rather than left empty so
+    # an accidental extra watch fails loudly as PolicyAllowed=False instead of
+    # quietly filling the archive with objects nobody asserted on.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment

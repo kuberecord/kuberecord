@@ -135,12 +135,28 @@ type KnownState struct {
 // history rather than of an object: was this scope watched in a previous epoch,
 // and which scopes did a previous process leave open?
 //
-// StateReader is optional for future sinks: a Writer that cannot read its own
-// history back can omit it. Such a Writer-only sink runs with cache warm-up,
-// zombie garbage-collection *and* boot reconciliation of scope epochs disabled,
-// and tags every record as a permanent Snapshot (it can never prove an object is
-// genuinely new versus merely un-warmed). This is a design note only — no code
-// path exercises a Writer-only sink yet.
+// StateReader is optional: a Writer that cannot read its own history back omits
+// it, which is what the S3 archive tier does (D12). Such a Writer-only sink runs
+// with cache warm-up, zombie garbage-collection *and* boot reconciliation of
+// scope epochs disabled, and tags every record as a permanent Snapshot (it can
+// never prove an object is genuinely new versus merely un-warmed).
+//
+// That omission is detected once, at registration, by SinkManager.newLiveSink,
+// and is reported rather than inferred — which is the whole point, because a
+// Writer-only sink's degradation is invisible in its own output. An archive with
+// no deletions in it looks exactly like an archive of a cluster where nothing was
+// deleted. Three places state it instead:
+//
+//   - CapabilitiesFor reports it to the control plane, which is how an S3Sink CR
+//     comes to carry HistoryUnavailable=True (with Ready still True — a declared
+//     capability limit is not a fault) and how the rules bound to that sink come
+//     to carry the same condition.
+//   - The warm/GC coordinator logs it once per sink at Info and then skips all
+//     three behaviours silently, because for such a sink they are expected rather
+//     than anomalous.
+//   - kuberecord_safe_mode stays pinned at 1 for every scope on the sink, since
+//     no scope is ever marked warm. That gauge is the observable signal; there is
+//     deliberately no second metric saying the same thing.
 type StateReader interface {
 	// LastKnownStates returns the last-known state of every *incarnation*
 	// matching filter whose own most recent event is not a deletion. A transient

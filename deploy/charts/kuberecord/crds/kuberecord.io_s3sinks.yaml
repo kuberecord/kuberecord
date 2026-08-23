@@ -1,0 +1,558 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: s3sinks.kuberecord.io
+spec:
+  group: kuberecord.io
+  names:
+    kind: S3Sink
+    listKind: S3SinkList
+    plural: s3sinks
+    singular: s3sink
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: READY
+      type: string
+    - jsonPath: .spec.bucket
+      name: BUCKET
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          S3Sink declares one S3 or MinIO bucket kuberecord may archive to.
+
+          It is cluster-scoped (D6) for the same reasons ClickHouseSink is: rules in any
+          namespace reference it by name, and a bucket is infrastructure owned by the
+          platform team rather than by whoever owns a namespace. Credentials are the only
+          part not in this object, and may not be in the cluster at all — see
+          S3CredentialsSpec.
+
+          It is the first Writer-only backend (D12). It cannot read its own history, so
+          cache warm-up, zombie garbage collection and boot reconciliation of scope
+          epochs are all disabled for it, and every record it receives is a permanent
+          Snapshot. That is a declared capability limit rather than a defect, and it is
+          reported on the sink itself as HistoryUnavailable=True while Ready stays True.
+          The supported way to have both a queryable timeline and a cheap immutable
+          archive is the tee pattern (D14): two rules over the same resources, one naming
+          a ClickHouseSink and one naming this.
+
+          The BUCKET printer column shows spec.bucket alone. The prefix is not in it
+          because CRD printer columns are plain JSONPath with no string functions, so
+          "bucket/prefix" cannot be rendered declaratively, and a column showing only the
+          prefix would be blank on most sinks.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of S3Sink.
+            properties:
+              bucket:
+                description: |-
+                  Bucket is the S3 (or MinIO) bucket every object is written to. kuberecord
+                  never creates it: a bucket carries retention, encryption, lifecycle and
+                  Object Lock settings that belong to whoever owns the account, and an
+                  operator that created its own would create one with none of them.
+
+                  There is deliberately no character Pattern beyond the length bound. S3's
+                  current naming rules are stricter than what exists in the wild — buckets
+                  created in us-east-1 before 2018 may carry uppercase letters and
+                  underscores, and MinIO deployments set their own rules — so a pattern
+                  written to today's documentation would reject buckets that work. An
+                  unusable name fails visibly on the BucketReachable condition instead.
+                maxLength: 63
+                minLength: 1
+                type: string
+              credentials:
+                description: |-
+                  Credentials names the Secret holding this sink's access key, or is omitted
+                  to authenticate from the ambient credential chain. See S3CredentialsSpec:
+                  the absence is a supported, and on a cloud provider preferred, state.
+                properties:
+                  secretRef:
+                    description: |-
+                      SecretRef names the Secret holding this sink's access key ID and secret
+                      access key. Its namespace defaults to the operator's own namespace — see
+                      SecretReference.Namespace for why that default is a security boundary
+                      rather than a convenience.
+                    properties:
+                      name:
+                        description: Name is the Secret's name.
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the Secret's namespace. Empty means the namespace the
+                          operator itself runs in.
+
+                          That default is a security property, not a convenience: the operator's
+                          aggregated ClusterRole grants Secret read access *only* in its own
+                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          editable by anyone with cluster-level write access to the CRD, so if this
+                          field could freely name any namespace, creating a sink would become a way
+                          to make the operator read a Secret its RBAC never intended to expose —
+                          and, with a sink that ships the value straight to a bucket, to read it
+                          back out again. Left empty, a sink can only ever reach credentials an
+                          administrator has deliberately placed alongside the operator.
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: spec.credentials must name a secretRef; to use ambient
+                    credentials (IRSA, workload identity or an instance role) omit
+                    spec.credentials entirely
+                  rule: has(self.secretRef)
+              endpoint:
+                description: |-
+                  Endpoint overrides the S3 API endpoint, which is how MinIO and other
+                  S3-compatible stores are addressed. Empty means AWS S3 itself, resolved
+                  from Region.
+
+                  The scheme is mandatory. `minio.kuberecord-system.svc:9000` is the mistake
+                  this Pattern exists to catch: the SDK needs an absolute URL, and a bare
+                  host:port is accepted by the CR, rejected by the client constructor, and
+                  diagnosed nowhere near where it was typed.
+
+                  `http://` is permitted, because in-cluster MinIO over plain HTTP is a normal
+                  deployment — but it does mean this cluster's entire audit stream, redactions
+                  applied and all, crosses the network unencrypted.
+                maxLength: 512
+                pattern: ^https?://[^\s/]+(/[^\s]*)?$
+                type: string
+              forcePathStyle:
+                default: false
+                description: |-
+                  ForcePathStyle addresses buckets as `<endpoint>/<bucket>/<key>` rather than
+                  as `<bucket>.<endpoint>/<key>`.
+
+                  It is false by default because virtual-hosted style is what AWS S3 wants,
+                  and true is what most MinIO deployments need: a bucket-as-subdomain URL
+                  only resolves if DNS (and any TLS certificate) covers `*.<endpoint>`, which
+                  a Service name in a cluster does not.
+                type: boolean
+              format:
+                default: jsonl-v1-zstd
+                description: |-
+                  Format is the physical encoding of the objects this sink writes.
+
+                  The enum has exactly one member on purpose. Reserving the field now means
+                  adding `parquet` later is an additive change to a schema authors already
+                  spell explicitly, rather than a breaking one that has to invent a default
+                  for every S3Sink already in etcd — and it makes every existing CR say, in
+                  its own text, which versioned contract (D15) produced its objects.
+                enum:
+                - jsonl-v1-zstd
+                type: string
+              objectLock:
+                description: |-
+                  ObjectLock applies per-object retention at PUT time. Omitted means objects
+                  are written with no retention of their own, and the bucket's own lifecycle
+                  and default-retention settings apply unchanged.
+                properties:
+                  mode:
+                    description: |-
+                      Mode is the retention mode applied to every object. COMPLIANCE is
+                      irreversible for the objects it covers — see ObjectLockModeCompliance.
+                    enum:
+                    - GOVERNANCE
+                    - COMPLIANCE
+                    type: string
+                  retainDays:
+                    description: |-
+                      RetainDays is how long, in days from the PUT, each object is retained.
+
+                      The ceiling of 36500 (a century) is a typo guard rather than a technical
+                      limit: with COMPLIANCE mode an extra digit is not correctable by anyone, so
+                      the one place it can still be caught is admission.
+                    format: int32
+                    maximum: 36500
+                    minimum: 1
+                    type: integer
+                required:
+                - mode
+                - retainDays
+                type: object
+              policy:
+                description: |-
+                  Policy restricts what may be written to this sink.
+
+                  It is the same type, the same shape and the same semantics as
+                  ClickHouseSink's, which is load-bearing rather than tidy: redaction is a
+                  per-sink floor, and if a backend could carry a weaker policy shape then
+                  choosing that backend would be a way to opt out of the floor. Streaming to
+                  an archive nobody queries is exactly when the temptation to skip redaction
+                  is highest, and exactly when the data lives longest.
+                properties:
+                  allowedGVKs:
+                    description: |-
+                      AllowedGVKs restricts which resource types may be streamed to this sink.
+
+                      An empty (or omitted) list allows everything *except* the hard deny-list
+                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      re-enable it. Deny is enforced in code, not merely in config, so the
+                      permissive default can never become a way to exfiltrate Secrets.
+                    items:
+                      description: |-
+                        GVKSelector matches a set of resource types for sink admission policy.
+
+                        It is a group/version plus a *list* of kinds (rather than a flat GVK list)
+                        because the common policy statement is "everything in this group" — spelled
+                        `kinds: ["*"]` — and enumerating every Kind of a large group by hand would
+                        both bloat the CR and go stale the moment a new Kind ships.
+                      properties:
+                        group:
+                          default: ""
+                          description: Group is the API group this selector admits.
+                            Empty means the core group.
+                          maxLength: 253
+                          pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                        kinds:
+                          description: |-
+                            Kinds are the admitted Kinds within group/version. The single entry `*`
+                            admits every Kind in that group/version.
+
+                            The list is a set: the API server rejects duplicate entries outright
+                            (`x-kubernetes-list-type: set`), which is both cheaper and stricter than
+                            an equivalent CEL uniqueness rule would be.
+                          items:
+                            maxLength: 63
+                            pattern: ^(\*|[A-Z][A-Za-z0-9]{0,62})$
+                            type: string
+                          maxItems: 128
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: set
+                        version:
+                          description: Version is the API version this selector admits.
+                          maxLength: 63
+                          pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                          type: string
+                      required:
+                      - kinds
+                      - version
+                      type: object
+                    maxItems: 128
+                    type: array
+                  redaction:
+                    description: |-
+                      Redaction is this sink's redaction floor: value paths scrubbed out of
+                      every object any rule streams here, before hashing (Task 3.3).
+
+                      It lives on the sink for the same reason AllowedGVKs does. Whoever owns
+                      the backend owns what may land in it, and that authority has to hold
+                      without reviewing every StreamRule anyone writes — so a rule may add paths
+                      through its own `spec.extraRedaction`, but nothing a rule declares can
+                      remove one listed here.
+
+                      An empty list is not "no redaction": the data plane always scrubs
+                      `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole
+                      prior copies of the objects it annotates.
+                    items:
+                      description: |-
+                        RedactionRule names one value to scrub out of every streamed object before it
+                        is hashed, diffed and written (Task 3.3).
+
+                        Exactly one of the two fields is set. They are separate fields rather than one
+                        string with two grammars because an annotation key routinely contains dots and
+                        slashes — `kubectl.kubernetes.io/last-applied-configuration` — which the
+                        dot-segment path syntax cannot spell unambiguously: written as a `fieldPath`
+                        it would mean six nested maps that do not exist. The shorthand is therefore
+                        the only way to name such a key, not sugar over a longer form.
+
+                        Redaction is *additive* everywhere it appears. A sink's policy is the floor,
+                        a rule's `extraRedaction` adds to it, and rules that overlap on one target
+                        contribute a union — nothing anywhere can remove a path another party asked
+                        for. That is what lets a platform team hand out a sink whose redaction floor
+                        they own without reviewing every rule written against it.
+                      properties:
+                        annotation:
+                          description: |-
+                            Annotation is the shorthand for one annotation key, equivalent to a
+                            fieldPath of `metadata.annotations` indexed by this exact key.
+
+                            `kubectl.kubernetes.io/last-applied-configuration` never needs listing: it
+                            is scrubbed on every object under every policy, including an empty one,
+                            because kubectl copies the entire submitted object into it and it would
+                            otherwise re-leak every value the rest of the policy removes.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                          type: string
+                        fieldPath:
+                          description: |-
+                            FieldPath is the value to scrub, as dot-separated field names with an
+                            optional `[*]` wildcard over arrays — `data.password`,
+                            `spec.template.spec.containers[*].env[*].value`.
+
+                            A path that matches nothing in a given object is a silent no-op, which is
+                            what makes one policy usable across a whole kind. A path that matches a
+                            map or an array rather than a scalar replaces that whole subtree with the
+                            sentinel.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?(\.[a-zA-Z_][a-zA-Z0-9_-]*(\[\*\])?)*$
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of fieldPath or annotation must be set
+                        rule: has(self.fieldPath) != has(self.annotation)
+                    maxItems: 64
+                    type: array
+                type: object
+              prefix:
+                description: |-
+                  Prefix is an optional key prefix every object is written under, letting one
+                  bucket hold several clusters' archives (or share space with something else
+                  entirely).
+
+                  It is a path *fragment*, not a path: no leading slash, no trailing slash,
+                  no empty segments. The object key is built as
+                  `<prefix>/format=jsonl-v1/…`, so a trailing slash would silently produce a
+                  `//` in every key this sink ever writes and quietly break the documented
+                  layout (D15) for every reader of the bucket. The permitted characters are
+                  the conservative subset that needs no escaping in a key, a URL or a query
+                  engine's glob; it can be widened later without invalidating anything
+                  already written, which is not true in the other direction.
+                maxLength: 512
+                pattern: ^([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)?$
+                type: string
+              region:
+                default: us-east-1
+                description: |-
+                  Region is the AWS region the bucket lives in.
+
+                  It defaults to us-east-1 because the SDK requires *some* region even when
+                  talking to MinIO, which ignores it — that default is what makes a bucket
+                  name alone a working spec. Unlike a guessed sink name, a guessed region
+                  cannot send the audit trail somewhere nobody chose: S3 bucket names are
+                  globally unique, so a wrong region does not resolve to a different bucket,
+                  it fails loudly and lands on the BucketReachable condition.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9-]+$
+                type: string
+              rotation:
+                description: Rotation decides when an accumulating object is closed
+                  and written.
+                properties:
+                  maxObjectAge:
+                    default: 5m
+                    description: |-
+                      MaxObjectAge is the longest an object's *first* record waits before the
+                      object is closed and written regardless of size.
+
+                      It is what bounds how much of the audit trail is only in memory at any
+                      moment: on a quiet cluster nothing else would ever close an object, and a
+                      crash would take the whole open batch with it. The floor of 10s keeps a
+                      quiet cluster from turning every record into its own object; the ceiling of
+                      1h keeps the exposure window inside the archive's coarsest path partition,
+                      so an object never spans two hour= prefixes' worth of waiting.
+
+                      The bound is one CEL rule rather than Minimum/Maximum because a duration is
+                      a string in the schema, and it carries its own shape guard rather than a
+                      companion Pattern marker for two reasons: controller-gen refuses a Pattern
+                      on a metav1.Duration at all, and `duration()` *errors* on an unparseable
+                      string, which the API server reports as machinery failing rather than as the
+                      author's value being wrong. CEL's logical operators absorb errors from the
+                      side that did not decide the result, so putting the match first makes the
+                      whole rule total: garbage fails the match and is rejected with the message
+                      below, and only a well-formed duration is ever parsed.
+
+                      The shape deliberately admits no fractional component: `1.5h` is spelled
+                      `1h30m`, and keeping the backslash-free character class out of a CEL string
+                      literal keeps the rule readable through two layers of quoting.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: maxObjectAge must be a duration between 10s and 1h,
+                        spelled without a fractional component (30s, 5m, 1h30m)
+                      rule: self.matches('^([0-9]+(ns|us|ms|s|m|h))+$') && duration(self)
+                        >= duration('10s') && duration(self) <= duration('1h')
+                  maxObjectBytes:
+                    default: 67108864
+                    description: |-
+                      MaxObjectBytes is the encoded size at which an accumulating object is
+                      closed and written, in bytes.
+
+                      It is measured on the *encoded* (compressed) payload, because that is what
+                      the object costs to store and to read back, and because it is the only
+                      figure a reader can predict from the bucket alone.
+
+                      The floor of 1Mi and ceiling of 1Gi are both about the read side. Below
+                      1Mi an active cluster produces the small-file explosion that makes an
+                      archive expensive to query — every engine reading this layout pays per
+                      object. Above 1Gi a single object stops being a practical unit of retry or
+                      of partial recovery, and a worker's in-flight memory (see
+                      S3WriterSpec.Workers) grows with it.
+                    format: int64
+                    maximum: 1073741824
+                    minimum: 1048576
+                    type: integer
+                type: object
+              writer:
+                description: |-
+                  Writer sizes the asynchronous write path for this sink.
+
+                  It carries a strict subset of ClickHouse's knobs: batchMaxRows and batchMaxWait
+                  are absent because for S3 the object *is* the batch and spec.rotation
+                  governs it, and checkpointEvery is absent because a Writer-only sink emits
+                  no diffs to checkpoint (D12). See S3WriterSpec for the full reasoning — the
+                  omissions are deliberate, not pending.
+                properties:
+                  drainTimeout:
+                    default: 15s
+                    description: |-
+                      DrainTimeout is the budget for flushing queued writes during graceful
+                      shutdown, before the client is closed and any still-queued job is settled
+                      as failed. For this backend the drain includes closing and PUTting each
+                      worker's partial object, so it must accommodate a round-trip per worker,
+                      not merely the queue's length.
+                    type: string
+                  enqueueTimeout:
+                    default: 2s
+                    description: |-
+                      EnqueueTimeout is how long Enqueue waits for queue room before returning
+                      an error. It is a backpressure signal, never a silent drop: the caller
+                      propagates the error so the pipeline's own requeue/backoff takes over.
+                    type: string
+                  queueSize:
+                    default: 5000
+                    description: |-
+                      QueueSize is the capacity, in jobs, of the async hand-off queue between
+                      pipeline workers and this sink's writers.
+                    format: int32
+                    maximum: 1000000
+                    minimum: 1
+                    type: integer
+                  workers:
+                    default: 4
+                    description: |-
+                      Workers is how many goroutines drain the queue into S3.
+
+                      Each worker accumulates its own object, so this multiplies two costs rather
+                      than one: the writer's steady-state memory ceiling is workers ×
+                      maxObjectBytes (at the ceilings of both, 64Gi — do not pair them), and the
+                      object count grows with it, since N workers close N partial objects where
+                      one worker would have closed a single full one. The ceiling of 64 matches
+                      ClickHouse's for a different reason: not because the backend punishes
+                      concurrency — S3 rewards it — but because memory does.
+                    format: int32
+                    maximum: 64
+                    minimum: 1
+                    type: integer
+                type: object
+            required:
+            - bucket
+            type: object
+          status:
+            description: status defines the observed state of S3Sink.
+            properties:
+              conditions:
+                description: |-
+                  Conditions carries Ready, CredentialsResolved, BucketReachable and
+                  HistoryUnavailable (see the condition-type constants).
+
+                  The first three follow the usual reading, and are set by asynchronous
+                  probes: a control-plane reconciler never talks to S3 on its own goroutine
+                  (Invariant 1), so an unreachable bucket slows nothing down — it just reports
+                  here. HistoryUnavailable does not follow the usual reading: it is True on a
+                  healthy sink, permanently, and says what this backend cannot do rather than
+                  what has gone wrong with it. See ConditionHistoryUnavailable.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

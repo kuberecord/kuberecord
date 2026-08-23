@@ -400,6 +400,74 @@ func TestDeleteClearsTheWarmCoordinatorsBookkeeping(t *testing.T) {
 	}
 }
 
+// TestDeleteTearsDownOnlyTheIdentifiedKind is the teardown half of typed identity:
+// two sinks may legitimately share a name across kinds (a ClickHouseSink and an
+// S3Sink called "audit" are two unrelated backends, D6), so deleting one must evict
+// exactly one sink's state and park exactly one sink's rules.
+//
+// The failure this closes is silent and expensive. Keyed on the name alone, deleting
+// the archive would discard the ClickHouse sink's hashCache — and the next
+// observation of every object in every scope it serves would be treated as new, so
+// the "deletion" of one sink would re-emit the entire cluster into another.
+func TestDeleteTearsDownOnlyTheIdentifiedKind(t *testing.T) {
+	const shared = "audit"
+	archive := ID{Kind: "S3Sink", Name: shared}
+	timeline := ID{Kind: DefaultSinkKind, Name: shared}
+
+	var warm *fakeWarmHooks
+	h := newManagerHarness(t, func(opts *ManagerOptions) {
+		warm = newFakeWarmHooks(opts.Pipeline.(*fakePipeline).clock)
+		opts.Warm = warm
+		opts.Dependents = fakeDependents{rules: map[ID][]string{
+			archive:  {"streamrule/team-a/archive"},
+			timeline: {"streamrule/team-a/timeline"},
+		}}
+	})
+	h.start()
+
+	for _, id := range []ID{timeline, archive} {
+		if err := h.mgr.Ensure(id, fakeConfig{fingerprint: "v1"}); err != nil {
+			t.Fatalf("Ensure(%s): %v", id, err)
+		}
+	}
+
+	h.mgr.Delete(archive)
+
+	waitFor(t, "the deleted archive sink to be parked", func() bool {
+		parked, _ := h.parks.snapshot()
+		_, ok := parked[archive]
+		return ok
+	})
+
+	// Everything the teardown touches names the S3Sink identity and nothing else.
+	removed, _ := h.pipe.removals()
+	if !slices.Contains(removed, archive) {
+		t.Errorf("RemoveSink was not called for %s; removals=%v", archive, removed)
+	}
+	if slices.Contains(removed, timeline) {
+		t.Errorf("RemoveSink evicted %s, whose CR was never deleted", timeline)
+	}
+	forgotten, _ := warm.forgets()
+	if !slices.Contains(forgotten, archive) {
+		t.Errorf("ForgetSink was not called for %s; forgotten=%v", archive, forgotten)
+	}
+	if slices.Contains(forgotten, timeline) {
+		t.Errorf("ForgetSink cleared %s, whose CR was never deleted", timeline)
+	}
+	parked, _ := h.parks.snapshot()
+	if want := []string{"streamrule/team-a/archive"}; !slices.Equal(parked[archive], want) {
+		t.Errorf("parked rules for %s = %v, want %v", archive, parked[archive], want)
+	}
+	if got, ok := parked[timeline]; ok {
+		t.Errorf("the rules of %s were parked (%v) by another kind's deletion", timeline, got)
+	}
+
+	// And the sink that shares the name is still routed, so its writes never paused.
+	if _, ok := h.mgr.WriterFor(timeline); !ok {
+		t.Errorf("%s stopped being routed when %s was deleted", timeline, archive)
+	}
+}
+
 // TestDeleteWithoutWarmHooksStillEvicts proves the hook is genuinely optional: a
 // deployment (or a test) that runs no warm coordinator must not need the wiring,
 // and must not panic for the want of it.
@@ -572,18 +640,20 @@ func TestRoutingReportsTheOptionalHalvesHonestly(t *testing.T) {
 		wantWriter  bool
 		wantReader  bool
 		wantEvents  bool
+		wantLive    bool
 		description string
 	}{
-		{sink: testID("full"), wantWriter: true, wantReader: true, wantEvents: true,
+		{sink: testID("full"), wantWriter: true, wantReader: true, wantEvents: true, wantLive: true,
 			description: "a backend implementing every half answers every router"},
-		{sink: testID("write-only"), wantWriter: true, wantReader: false, wantEvents: false,
+		{sink: testID("write-only"), wantWriter: true, wantReader: false, wantEvents: false, wantLive: true,
 			description: "a write-only backend routes writes and reports no reader"},
-		{sink: testID("absent"), wantWriter: false, wantReader: false, wantEvents: false,
+		{sink: testID("absent"), wantWriter: false, wantReader: false, wantEvents: false, wantLive: false,
 			description: "an unknown sink is transiently absent from every router"},
 		// A live ClickHouseSink named "full" must not answer for an S3Sink of the
 		// same name: the routers key on the whole identity, which is what stops one
 		// backend's writer from serving another's records (Task 4.1).
 		{sink: ID{Kind: "S3Sink", Name: "full"}, wantWriter: false, wantReader: false, wantEvents: false,
+			wantLive:    false,
 			description: "a different kind sharing a live sink's name is absent from every router"},
 	}
 	for _, tc := range tests {
@@ -596,6 +666,17 @@ func TestRoutingReportsTheOptionalHalvesHonestly(t *testing.T) {
 			}
 			if _, ok := h.mgr.ScopeEventWriterFor(tc.sink); ok != tc.wantEvents {
 				t.Errorf("ScopeEventWriterFor(%q) ok = %t, want %t (%s)", tc.sink, ok, tc.wantEvents, tc.description)
+			}
+			// The control plane's view of the same detection, and it must agree with
+			// the router's: a reconciler that reported a capability the router does
+			// not route would put a claim in CR status that nothing upholds.
+			caps, live := h.mgr.CapabilitiesFor(tc.sink)
+			if live != tc.wantLive {
+				t.Errorf("CapabilitiesFor(%q) live = %t, want %t (%s)", tc.sink, live, tc.wantLive, tc.description)
+			}
+			if caps.HistoryReadable != tc.wantReader {
+				t.Errorf("CapabilitiesFor(%q).HistoryReadable = %t, want %t (%s)",
+					tc.sink, caps.HistoryReadable, tc.wantReader, tc.description)
 			}
 		})
 	}
@@ -688,11 +769,16 @@ settled:
 	}
 }
 
-// TestProbeClassifiesASchemaMismatch proves the one classification the manager
-// makes: a failure wrapping sink.ErrSchemaInvalid is reported as SchemaInvalid,
-// because it needs a migration rather than patience, while everything else is
-// reported as unreachable.
-func TestProbeClassifiesASchemaMismatch(t *testing.T) {
+// TestProbeClassifiesItsFailures proves the two classifications the manager makes,
+// and the default everything else falls into.
+//
+// Both classified cases are "this will not fix itself with time" verdicts that need
+// a human, and they need *different* humans: a schema mismatch needs a migration,
+// and a credential that could not be obtained needs whoever owns the workload's
+// identity. Everything else is reachability, which the manager keeps retrying on
+// its own. Collapsing any two of the three would leave the reconciler unable to
+// write a condition that says what to do next.
+func TestProbeClassifiesItsFailures(t *testing.T) {
 	tests := []struct {
 		name       string
 		probeErr   error
@@ -702,6 +788,12 @@ func TestProbeClassifiesASchemaMismatch(t *testing.T) {
 			name:       "a wrapped schema mismatch is permanent",
 			probeErr:   fmt.Errorf("%w: table %q is missing", ErrSchemaInvalid, "resource_states"),
 			wantReason: ProbeReasonSchemaInvalid,
+		},
+		{
+			name: "a wrapped credential failure is about identity, not reachability",
+			probeErr: fmt.Errorf("write probe object to bucket %q: %w: no EC2 IMDS role found",
+				"audit", ErrCredentialsUnavailable),
+			wantReason: ProbeReasonCredentialsInvalid,
 		},
 		{
 			name:       "any other failure is unreachable",
@@ -939,5 +1031,84 @@ func TestNewSinkManagerValidatesItsDependencies(t *testing.T) {
 	}
 	if err := m.Ensure(testID("primary"), nil); err == nil {
 		t.Error("Ensure accepted a nil configuration")
+	}
+}
+
+// TestCapabilitiesForSeparatesNotRunningFromWriterOnly is the distinction Task 6.5
+// rests on, and the reason CapabilitiesFor exists at all rather than the reconciler
+// asking StateReaderFor.
+//
+// StateReaderFor collapses "no instance yet" and "an instance that cannot read its
+// own history" into one false, which is right for the data plane: it re-queues
+// either way. It is wrong for a reconciler. The first is transient and worth an
+// Unknown condition; the second is permanent, is the whole of D12, and is worth a
+// condition an operator acts on. A reconciler that could not tell them apart would
+// have every S3Sink in every cluster reporting "still starting up", forever.
+func TestCapabilitiesForSeparatesNotRunningFromWriterOnly(t *testing.T) {
+	h := newManagerHarness(t, func(opts *ManagerOptions) {
+		clock := &atomic.Int64{}
+		opts.Factory = func(id ID, _ InstanceConfig) (Writer, error) {
+			if id.Name == "archive" {
+				return newFakeWriter(id.Name, clock), nil
+			}
+			return newFakeInstance(id.Name, clock), nil
+		}
+	})
+	h.start()
+
+	// Nothing declared yet. Both routers say no, and only CapabilitiesFor explains
+	// which no it is.
+	if _, ok := h.mgr.StateReaderFor(testID("archive")); ok {
+		t.Fatal("StateReaderFor answered for a sink that was never declared")
+	}
+	if caps, live := h.mgr.CapabilitiesFor(testID("archive")); live {
+		t.Fatalf("CapabilitiesFor reported a live instance before Ensure: %+v", caps)
+	}
+
+	if err := h.mgr.Ensure(testID("archive"), fakeConfig{fingerprint: "v1"}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	// Ensure builds and routes the instance synchronously, which is what makes the
+	// pull model work at all: the reconcile pass that declares a sink can ask about
+	// it in the same pass, with no wake-up needed.
+	caps, live := h.mgr.CapabilitiesFor(testID("archive"))
+	if !live {
+		t.Fatal("CapabilitiesFor reported no live instance immediately after Ensure returned")
+	}
+	if caps.HistoryReadable {
+		t.Error("a Writer with no StateReader reported HistoryReadable")
+	}
+	// Same no from StateReaderFor as before Ensure — which is exactly why the
+	// reconciler cannot use it.
+	if _, ok := h.mgr.StateReaderFor(testID("archive")); ok {
+		t.Error("StateReaderFor answered for a Writer-only backend")
+	}
+
+	// A recycle re-detects rather than remembering. This is the case that would go
+	// stale if the capability were cached per sink ID instead of read off the live
+	// instance: a configuration change that swapped the backend would leave the CR
+	// asserting the old one's limits.
+	if err := h.mgr.Ensure(testID("archive"), fakeConfig{fingerprint: "v2"}); err != nil {
+		t.Fatalf("Ensure after rotation: %v", err)
+	}
+	if caps, live := h.mgr.CapabilitiesFor(testID("archive")); !live || caps.HistoryReadable {
+		t.Errorf("after a recycle: live = %t, caps = %+v; want a live Writer-only instance", live, caps)
+	}
+
+	// A fully-featured backend under the same manager reports the other answer, so
+	// the verdict is per instance and not per process.
+	if err := h.mgr.Ensure(testID("timeline"), fakeConfig{fingerprint: "v1"}); err != nil {
+		t.Fatalf("Ensure(timeline): %v", err)
+	}
+	if caps, live := h.mgr.CapabilitiesFor(testID("timeline")); !live || !caps.HistoryReadable {
+		t.Errorf("a backend with a StateReader: live = %t, caps = %+v; want HistoryReadable", live, caps)
+	}
+
+	// And a withdrawn sink stops reporting anything, rather than leaving a stale
+	// capability behind for a reconciler to keep writing into status.
+	h.mgr.Delete(testID("archive"))
+	if caps, live := h.mgr.CapabilitiesFor(testID("archive")); live {
+		t.Errorf("a deleted sink still reports capabilities: %+v", caps)
 	}
 }

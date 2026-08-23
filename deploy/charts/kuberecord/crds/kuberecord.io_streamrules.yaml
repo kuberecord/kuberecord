@@ -281,20 +281,25 @@ spec:
                     default: ClickHouseSink
                     description: |-
                       Kind is the sink CR's kind, spelled as the API server spells it —
-                      "ClickHouseSink". Omitting it means ClickHouseSink, which is the default
-                      only because ClickHouse was the first backend and is what every rule
+                      "ClickHouseSink", "S3Sink". Omitting it means ClickHouseSink, which is the
+                      default only because ClickHouse was the first backend and is what every rule
                       written before the kind existed meant; nothing in the runtime treats that
                       kind specially, and no path falls back to it when another kind fails to
-                      resolve.
+                      resolve. In particular a rule meaning to archive to an S3Sink must say so:
+                      the default is inherited history, not a preference.
 
-                      The enum lists only the kinds this build actually serves, which is the
+                      The enum lists only the kinds this release ships a backend for, which is the
                       point of having one: a rule naming a kind no reconciler implements would
                       otherwise be admitted and then park forever with nothing to bind to, and
                       its author's only clue would be a condition on an object they may not think
                       to read. Rejecting the spelling at admission puts the error where they
                       typed it. Each new backend adds itself here as it lands.
+
+                      Widening it is a release decision rather than a refactor, so it is asserted
+                      literally, with its list items, in crdmanifests_test.go.
                     enum:
                     - ClickHouseSink
+                    - S3Sink
                     type: string
                   name:
                     description: |-
@@ -335,10 +340,19 @@ spec:
                 type: integer
               conditions:
                 description: |-
-                  Conditions carries Ready, RBACGranted, PolicyAllowed and
-                  ResourceResolved (see the constants above). A rule that cannot run
-                  degrades here and only here: the process never exits and every other
-                  rule keeps streaming (Invariant 5).
+                  Conditions carries Ready, RBACGranted, PolicyAllowed,
+                  ResourceResolved and HistoryUnavailable (see the constants above). A
+                  rule that cannot run degrades here and only here: the process never
+                  exits and every other rule keeps streaming (Invariant 5).
+
+                  HistoryUnavailable is the odd one out, and is mirrored from the sink
+                  the rule names rather than decided about the rule: a rule bound to a
+                  Writer-only sink (D12) reports it True, permanently, while staying
+                  entirely Ready. It is here because the two objects usually have
+                  different owners — a rule's author may never read the cluster-scoped
+                  sink they named — and an author who sees only Ready=True would have no
+                  way to learn that their stream will contain no deletions. See
+                  ConditionHistoryUnavailable.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

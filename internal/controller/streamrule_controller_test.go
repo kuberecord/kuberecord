@@ -97,9 +97,14 @@ func (h *harness) stageLegacyRule(ruleKind, namespace, name, legacySinkRef strin
 	}, dropRequiredSink)
 }
 
-// stageRuleNamingSinkKind stores a rule naming a sink kind this build does not
-// serve, which admission refuses (the CRD's enum lists only the served kinds) and
-// only a newer operator — or a downgraded one — could have written.
+// stageRuleNamingSinkKind stores a rule naming a sink kind no reconciler in this
+// build serves.
+//
+// It relaxes the CRD's kind enum on the way in, which is what a kind no *release*
+// serves needs — such a rule could only have been written by a newer operator, or by
+// one this binary was downgraded from. Every kind the enum admits now has a
+// reconciler behind it (Task 6.4 registered the last one), so the relaxation is what
+// makes this helper able to stage the unserved case at all.
 func (h *harness) stageRuleNamingSinkKind(ruleKind, namespace, name, sinkKind, sinkName string,
 	resources ...v1alpha1.WatchedResource) client.Object {
 	h.t.Helper()
@@ -619,53 +624,85 @@ func TestLegacyRuleIsReportedAndRegistersNothing(t *testing.T) {
 // else. The lower tiers guard the same property on their own keys (sink.ID, the
 // pipeline's per-sink state, plan.Registry.RulesForSink); this is the last hop.
 //
-// A *resolvable* second kind cannot be tested yet — S3Sink has no CRD and no
-// reconciler until Task 6.1 — so the second rule here parks rather than streaming to
-// its own backend. Extending it to assert two live backends is that task's job.
+// Since Task 6.4 both halves are *live*: two backends of different kinds share one
+// name, both are reconciled, and each streams to its own. That is a strictly stronger
+// test than the earlier version, where the second kind had no reconciler and parked
+// for a reason indistinguishable from the collision this asserts against — a rule
+// bound to the wrong backend and a rule bound to none both install no targets. Only
+// two running sinks can tell the two apart. The unserved-kind branch is still covered
+// (a kind no release serves is storable in etcd but reconciled by nobody), with a
+// kind that is genuinely absent from this build.
 func TestSinkResolutionComparesTypedIdentities(t *testing.T) {
 	h := newHarness(t, harnessOptions{allowAll: true})
 	sharedName := uniqueName("shared")
 	h.createReadySink(sharedName, v1alpha1.SinkPolicy{})
+	h.createReadyS3Sink(sharedName, v1alpha1.SinkPolicy{})
 
 	namespace := uniqueName("ns")
 	h.createNamespace(namespace, nil)
 	configMaps := []string{fmt.Sprintf("%s@%s", coreGVK("ConfigMap"), namespace)}
 
-	// The kind this build serves, under the shared name: streams.
+	// One kind, under the shared name: streams to the ClickHouse backend.
 	bound := h.newStreamRuleWithSink(namespace, "bound",
-		v1alpha1.SinkReference{Kind: "ClickHouseSink", Name: sharedName}, resourceEntry("", "ConfigMap"))
+		v1alpha1.SinkReference{Kind: clickHouseSinkKind, Name: sharedName}, resourceEntry("", "ConfigMap"))
 	boundKey := RuleKey(kindStreamRule, namespace, "bound")
 	h.waitForRuleCondition(bound, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
 	h.waitForTargets(boundKey, configMaps)
 
-	// Another kind, the same name: parks, and the message names the kind rather than
-	// only the name, since the name alone would describe a sink that does exist.
+	// The other kind, the *same* name: streams to the archive backend, independently.
+	archived := h.newStreamRuleWithSink(namespace, "archived",
+		v1alpha1.SinkReference{Kind: s3SinkKind, Name: sharedName}, resourceEntry("", "ConfigMap"))
+	archivedKey := RuleKey(kindStreamRule, namespace, "archived")
+	h.waitForRuleCondition(archived, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	h.waitForTargets(archivedKey, configMaps)
+
+	// A kind no release serves — storable in etcd (a rule written by a newer
+	// operator, or one this binary was downgraded out of serving) and reconciled by
+	// nobody. It parks, and the message names the kind rather than only the name,
+	// since the name alone describes two sinks that do exist.
 	elsewhere := h.stageRuleNamingSinkKind(kindStreamRule, namespace, "elsewhere",
-		"S3Sink", sharedName, resourceEntry("", "ConfigMap"))
+		"PostgresSink", sharedName, resourceEntry("", "ConfigMap"))
 	elsewhereKey := RuleKey(kindStreamRule, namespace, "elsewhere")
 	parked := h.waitForRuleCondition(elsewhere, v1alpha1.ConditionReady,
 		metav1.ConditionFalse, ReasonSinkMissing)
-	if !strings.Contains(parked.Message, "S3Sink") {
+	if !strings.Contains(parked.Message, "PostgresSink") {
 		t.Errorf("SinkMissing message %q does not name the kind that is missing", parked.Message)
 	}
 	if got := h.targetsFor(elsewhereKey); len(got) != 0 {
 		t.Errorf("a rule naming an unserved sink kind installed targets %v", got)
 	}
 
-	// The served sink's dependents are exactly the rule that named its kind — which
-	// is what decides whose rules get parked when it is deleted.
+	// Each sink's dependents are exactly the rule that named *its* kind — which is
+	// what decides whose rules get parked when one of them is deleted, and the last
+	// hop where a name-keyed resolution would silently merge the two.
 	if got := h.Registry.RulesForSink(clickHouseSinkID(sharedName)); !slicesEqual(got, []string{boundKey}) {
 		t.Errorf("RulesForSink(%s) = %v, want [%s]",
 			clickHouseSinkID(sharedName), got, boundKey)
 	}
-	// And the rule that streams is unaffected by the parked one sharing its name.
+	if got := h.Registry.RulesForSink(s3SinkID(sharedName)); !slicesEqual(got, []string{archivedKey}) {
+		t.Errorf("RulesForSink(%s) = %v, want [%s]",
+			s3SinkID(sharedName), got, archivedKey)
+	}
+	// And each rule's targets name its own backend, not the one that happens to share
+	// the name.
+	for _, tc := range []struct {
+		rule string
+		want []sink.ID
+	}{
+		{boundKey, []sink.ID{{Kind: clickHouseSinkKind, Name: sharedName}}},
+		{archivedKey, []sink.ID{{Kind: s3SinkKind, Name: sharedName}}},
+	} {
+		if got := h.targetSinksFor(tc.rule); !slices.Equal(got, tc.want) {
+			t.Errorf("rule %s streams to %v, want %v", tc.rule, got, tc.want)
+		}
+	}
 	if got := h.targetsFor(boundKey); !slicesEqual(got, configMaps) {
 		t.Errorf("targets = %v, want the bound rule still streaming at %v", got, configMaps)
 	}
 
 	// Criterion (c) in its plainest form: the served kind, a name nothing answers to.
 	missing := h.newStreamRuleWithSink(namespace, "nosink",
-		v1alpha1.SinkReference{Kind: "ClickHouseSink", Name: uniqueName("absent")},
+		v1alpha1.SinkReference{Kind: clickHouseSinkKind, Name: uniqueName("absent")},
 		resourceEntry("", "ConfigMap"))
 	missingKey := RuleKey(kindStreamRule, namespace, "nosink")
 	h.waitForRuleCondition(missing, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
@@ -948,4 +985,91 @@ func TestClusterRuleInvalidNamespaceSelector(t *testing.T) {
 	}
 	h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonNamespaceSelectorInvalid)
 	h.waitForTargets(RuleKey(kindClusterStreamRule, "", name), nil)
+}
+
+// TestRuleMirrorsItsSinksHistoryLimit is Task 6.5's "an author reading only the
+// rule must not be misled".
+//
+// A StreamRule and the cluster-scoped sink it names usually have different owners.
+// A rule bound to a Writer-only archive is entirely healthy — it streams, its
+// records land, Ready is True — and yet what it produces is not what a reader of
+// the rule alone would assume: no Added, no Modified, and no deletion at all for
+// anything that disappears while the operator is down. So the rule says so itself,
+// rather than leaving its author to go and read a sink they may not own.
+func TestRuleMirrorsItsSinksHistoryLimit(t *testing.T) {
+	h := newHarness(t, harnessOptions{allowAll: true})
+
+	t.Run("a rule bound to a writer-only sink says so and still streams", func(t *testing.T) {
+		sinkName := uniqueName("s3mirror")
+		// Declared before the sink CR exists, so the sink's own condition is True by
+		// the time the rule resolves it — the ordering a real cluster has, where the
+		// instance is built by the reconcile that declares it.
+		h.Runtime.setCapabilities(s3SinkID(sinkName), sink.Capabilities{})
+		// A real allow-list, so the mirrored condition is asserted on a rule that
+		// passed a policy gate rather than on one nothing was ever checked about:
+		// the two verdicts are independent, and a pass that only ever saw the
+		// permissive default would not show that.
+		h.createReadyS3Sink(sinkName, v1alpha1.SinkPolicy{
+			AllowedGVKs: []v1alpha1.GVKSelector{{Version: "v1", Kinds: []string{"ConfigMap"}}},
+		})
+		h.waitForS3SinkCondition(sinkName, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRuleWithSink(namespace, "archived",
+			v1alpha1.SinkReference{Kind: s3SinkKind, Name: sinkName}, resourceEntry("", "ConfigMap"))
+		ruleKey := RuleKey(kindStreamRule, namespace, "archived")
+
+		mirrored := h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionTrue, ReasonWriterOnlySink)
+		// The sink is named, because the fix — if the author wants a timeline — is
+		// to add a second rule pointing somewhere else (D14), and they need to know
+		// which sink is the one with the limit.
+		if !strings.Contains(mirrored.Message, s3SinkID(sinkName).String()) {
+			t.Errorf("the rule's message does not name its sink:\n%s", mirrored.Message)
+		}
+		for _, want := range []string{"permanent Snapshot", "while the operator is down is never recorded"} {
+			if !strings.Contains(mirrored.Message, want) {
+				t.Errorf("the rule's message does not state the consequence %q:\n%s", want, mirrored.Message)
+			}
+		}
+
+		// And the rule is *working*. This is the assertion that keeps the mirror from
+		// becoming a degrade: the limit belongs to the backend somebody chose, not to
+		// the rule that uses it, so its targets are installed and Ready is True.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+		h.waitForTargets(ruleKey, []string{fmt.Sprintf("%s@%s", coreGVK("ConfigMap"), namespace)})
+	})
+
+	t.Run("a rule bound to a sink that can read its history is unaffected", func(t *testing.T) {
+		sinkName := uniqueName("chmirror")
+		h.createReadySink(sinkName, v1alpha1.SinkPolicy{})
+
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRule(namespace, "timeline", sinkName, resourceEntry("", "ConfigMap"))
+
+		// A ClickHouseSink reports no HistoryUnavailable condition of its own — the
+		// condition belongs to the backend that has the limit — and an absent
+		// condition mirrors as False rather than Unknown. That is the difference
+		// between "this sink has no limitation" and "nobody has looked", and the
+		// rule's author is entitled to the former.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionFalse, ReasonHistoryReadable)
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonStreaming)
+	})
+
+	t.Run("a rule with no sink to mirror reports Unknown, never False", func(t *testing.T) {
+		namespace := uniqueName("ns")
+		h.createNamespace(namespace, nil)
+		rule := h.newStreamRule(namespace, "orphan", uniqueName("missing"), resourceEntry("", "ConfigMap"))
+
+		// False is the *reassuring* value of an inverted condition, so a rule whose
+		// sink does not exist must not report it: that would tell an author their
+		// records carry accurate event types on the strength of a sink nobody found.
+		h.waitForRuleCondition(rule, v1alpha1.ConditionHistoryUnavailable,
+			metav1.ConditionUnknown, ReasonNotEvaluated)
+		h.waitForRuleCondition(rule, v1alpha1.ConditionReady, metav1.ConditionFalse, ReasonSinkMissing)
+	})
 }

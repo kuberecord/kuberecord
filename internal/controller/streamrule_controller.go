@@ -62,10 +62,13 @@ const defaultRuleResyncPeriod = 2 * time.Minute
 // sinkNameIndexKey is the field-index name under which both rule kinds are indexed
 // by spec.sink.name, so a sink event maps straight to the rules that stream to it.
 //
-// It indexes the name alone rather than the whole typed identity because a sink
-// event carries a CR of one known kind: the ClickHouseSink watch that feeds this
-// index can only ever announce ClickHouseSinks, so a name is enough to find the
-// candidates, and the reconcile pass that follows compares the full identity.
+// It indexes the name alone rather than the whole typed identity because every sink
+// watch feeding it announces CRs of one known kind — a ClickHouseSink event can
+// only be about a ClickHouseSink — so a name is enough to find the *candidates*,
+// and the reconcile pass that follows compares the full identity. That is what
+// keeps one index correct as kinds are added: a same-named sink of another kind
+// costs one extra reconcile that reaches the SinkMissing verdict, never a rule
+// bound to the wrong backend.
 const sinkNameIndexKey = ".spec.sink.name"
 
 // accessVerbs are the verbs a watch actually needs.
@@ -499,11 +502,11 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	}
 
 	sinkID := sinkIDFrom(spec.Sink)
-	chSink, verdict, err := r.resolveSink(ctx, sinkID)
+	boundSink, verdict, err := r.resolveSink(ctx, sinkID)
 	if err != nil {
 		return planOutcome{err: err}
 	}
-	if chSink == nil {
+	if boundSink == nil {
 		// No sink, no targets: a watch whose records have nowhere to go is not a
 		// watch worth running, and its scope rows would name a sink that does not
 		// exist.
@@ -513,7 +516,14 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 		return planOutcome{verdict: verdict, install: true}
 	}
 
-	if denied := checkPolicy(spec.Resources, chSink.Spec.Policy); denied != nil {
+	// Before any gate: the sink's declared capability limit belongs on the rule
+	// whether the rule then passes or fails. An author whose rule is refused by
+	// policy still needs to know what their sink would have done with the records,
+	// and a pass that set this only on the happy path would drop the statement
+	// exactly when the rule's conditions are being read most closely.
+	setRuleHistoryUnavailable(status, sinkID, boundSink)
+
+	if denied := checkPolicy(spec.Resources, boundSink.policy); denied != nil {
 		log.Info("Rule is not admitted by its sink's policy; withdrawing its watch targets",
 			"rule", ruleKey, "sink", sinkID.String(), "reason", denied.reason)
 		status.set(v1alpha1.ConditionPolicyAllowed, metav1.ConditionFalse, denied.reason, denied.message)
@@ -555,7 +565,7 @@ func (r *RuleReconciler) plan(ctx context.Context, obj client.Object, status *st
 	// The rule's additions are merged with the sink's floor once per pass, here,
 	// rather than per target: every target of one rule streams to one sink, so
 	// the answer cannot differ between them.
-	redaction := canonicalRedaction(chSink.Spec.Policy.Redaction, spec.ExtraRedaction)
+	redaction := canonicalRedaction(boundSink.policy.Redaction, spec.ExtraRedaction)
 
 	targets, denials, err := r.reviewTargets(ctx, sinkID, resolved, redaction)
 	if err != nil {
@@ -609,24 +619,71 @@ func sinkIDFrom(ref v1alpha1.SinkReference) sink.ID {
 	return sink.ID{Kind: kind, Name: ref.Name}
 }
 
+// resolvedSink is the whole of a sink CR that a rule's verdict depends on: the
+// policy its resources are admitted by, and the conditions its health is read
+// from.
+//
+// It exists so the gates below are written once for every kind of sink rather than
+// once per kind. A rule does not care which backend it streams to — that is the
+// point of the sink contract — and a reconciler that switched on the kind at each
+// gate would be one edit away from admitting a resource on one backend that the
+// other refuses.
+type resolvedSink struct {
+	// policy is spec.policy: the sink owner's admission decision, and the
+	// redaction floor a rule may add to but never weaken.
+	policy v1alpha1.SinkPolicy
+
+	// conditions is status.conditions, carried whole rather than pre-digested into
+	// a boolean, because more than readiness is read from it as the backends grow
+	// apart in what they can do.
+	conditions []metav1.Condition
+}
+
+// sinkFetchers is how this build reads one sink of each kind it serves.
+//
+// It is a map rather than a switch so that "which sink kinds does this binary
+// actually serve?" has one answer, in one place, that cannot disagree with itself —
+// and so that adding D6's next backend is an entry here beside its reconciler,
+// not an edit spread across the gates. The keys are exactly the kinds the
+// SinkReference enum admits.
+var sinkFetchers = map[string]func(context.Context, client.Client, string) (*resolvedSink, error){
+	clickHouseSinkKind: func(ctx context.Context, c client.Client, name string) (*resolvedSink, error) {
+		var chSink v1alpha1.ClickHouseSink
+		if err := c.Get(ctx, types.NamespacedName{Name: name}, &chSink); err != nil {
+			return nil, err
+		}
+		return &resolvedSink{policy: chSink.Spec.Policy, conditions: chSink.Status.Conditions}, nil
+	},
+	s3SinkKind: func(ctx context.Context, c client.Client, name string) (*resolvedSink, error) {
+		var s3Sink v1alpha1.S3Sink
+		if err := c.Get(ctx, types.NamespacedName{Name: name}, &s3Sink); err != nil {
+			return nil, err
+		}
+		return &resolvedSink{policy: s3Sink.Spec.Policy, conditions: s3Sink.Status.Conditions}, nil
+	},
+}
+
 // resolveSink loads the sink a rule names and judges its health.
 //
-// The *kind* is checked before anything is fetched, and that check is the whole
+// The *kind* is looked up before anything is fetched, and that lookup is the whole
 // point of a typed reference. A ClickHouseSink named "default" and an S3Sink named
 // "default" are both legal in etcd (D6), so a reference to a kind this build does
-// not serve must park rather than fall through to the same-named sink of the kind
-// it does: binding a rule to the wrong backend would hand it another sink's dedup
+// not serve must park rather than fall through to the same-named sink of a kind it
+// does: binding a rule to the wrong backend would hand it another sink's dedup
 // baseline and warm state, re-emitting every object or suppressing genuine changes,
 // with nothing in the logs to say so.
 //
 // A missing sink returns a nil sink with the SinkMissing verdict. A present but
 // unhealthy sink returns the sink *and* a SinkNotReady verdict, because the rule's
 // targets stay installed in that case — see RuleReconciler's doc comment for why.
-func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*v1alpha1.ClickHouseSink, sinkVerdict, error) {
-	if id.Kind != clickHouseSinkKind {
-		// Not reachable through admission — the CRD's enum lists only the kinds this
-		// build serves — but perfectly reachable in etcd: a rule stored by a newer
-		// operator, or one whose kind this binary was downgraded out of serving.
+func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*resolvedSink, sinkVerdict, error) {
+	fetch, served := sinkFetchers[id.Kind]
+	if !served {
+		// Two ways to arrive here, handled the same way. A kind no release serves
+		// cannot be admitted (the CRD's enum) but is perfectly storable in etcd: a
+		// rule written by a newer operator, or one whose kind this binary was
+		// downgraded out of serving.
+		//
 		// SinkMissing is the honest verdict for both: the sink the rule asked for is
 		// not here, and no other sink may stand in for it.
 		return nil, sinkVerdict{
@@ -636,8 +693,8 @@ func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*v1alpha1
 		}, nil
 	}
 
-	var chSink v1alpha1.ClickHouseSink
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: id.Name}, &chSink); err != nil {
+	resolved, err := fetch(ctx, r.Client, id.Name)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, sinkVerdict{
 				reason:  ReasonSinkMissing,
@@ -647,29 +704,74 @@ func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*v1alpha1
 		return nil, sinkVerdict{}, fmt.Errorf("get %s: %w", id, err)
 	}
 
-	ready := findCondition(chSink.Status.Conditions, v1alpha1.ConditionReady)
+	ready := findCondition(resolved.conditions, v1alpha1.ConditionReady)
 	switch {
 	case ready == nil:
-		return &chSink, sinkVerdict{
+		return resolved, sinkVerdict{
 			reason:  ReasonSinkNotReady,
 			message: fmt.Sprintf("Sink %s has not reported its health yet", id),
 		}, nil
 	case ready.Status != metav1.ConditionTrue:
-		return &chSink, sinkVerdict{
+		return resolved, sinkVerdict{
 			reason:  ReasonSinkNotReady,
 			message: fmt.Sprintf("Sink %s is not ready (%s: %s)", id, ready.Reason, ready.Message),
 		}, nil
 	default:
-		return &chSink, sinkVerdict{}, nil
+		return resolved, sinkVerdict{}, nil
 	}
 }
 
 // setUnevaluated marks the rule's own three conditions Unknown because no gate
 // could run without a sink: the sink's policy decides PolicyAllowed and the sink's
 // name is part of every target, so none of the three is answerable.
+//
+// HistoryUnavailable goes Unknown with them, and for a sharper reason than the
+// other three. It is a *mirror* of the bound sink's condition, and there is no
+// sink to mirror — so reporting False would be this reconciler inventing the
+// reassuring half of an inverted condition about a backend it never found.
 func (r *RuleReconciler) setUnevaluated(status *statusWriter, message string) {
 	for _, condType := range ruleReadyOrder {
 		status.set(condType, metav1.ConditionUnknown, ReasonNotEvaluated, message)
+	}
+	status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionUnknown, ReasonNotEvaluated, message)
+}
+
+// setRuleHistoryUnavailable mirrors the bound sink's HistoryUnavailable condition
+// onto the rule.
+//
+// It is a mirror rather than a second derivation: the sink's own reconciler is the
+// only component that reads the sink runtime's capability report, and a rule
+// reconciler that asked the runtime itself would be a second authority on the same
+// fact, free to disagree with the sink's own status. Reading the sink CR the rule
+// already fetched costs nothing and cannot drift.
+//
+// The rule needs it at all because the two objects usually have different owners.
+// A StreamRule's author may never look at the cluster-scoped S3Sink they named,
+// and a rule reporting only Ready=True would tell them their rule is streaming —
+// true — while leaving them to discover from row counts, months later, that the
+// stream contains no deletions. That is the exact failure mode D12 must not ship
+// with (Invariant 5), so the rule states it too.
+//
+// It is deliberately not in ruleReadyOrder: a declared capability limit of the
+// backend somebody chose is not a fault of the rule that uses it, and dragging
+// Ready False would make every S3-bound rule look broken.
+//
+// An *absent* condition on the sink reads as False rather than Unknown, because
+// only a sink that has not been reconciled yet lacks it, and that resolves within
+// one pass. A sink whose capabilities genuinely are unknown reports the condition
+// as Unknown and is mirrored as Unknown, which is the case worth distinguishing.
+func setRuleHistoryUnavailable(status *statusWriter, id sink.ID, boundSink *resolvedSink) {
+	reported := findCondition(boundSink.conditions, v1alpha1.ConditionHistoryUnavailable)
+	switch {
+	case reported != nil && reported.Status == metav1.ConditionTrue:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionTrue, ReasonWriterOnlySink,
+			writerOnlySinkRuleMessage(id.String()))
+	case reported != nil && reported.Status == metav1.ConditionUnknown:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionUnknown, reported.Reason,
+			fmt.Sprintf("Sink %s has not reported whether it can reconstruct history: %s", id, reported.Message))
+	default:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionFalse, ReasonHistoryReadable,
+			historyReadableRuleMessage(id.String()))
 	}
 }
 
@@ -1023,7 +1125,7 @@ func (r *RuleReconciler) readyCondition(status *statusWriter, verdict sinkVerdic
 		return condition(v1alpha1.ConditionReady, metav1.ConditionFalse,
 			verdict.reason, verdict.message, status.generation)
 	}
-	return readyFor(status, v1alpha1.ConditionReady, ruleReadyOrder, ReasonStreaming,
+	return readyFor(status, ruleReadyOrder, ReasonStreaming,
 		"Every resource this rule names is admitted, resolved, permitted and installed in the watch plan")
 }
 
@@ -1092,7 +1194,11 @@ func (r *RuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(r.kind.newObject()).
+		// One watch per sink kind this build serves, all mapping through the same
+		// spec.sink.name index: a sink becoming Ready, unreachable or deleted
+		// changes every dependent rule's verdict whichever backend it is.
 		Watches(&v1alpha1.ClickHouseSink{}, handler.EnqueueRequestsFromMapFunc(r.rulesForSink)).
+		Watches(&v1alpha1.S3Sink{}, handler.EnqueueRequestsFromMapFunc(r.rulesForSink)).
 		WatchesRawSource(source.Channel(r.events, &handler.EnqueueRequestForObject{})).
 		Named(r.kind.controllerName)
 
@@ -1109,8 +1215,8 @@ func (r *RuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // one resync period of staleness (see Parker.SinkGone).
 const parkChannelCapacity = 128
 
-// rulesForSink maps a ClickHouseSink event onto the rules that stream to it, via
-// the spec.sink.name field index.
+// rulesForSink maps a sink event of any served kind onto the rules that stream to
+// it, via the spec.sink.name field index.
 func (r *RuleReconciler) rulesForSink(ctx context.Context, obj client.Object) []reconcile.Request {
 	list := r.kind.newList()
 	if err := r.Client.List(ctx, list, client.MatchingFields{sinkNameIndexKey: obj.GetName()}); err != nil {

@@ -42,7 +42,7 @@ func TestClusterStreamRuleValidation(t *testing.T) {
 			o.(*ClusterStreamRule).Spec.Sink.Name = otherSinkName
 		},
 		setSinkKind: func(o clientObject) {
-			o.(*ClusterStreamRule).Spec.Sink.Kind = unknownSinkKind
+			o.(*ClusterStreamRule).Spec.Sink.Kind = otherSinkKind
 		},
 		appendResource: func(o clientObject) {
 			r := o.(*ClusterStreamRule)

@@ -2,6 +2,7 @@
 # Not referenced by config/default: samples are examples, not part of a deploy.
 resources:
 - kuberecord.io_v1alpha1_clickhousesink.yaml
+- kuberecord.io_v1alpha1_s3sink.yaml
 - kuberecord.io_v1alpha1_streamrule.yaml
 - kuberecord.io_v1alpha1_clusterstreamrule.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

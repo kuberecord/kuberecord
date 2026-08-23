@@ -86,6 +86,24 @@ const (
 	// will not fix itself with time — it needs an operator to migrate the schema —
 	// whereas an unreachable backend usually will.
 	ProbeReasonSchemaInvalid = "SchemaInvalid"
+
+	// ProbeReasonCredentialsInvalid marks a probe that never reached the backend
+	// because no usable credential could be produced for it.
+	//
+	// It is separate from ProbeReasonUnreachable because the two send an operator
+	// to opposite ends of their infrastructure. "Unreachable" is a statement about
+	// the network and the backend; this is a statement about identity — an IRSA
+	// annotation that was never applied, an instance role that carries no policy,
+	// an expired session — and reporting it as unreachable would have somebody
+	// reading firewall rules to explain a broken role binding.
+	//
+	// It exists for the credential a sink resolves *itself* rather than from a
+	// Secret. A Secret that cannot be read is a control-plane fact the reconciler
+	// establishes synchronously, with no probe involved; an ambient credential
+	// chain (IRSA, workload identity, an instance role) can only be exercised by
+	// attempting a request, so the probe is the only place its failure can
+	// surface. See ErrCredentialsUnavailable.
+	ProbeReasonCredentialsInvalid = "CredentialsInvalid"
 )
 
 // ErrSchemaInvalid is the classifier a backend wraps around a schema-mismatch
@@ -97,6 +115,23 @@ const (
 // "wrong shape, call a human" — is a property of the sink contract, not of any
 // one backend.
 var ErrSchemaInvalid = errors.New("sink schema does not match the schema the operator writes")
+
+// ErrCredentialsUnavailable is the classifier a backend wraps around a probe
+// failure that never got as far as the backend because it could not produce a
+// credential to sign the attempt with.
+//
+// It lives here, beside ErrSchemaInvalid, for the same reason that one does: the
+// distinction it draws — "I cannot reach it" versus "I do not know who I am" —
+// is a property of the sink contract rather than of any one backend's error
+// vocabulary, and the manager must be able to classify it without importing an
+// SDK's error types.
+//
+// A backend that resolves its credential from a Kubernetes Secret has no use for
+// it: an unreadable Secret is decided by the reconciler, synchronously, before
+// any instance exists. It is for the ambient chains — IRSA, workload identity, an
+// instance role — whose only honest test is an attempted request, which is
+// exactly what a probe is.
+var ErrCredentialsUnavailable = errors.New("sink could not obtain a credential to authenticate with")
 
 // errManagerStopped is returned by Ensure once the manager has begun shutting
 // down. A reconciler seeing it should do nothing: the process is exiting, and the
@@ -297,6 +332,33 @@ type ManagerOptions struct {
 	ResultBuffer int
 }
 
+// Capabilities is what one live instance turned out to be able to do, as the
+// *control plane* needs it — a question about a sink's declared limits rather
+// than about its health.
+//
+// It exists because the routing accessors below cannot answer it. StateReaderFor
+// deliberately collapses "no live instance" and "live but cannot read its own
+// history" into one false, because the data plane treats them identically (it
+// re-queues either way). A reconciler must not: the first is a transient state
+// worth an Unknown condition, the second is a permanent capability limit worth a
+// condition an operator can act on. Conflating them would have an S3Sink report
+// its D12 archive limit as "still starting up", forever.
+//
+// It carries one field today because one is all that has a consumer. The other
+// two optional halves already degrade observably without a condition of their own
+// — a backend with no Prober posts no probe results, so BucketReachable stays
+// ProbePending; one with no ScopeEventWriter writes no scope rows — so exporting
+// them here would be describing a question nobody asks.
+type Capabilities struct {
+	// HistoryReadable reports whether the instance implements StateReader.
+	//
+	// False is the whole of D12's archive tier: cache warm-up, zombie garbage
+	// collection and boot reconciliation of scope epochs are all disabled for such
+	// a sink, and every record it receives is a permanent Snapshot. See
+	// StateReader for why that is a declared limit rather than a defect.
+	HistoryReadable bool
+}
+
 // liveSink is one running instance: the backend, the optional halves of the sink
 // contract it turned out to implement, the fingerprint it was built from, and the
 // handles that stop it.
@@ -337,6 +399,13 @@ func newLiveSink(id ID, fingerprint string, writer Writer) *liveSink {
 		inst.prober = prober
 	}
 	return inst
+}
+
+// capabilities renders this instance's optional halves as the control plane's
+// view of them. It reads the fields newLiveSink resolved rather than re-asserting
+// on the writer, so the reported capability and the routed one can never disagree.
+func (inst *liveSink) capabilities() Capabilities {
+	return Capabilities{HistoryReadable: inst.reader != nil}
 }
 
 // SinkManager runs one backend instance per sink CR and is the operator's single
@@ -714,6 +783,19 @@ func (m *SinkManager) startLocked(inst *liveSink) {
 		}
 	})
 
+	if inst.reader == nil {
+		// Reported at Info, not V(1), and here rather than left to whoever notices
+		// later: this is the moment the operator's behaviour changes for this sink,
+		// and a capability limit nobody logged is exactly the silent degradation
+		// Invariant 5 forbids. It re-logs on a recycle, deliberately — a new
+		// instance is a new detection, and a backend that lost (or gained) its read
+		// half across a configuration change is worth a line either way.
+		m.log.Info("Sink backend cannot read its own history; cache warm-up, zombie garbage collection and "+
+			"boot reconciliation of scope epochs are disabled for it, and every record it receives is a "+
+			"permanent Snapshot",
+			"sink", inst.id.String())
+	}
+
 	if inst.prober == nil {
 		m.log.V(1).Info("Sink backend cannot be probed; no health results will be posted for it", "sink", inst.id.String())
 		return
@@ -791,6 +873,26 @@ func (m *SinkManager) StateReaderFor(id ID) (StateReader, bool) {
 		return nil, false
 	}
 	return inst.reader, true
+}
+
+// CapabilitiesFor reports what the live instance for id can do, or ok=false when
+// there is no live instance to ask.
+//
+// The two answers it separates are the reason it exists rather than the caller
+// using StateReaderFor: ok=false means "not running yet" — a transient state a
+// reconciler reports as Unknown — while ok=true with HistoryReadable false means
+// "running, and permanently unable to read its own history", which is a declared
+// capability limit an operator can act on. See Capabilities.
+//
+// It is a control-plane call (once per reconcile, not once per work item), but it
+// is lock-free anyway because it reads the same immutable routing snapshot the
+// hot path does: a reconciler must never be able to block a recycle.
+func (m *SinkManager) CapabilitiesFor(id ID) (Capabilities, bool) {
+	inst, ok := (*m.live.Load())[id]
+	if !ok {
+		return Capabilities{}, false
+	}
+	return inst.capabilities(), true
 }
 
 // ScopeEventWriterFor implements pipeline.ScopeEventRouter: the live scope-log
@@ -906,9 +1008,15 @@ func (m *SinkManager) probe(ctx context.Context, inst *liveSink) ProbeResult {
 		return result
 	}
 
+	// Ordered most-specific first, and the two classifiers are disjoint by
+	// construction: a probe that never obtained a credential cannot have reached
+	// the backend to disagree with its schema.
 	result.Reason = ProbeReasonUnreachable
-	if errors.Is(err, ErrSchemaInvalid) {
+	switch {
+	case errors.Is(err, ErrSchemaInvalid):
 		result.Reason = ProbeReasonSchemaInvalid
+	case errors.Is(err, ErrCredentialsUnavailable):
+		result.Reason = ProbeReasonCredentialsInvalid
 	}
 	// Logged here, with the sink's identity, so the condition the reconciler
 	// eventually writes is never the only record of the failure (Invariant 4).

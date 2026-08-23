@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -53,6 +54,8 @@ import (
 	"github.com/yelzhy/kuberecord/internal/plan"
 	"github.com/yelzhy/kuberecord/internal/sink"
 	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
+	"github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/yelzhy/kuberecord/internal/sink/s3/awsstore"
 	"github.com/yelzhy/kuberecord/internal/watch"
 	// +kubebuilder:scaffold:imports
 )
@@ -509,6 +512,14 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 		return fmt.Errorf("build the authorization client: %w", err)
 	}
 
+	// One probe hub for every sink kind, because the sink runtime has one
+	// probe-result channel carrying verdicts for all of them: a drainer per
+	// reconciler would steal the other's results (see controller.SinkProbeHub).
+	probes := controller.NewSinkProbeHub(op.sinks.ProbeResults())
+	if err := probes.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the sink probe hub: %w", err)
+	}
+
 	sinkReconciler := &controller.SinkReconciler{
 		Client: mgr.GetClient(),
 		// GetEventRecorderFor is deprecated in favour of the events/v1 recorder,
@@ -525,9 +536,26 @@ func (op *operator) setupControlPlane(mgr ctrl.Manager, cfg operatorConfig) erro
 		// (Invariant 1).
 		BuildConfig:       newSinkConfigBuilder(cfg.writer, cfg.autoCreateSchema),
 		OperatorNamespace: cfg.operatorNamespace,
+		Probes:            probes,
 	}
-	if err := sinkReconciler.SetupWithManager(mgr, op.sinks.ProbeResults()); err != nil {
+	if err := sinkReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up the ClickHouseSink reconciler: %w", err)
+	}
+
+	s3SinkReconciler := &controller.S3SinkReconciler{
+		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: see the ClickHouseSink recorder above.
+		Recorder: mgr.GetEventRecorderFor("kuberecord-s3sink"),
+		Sinks:    op.sinks,
+		// The object-store mapping lives here, in the wiring, for the same reason
+		// the ClickHouse one does: internal/controller then depends on no client
+		// and cannot reach a bucket even by accident (Invariant 1).
+		BuildConfig:       newS3SinkConfigBuilder(cfg.writer),
+		OperatorNamespace: cfg.operatorNamespace,
+		Probes:            probes,
+	}
+	if err := s3SinkReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up the S3Sink reconciler: %w", err)
 	}
 
 	base := controller.RuleReconciler{
@@ -578,11 +606,25 @@ func (op *operator) parkRules(id sink.ID, ruleKeys []string) {
 // it could not label its own series.
 func newSinkFactory(metrics *pipeline.PipelineMetrics) sink.Factory {
 	return func(id sink.ID, cfg sink.InstanceConfig) (sink.Writer, error) {
-		chConfig, ok := cfg.(clickhouse.Config)
-		if !ok {
-			return nil, fmt.Errorf("sink %s: %T is not a ClickHouse configuration", id, cfg)
+		switch typed := cfg.(type) {
+		case clickhouse.Config:
+			return clickhouse.Open(typed, metrics.ForSink(id))
+		case s3.SinkConfig:
+			// context.Background is correct rather than convenient: building the
+			// store performs no I/O (see awsstore.New) — it resolves process
+			// environment and assembles a lazy credential chain — and the
+			// sink.Factory contract has no context to thread precisely because the
+			// SinkManager calls it inline from a reconcile (Invariant 1). The
+			// first network call happens on the writer's own goroutines, under
+			// their own deadlines.
+			store, err := awsstore.New(context.Background(), typed.Client)
+			if err != nil {
+				return nil, fmt.Errorf("sink %s: build the object store: %w", id, err)
+			}
+			return s3.NewWriter(store, typed.Writer, metrics.ForSink(id)), nil
+		default:
+			return nil, fmt.Errorf("sink %s: %T is not a sink configuration this build can serve", id, cfg)
 		}
-		return clickhouse.Open(chConfig, metrics.ForSink(id))
 	}
 }
 
@@ -618,6 +660,66 @@ func newSinkConfigBuilder(defaults writerTuning, autoCreateSchema bool) controll
 			CheckpointEvery: intOrDefault(spec.Writer.CheckpointEvery, clickhouse.DefaultCheckpointEvery),
 		}, nil
 	}
+}
+
+// newS3SinkConfigBuilder returns the controller.S3SinkConfigBuilder that maps an
+// S3Sink spec plus its resolved credentials onto an object-store configuration.
+//
+// The four writer knobs S3 shares with ClickHouse fall back to the same
+// operator-level --writer-* values, deliberately: an administrator who sized the
+// write path for their cluster on the Deployment should not have to repeat it per
+// sink, and a sink that states a value still wins. spec.rotation has no --writer-*
+// twin — an omitted field resolves to zero, which the S3 writer reads as "use the
+// shipped default" — for the same reason checkpointEvery has none: the CRD already
+// defaults both, so a fleet-wide fallback over them could only disagree with the
+// schema.
+//
+// Like its ClickHouse twin it performs no I/O: it translates a struct, and is
+// called inline from a reconcile (Invariant 1).
+func newS3SinkConfigBuilder(defaults writerTuning) controller.S3SinkConfigBuilder {
+	return func(_ string, spec v1alpha1.S3SinkSpec, creds controller.S3Credentials) (sink.InstanceConfig, error) {
+		cfg := s3.SinkConfig{
+			Client: s3.ClientConfig{
+				Region:         spec.Region,
+				Endpoint:       spec.Endpoint,
+				ForcePathStyle: spec.ForcePathStyle,
+				// A zero-valued credential is not a missing one: it is this sink
+				// asking to authenticate from the ambient chain, which is the
+				// recommended shape on a cloud provider (see
+				// v1alpha1.S3CredentialsSpec).
+				Credentials: s3.Credentials{
+					AccessKeyID:     creds.AccessKeyID,
+					SecretAccessKey: creds.SecretAccessKey,
+					SessionToken:    creds.SessionToken,
+				},
+			},
+			Writer: s3.Config{
+				Bucket:         spec.Bucket,
+				Prefix:         spec.Prefix,
+				MaxObjectBytes: int64OrZero(spec.Rotation.MaxObjectBytes),
+				MaxObjectAge:   durationOrDefault(spec.Rotation.MaxObjectAge, 0),
+				QueueSize:      intOrDefault(spec.Writer.QueueSize, defaults.queueSize),
+				Workers:        intOrDefault(spec.Writer.Workers, defaults.workers),
+				EnqueueTimeout: durationOrDefault(spec.Writer.EnqueueTimeout, defaults.enqueueTimeout),
+				DrainTimeout:   durationOrDefault(spec.Writer.DrainTimeout, defaults.drainTimeout),
+			},
+		}
+		if lock := spec.ObjectLock; lock != nil {
+			// The mode is passed through as the string S3 itself uses; the CRD's enum
+			// has already established it is one of the two legal ones.
+			cfg.Writer.ObjectLock = &s3.ObjectLock{Mode: string(lock.Mode), RetainDays: lock.RetainDays}
+		}
+		return cfg, nil
+	}
+}
+
+// int64OrZero resolves an optional CRD int64 field, leaving an omitted one at zero
+// — which every field it is used for reads as "use the shipped default".
+func int64OrZero(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
 }
 
 // durationOrDefault resolves an optional CRD duration field.

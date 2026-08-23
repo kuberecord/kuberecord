@@ -329,22 +329,35 @@ func TestSinkDeletionWithdrawsFromRuntime(t *testing.T) {
 	}
 }
 
-// TestProbeWatcherShutdown is the goleak check for the one long-lived goroutine this
-// package owns. It also pins the two properties that make the watcher safe to put on
-// the sink runtime's health path: a verdict is recorded before it is announced, and a
-// blocked wake-up channel never outlives the context.
-func TestProbeWatcherShutdown(t *testing.T) {
+// TestProbeHubShutdown is the goleak check for the one long-lived goroutine this
+// package owns. It also pins the three properties that make the hub safe to put on
+// the sink runtime's health path: a verdict is recorded before it is announced, a
+// blocked wake-up channel never outlives the context, and a verdict reaches the
+// reconciler for its own *kind* and no other.
+func TestProbeHubShutdown(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
+	// hubFor builds a hub over results with one registered kind, returning the
+	// wake-up channel that kind would be watched through.
+	hubFor := func(t *testing.T, results chan sink.ProbeResult) (*SinkProbeHub, chan event.GenericEvent) {
+		t.Helper()
+		hub := NewSinkProbeHub(results)
+		events, err := hub.register(clickHouseSinkKind, func(name string) client.Object {
+			return &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		})
+		if err != nil {
+			t.Fatalf("register a kind with the hub: %v", err)
+		}
+		return hub, events
+	}
+
 	t.Run("drains until cancelled", func(t *testing.T) {
-		probes := newProbeStore()
-		events := make(chan event.GenericEvent, 4)
 		results := make(chan sink.ProbeResult, 4)
-		watcher := &ProbeWatcher{Results: results, Probes: probes, Events: events}
+		hub, events := hubFor(t, results)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- watcher.Start(ctx) }()
+		go func() { done <- hub.Start(ctx) }()
 
 		results <- sink.ProbeResult{Sink: clickHouseSinkID("one"), At: time.Now().UTC()}
 		select {
@@ -353,12 +366,12 @@ func TestProbeWatcherShutdown(t *testing.T) {
 				t.Errorf("woke the reconciler for %q, want %q", ev.Object.GetName(), "one")
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("the watcher never announced a verdict")
+			t.Fatal("the hub never announced a verdict")
 		}
 		// The store is written before the wake-up is sent, so a reconcile triggered
 		// by that wake-up can never read a verdict older than the one it was woken
 		// for.
-		if _, recorded := probes.latest(clickHouseSinkID("one")); !recorded {
+		if _, recorded := hub.latest(clickHouseSinkID("one")); !recorded {
 			t.Error("the verdict was announced before it was recorded")
 		}
 
@@ -375,14 +388,25 @@ func TestProbeWatcherShutdown(t *testing.T) {
 
 	t.Run("a full wake-up channel does not outlive the context", func(t *testing.T) {
 		// Capacity zero with no reader: the send blocks, and only ctx.Done may
-		// release it. A watcher that could not be cancelled here would hold the sink
+		// release it. A hub that could not be cancelled here would hold the sink
 		// runtime's probe loop open through shutdown.
 		results := make(chan sink.ProbeResult, 1)
-		watcher := &ProbeWatcher{Results: results, Probes: newProbeStore(), Events: make(chan event.GenericEvent)}
+		hub := NewSinkProbeHub(results)
+		if _, err := hub.register(clickHouseSinkKind, func(name string) client.Object {
+			return &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		}); err != nil {
+			t.Fatalf("register a kind with the hub: %v", err)
+		}
+		// Replace the buffered channel the helper would have handed out with an
+		// unbuffered one, so the send has nowhere to go.
+		hub.targets[clickHouseSinkKind] = probeTarget{
+			events:    make(chan event.GenericEvent),
+			newObject: func(string) client.Object { return &v1alpha1.ClickHouseSink{} },
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- watcher.Start(ctx) }()
+		go func() { done <- hub.Start(ctx) }()
 		results <- sink.ProbeResult{Sink: clickHouseSinkID("blocked"), At: time.Now().UTC()}
 
 		cancel()
@@ -392,4 +416,55 @@ func TestProbeWatcherShutdown(t *testing.T) {
 			t.Fatal("Start stayed blocked on a full wake-up channel after cancellation")
 		}
 	})
+
+	t.Run("a verdict for an unregistered kind is recorded but wakes nobody", func(t *testing.T) {
+		// This is the failure mode one shared channel introduces and the reason the
+		// hub dispatches on kind rather than assuming one: a verdict that reached
+		// the wrong reconciler would be written onto the wrong CR's status. It is
+		// still *stored*, so a reconciler registered later reads it rather than
+		// waiting for the next probe interval.
+		results := make(chan sink.ProbeResult, 1)
+		hub, events := hubFor(t, results)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		done := make(chan error, 1)
+		go func() { done <- hub.Start(ctx) }()
+
+		orphan := sink.ID{Kind: "PostgresSink", Name: "future"}
+		results <- sink.ProbeResult{Sink: orphan, At: time.Now().UTC()}
+		waitFor(t, "the orphaned verdict to be recorded", func() (bool, string) {
+			_, ok := hub.latest(orphan)
+			return ok, "not recorded yet"
+		})
+		select {
+		case ev := <-events:
+			t.Errorf("the ClickHouseSink reconciler was woken for %q, a sink of another kind",
+				ev.Object.GetName())
+		default:
+		}
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Start did not return after its context was cancelled")
+		}
+	})
+}
+
+// TestProbeHubRefusesADuplicateRegistration pins the wiring mistake the hub must
+// not absorb: two reconcilers for one kind would each write the other's conditions,
+// and only one of them would ever be woken. It is refused rather than overwritten.
+func TestProbeHubRefusesADuplicateRegistration(t *testing.T) {
+	hub := NewSinkProbeHub(nil)
+	newObject := func(name string) client.Object {
+		return &v1alpha1.ClickHouseSink{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	}
+	if _, err := hub.register(clickHouseSinkKind, newObject); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	if _, err := hub.register(clickHouseSinkKind, newObject); err == nil {
+		t.Error("the hub accepted a second reconciler for the same sink kind")
+	}
 }

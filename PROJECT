@@ -24,6 +24,13 @@ resources:
   version: v1alpha1
 - api:
     crdVersion: v1
+    namespaced: false
+  domain: kuberecord.io
+  kind: S3Sink
+  path: github.com/yelzhy/kuberecord/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
     namespaced: true
   domain: kuberecord.io
   kind: StreamRule

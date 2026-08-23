@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/gomega" //nolint:revive,staticcheck
 
+	"github.com/yelzhy/kuberecord/internal/sink"
 	"github.com/yelzhy/kuberecord/test/harness"
 )
 
@@ -44,6 +45,22 @@ var ch = &harness.ClickHouse{
 	Deployment: clickHouseDeployment,
 	User:       clickHouseUser,
 	Database:   clickHouseDatabase,
+	ClusterID:  clusterID,
+}
+
+// mio is this suite's view of the S3 archive: the MinIO pod to exec into, the
+// credentials the fixture and the operator share, and the bucket and prefix the
+// S3Sink writes under.
+//
+// It is populated here rather than in the scenario for the reason this whole file
+// exists: which store the suite reads, and as whom, is a property of the suite.
+var mio = &harness.MinIO{
+	Namespace:  minioNamespace,
+	Deployment: minioDeployment,
+	User:       s3AccessKeyID,
+	Password:   s3SecretAccessKey,
+	Bucket:     s3Bucket,
+	Prefix:     s3Prefix,
 	ClusterID:  clusterID,
 }
 
@@ -70,6 +87,11 @@ type (
 	operatorPodInfo = harness.PodInfo
 	ruleResource    = harness.RuleResource
 	redactionEntry  = harness.RedactionEntry
+	// archiveRecord is one line of an S3 object: the logical sink.Record itself,
+	// because that is what this backend stores (D9) — there is no physical row type
+	// standing between the contract and the bytes, the way ResourceRow stands
+	// between it and ClickHouse's columns.
+	archiveRecord = sink.Record
 )
 
 // Event types, condition statuses, groups and kinds, as this suite spells them.
@@ -92,6 +114,10 @@ const (
 	kindIngress    = harness.KindIngress
 	kindEvent      = harness.KindEvent
 	kindConfigMap  = harness.KindConfigMap
+
+	// sinkKindS3 is the spec.sink.kind an S3-bound rule names. It is the CRD's
+	// enum value, spelled once here rather than at each scenario.
+	sinkKindS3 = "S3Sink"
 )
 
 // creationEvents are the two tags an object's first appearance can carry — see
@@ -122,6 +148,32 @@ func expectCondition(g Gomega, kind, name, namespace, condType, status string) k
 }
 
 func resourceRows(filter objectFilter) ([]resourceRow, error) { return ch.ResourceRows(filter) }
+
+// The archive's side of the same vocabulary. A scenario builds one objectFilter
+// and asks either backend about it; only the verb changes — rows from ClickHouse,
+// records from the bucket.
+func archiveRecords(filter objectFilter) ([]archiveRecord, error) { return mio.Records(filter) }
+
+func eventuallyExactlyOneRecord(filter objectFilter, timeout ...time.Duration) archiveRecord {
+	return mio.EventuallyExactlyOneRecord(filter, timeout...)
+}
+
+func eventuallyRecordCount(filter objectFilter, want int, timeout ...time.Duration) []archiveRecord {
+	return mio.EventuallyRecordCount(filter, want, timeout...)
+}
+
+func consistentlyRecordCount(filter objectFilter, want int, window ...time.Duration) {
+	mio.ConsistentlyRecordCount(filter, want, window...)
+}
+
+// s3StreamRuleYAML renders a StreamRule pointed at this suite's S3Sink.
+//
+// It names the sink's kind, which a rule reaching anything other than a
+// ClickHouseSink must: the CRD defaults spec.sink.kind, so a rule that left it out
+// would look for a ClickHouseSink called "archive" and park with SinkMissing.
+func s3StreamRuleYAML(namespace, name string, resources []ruleResource) string {
+	return harness.StreamRuleYAMLForSinkKind(namespace, name, sinkKindS3, s3SinkName, resources)
+}
 
 func scopeRows(query scopeQuery) ([]scopeRow, error) { return ch.ScopeRows(query) }
 

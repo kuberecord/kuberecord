@@ -151,40 +151,6 @@ type WriterSpec struct {
 	CheckpointEvery *int32 `json:"checkpointEvery,omitempty"`
 }
 
-// SinkPolicy is the sink owner's admission policy over what may be written to
-// it.
-//
-// It exists because sink ownership and rule ownership are different roles: the
-// platform team owning a ClickHouse instance needs a say in what lands in it
-// that does not depend on reviewing every StreamRule anyone writes.
-type SinkPolicy struct {
-	// AllowedGVKs restricts which resource types may be streamed to this sink.
-	//
-	// An empty (or omitted) list allows everything *except* the hard deny-list
-	// — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
-	// re-enable it. Deny is enforced in code, not merely in config, so the
-	// permissive default can never become a way to exfiltrate Secrets.
-	// +optional
-	// +kubebuilder:validation:MaxItems=128
-	AllowedGVKs []GVKSelector `json:"allowedGVKs,omitempty"`
-
-	// Redaction is this sink's redaction floor: value paths scrubbed out of
-	// every object any rule streams here, before hashing (Task 3.3).
-	//
-	// It lives on the sink for the same reason AllowedGVKs does. Whoever owns
-	// the ClickHouse instance owns what may land in it, and that authority has
-	// to hold without reviewing every StreamRule anyone writes — so a rule may
-	// add paths through its own `spec.extraRedaction`, but nothing a rule
-	// declares can remove one listed here.
-	//
-	// An empty list is not "no redaction": the data plane always scrubs
-	// `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole
-	// prior copies of the objects it annotates.
-	// +optional
-	// +kubebuilder:validation:MaxItems=64
-	Redaction []RedactionRule `json:"redaction,omitempty"`
-}
-
 // ClickHouseSinkSpec is the desired state of a ClickHouseSink.
 type ClickHouseSinkSpec struct {
 	// Connection is how to reach ClickHouse.

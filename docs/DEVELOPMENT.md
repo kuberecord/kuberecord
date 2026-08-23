@@ -22,7 +22,7 @@ make build            # go build the manager binary
 make run              # run the controller locally against your current kubeconfig context
                       #   (OPERATOR_NAMESPACE=<ns> selects where it reads sink credentials Secrets)
 make test             # run the unit/envtest suite (make setup-envtest fetches the binaries)
-make test-integration # run the ClickHouse integration tests against a throwaway container (needs Docker)
+make test-integration # run the integration suites against throwaway ClickHouse and MinIO containers (needs Docker)
 make test-e2e         # run the end-to-end acceptance suite on a Kind cluster (needs Docker + Kind)
 make test-chaos       # run the failure-mode (chaos) suite on a Kind cluster (needs Docker + Kind)
 make bench-load       # run the synthetic-churn load harness on a named scale profile
@@ -105,23 +105,36 @@ in ClickHouse what the stand-in assumes.
 
 ## Integration tests — `make test-integration`
 
-Two suites run against a real, dockerized ClickHouse (build tag `integration`),
-in a container the target creates and always tears down:
+Three suites run against real, dockerized backends (build tag `integration`) — a
+ClickHouse and a MinIO, both in containers the target creates and always tears
+down:
 
-- `internal/sink` exercises the writer and reader paths against a real server;
+- `internal/sink/clickhouse` exercises the writer and reader paths against a real
+  server;
 - `test/queries` executes **every query kuberecord publishes** — the SQL in
   [`docs/QUERIES.md`](QUERIES.md) and in every shipped Grafana dashboard —
   against tables built from the shipped DDL alone. That is how "these queries
   only touch frozen-schema columns" stays a tested claim rather than a review
   convention.
+- `internal/sink/s3/awsstore` writes through the real S3 `Writer` to MinIO and
+  reads the objects back: that they land at the documented key layout, that the
+  decompressed JSONL decodes to exactly the records enqueued, that a retried
+  write leaves **one** object rather than a duplicate, that both rotation
+  triggers fire independently, and that the Object Lock retention headers really
+  are on the object. It lives beside the AWS SDK because that is the only place
+  the SDK and the shipped writer can meet — `internal/sink/s3` links no SDK by
+  design, which is what keeps the write path testable against a stand-in store.
 
 ## End-to-end tests — `make test-e2e`
 
 The acceptance suite. It creates a Kind cluster, builds and side-loads the
 manager image, deploys a single-node ClickHouse
 (`test/e2e/manifests/clickhouse.yaml`) and the operator, and then drives real
-custom resources while **asserting by querying ClickHouse directly** — not by
-reading the operator's own status.
+custom resources while **asserting by reading the backend directly** — not by
+reading the operator's own status. The archive scenario brings up its own MinIO
+(`test/e2e/manifests/minio.yaml`) rather than adding it to the suite's setup, so a
+focused run of the ClickHouse scenarios — which is what the two install-path
+smokes below are — pays none of its two minutes.
 
 | Scenario | What it proves |
 |---|---|
@@ -132,6 +145,7 @@ reading the operator's own status.
 | Cluster scope | a `ClusterStreamRule` streams `v1/Node`; a namespaced `StreamRule` naming it reports `ResourceResolved=False` |
 | Events | a rule naming `v1/Event` persists the Event stream past its TTL, with no false `Deleted` rows |
 | Redaction | a configured path is scrubbed before hashing, and neither the payload, the diff nor the hash can reveal it |
+| Archive (S3) | an `S3Sink` over an in-cluster MinIO reports `HistoryUnavailable=True` while staying `Ready`, and its rule mirrors it; a Deployment's lifecycle lands in the bucket as rotated zstd-compressed JSONL at the documented key layout — a full `Snapshot` first (never `Added`), a diff-only `Modified` for a change — and after a restart the live object is re-snapshotted in full while an object deleted during the outage produces **no** `Deleted` record at all (D12). Every assertion reads the bucket, not the operator |
 
 It needs Docker and [kind] and nothing else — the suite installs everything it
 depends on and tears the cluster down afterwards. Budget under 15 minutes; the
