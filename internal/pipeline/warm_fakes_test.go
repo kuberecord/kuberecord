@@ -70,6 +70,18 @@ type fakeStateReader struct {
 	// block, when non-nil, holds every LastKnownStates call until it is closed —
 	// the hook the cancellation tests use to catch a warm mid-flight.
 	block chan struct{}
+
+	// onActiveScopes, when non-nil, runs at the start of every ActiveScopes call,
+	// before anything is recorded and while the caller's own state is still what it
+	// was when it decided to make the call.
+	//
+	// It is the ordering hook the settle-gate test needs. "The boot pass must not
+	// run before the desired state settles" is a statement about *when* a call
+	// happened, and a pass that is correctly waiting has nothing observable to
+	// sequence against — so instead of watching a clock, the test records whether
+	// the gate was open at the moment of each call and asserts afterwards, once a
+	// call has demonstrably happened, that none of them was early.
+	onActiveScopes func()
 }
 
 func newFakeStateReader() *fakeStateReader {
@@ -111,6 +123,13 @@ func (f *fakeStateReader) ScopeWasActive(_ context.Context, filter sink.ScopeFil
 }
 
 func (f *fakeStateReader) ActiveScopes(_ context.Context, clusterID string) ([]sink.ScopeFilter, error) {
+	f.mu.Lock()
+	hook := f.onActiveScopes
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activeScopeCalls++
@@ -250,25 +269,54 @@ type fakeSinkBackends struct {
 	mu      sync.Mutex
 	readers map[sink.ID]sink.StateReader
 	events  map[sink.ID]sink.ScopeEventWriter
+
+	// readerLookups counts StateReaderFor calls per sink, and sinkIDCalls counts
+	// SinkIDs calls. Both exist to be *sequencing barriers* rather than
+	// statistics: a lookup that came back empty is the coordinator having tried
+	// and been turned away, and a SinkIDs call is one boot-reconciliation tick
+	// having happened. Waiting for either is how a test asserts an absence
+	// relative to a completed attempt instead of relative to a wall-clock window
+	// (see stayFalse for why that distinction is the whole point).
+	readerLookups map[sink.ID]int
+	sinkIDCalls   int
 }
 
 func newFakeSinkBackends() *fakeSinkBackends {
 	return &fakeSinkBackends{
-		readers: make(map[sink.ID]sink.StateReader),
-		events:  make(map[sink.ID]sink.ScopeEventWriter),
+		readers:       make(map[sink.ID]sink.StateReader),
+		events:        make(map[sink.ID]sink.ScopeEventWriter),
+		readerLookups: make(map[sink.ID]int),
 	}
 }
 
 func (f *fakeSinkBackends) StateReaderFor(id sink.ID) (sink.StateReader, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readerLookups[id]++
 	r, ok := f.readers[id]
 	return r, ok
+}
+
+// readerLookupCount reports how many times a reader was resolved for id,
+// successfully or not.
+func (f *fakeSinkBackends) readerLookupCount(id sink.ID) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readerLookups[id]
+}
+
+// sinkIDCallCount reports how many boot-reconciliation ticks have enumerated the
+// live sinks.
+func (f *fakeSinkBackends) sinkIDCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sinkIDCalls
 }
 
 func (f *fakeSinkBackends) SinkIDs() []sink.ID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sinkIDCalls++
 	ids := make([]sink.ID, 0, len(f.readers)+len(f.events))
 	for id := range f.readers {
 		ids = append(ids, id)
@@ -349,6 +397,31 @@ func (f *fakeScopes) withSettleGate() (open func()) {
 	return sync.OnceFunc(func() { close(gate) })
 }
 
+// settleOpen reports whether the gate has been opened, without blocking on it.
+//
+// It is the *state* behind Settled's channel, which the gate test needs because
+// its assertion is about ordering: a boot pass observed while this returns false
+// ran early, and one observed after it returns true did not. A test that only had
+// the channel could wait for the gate but never ask whether a call it is looking
+// at preceded it.
+func (f *fakeScopes) settleOpen() bool {
+	f.mu.Lock()
+	gate := f.settled
+	f.mu.Unlock()
+	if gate == nil {
+		// No gate installed means no gating is needed, which the ScopeStates
+		// contract defines as "the pass may run immediately" — so every call is
+		// legitimately after it.
+		return true
+	}
+	select {
+	case <-gate:
+		return true
+	default:
+		return false
+	}
+}
+
 func (f *fakeScopes) ScopeSynced(id sink.ID, scope ScopeKey) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -403,9 +476,39 @@ func waitFor(t *testing.T, cond func() bool, describe func() string) {
 	}
 }
 
-// stayFalse asserts cond does not become true within a short window — the shape
-// every "it must not do that yet" assertion needs (no GC before the informer
-// syncs, no Deleted row for an orphaned scope).
+// stayFalse asserts cond does not become true within a short wall-clock window.
+//
+// **It can only fail open, and it is the weaker of the two barriers available
+// here. Reach for sequencing first.** The window is wall-clock, so it is
+// scheduler-dependent in both directions: a genuine violation whose goroutine was
+// not scheduled inside 250ms reads as a pass, and on a consistently loaded CI
+// runner it reads as a pass every time. Worse, the window can elapse before the
+// operation under test has even started, in which case the assertion is vacuous
+// rather than merely weak — nothing was going to happen yet.
+//
+// The alternative, and the default, is to sequence the absence against a
+// *completed operation*: run the pass that would have produced the forbidden
+// effect to completion, then assert the effect was not recorded. That is a final
+// answer rather than a time-bounded one — after the operation has finished, the
+// effect can no longer appear. This package offers three shapes of it, in
+// decreasing strength:
+//
+//   - warmHarness.warmPass, which runs one warm on the calling goroutine and
+//     returns when the whole pass is over.
+//   - the stop function warmHarness.run returns, which cancels the coordinator and
+//     waits for every warm goroutine to exit (WarmCoordinator.Start does not
+//     return before that). Pair it with a positive barrier first, so the pass is
+//     known to have reached the point where the effect would have been produced.
+//   - a counter on one of the fakes that the operation increments as it goes —
+//     awaitBootReconciled, fakeSinkBackends.readerLookupCount and
+//     sinkIDCallCount — for a pass whose *attempt* is observable even when its
+//     outcome is nothing at all.
+//
+// What is left for stayFalse is the case where the operation under test is
+// deliberately blocked and therefore has no completion to wait for. There is
+// exactly one such call site (TestWarmScopeWaitsForTheInformerToSync), and it
+// carries a comment saying so. Adding a second one needs the same justification,
+// in writing.
 func stayFalse(t *testing.T, cond func() bool, describe string) {
 	t.Helper()
 	deadline := time.Now().Add(250 * time.Millisecond)

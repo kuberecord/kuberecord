@@ -411,6 +411,11 @@ spec:
                       object. Above 1Gi a single object stops being a practical unit of retry or
                       of partial recovery, and a worker's in-flight memory (see
                       S3WriterSpec.Workers) grows with it.
+
+                      This ceiling bounds *one* object. What bounds the sink is the cross-field
+                      rule on S3SinkSpec: workers × maxObjectBytes may not exceed
+                      S3WriterMemoryBudgetBytes, because each worker accumulates an object of its
+                      own. Raising this field therefore lowers how many workers the sink may have.
                     format: int64
                     maximum: 1073741824
                     minimum: 1048576
@@ -458,11 +463,17 @@ spec:
 
                       Each worker accumulates its own object, so this multiplies two costs rather
                       than one: the writer's steady-state memory ceiling is workers ×
-                      maxObjectBytes (at the ceilings of both, 64Gi — do not pair them), and the
-                      object count grows with it, since N workers close N partial objects where
-                      one worker would have closed a single full one. The ceiling of 64 matches
-                      ClickHouse's for a different reason: not because the backend punishes
-                      concurrency — S3 rewards it — but because memory does.
+                      maxObjectBytes, and the object count grows with it, since N workers close N
+                      partial objects where one worker would have closed a single full one. The
+                      ceiling of 64 matches ClickHouse's for a different reason: not because the
+                      backend punishes concurrency — S3 rewards it — but because memory does.
+
+                      The two ceilings do not compose: 64 workers at 1Gi each would be 64Gi, so
+                      the pairing is rejected at admission by the cross-field rule on S3SinkSpec
+                      rather than merely warned about here (workers × maxObjectBytes may not
+                      exceed S3WriterMemoryBudgetBytes). A high worker count is still available at
+                      a smaller rotation size, which is the shape that actually helps: S3 rewards
+                      request concurrency, not object size.
                     format: int32
                     maximum: 64
                     minimum: 1
@@ -471,6 +482,15 @@ spec:
             required:
             - bucket
             type: object
+            x-kubernetes-validations:
+            - message: 'spec.writer.workers × spec.rotation.maxObjectBytes must not
+                exceed 4Gi (4294967296 bytes): each worker accumulates its own object,
+                so workers multiplies this sink''s steady-state memory ceiling rather
+                than only its throughput. Lower either operand (the defaults are 4
+                × 64Mi = 256Mi) or split the load across two sinks'
+              rule: '(has(self.writer) && has(self.writer.workers) ? self.writer.workers
+                : 4) * (has(self.rotation) && has(self.rotation.maxObjectBytes) ?
+                self.rotation.maxObjectBytes : 67108864) <= 4294967296'
           status:
             description: status defines the observed state of S3Sink.
             properties:

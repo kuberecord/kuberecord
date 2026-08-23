@@ -58,6 +58,7 @@ func (c Config) Fingerprint() string {
 	// returns one), and Fprintf's return is therefore not fallible in any way a
 	// caller could act on — but it is still read and checked rather than
 	// discarded, so this stays clean under Invariant 4's no-silent-errors rule.
+	// See the branch below for what the unreachable constant is and is not.
 	if _, err := fmt.Fprintf(h,
 		"addr=%q db=%q user=%q pass=%q dial=%q read=%q autocreate=%t "+
 			"batchrows=%d batchwait=%q queue=%d workers=%d enqueue=%q drain=%q checkpoint=%d",
@@ -66,8 +67,14 @@ func (c Config) Fingerprint() string {
 		c.BatchMaxRows, c.BatchMaxWait.String(), c.WriteQueueSize, c.WriteWorkers,
 		c.EnqueueTimeout.String(), c.ShutdownDrainTimeout.String(), c.CheckpointEvery,
 	); err != nil {
-		// Unreachable; a digest of nothing would silently make every
-		// configuration look identical, so it is reported rather than returned.
+		// Unreachable by hash.Hash's contract: its Write never returns an error, so
+		// Fprintf to one cannot fail. The constant is a tombstone, not a mitigation
+		// — if this branch were ever reached, every configuration would digest
+		// identically and every reconfiguration would look like a no-op. Nothing
+		// reports it because nothing here can: this method has no logger, and
+		// returning an error would put a failure mode into sink.InstanceConfig that
+		// no implementation of it has. Deliberately identical to
+		// s3.SinkConfig.Fingerprint's branch; the two are read side by side.
 		return "unfingerprintable"
 	}
 	return hex.EncodeToString(h.Sum(nil))

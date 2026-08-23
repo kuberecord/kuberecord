@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,13 +135,90 @@ func (h *warmHarness) warmNow(scope ScopeKey) time.Time {
 	return epoch
 }
 
+// warmPass runs one warm for scope to completion on the calling goroutine and
+// returns the epoch it ran for.
+//
+// It is the strongest barrier this package has for a negative assertion. A warm
+// requested through WarmScope runs on its own goroutine, so "the sweep wrote
+// nothing" can only ever be checked against a clock — but a warm that has
+// *returned* has finished deciding, and an effect it did not record cannot appear
+// afterwards. Every assertion sequenced this way is therefore final rather than
+// time-bounded (see stayFalse for the failure mode that motivates it).
+//
+// It is only usable where the pass terminates on its own: a warm parked in
+// awaitScopeSync, or retrying a sink that never becomes live, would block the test
+// goroutine instead. Those keep the async form and a different barrier.
+//
+// The scope is marked desired first, exactly as warmNow does, because production
+// only ever warms a scope an interest was just installed for. Nothing else about
+// the pass differs: WarmScope's own bookkeeping (idempotency per epoch,
+// cancellation, the pending queue) is what the async tests exercise, and is not
+// what a "did it write anything" assertion is about.
+func (h *warmHarness) warmPass(t *testing.T, scope ScopeKey) time.Time {
+	t.Helper()
+	epoch := time.Now().UTC()
+	h.scopes.markDesired(scope)
+	h.coord.warm(h.ctx, scopeRef{sink: testSink, scope: scope}, epoch)
+	return epoch
+}
+
+// awaitBootReconciled waits until the coordinator has marked the sink's boot pass
+// done — the completion signal for "boot reconciliation has run", which is
+// otherwise invisible on a pass whose correct outcome is to write nothing.
+//
+// The mark is only set after closeOrphanedScopes returned successfully, so
+// anything that pass would have emitted has already been emitted by the time this
+// returns.
+func (h *warmHarness) awaitBootReconciled(t *testing.T) {
+	t.Helper()
+	waitFor(t, func() bool { return h.coord.bootReconciled(testSink) },
+		func() string { return "the sink's boot reconciliation to be marked done" })
+}
+
+// awaitBootTicks waits until the boot loop has enumerated the live sinks at least
+// n times.
+//
+// It is how a test asserts that a pass did *not* re-run: the loop is
+// level-triggered on a ticker, so several ticks having come and gone with the
+// output unchanged is the positive evidence that the once-per-sink gate is
+// holding. Counting the enumeration rather than the pass is deliberate — the tick
+// happens whether or not the pass does.
+func (h *warmHarness) awaitBootTicks(t *testing.T, n int) {
+	t.Helper()
+	waitFor(t, func() bool { return h.backends.sinkIDCallCount() >= n },
+		func() string {
+			return fmt.Sprintf("%d boot-reconciliation ticks, saw %d", n, h.backends.sinkIDCallCount())
+		})
+}
+
+// awaitReaderLookups waits until the coordinator has tried to resolve the sink's
+// StateReader at least n times.
+//
+// A warm for a sink that is not live yet produces nothing at all, so there is no
+// output to wait for — but each retry consults the router, and two consultations
+// prove the retry loop is running and being turned away rather than simply not
+// having started. That is the barrier a "nothing was read" assertion needs.
+func (h *warmHarness) awaitReaderLookups(t *testing.T, n int) {
+	t.Helper()
+	waitFor(t, func() bool { return h.backends.readerLookupCount(testSink) >= n },
+		func() string {
+			return fmt.Sprintf("%d reader lookups for %s, saw %d",
+				n, testSink, h.backends.readerLookupCount(testSink))
+		})
+}
+
+// scopeIsWarm reports whether the scope has been marked warm, for the assertions
+// that are about it *not* having been.
+func (h *warmHarness) scopeIsWarm(scope ScopeKey) bool {
+	st := h.pipeline.sinks.get(testSink)
+	return st.scopeWarm(Key{Sink: testSink, Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace})
+}
+
 // awaitWarm waits until the scope has been marked warm (SafeMode off).
 func (h *warmHarness) awaitWarm(t *testing.T, scope ScopeKey) {
 	t.Helper()
-	waitFor(t, func() bool {
-		st := h.pipeline.sinks.get(testSink)
-		return st.scopeWarm(Key{Sink: testSink, Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace})
-	}, func() string { return "the scope to be marked warm" })
+	waitFor(t, func() bool { return h.scopeIsWarm(scope) },
+		func() string { return "the scope to be marked warm" })
 }
 
 // writerOnlyAnnouncements returns the coordinator's "this sink cannot read its own
@@ -285,9 +363,17 @@ func TestBootReconciliationRuleDeletedWhileOperatorDownEmitsStoppedAndNeverDelet
 		t.Error("scope event carries no timestamp")
 	}
 
+	// Everything below is sequenced on the pass being *marked done* rather than on
+	// a wall-clock window. The mark is set only after closeOrphanedScopes returned,
+	// so whatever that pass was going to write, it has written by now — which makes
+	// each absence a final answer instead of a 250ms guess (see stayFalse).
+	h.awaitBootReconciled(t)
+
 	// The whole point: not one Deleted row, and in fact not one row at all.
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-		"boot reconciliation wrote resource_states rows; a closed scope must never be recorded as deletions")
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("boot reconciliation wrote %d resource_states rows; a closed scope must never be "+
+			"recorded as deletions: %+v", len(records), records)
+	}
 
 	// It also must not warm the orphan: there is nothing watching it, so seeding a
 	// dedup baseline for it would be pure memory with no reader.
@@ -295,9 +381,15 @@ func TestBootReconciliationRuleDeletedWhileOperatorDownEmitsStoppedAndNeverDelet
 		t.Errorf("boot reconciliation read object history for %d scopes, want 0: %+v", len(reads), reads)
 	}
 
-	// And it happens once per sink, not once per tick.
-	stayFalse(t, func() bool { return len(h.events.recorded()) > 1 },
-		"boot reconciliation re-emitted a Stopped row for an already-reconciled sink")
+	// And it happens once per sink, not once per tick. The loop is level-triggered
+	// on a ticker, so the barrier is ticks having actually elapsed: three
+	// enumerations of the live sinks, one Stopped row.
+	h.awaitBootTicks(t, 3)
+	if events := h.events.recorded(); len(events) != 1 {
+		t.Errorf("boot reconciliation emitted %d scope events across %d ticks, want exactly 1 — a "+
+			"reconciled sink must not be re-reconciled: %+v",
+			len(events), h.backends.sinkIDCallCount(), events)
+	}
 }
 
 // TestBootReconciliationLeavesDesiredScopesOpen is the other half of the same
@@ -314,27 +406,52 @@ func TestBootReconciliationLeavesDesiredScopesOpen(t *testing.T) {
 
 	h.run(t)
 
-	waitFor(t, func() bool { return h.reader.activeScopesCallCount() > 0 },
-		func() string { return "the boot pass to enumerate open scopes" })
-	stayFalse(t, func() bool { return len(h.events.recorded()) > 0 },
-		"boot reconciliation closed a scope a live rule still wants")
+	// The pass ran and completed: it enumerated the open scopes, judged this one
+	// still desired, and was marked done. Only then is "no scope event" a claim
+	// about the pass's decision rather than about how fast the test read.
+	h.awaitBootReconciled(t)
+	if calls := h.reader.activeScopesCallCount(); calls == 0 {
+		t.Error("the boot pass was marked done without enumerating open scopes")
+	}
+	if events := h.events.recorded(); len(events) != 0 {
+		t.Errorf("boot reconciliation closed %d scopes a live rule still wants: %+v", len(events), events)
+	}
 }
 
 // TestBootReconciliationWaitsForTheSettleGate proves the gate is honoured. Judging
 // orphans against a desired state that has not been populated yet would close every
 // scope in the cluster on startup.
+//
+// It is asserted by *ordering* rather than by a window, because a pass that is
+// correctly waiting has nothing to sequence against: there is no completion signal
+// for "blocked on the gate", and the first observable thing the pass does is the
+// very call that would be too early. So the fake records, at each enumeration,
+// whether the gate was open at that moment, and the assertion is made afterwards —
+// once a pass has demonstrably run — that none of them was early. A coordinator
+// that ignored the gate would enumerate immediately, while the gate is still shut,
+// and be caught deterministically rather than only when the scheduler cooperates.
 func TestBootReconciliationWaitsForTheSettleGate(t *testing.T) {
 	h := newWarmHarness(t)
 	openGate := h.scopes.withSettleGate()
 
+	var early atomic.Int64
+	h.reader.onActiveScopes = func() {
+		if !h.scopes.settleOpen() {
+			early.Add(1)
+		}
+	}
+
 	h.reader.setActiveScopes(scopeFilterFor(podScope))
 	h.run(t)
 
-	stayFalse(t, func() bool { return h.reader.activeScopesCallCount() > 0 },
-		"boot reconciliation ran before the desired state settled")
-
 	openGate()
 	h.events.awaitEvents(t, 1)
+
+	if n := early.Load(); n != 0 {
+		t.Errorf("boot reconciliation enumerated open scopes %d times before the desired state settled; "+
+			"judging orphans against a desired state that is not populated yet closes every scope in "+
+			"the cluster on startup", n)
+	}
 }
 
 // TestBootReconciliationRetriesAfterAFailedEnumeration covers Invariant 5 on this
@@ -366,8 +483,15 @@ func TestBootReconciliationSkipsASinkWithNoStateReader(t *testing.T) {
 
 	h.run(t)
 
-	stayFalse(t, func() bool { return len(h.events.recorded()) > 0 },
-		"a sink that cannot read its own history had scope epochs reconciled anyway")
+	// The pass is marked done for this sink too — that is what makes it a decision
+	// taken once rather than an error retried every tick — so the mark is the
+	// barrier, and further ticks are the proof it stays taken.
+	h.awaitBootReconciled(t)
+	h.awaitBootTicks(t, 3)
+	if events := h.events.recorded(); len(events) != 0 {
+		t.Errorf("a sink that cannot read its own history had %d scope epochs reconciled anyway: %+v",
+			len(events), events)
+	}
 }
 
 // TestWarmScopeSeedsHistoryAndCollectsGenuineZombies is the ordinary restart path:
@@ -384,8 +508,8 @@ func TestWarmScopeSeedsHistoryAndCollectsGenuineZombies(t *testing.T) {
 	h.lister.set(podKey("alive"), newPod("alive", "uid-alive", "7", "nginx"))
 	h.scopes.markSynced(podScope)
 
-	h.run(t)
-	h.warmNow(podScope)
+	stop := h.run(t)
+	epoch := h.warmNow(podScope)
 	h.awaitWarm(t, podScope)
 
 	waitFor(t, func() bool { return len(h.deletedRecords()) >= 1 },
@@ -409,9 +533,17 @@ func TestWarmScopeSeedsHistoryAndCollectsGenuineZombies(t *testing.T) {
 	if _, ok := st.cache.Load(podKey("gone").cacheKey()); ok {
 		t.Error("the zombie's cache entry survived a confirmed Deleted write")
 	}
-	// A repeated warm for the same epoch must not re-run the sweep.
-	stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
-		"the GC pass emitted a second Deleted row for one disappearance")
+	// A repeated warm for the same epoch must not re-run the sweep — asserted by
+	// draining rather than by waiting. The request goes in, then the coordinator is
+	// stopped, and Start returns only once every warm goroutine it ever spawned has
+	// exited: so a second sweep would have had to *complete* before this check, not
+	// merely have been slower than a 250ms window.
+	h.coord.WarmScope(WarmTarget{Sink: testSink, Scope: podScope, EpochStart: epoch})
+	stop()
+	if again := h.deletedRecords(); len(again) != 1 {
+		t.Errorf("the GC pass emitted %d Deleted rows for one disappearance, want exactly 1: %+v",
+			len(again), again)
+	}
 }
 
 // TestWarmScopeGCHonoursTheEpochCheck is the brand-new-scope case: a rule appears
@@ -437,14 +569,21 @@ func TestWarmScopeGCHonoursTheEpochCheck(t *testing.T) {
 	h.reader.setWasActive(filter, false)
 	h.scopes.markSynced(podScope)
 
-	h.run(t)
-	epoch := h.warmNow(podScope)
-	h.awaitWarm(t, podScope)
+	// Run to completion on this goroutine: the pass ends at the epoch check, so
+	// "nothing was written" is checked after the pass that would have written it
+	// has returned rather than after a wall-clock window (see warmPass).
+	epoch := h.warmPass(t, podScope)
 
-	waitFor(t, func() bool { return len(h.reader.epochProbes()) > 0 },
-		func() string { return "the epoch check to run" })
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-		"a scope with no previous open epoch had its pre-history recorded as deletions")
+	if !h.scopeIsWarm(podScope) {
+		t.Error("the scope was not marked warm: seeding runs regardless of the epoch check")
+	}
+	if probes := h.reader.epochProbes(); len(probes) == 0 {
+		t.Fatal("the warm returned without running the epoch check")
+	}
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("a scope with no previous open epoch had its pre-history recorded as %d deletions: %+v",
+			len(records), records)
+	}
 
 	// The probe is anchored to the epoch's own start, so this epoch's Started row —
 	// written asynchronously, possibly during the warm — cannot answer for a previous
@@ -524,7 +663,30 @@ func TestWarmScopeWaitsForTheInformerToSync(t *testing.T) {
 
 	// Seeding and the SafeMode flip happen regardless of sync state.
 	h.awaitWarm(t, podScope)
-	// The sweep does not.
+
+	// This is the one retained stayFalse in the package, and the exception it needs
+	// is written down here rather than assumed.
+	//
+	// What it is waiting on: the informer flipping to synced, which this test
+	// deliberately never lets happen until the line below. There is no completion
+	// signal to sequence against, because the pass under test is *parked* — it is
+	// looping inside awaitScopeSync by design, so there is no "pass returned" to
+	// wait for, and cancelling it to force one would replace the property (the gate
+	// holds) with a weaker one (the gate held until we cancelled). Nor can the
+	// forbidden effect be told apart from the permitted one by output alone: the
+	// fake indexer is always populated, so a sweep that ran early would find the
+	// same objects a timely one does and emit the same single row. Only the ordering
+	// differs, and ordering is what a window measures.
+	//
+	// What it costs is real: this assertion can only fail open. Two things make the
+	// window worth something anyway. First, the barrier immediately below it —
+	// awaitScopeSync is polled, so two consultations of the informer's readiness
+	// prove the warm has *reached* the gate and is sitting in it, which is what
+	// stops the window from elapsing before the pass has even started (the vacuous
+	// case). Second, the positive half at the end: the sweep lands the moment the
+	// gate opens, which bounds how long it was ever going to take.
+	waitFor(t, func() bool { return h.scopes.syncChecked() >= 2 },
+		func() string { return "the warm to reach the informer-sync gate and re-poll it" })
 	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
 		"the GC pass ran before the informer reported synced")
 	if probes := h.reader.epochProbes(); len(probes) != 0 {
@@ -545,9 +707,12 @@ func TestWarmScopeAbandonsGCWhenTheScopeStopsWaitingForSync(t *testing.T) {
 	h.reader.setStates(filter, knownState("gone", "uid-gone", "hash-gone"))
 	h.reader.setWasActive(filter, true)
 
-	h.run(t)
+	stop := h.run(t)
 	h.warmNow(podScope)
 	h.awaitWarm(t, podScope)
+	// The warm is in the sync gate, where the desire check is made.
+	waitFor(t, func() bool { return h.scopes.syncChecked() >= 1 },
+		func() string { return "the warm to reach the informer-sync gate" })
 
 	// Undesire the scope without cancelling the run, so the abort is decided by the
 	// desire check rather than by StopScope's cancellation.
@@ -555,8 +720,16 @@ func TestWarmScopeAbandonsGCWhenTheScopeStopsWaitingForSync(t *testing.T) {
 	delete(h.scopes.desired, scopeRef{sink: testSink, scope: podScope})
 	h.scopes.mu.Unlock()
 
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-		"the GC pass proceeded for a scope no rule wants any more")
+	// The abort is what ends the pass, so the pass has an end to wait for: stop()
+	// returns only after every warm goroutine has exited, which makes the absence
+	// below final rather than time-bounded. Cancellation cannot be what produced it
+	// — the gate had already been reached, and the undesire above is what the warm
+	// sees first.
+	stop()
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("the GC pass proceeded for a scope no rule wants any more, writing %d rows: %+v",
+			len(records), records)
+	}
 }
 
 // TestWarmScopeGCRefusesAReincarnatedObject ports the UID-mismatch refusal from the
@@ -577,14 +750,22 @@ func TestWarmScopeGCRefusesAReincarnatedObject(t *testing.T) {
 		st.cache.Reserve(podKey("web").cacheKey(), CacheEntry{Hash: "hash-new", UID: newUID})
 		h.lister.set(podKey("web"), newPod("web", newUID, "11", "nginx"))
 
-		h.run(t)
+		stop := h.run(t)
 		h.warmNow(podScope)
 		h.awaitWarm(t, podScope)
-		waitFor(t, func() bool { return len(h.reader.epochProbes()) > 0 },
-			func() string { return "the GC pass to reach the epoch check" })
+		// The sweep has *returned*: recoverRefusedReincarnations only runs after
+		// collectZombies, and its first act is to re-read history — so a second read
+		// is the completion signal for the pass whose claim was refused. (It then
+		// waits for the successor's row, which this fixture never supplies, so the
+		// warm is drained rather than joined.)
+		waitFor(t, func() bool { return len(h.reader.historyReads()) >= 2 },
+			func() string { return "the GC pass to return and close-out recovery to re-read history" })
+		stop()
 
-		stayFalse(t, func() bool { return len(h.deletedRecords()) > 0 },
-			"the GC pass deleted a currently-existing object by name after a reincarnation")
+		if deleted := h.deletedRecords(); len(deleted) != 0 {
+			t.Errorf("the GC pass deleted a currently-existing object by name after a reincarnation: %+v",
+				deleted)
+		}
 
 		entry, ok := st.cache.Load(podKey("web").cacheKey())
 		if !ok || entry.UID != newUID || entry.PendingDelete {
@@ -673,12 +854,16 @@ func TestWarmScopeClassifiesIncarnationsFromHistory(t *testing.T) {
 		// only Deleted row that can appear is the recovered close-out.
 		h.lister.set(podKey("web"), newPod("web", newUID, "11", "nginx"))
 
-		h.run(t)
-		h.warmNow(podScope)
-		h.awaitWarm(t, podScope)
+		// The whole pass runs here: seed, close out the prior, sweep (the successor is
+		// alive, so nothing is collected), return. Because it has returned, the
+		// "exactly one" below is a final count rather than a count taken while
+		// another row might still be on its way.
+		h.warmPass(t, podScope)
 
-		waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
-			func() string { return "one close-out row for the unclosed prior incarnation" })
+		if deleted := h.deletedRecords(); len(deleted) != 1 {
+			t.Fatalf("close-out recovery wrote %d Deleted rows for one unrecorded death, want exactly 1: %+v",
+				len(deleted), deleted)
+		}
 
 		got := h.deletedRecords()[0]
 		if got.UID != oldUID {
@@ -699,11 +884,6 @@ func TestWarmScopeClassifiesIncarnationsFromHistory(t *testing.T) {
 		if got.Namespace != "default" || got.Name != "web" || got.Kind != "Pod" {
 			t.Errorf("close-out identity = %s/%s (%s), want default/web (Pod)", got.Namespace, got.Name, got.Kind)
 		}
-
-		// Exactly one: the successor is alive, so nothing else may be recorded as
-		// dead, and the recovery must not double-emit.
-		stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
-			"close-out recovery emitted more than one Deleted row for one unrecorded death")
 	})
 }
 
@@ -737,7 +917,9 @@ func TestWarmScopeClosesOutAReincarnationTheGCPassCouldNotClaim(t *testing.T) {
 	st.cache.Reserve(podKey("web").cacheKey(), CacheEntry{Hash: "hash-new", UID: newUID})
 	h.lister.set(podKey("web"), newPod("web", newUID, "11", "nginx"))
 
-	h.run(t)
+	// Async, and it has to be: the history this warm reads changes *while it runs*,
+	// which is the whole race being reproduced.
+	stop := h.run(t)
 	h.warmNow(podScope)
 	waitFor(t, func() bool { return len(h.reader.historyReads()) > 0 },
 		func() string { return "the seed read of a history that holds only the old incarnation" })
@@ -770,8 +952,14 @@ func TestWarmScopeClosesOutAReincarnationTheGCPassCouldNotClaim(t *testing.T) {
 	if !ok || entry.UID != newUID || entry.PendingDelete {
 		t.Errorf("the live successor's entry was disturbed by the close-out: %+v (present %v)", entry, ok)
 	}
-	stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
-		"the refused reincarnation was closed out more than once")
+	// Once, not twice. The recovery pass has nothing left pending after the row it
+	// just emitted, so it returns; stop() waits for that goroutine to exit, which
+	// makes this count final rather than a snapshot taken 250ms in.
+	stop()
+	if deleted := h.deletedRecords(); len(deleted) != 1 {
+		t.Errorf("the refused reincarnation was closed out %d times, want exactly once: %+v",
+			len(deleted), deleted)
+	}
 }
 
 // gcSweep drives one zombie sweep over targets directly, with no seeding, so a test
@@ -962,14 +1150,18 @@ func TestCloseOutsAreNeverEmittedForPreHistoryWhenTheScopeWasNeverActive(t *test
 		h.scopes.markSynced(podScope)
 		h.lister.set(podKey(object), newPod(object, newUID, "11", "nginx"))
 
-		h.run(t)
-		h.warmNow(podScope)
-		h.awaitWarm(t, podScope)
-		waitFor(t, func() bool { return len(h.reader.epochProbes()) > 0 },
-			func() string { return "the epoch check to run" })
+		// The pass ends at the epoch check, so it can be run to completion here and
+		// the absence below is what the pass decided rather than what it had not got
+		// round to yet.
+		h.warmPass(t, podScope)
 
-		stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-			"an unclosed incarnation in pre-history was fabricated into a deletion")
+		if probes := h.reader.epochProbes(); len(probes) == 0 {
+			t.Fatal("the warm returned without running the epoch check")
+		}
+		if records := h.writer.recorded(); len(records) != 0 {
+			t.Errorf("%d unclosed incarnations in pre-history were fabricated into deletions: %+v",
+				len(records), records)
+		}
 	})
 
 	t.Run("a previous open epoch: exactly one Deleted row", func(t *testing.T) {
@@ -980,17 +1172,19 @@ func TestCloseOutsAreNeverEmittedForPreHistoryWhenTheScopeWasNeverActive(t *test
 		h.scopes.markSynced(podScope)
 		h.lister.set(podKey(object), newPod(object, newUID, "11", "nginx"))
 
-		h.run(t)
-		h.warmNow(podScope)
-		h.awaitWarm(t, podScope)
+		// Both halves of "exactly one" in a single assertion, taken after the pass
+		// returned: the successor is alive so the sweep collects nothing, and the
+		// close-out is emitted once.
+		h.warmPass(t, podScope)
 
-		waitFor(t, func() bool { return len(h.deletedRecords()) == 1 },
-			func() string { return "the close-out row once the epoch check passes" })
-		if got := h.deletedRecords()[0].UID; got != oldUID {
+		deleted := h.deletedRecords()
+		if len(deleted) != 1 {
+			t.Fatalf("%d Deleted rows were written for one unrecorded death, want exactly 1: %+v",
+				len(deleted), deleted)
+		}
+		if got := deleted[0].UID; got != oldUID {
 			t.Errorf("Deleted row uid = %q, want the prior incarnation's %q", got, oldUID)
 		}
-		stayFalse(t, func() bool { return len(h.deletedRecords()) > 1 },
-			"more than one Deleted row was written for one unrecorded death")
 	})
 }
 
@@ -1086,11 +1280,16 @@ func TestForgetSinkRestoresBootReconciliationAndCancelsWarms(t *testing.T) {
 	h.reader.setActiveScopes(orphan)
 	h.reader.setStates(scopeFilterFor(podScope), knownState("web", "uid-web", "hash-web"))
 
-	h.run(t)
+	stop := h.run(t)
 
 	h.events.awaitEvents(t, 1)
-	stayFalse(t, func() bool { return len(h.events.recorded()) > 1 },
-		"the boot pass re-ran for a sink it had already reconciled")
+	// Ticks, not a stopwatch: the loop has enumerated the live sinks three times
+	// and still emitted one Stopped row, so the once-per-sink mark is holding.
+	h.awaitBootTicks(t, 3)
+	if events := h.events.recorded(); len(events) != 1 {
+		t.Fatalf("the boot pass re-ran for a sink it had already reconciled: %d events across %d ticks: %+v",
+			len(events), h.backends.sinkIDCallCount(), events)
+	}
 	passesBefore := h.reader.activeScopesCallCount()
 
 	// A warm for this sink, caught mid-read.
@@ -1119,13 +1318,18 @@ func TestForgetSinkRestoresBootReconciliationAndCancelsWarms(t *testing.T) {
 	}
 
 	// The in-flight warm was cancelled with the sink, so it neither marked its
-	// scope warm nor wrote anything for a sink that is gone.
-	st := h.pipeline.sinks.get(testSink)
-	if st.scopeWarm(Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default"}) {
+	// scope warm nor wrote anything for a sink that is gone. Drained first: the
+	// cancelled goroutine has already been released from its blocked read, and
+	// stop() does not return until it has exited, so both assertions are about a
+	// warm that is over.
+	stop()
+	if h.scopeIsWarm(podScope) {
 		t.Error("a warm cancelled by ForgetSink still marked its scope warm")
 	}
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-		"a warm cancelled by ForgetSink still wrote resource_states rows")
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("a warm cancelled by ForgetSink wrote %d resource_states rows: %+v",
+			len(records), records)
+	}
 }
 
 // TestWarmScopeWarmsOnlyItsOwnScope is the "new rule on a live cluster" criterion:
@@ -1217,16 +1421,26 @@ func TestWarmScopeDisabledForASinkThatCannotReadItsHistory(t *testing.T) {
 		{Group: "apps", Kind: "Deployment", Namespace: "default"},
 	}
 
+	// The boot pass runs too — it discovers the same missing read half, and the
+	// one-line-per-sink claim has to hold across both producers, not just across the
+	// warms.
 	h.run(t)
+
+	// Each warm is run to completion: the missing read half is a permanent error, so
+	// the pass returns immediately instead of retrying, and every assertion below is
+	// therefore about three finished passes rather than three that might still be
+	// about to act.
 	for _, scope := range scopes {
-		h.warmNow(scope)
+		h.warmPass(t, scope)
 	}
+	// The boot pass has an end too, and this is it.
+	h.awaitBootReconciled(t)
 
 	for _, scope := range scopes {
-		stayFalse(t, func() bool {
-			st := h.pipeline.sinks.get(testSink)
-			return st.scopeWarm(Key{Sink: testSink, Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace})
-		}, "a sink with no StateReader marked its scope warm, which would let a cache miss claim an object is genuinely new")
+		if h.scopeIsWarm(scope) {
+			t.Errorf("a sink with no StateReader marked scope %+v warm, which would let a cache miss "+
+				"claim an object is genuinely new", scope)
+		}
 	}
 
 	// Not one call, for any scope: the reader is never resolved, so nothing even
@@ -1241,19 +1455,18 @@ func TestWarmScopeDisabledForASinkThatCannotReadItsHistory(t *testing.T) {
 		t.Errorf("ScopeWasActive was called for a sink with no StateReader: %+v", calls)
 	}
 
-	// Exactly one line, for three scopes plus the boot pass — waited for rather
-	// than read, for the same reason as in the restart test: the announcement is
-	// made on a warm goroutine. This one survives a single read today only because
-	// the stayFalse loops above happen to give it a second first, which makes it a
-	// property of the assertion order rather than of the code under test.
-	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 1 },
-		func() string {
-			return fmt.Sprintf("exactly one announcement across %d scopes, got %d",
-				len(scopes), len(h.writerOnlyAnnouncements()))
-		})
-	stayFalse(t, func() bool { return len(h.writerOnlyAnnouncements()) > 1 },
-		"the missing read half was announced more than once, so it is being announced per scope")
+	// Exactly one line, for three scopes plus the boot pass — and now that all four
+	// have completed, this is a plain count rather than a wait followed by a window.
+	// It used to depend on the assertion order above happening to give the
+	// announcement time to land, which made it a property of the test rather than of
+	// the code under test.
 	announced := h.writerOnlyAnnouncements()
+	if len(announced) != 1 {
+		t.Fatalf("the missing read half was announced %d times across %d completed warms and the boot "+
+			"pass, want exactly once per sink — more than one means it is being announced per scope, "+
+			"and a real cluster has hundreds of scopes per sink:\n%v",
+			len(announced), len(scopes), announced)
+	}
 	// And it names all three behaviours it switches off, so the line is worth the
 	// one time it is printed.
 	for _, want := range []string{"cache warm-up", "zombie garbage collection", "boot reconciliation"} {
@@ -1326,15 +1539,15 @@ func TestWriterOnlySinkProducesNoDeletedRowsFromTheGCPath(t *testing.T) {
 		return h
 	}
 
+	// Both halves run the warm to completion on the test goroutine, so the pairing
+	// compares two *finished* passes over one fixture. That is what makes the zero
+	// meaningful: it is not "nothing yet", it is "nothing, and the pass that would
+	// have done it is over".
 	t.Run("a sink that can read its history writes exactly one Deleted row", func(t *testing.T) {
 		h := setup(t)
 
-		h.run(t)
-		h.warmNow(podScope)
-		h.awaitWarm(t, podScope)
+		h.warmPass(t, podScope)
 
-		waitFor(t, func() bool { return len(h.deletedRecords()) >= 1 },
-			func() string { return "one Deleted row for the zombie" })
 		if deleted := h.deletedRecords(); len(deleted) != 1 {
 			t.Fatalf("wrote %d Deleted rows, want exactly 1: %+v", len(deleted), deleted)
 		}
@@ -1346,12 +1559,13 @@ func TestWriterOnlySinkProducesNoDeletedRowsFromTheGCPath(t *testing.T) {
 		// object, the synced informer — is identical.
 		h.backends.removeReader(testSink)
 
-		h.run(t)
-		h.warmNow(podScope)
+		h.warmPass(t, podScope)
 
-		stayFalse(t, func() bool { return len(h.deletedRecords()) > 0 },
-			"a Writer-only sink was sent a Deleted row by the GC path: the archive's silence about deletions "+
-				"must be total, since a reader cannot tell a rare fabricated deletion from a real one")
+		if deleted := h.deletedRecords(); len(deleted) != 0 {
+			t.Errorf("a Writer-only sink was sent %d Deleted rows by the GC path: the archive's silence "+
+				"about deletions must be total, since a reader cannot tell a rare fabricated deletion "+
+				"from a real one: %+v", len(deleted), deleted)
+		}
 		// Nor a close-out, which is the *other* Deleted-row producer on this path:
 		// the fixture has no reincarnation, but a pass that ran at all would have
 		// had to read history to find that out.
@@ -1376,8 +1590,14 @@ func TestWarmScopeRetriesWhileTheSinkIsNotLiveYet(t *testing.T) {
 	h.run(t)
 	h.warmNow(podScope)
 
-	stayFalse(t, func() bool { return len(h.reader.historyReads()) > 0 },
-		"history was read for a sink that is not live")
+	// A warm for a sink that is not live produces nothing, so there is no output to
+	// wait for — but every retry consults the router, and two consultations prove
+	// the loop is running and being turned away rather than simply not having
+	// started yet. That is the barrier the absence is asserted against.
+	h.awaitReaderLookups(t, 2)
+	if reads := h.reader.historyReads(); len(reads) != 0 {
+		t.Errorf("history was read for a sink that is not live: %+v", reads)
+	}
 
 	h.router.set(testSink, h.writer)
 	h.backends.setReader(testSink, h.reader)
@@ -1401,10 +1621,29 @@ func TestWarmScopeIsIdempotentPerEpoch(t *testing.T) {
 	waitFor(t, func() bool { return len(h.reader.historyReads()) == 1 },
 		func() string { return "the first warm's history read" })
 
-	// Same epoch again: nothing to do.
+	// Same epoch again: nothing to do. The drop is decided synchronously, inside
+	// WarmScope and under the coordinator's own lock, so it is observable as state
+	// rather than as an absence — the run entry is the identical object, meaning no
+	// second goroutine was ever started. A count of history reads on its own could
+	// only ever say "not yet".
+	ref := scopeRef{sink: testSink, scope: podScope}
+	h.coord.mu.Lock()
+	before := h.coord.runs[ref]
+	h.coord.mu.Unlock()
+
 	h.coord.WarmScope(WarmTarget{Sink: testSink, Scope: podScope, EpochStart: epoch})
-	stayFalse(t, func() bool { return len(h.reader.historyReads()) > 1 },
-		"a repeated warm request for the same epoch re-read the sink's history")
+
+	h.coord.mu.Lock()
+	after := h.coord.runs[ref]
+	h.coord.mu.Unlock()
+	if before == nil || after != before {
+		t.Errorf("a repeated warm request for the same epoch replaced the run (%p → %p); it must be "+
+			"dropped, or the sink's history is re-read for an epoch already warmed", before, after)
+	}
+	if reads := h.reader.historyReads(); len(reads) != 1 {
+		t.Errorf("history was read %d times after a repeated same-epoch request, want 1: %+v",
+			len(reads), reads)
+	}
 
 	// A newer epoch supersedes it.
 	h.coord.WarmScope(WarmTarget{Sink: testSink, Scope: podScope, EpochStart: epoch.Add(time.Second)})
@@ -1426,7 +1665,7 @@ func TestStopScopeCancelsAnInFlightWarm(t *testing.T) {
 	release := h.reader.blockLastKnownStates()
 	defer release()
 
-	h.run(t)
+	stop := h.run(t)
 	h.warmNow(podScope)
 	waitFor(t, func() bool { return len(h.reader.historyReads()) > 0 },
 		func() string { return "the warm to reach the blocked history read" })
@@ -1434,10 +1673,14 @@ func TestStopScopeCancelsAnInFlightWarm(t *testing.T) {
 	h.coord.StopScope(testSink, podScope)
 	release()
 
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-		"a cancelled warm still wrote rows for its stopped scope")
-	st := h.pipeline.sinks.get(testSink)
-	if st.scopeWarm(Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default"}) {
+	// Released and then drained: the cancelled warm has returned from its blocked
+	// read and its goroutine has exited by the time stop() returns, so neither
+	// assertion can be satisfied by a row that had not arrived yet.
+	stop()
+	if records := h.writer.recorded(); len(records) != 0 {
+		t.Errorf("a cancelled warm wrote %d rows for its stopped scope: %+v", len(records), records)
+	}
+	if h.scopeIsWarm(podScope) {
 		t.Error("a cancelled warm marked its scope warm")
 	}
 }
@@ -1452,10 +1695,23 @@ func TestWarmScopeRequestedBeforeStartIsNotLost(t *testing.T) {
 	h.lister.set(podKey("web"), newPod("web", "uid-web", "2", "nginx"))
 	h.scopes.markSynced(podScope)
 
-	// Requested while the coordinator is not running yet.
+	// Requested while the coordinator is not running yet. WarmScope decides what to
+	// do with the request synchronously, under its own lock, so "held rather than
+	// run" is observable as state: the target is in pending, no run exists, and
+	// therefore no goroutine was started that could read anything.
 	h.warmNow(podScope)
-	stayFalse(t, func() bool { return len(h.reader.historyReads()) > 0 },
-		"a warm ran before the coordinator started")
+
+	h.coord.mu.Lock()
+	pending, runs := len(h.coord.pending), len(h.coord.runs)
+	h.coord.mu.Unlock()
+	if pending != 1 || runs != 0 {
+		t.Errorf("a warm requested before Start left %d pending and %d runs, want 1 and 0: a request "+
+			"that arrives before this runnable comes up must be held, not dropped and not run",
+			pending, runs)
+	}
+	if reads := h.reader.historyReads(); len(reads) != 0 {
+		t.Errorf("a warm ran before the coordinator started: %+v", reads)
+	}
 
 	h.run(t)
 	h.awaitWarm(t, podScope)
@@ -1551,9 +1807,13 @@ func TestWarmEventsScopeSeedsButClaimsNoDeletes(t *testing.T) {
 			aliveKey := eventKey(gvk.group, "alive.17bbb")
 			h.lister.set(aliveKey, newEvent(gvk.group, aliveKey.Name, "uid-alive", "7", 1))
 
-			h.run(t)
-			h.warmNow(scope)
-			h.awaitWarm(t, scope)
+			// An Events warm takes the seed and returns at the ephemeral branch, so it
+			// runs to completion here — which is what turns "no rows" from a 250ms
+			// window into a statement about a finished pass.
+			h.warmPass(t, scope)
+			if !h.scopeIsWarm(scope) {
+				t.Fatal("an Events scope was not marked warm: the seed is the whole point of warming one")
+			}
 
 			// Both baselines are seeded — that is the whole purpose of warming an
 			// Events scope.
@@ -1570,8 +1830,10 @@ func TestWarmEventsScopeSeedsButClaimsNoDeletes(t *testing.T) {
 			}
 
 			// And nothing was reconciled away: no Deleted row, and in fact no row.
-			stayFalse(t, func() bool { return len(h.writer.recorded()) > 0 },
-				"an Events scope wrote rows during warm-up; an expired Event is not a deletion")
+			if records := h.writer.recorded(); len(records) != 0 {
+				t.Errorf("an Events scope wrote %d rows during warm-up; an expired Event is not a "+
+					"deletion: %+v", len(records), records)
+			}
 
 			// The two gates the GC pass needs are never consulted, because the pass
 			// never runs — which is what "zero delete claims" means structurally
@@ -1622,9 +1884,10 @@ func TestWarmEventsRestartDoesNotReEmitUnchangedEvents(t *testing.T) {
 	// The operator restarts. Every in-memory cache is gone; the Event is still live
 	// and still unchanged.
 	h.restartWarm(t)
-	h.run(t)
-	h.warmNow(scope)
-	h.awaitWarm(t, scope)
+	// Run to completion, so the row count below covers the warm as well as the
+	// Process call: an Events warm that emitted anything would have done it before
+	// this returns.
+	h.warmPass(t, scope)
 
 	// The informer's initial list re-delivers it.
 	if err := h.pipeline.Process(h.ctx, key); err != nil {
@@ -1632,10 +1895,9 @@ func TestWarmEventsRestartDoesNotReEmitUnchangedEvents(t *testing.T) {
 	}
 
 	if got, want := h.writer.eventTypes(), []string{"Added"}; !slices.Equal(got, want) {
-		t.Fatalf("event types = %v, want %v — the seeded hash must deduplicate the re-delivery", got, want)
+		t.Fatalf("event types = %v, want %v — the seeded hash must deduplicate the re-delivery.\n"+
+			"Anything past the first row means the restart re-emitted a live, unchanged Event", got, want)
 	}
-	stayFalse(t, func() bool { return len(h.writer.recorded()) > 1 },
-		"a restart re-emitted a row for a live, unchanged Event")
 }
 
 // TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart is Task 6.5's
@@ -1662,14 +1924,15 @@ func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T
 	h.lister.set(web, newPod(web.Name, "uid-web", "1", "nginx:1"))
 	h.lister.set(api, newPod(api.Name, "uid-api", "1", "envoy:1"))
 
-	stop := h.run(t)
-	h.warmNow(podScope)
-	// The first process's announcement, waited for rather than assumed. It lands on
-	// the warm goroutine warmNow starts, and it is what the count after the restart
-	// is measured against, so reading it later without a barrier would make the
-	// two-process claim below depend on goroutine scheduling.
-	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 1 },
-		func() string { return "the first process to announce the missing read half" })
+	// The first process's warm, run to completion. It is what the count after the
+	// restart is measured against, and a Writer-only warm ends on a permanent error
+	// — so running it here rather than through WarmScope makes the two-process claim
+	// below independent of goroutine scheduling instead of merely likely.
+	h.warmPass(t, podScope)
+	if announced := h.writerOnlyAnnouncements(); len(announced) != 1 {
+		t.Fatalf("the first process announced the missing read half %d times, want exactly once:\n%v",
+			len(announced), announced)
+	}
 
 	// Two first sightings, both Snapshot: the scope is never marked warm, so the
 	// hedge never lifts.
@@ -1699,10 +1962,8 @@ func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T
 
 	// The restart. The lister and the sink survive it, exactly as the API server and
 	// the bucket do; every in-memory baseline does not.
-	stop()
 	h.restartWarm(t)
-	h.run(t)
-	h.warmNow(podScope)
+	h.warmPass(t, podScope)
 
 	// Both live objects are first sightings again, and both are re-snapshotted in
 	// full. This is the "full re-snapshot on every restart" the release summary
@@ -1735,16 +1996,12 @@ func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T
 	// a new object, so this also proves the dedup is per coordinator rather than
 	// accidentally global — the second process is entitled to say it once too.
 	//
-	// Waited for and then held, rather than read once. The announcement is made on
-	// the warm goroutine that the fire-and-forget warmNow above started, so a single
-	// read here races it; the two halves together are what keep the claim exact —
-	// waitFor establishes that each process said it, stayFalse that neither said it
-	// twice.
-	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 2 },
-		func() string {
-			return fmt.Sprintf("one announcement from each of the two processes, got %d:\n%v",
-				len(h.writerOnlyAnnouncements()), h.writerOnlyAnnouncements())
-		})
-	stayFalse(t, func() bool { return len(h.writerOnlyAnnouncements()) > 2 },
-		"the missing read half was announced more than once in a process, so the per-sink dedup is not holding")
+	// Exactly two, counted after both processes' warms have returned. Both halves of
+	// the claim are in the one assertion: each process said it (two lines), and
+	// neither said it twice (not three).
+	if announced := h.writerOnlyAnnouncements(); len(announced) != 2 {
+		t.Errorf("the missing read half was announced %d times across two processes, want exactly one "+
+			"each — fewer means a restarted process stays silent about a limit its operator has to "+
+			"know, more means the per-sink dedup is not holding:\n%v", len(announced), announced)
+	}
 }

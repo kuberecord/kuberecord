@@ -112,6 +112,11 @@ type S3RotationSpec struct {
 	// object. Above 1Gi a single object stops being a practical unit of retry or
 	// of partial recovery, and a worker's in-flight memory (see
 	// S3WriterSpec.Workers) grows with it.
+	//
+	// This ceiling bounds *one* object. What bounds the sink is the cross-field
+	// rule on S3SinkSpec: workers × maxObjectBytes may not exceed
+	// S3WriterMemoryBudgetBytes, because each worker accumulates an object of its
+	// own. Raising this field therefore lowers how many workers the sink may have.
 	// +optional
 	// +kubebuilder:default=67108864
 	// +kubebuilder:validation:Minimum=1048576
@@ -208,11 +213,17 @@ type S3WriterSpec struct {
 	//
 	// Each worker accumulates its own object, so this multiplies two costs rather
 	// than one: the writer's steady-state memory ceiling is workers ×
-	// maxObjectBytes (at the ceilings of both, 64Gi — do not pair them), and the
-	// object count grows with it, since N workers close N partial objects where
-	// one worker would have closed a single full one. The ceiling of 64 matches
-	// ClickHouse's for a different reason: not because the backend punishes
-	// concurrency — S3 rewards it — but because memory does.
+	// maxObjectBytes, and the object count grows with it, since N workers close N
+	// partial objects where one worker would have closed a single full one. The
+	// ceiling of 64 matches ClickHouse's for a different reason: not because the
+	// backend punishes concurrency — S3 rewards it — but because memory does.
+	//
+	// The two ceilings do not compose: 64 workers at 1Gi each would be 64Gi, so
+	// the pairing is rejected at admission by the cross-field rule on S3SinkSpec
+	// rather than merely warned about here (workers × maxObjectBytes may not
+	// exceed S3WriterMemoryBudgetBytes). A high worker count is still available at
+	// a smaller rotation size, which is the shape that actually helps: S3 rewards
+	// request concurrency, not object size.
 	// +optional
 	// +kubebuilder:default=4
 	// +kubebuilder:validation:Minimum=1
@@ -236,7 +247,55 @@ type S3WriterSpec struct {
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
 }
 
+// S3WriterMemoryBudgetBytes is the ceiling S3SinkSpec's cross-field rule puts on
+// `writer.workers × rotation.maxObjectBytes` — 4Gi.
+//
+// That product is the writer's steady-state memory ceiling, per sink, because
+// maxObjectBytes is measured on the encoded payload and each worker accumulates
+// an object of its own. Both fields' own bounds are individually reasonable and
+// compose into something that is not: 64 workers at 1Gi each is 64Gi, which no
+// node survives, and under the tee pattern (D14) two sinks' ceilings sum on top
+// of the informer cache and each sink's hashCache.
+//
+// 4Gi is chosen as a bound an operator can hold in their head next to a
+// container memory limit rather than measured from a benchmark: Task 6.6 measured
+// the write path against MinIO for correctness (key layout, retry idempotency,
+// rotation counts, Object Lock headers) and recorded no memory figure, so there
+// is nothing to justify a different number from. It leaves every shape that
+// actually helps throughput available — 64 workers at 64Mi is exactly 4Gi, and S3
+// rewards request concurrency rather than object size — while making the pairing
+// that only multiplies memory unrepresentable.
+//
+// It is a *schema* constant. Nothing in the runtime may read it: an admitted spec
+// is a valid spec, and a writer that clamped or warned about a value the API
+// server accepted would be second-guessing the operator (see the S3Sink write
+// path, which takes spec.writer.workers verbatim).
+const S3WriterMemoryBudgetBytes = 4 << 30
+
 // S3SinkSpec is the desired state of an S3Sink.
+//
+// The cross-field rule below is the one constraint that cannot live on either
+// field alone. It carries the defaults of both operands as literals because a
+// spec may omit either block entirely — `rotation` and `writer` have no defaults
+// of their own, and structural defaulting never descends into an absent parent,
+// so an omitted block leaves its children unset rather than defaulted. The
+// literals are the same values the schema defaults declare *and* the same ones
+// the write path falls back to (see internal/sink/s3's defaultWorkers and
+// defaultMaxObjectBytes), so the rule judges the configuration that will actually
+// run, whichever way the spec was written.
+//
+// The message names its operands by field path rather than by value, and that is
+// a platform limit rather than a preference. A messageExpression interpolating the
+// offending numbers is rejected at CRD installation: `string(<int>)` yields a
+// string the CEL cost estimator treats as unbounded, so a single interpolation
+// exceeds the per-expression budget "by factor of more than 100x" and pushes the
+// whole schema's rule-cost total over its limit with it (observed against
+// apiextensions v0.35 — a literal messageExpression installs fine, so the cost is
+// the conversion, not the field). What the author needs is in their own spec; what
+// they cannot infer — that the two fields multiply, and where the ceiling is — is
+// what the static text says.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.writer) && has(self.writer.workers) ? self.writer.workers : 4) * (has(self.rotation) && has(self.rotation.maxObjectBytes) ? self.rotation.maxObjectBytes : 67108864) <= 4294967296",message="spec.writer.workers × spec.rotation.maxObjectBytes must not exceed 4Gi (4294967296 bytes): each worker accumulates its own object, so workers multiplies this sink's steady-state memory ceiling rather than only its throughput. Lower either operand (the defaults are 4 × 64Mi = 256Mi) or split the load across two sinks"
 type S3SinkSpec struct {
 	// Bucket is the S3 (or MinIO) bucket every object is written to. kuberecord
 	// never creates it: a bucket carries retention, encryption, lifecycle and

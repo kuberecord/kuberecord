@@ -131,7 +131,8 @@ func (c SinkConfig) Fingerprint() string {
 	// Errors from a hash writer are impossible by contract (hash.Hash never
 	// returns one), so Fprintf's return is not fallible in any way a caller could
 	// act on — but it is still read and checked rather than discarded, so this
-	// stays clean under Invariant 4's no-silent-errors rule.
+	// stays clean under Invariant 4's no-silent-errors rule. See the branch below
+	// for what the unreachable constant is and is not.
 	if _, err := fmt.Fprintf(h,
 		"region=%q endpoint=%q pathstyle=%t akid=%q secret=%q token=%q "+
 			"bucket=%q prefix=%q maxbytes=%d maxage=%q lock=%q "+
@@ -144,9 +145,14 @@ func (c SinkConfig) Fingerprint() string {
 		c.Writer.QueueSize, c.Writer.Workers,
 		c.Writer.EnqueueTimeout.String(), c.Writer.DrainTimeout.String(),
 	); err != nil {
-		// Unreachable; a digest of nothing would silently make every configuration
-		// look identical — and therefore make every reconfiguration a no-op — so it
-		// is reported rather than returned.
+		// Unreachable by hash.Hash's contract: its Write never returns an error, so
+		// Fprintf to one cannot fail. The constant is a tombstone, not a mitigation
+		// — if this branch were ever reached, every configuration would digest
+		// identically and every reconfiguration would look like a no-op. Nothing
+		// reports it because nothing here can: this method has no logger, and
+		// returning an error would put a failure mode into sink.InstanceConfig that
+		// no implementation of it has. Deliberately identical to
+		// clickhouse.Config.Fingerprint's branch; the two are read side by side.
 		return "unfingerprintable"
 	}
 	return hex.EncodeToString(h.Sum(nil))

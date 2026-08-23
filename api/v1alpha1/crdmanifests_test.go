@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,6 +115,12 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"default: 67108864",
 				"default: 5m",
 				"rule: self.matches('^([0-9]+(ns|us|ms|s|m|h))+$') && duration(self)",
+				// The cross-field memory bound. Matched here only far enough to prove
+				// a rule is present on `spec` at all — controller-gen line-folds a
+				// long CEL expression, so no substring can carry the whole of it.
+				// TestS3SinkWorkerMemoryRuleIsGenerated asserts the rule itself
+				// against the parsed document.
+				"rule: '(has(self.writer) && has(self.writer.workers) ? self.writer.workers",
 				// The credential union: a Secret, or nothing at all. The message is
 				// asserted because it is what tells an author which state they meant.
 				"rule: has(self.secretRef)",
@@ -463,6 +470,84 @@ var (
 	sharedWriterKnobs         = []string{"queueSize", "workers", "enqueueTimeout", "drainTimeout"}
 	clickHouseOnlyWriterKnobs = []string{"batchMaxRows", "batchMaxWait", "checkpointEvery"}
 )
+
+// TestS3SinkWorkerMemoryRuleIsGenerated asserts that the cross-field memory bound
+// declared on S3SinkSpec actually reached the CRD on disk, in full.
+//
+// The envtest table proves the *behaviour* against whatever CRDs are installed;
+// this proves the installed CRDs are the ones today's markers generate. That
+// separation is what catches the specific accident this rule is most exposed to: a
+// marker edited — the bound raised, a fallback dropped — and `make manifests`
+// forgotten, leaving the admission suite passing against the previously-generated
+// schema.
+//
+// It reads the parsed document rather than matching substrings because
+// controller-gen line-folds a CEL expression this long, so a literal match can only
+// ever cover the first fold. Parsing gives the expression back whole, which lets
+// each load-bearing piece be named: both operands, both fallback literals, and the
+// bound — the last one taken from S3WriterMemoryBudgetBytes, so the Go constant and
+// the schema cannot drift the way the *Pattern constants could before
+// TestCRDPatternConstantsMatchMarkers existed.
+func TestS3SinkWorkerMemoryRuleIsGenerated(t *testing.T) {
+	specSchema := crdSpecSchema(t, s3SinkCRDFile)
+
+	validations, ok := specSchema["x-kubernetes-validations"].([]any)
+	if !ok {
+		t.Fatalf("generated CRD %s has no x-kubernetes-validations on spec", s3SinkCRDFile)
+	}
+
+	var rule, message string
+	for _, entry := range validations {
+		validation, isMap := entry.(map[string]any)
+		if !isMap {
+			t.Fatalf("generated CRD %s has a non-object spec validation: %v", s3SinkCRDFile, entry)
+		}
+		text, _ := validation["rule"].(string)
+		if strings.Contains(text, "workers") && strings.Contains(text, "maxObjectBytes") {
+			rule = text
+			message, _ = validation["message"].(string)
+			break
+		}
+	}
+	if rule == "" {
+		t.Fatalf("generated CRD %s carries no spec-level rule over workers and maxObjectBytes "+
+			"(did you run `make manifests`?). Its absence means the 64 × 1Gi = 64Gi pairing is "+
+			"admitted again, with nothing but a field comment against it.\nspec validations: %v",
+			s3SinkCRDFile, validations)
+	}
+
+	// The fallbacks are named as whole ternary arms rather than as bare numbers: a
+	// spec that omits `rotation` or `writer` entirely is never defaulted (structural
+	// defaulting does not descend into an absent parent — see
+	// TestS3SinkOmittedRotationAndWriterStayAbsent), so dropping one of these arms
+	// would silently exempt exactly the hand-written YAML the rule exists for.
+	for _, want := range []string{
+		"? self.writer.workers : 4",
+		"? self.rotation.maxObjectBytes : 67108864",
+		strconv.Itoa(S3WriterMemoryBudgetBytes),
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("the generated worker-memory rule does not contain %q.\nrule: %s", want, rule)
+		}
+	}
+
+	// The message has to be enough to fix the spec without reading the source. It
+	// names its operands by field path rather than by value because a
+	// messageExpression interpolating the numbers is refused at CRD installation on
+	// cost grounds (see S3SinkSpec) — so what it does say is all an author gets.
+	for _, want := range []string{
+		"spec.writer.workers",
+		"spec.rotation.maxObjectBytes",
+		"4Gi",
+		strconv.Itoa(S3WriterMemoryBudgetBytes),
+		"each worker accumulates its own object",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("the generated worker-memory rejection message does not name %q.\nmessage: %s",
+				want, message)
+		}
+	}
+}
 
 // TestSharedWriterKnobsAgreeAcrossSinks pins the relationship between
 // ClickHouseSink's WriterSpec and S3Sink's S3WriterSpec: the four shared knobs

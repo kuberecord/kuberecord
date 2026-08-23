@@ -72,10 +72,20 @@ linters:
             - "**/internal/sink/*.go"
             - "**/internal/sink/clickhouse/**"
             - "**/internal/sink/conformance/**"
+            # Non-recursive on purpose — `*.go`, never `**`. That single character
+            # *is* the confinement boundary: the glob covers internal/sink/s3's own
+            # files and deliberately does not descend into internal/sink/s3/awsstore,
+            # which is the one package allowed to hold the SDK. Widening it to `/**`
+            # would deny the SDK inside the package whose entire purpose is to
+            # contain it, so the rule cannot simply be made "stricter" here.
             - "**/internal/sink/s3/*.go"
           deny:
             - pkg: github.com/aws/aws-sdk-go-v2
               desc: "the AWS SDK belongs to internal/sink/s3/awsstore alone; everything else speaks the s3.ObjectStore interface (Task 6.4)"
+            - pkg: github.com/aws/smithy-go
+              desc: "smithy-go is the AWS SDK's error and transport substrate (smithy.APIError, smithy.OperationError); it belongs to internal/sink/s3/awsstore for exactly the reason the SDK itself does — a Prober that classified NoSuchBucket by unwrapping smithy types would put SDK types back into the package whose purpose is to be SDK-free (Task 6.4)"
+            - pkg: github.com/aws/aws-sdk-go
+              desc: "kuberecord is aws-sdk-go-v2 only: a v1 import would be both an isolation break and a dependency regression, so v1 is a tombstone here rather than an omission (Task 6.7)"
 
         # Task 5.1 acceptance criterion: the Writer conformance suite is built
         # around the contract in internal/sink, not around any backend's
