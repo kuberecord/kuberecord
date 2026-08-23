@@ -1970,6 +1970,7 @@ rules:
   resources:
   - clickhousesinks
   - clusterstreamrules
+  - s3sinks
   - streamrules
   verbs:
   - get
@@ -1980,6 +1981,7 @@ rules:
   resources:
   - clickhousesinks/status
   - clusterstreamrules/status
+  - s3sinks/status
   - streamrules/status
   verbs:
   - get

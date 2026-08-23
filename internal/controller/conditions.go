@@ -87,6 +87,53 @@ const (
 	ReasonCredentialsUnavailable = "CredentialsUnavailable"
 )
 
+// Condition reasons specific to S3Sink.
+//
+// They exist as their own set rather than reusing the ClickHouse ones because the
+// operator action each names is genuinely different: a bucket that will not accept
+// a retained object is not a schema to migrate, and a credential resolved from the
+// ambient chain is not a Secret to create.
+const (
+	// ReasonAmbientCredentials marks a sink that names no Secret and authenticates
+	// from the ambient chain — IRSA, workload identity, or an instance role.
+	//
+	// It reports CredentialsResolved=True on the strength of the *configuration*
+	// being complete, not of a credential having been produced: the chain is lazy,
+	// and only a request can exercise it. A chain that turns out to produce nothing
+	// is reported by the health probe and lands on this same condition as
+	// ReasonCredentialsUnavailable, which is why omitting spec.credentials is a
+	// supported state rather than an unverifiable one.
+	ReasonAmbientCredentials = "AmbientCredentials"
+
+	// ReasonBucketWritable marks a sink whose bucket answered a write. It is a
+	// write and not a HEAD deliberately: a read-only credential passes a HEAD and
+	// then fails every PUT (see v1alpha1.ConditionBucketReachable).
+	ReasonBucketWritable = "BucketWritable"
+
+	// ReasonBucketIncompatible marks a bucket that answered and refused the *shape*
+	// of object this sink is configured to write — today, a spec.objectLock against
+	// a bucket with no Object Lock configuration, which on S3 can only be enabled
+	// at bucket creation.
+	//
+	// It is distinct from ReasonBucketUnreachable because it will never clear on
+	// its own: every write this sink attempts will fail identically until a human
+	// changes the bucket or the spec.
+	ReasonBucketIncompatible = "BucketIncompatible"
+
+	// ReasonBucketUnreachable marks a bucket that did not answer at all — DNS, a
+	// refused connection, a 5xx, a rejected credential. Unlike
+	// ReasonBucketIncompatible it usually clears with time, so the sink runtime
+	// keeps probing and the condition flips back on its own.
+	ReasonBucketUnreachable = "BucketUnreachable"
+
+	// ReasonArchiving marks an S3Sink that is fully healthy: its credential
+	// resolved and its bucket accepted a write. It is the S3 counterpart of
+	// ReasonConnected, named for what the sink is *doing* rather than for a
+	// connection it does not hold — an object store is reached per request, so
+	// there is no connection to be "connected" over.
+	ReasonArchiving = "Archiving"
+)
+
 // Condition reasons for StreamRule and ClusterStreamRule.
 const (
 	// ReasonSecretsDenied marks a rule naming v1/Secret. The deny is hard-coded
@@ -321,7 +368,7 @@ func (w *statusWriter) apply(existing *[]metav1.Condition) {
 // caused the conflict.
 //
 // A conflict is expected traffic, not an anomaly: both rule reconcilers, the
-// probe watcher and the periodic resync can all decide to write the same object's
+// probe hub and the periodic resync can all decide to write the same object's
 // status within milliseconds of each other.
 func updateStatus[T client.Object](ctx context.Context, c client.Client, obj T, mutate func(T)) error {
 	key := client.ObjectKeyFromObject(obj)

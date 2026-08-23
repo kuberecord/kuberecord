@@ -178,9 +178,11 @@ type harness struct {
 	// Runtime records what the sink reconciler declared, and never dials anything.
 	Runtime *fakeSinkRuntime
 
-	// Probes is the store the reconciler reads health verdicts from; tests push
-	// verdicts through ProbeResults.
-	Probes *probeStore
+	// Probes is the hub the reconcilers read health verdicts from; tests push
+	// verdicts through ProbeResults. It is one hub for both sink kinds, exactly as
+	// the composition root builds it, so these tests also cover the dispatch: a
+	// verdict for an S3Sink must wake the S3 reconciler and no other.
+	Probes *SinkProbeHub
 
 	// ProbeResults is the channel a fake sink runtime's probes arrive on.
 	ProbeResults chan sink.ProbeResult
@@ -221,6 +223,10 @@ type harnessOptions struct {
 	// buildConfig overrides the sink configuration builder. Nil means a builder
 	// that fingerprints the spec and the password.
 	buildConfig SinkConfigBuilder
+
+	// s3BuildConfig overrides the S3 sink configuration builder. Nil means a
+	// builder that fingerprints the spec and the access key.
+	s3BuildConfig S3SinkConfigBuilder
 }
 
 // newHarness boots a manager with the three reconcilers wired up and returns once
@@ -261,7 +267,6 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		Registry:          plan.New(),
 		Reviewer:          newFakeReviewer(opts.allowAll, opts.allowed...),
 		Runtime:           newFakeSinkRuntime(),
-		Probes:            newProbeStore(),
 		ProbeResults:      make(chan sink.ProbeResult, 16),
 		OperatorNamespace: operatorNamespace,
 		stopped:           make(chan struct{}),
@@ -269,9 +274,18 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 	}
 	h.RuleMetrics = NewRuleMetrics(h.metricsReg)
 
+	h.Probes = NewSinkProbeHub(h.ProbeResults)
+	if err := h.Probes.SetupWithManager(mgr); err != nil {
+		t.Fatalf("set up the sink probe hub: %v", err)
+	}
+
 	buildConfig := opts.buildConfig
 	if buildConfig == nil {
 		buildConfig = fakeConfigBuilder
+	}
+	s3BuildConfig := opts.s3BuildConfig
+	if s3BuildConfig == nil {
+		s3BuildConfig = fakeS3ConfigBuilder
 	}
 	sinkReconciler := &SinkReconciler{
 		Client: mgr.GetClient(),
@@ -283,8 +297,22 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		Probes:            h.Probes,
 		ResyncPeriod:      opts.resyncPeriod,
 	}
-	if err := sinkReconciler.SetupWithManager(mgr, h.ProbeResults); err != nil {
+	if err := sinkReconciler.SetupWithManager(mgr); err != nil {
 		t.Fatalf("set up the sink reconciler: %v", err)
+	}
+
+	s3SinkReconciler := &S3SinkReconciler{
+		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: matches the composition root; see cmd/main.go.
+		Recorder:          mgr.GetEventRecorderFor("kuberecord-test"),
+		Sinks:             h.Runtime,
+		BuildConfig:       s3BuildConfig,
+		OperatorNamespace: operatorNamespace,
+		Probes:            h.Probes,
+		ResyncPeriod:      opts.resyncPeriod,
+	}
+	if err := s3SinkReconciler.SetupWithManager(mgr); err != nil {
+		t.Fatalf("set up the S3 sink reconciler: %v", err)
 	}
 
 	base := RuleReconciler{
@@ -345,7 +373,7 @@ func (h *harness) pushProbe(result sink.ProbeResult) {
 	select {
 	case h.ProbeResults <- result:
 	case <-time.After(5 * time.Second):
-		h.t.Fatalf("the probe watcher never drained a result for sink %q", result.Sink)
+		h.t.Fatalf("the probe hub never drained a result for sink %q", result.Sink)
 	}
 }
 
@@ -421,6 +449,11 @@ func (h *harness) deleteIfExists(obj client.Object) {
 	}
 }
 
+// conditionAbsent is what a condition poll reports while the condition it is
+// waiting for has not been written at all. It is one constant so a timeout message
+// reads the same whichever object the poll was watching.
+const conditionAbsent = "condition absent"
+
 // waitTimeout bounds every eventual assertion. It is generous because envtest's
 // apiserver shares a machine with the rest of the suite; a genuine failure still
 // fails, just later.
@@ -455,7 +488,7 @@ func (h *harness) waitForSinkCondition(name, condType string, want metav1.Condit
 		}
 		c := findCondition(chSink.Status.Conditions, condType)
 		if c == nil {
-			return false, "condition absent"
+			return false, conditionAbsent
 		}
 		return c.Status == want && c.Reason == reason, fmt.Sprintf("%s/%s: %s", c.Status, c.Reason, c.Message)
 	})
@@ -480,7 +513,7 @@ func (h *harness) waitForRuleCondition(obj client.Object, condType string,
 		conditions := ruleConditions(fresh)
 		c := findCondition(conditions, condType)
 		if c == nil {
-			return false, "condition absent"
+			return false, conditionAbsent
 		}
 		if c.Status == want && c.Reason == reason {
 			settled = *c
@@ -889,13 +922,25 @@ func (f *fakeSinkRuntime) Delete(id sink.ID) {
 	f.deleted = append(f.deleted, id)
 }
 
-// fingerprints returns the distinct configurations declared for one sink, in
-// order. It takes a name and resolves the ID itself, because every sink these
-// tests create is a ClickHouseSink.
+// fingerprints returns the distinct configurations declared for one ClickHouseSink,
+// in order. It takes a name and resolves the ID itself, which is also what makes it
+// an assertion about the *kind*: a reconciler declaring its sink under a bare name,
+// or under the wrong kind, would simply not be found here.
 func (f *fakeSinkRuntime) fingerprints(name string) []string {
+	return f.fingerprintsFor(clickHouseSinkID(name))
+}
+
+// s3Fingerprints is the same accessor for an S3Sink, and exists separately for the
+// same reason: it names the kind, so a sink declared under the wrong one is a
+// failing assertion rather than a passing one about a different backend.
+func (f *fakeSinkRuntime) s3Fingerprints(name string) []string {
+	return f.fingerprintsFor(s3SinkID(name))
+}
+
+func (f *fakeSinkRuntime) fingerprintsFor(id sink.ID) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.ensured[clickHouseSinkID(name)]...)
+	return append([]string(nil), f.ensured[id]...)
 }
 
 // deletions returns the sinks withdrawn so far.
@@ -917,6 +962,104 @@ func (c fakeConfig) Fingerprint() string { return c.fingerprint }
 func fakeConfigBuilder(name string, spec v1alpha1.ClickHouseSinkSpec, password string) (sink.InstanceConfig, error) {
 	return fakeConfig{fingerprint: fmt.Sprintf("%s|%s|%s|%s",
 		name, spec.Connection.Addr, spec.Connection.Username, password)}, nil
+}
+
+// fakeS3ConfigBuilder fingerprints the fields a real object-store configuration
+// would be built from, so a rotated access key changes the fingerprint exactly as
+// s3.SinkConfig.Fingerprint would — including the ambient case, where the key is
+// empty and the fingerprint must still cover the rest of the spec.
+func fakeS3ConfigBuilder(name string, spec v1alpha1.S3SinkSpec,
+	creds S3Credentials) (sink.InstanceConfig, error) {
+	return fakeConfig{fingerprint: fmt.Sprintf("%s|%s|%s|%s|%t|%s|%s",
+		name, spec.Bucket, spec.Prefix, spec.Endpoint, spec.ForcePathStyle,
+		creds.AccessKeyID, creds.SecretAccessKey)}, nil
+}
+
+// createS3Secret creates an S3 credentials Secret in the operator namespace.
+func (h *harness) createS3Secret(name, accessKeyID, secretAccessKey string) {
+	h.t.Helper()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.OperatorNamespace},
+		Data: map[string][]byte{
+			DefaultAccessKeyIDSecretKey:     []byte(accessKeyID),
+			DefaultSecretAccessKeySecretKey: []byte(secretAccessKey),
+		},
+	}
+	if err := h.Client.Create(context.Background(), secret); err != nil {
+		h.t.Fatalf("create S3 secret %q: %v", name, err)
+	}
+}
+
+// createS3Sink creates an S3Sink naming a Secret of the same name, and registers its
+// deletion. It does not wait for any condition — the tests that call it are about
+// how those conditions settle — and returns nothing: a sink is read back through
+// waitForS3SinkCondition or the API, never from a stale copy of what was created.
+func (h *harness) createS3Sink(name string, mutate func(*v1alpha1.S3Sink)) {
+	h.t.Helper()
+	s3Sink := &v1alpha1.S3Sink{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1alpha1.S3SinkSpec{
+			Bucket:      "kuberecord-audit",
+			Credentials: &v1alpha1.S3CredentialsSpec{SecretRef: &v1alpha1.SecretReference{Name: name}},
+		},
+	}
+	if mutate != nil {
+		mutate(s3Sink)
+	}
+	if err := h.Client.Create(context.Background(), s3Sink); err != nil {
+		h.t.Fatalf("create S3 sink %q: %v", name, err)
+	}
+	h.t.Cleanup(func() { h.deleteIfExists(s3Sink) })
+}
+
+// createReadyS3Sink creates an S3Sink with its Secret and drives it to Ready=True
+// by pushing a successful probe, so a rule test can start from a healthy archive
+// sink without repeating the handshake.
+func (h *harness) createReadyS3Sink(name string, policy v1alpha1.SinkPolicy) {
+	h.t.Helper()
+	// The Secret is named after the sink *and its kind*, because a test may create a
+	// ClickHouseSink and an S3Sink under one name — that collision is the whole
+	// subject of the typed-identity tests — and the two would otherwise fight over
+	// one Secret object.
+	secretName := name + "-s3"
+	h.createS3Secret(secretName, "AKIATEST", "secret-access-key")
+	h.createS3Sink(name, func(s *v1alpha1.S3Sink) {
+		s.Spec.Policy = policy
+		s.Spec.Credentials = &v1alpha1.S3CredentialsSpec{
+			SecretRef: &v1alpha1.SecretReference{Name: secretName},
+		}
+	})
+
+	h.waitForS3SinkCondition(name, v1alpha1.ConditionCredentialsResolved,
+		metav1.ConditionTrue, ReasonSecretResolved)
+	h.pushProbe(sink.ProbeResult{Sink: s3SinkID(name), At: time.Now().UTC()})
+	h.waitForS3SinkCondition(name, v1alpha1.ConditionReady, metav1.ConditionTrue, ReasonArchiving)
+}
+
+// waitForS3SinkCondition waits until an S3Sink carries the given condition status
+// and reason, and returns the condition it settled on so a test can assert on its
+// message.
+func (h *harness) waitForS3SinkCondition(name, condType string,
+	want metav1.ConditionStatus, reason string) metav1.Condition {
+	h.t.Helper()
+	var settled metav1.Condition
+	waitFor(h.t, fmt.Sprintf("S3 sink %q condition %s=%s/%s", name, condType, want, reason),
+		func() (bool, string) {
+			var s3Sink v1alpha1.S3Sink
+			if err := h.Client.Get(context.Background(), client.ObjectKey{Name: name}, &s3Sink); err != nil {
+				return false, err.Error()
+			}
+			c := findCondition(s3Sink.Status.Conditions, condType)
+			if c == nil {
+				return false, conditionAbsent
+			}
+			if c.Status == want && c.Reason == reason {
+				settled = *c
+				return true, ""
+			}
+			return false, fmt.Sprintf("%s/%s: %s", c.Status, c.Reason, c.Message)
+		})
+	return settled
 }
 
 // slicesEqual compares two string slices element-wise, treating nil and empty as

@@ -400,6 +400,74 @@ func TestDeleteClearsTheWarmCoordinatorsBookkeeping(t *testing.T) {
 	}
 }
 
+// TestDeleteTearsDownOnlyTheIdentifiedKind is the teardown half of typed identity:
+// two sinks may legitimately share a name across kinds (a ClickHouseSink and an
+// S3Sink called "audit" are two unrelated backends, D6), so deleting one must evict
+// exactly one sink's state and park exactly one sink's rules.
+//
+// The failure this closes is silent and expensive. Keyed on the name alone, deleting
+// the archive would discard the ClickHouse sink's hashCache — and the next
+// observation of every object in every scope it serves would be treated as new, so
+// the "deletion" of one sink would re-emit the entire cluster into another.
+func TestDeleteTearsDownOnlyTheIdentifiedKind(t *testing.T) {
+	const shared = "audit"
+	archive := ID{Kind: "S3Sink", Name: shared}
+	timeline := ID{Kind: DefaultSinkKind, Name: shared}
+
+	var warm *fakeWarmHooks
+	h := newManagerHarness(t, func(opts *ManagerOptions) {
+		warm = newFakeWarmHooks(opts.Pipeline.(*fakePipeline).clock)
+		opts.Warm = warm
+		opts.Dependents = fakeDependents{rules: map[ID][]string{
+			archive:  {"streamrule/team-a/archive"},
+			timeline: {"streamrule/team-a/timeline"},
+		}}
+	})
+	h.start()
+
+	for _, id := range []ID{timeline, archive} {
+		if err := h.mgr.Ensure(id, fakeConfig{fingerprint: "v1"}); err != nil {
+			t.Fatalf("Ensure(%s): %v", id, err)
+		}
+	}
+
+	h.mgr.Delete(archive)
+
+	waitFor(t, "the deleted archive sink to be parked", func() bool {
+		parked, _ := h.parks.snapshot()
+		_, ok := parked[archive]
+		return ok
+	})
+
+	// Everything the teardown touches names the S3Sink identity and nothing else.
+	removed, _ := h.pipe.removals()
+	if !slices.Contains(removed, archive) {
+		t.Errorf("RemoveSink was not called for %s; removals=%v", archive, removed)
+	}
+	if slices.Contains(removed, timeline) {
+		t.Errorf("RemoveSink evicted %s, whose CR was never deleted", timeline)
+	}
+	forgotten, _ := warm.forgets()
+	if !slices.Contains(forgotten, archive) {
+		t.Errorf("ForgetSink was not called for %s; forgotten=%v", archive, forgotten)
+	}
+	if slices.Contains(forgotten, timeline) {
+		t.Errorf("ForgetSink cleared %s, whose CR was never deleted", timeline)
+	}
+	parked, _ := h.parks.snapshot()
+	if want := []string{"streamrule/team-a/archive"}; !slices.Equal(parked[archive], want) {
+		t.Errorf("parked rules for %s = %v, want %v", archive, parked[archive], want)
+	}
+	if got, ok := parked[timeline]; ok {
+		t.Errorf("the rules of %s were parked (%v) by another kind's deletion", timeline, got)
+	}
+
+	// And the sink that shares the name is still routed, so its writes never paused.
+	if _, ok := h.mgr.WriterFor(timeline); !ok {
+		t.Errorf("%s stopped being routed when %s was deleted", timeline, archive)
+	}
+}
+
 // TestDeleteWithoutWarmHooksStillEvicts proves the hook is genuinely optional: a
 // deployment (or a test) that runs no warm coordinator must not need the wiring,
 // and must not panic for the want of it.
@@ -688,11 +756,16 @@ settled:
 	}
 }
 
-// TestProbeClassifiesASchemaMismatch proves the one classification the manager
-// makes: a failure wrapping sink.ErrSchemaInvalid is reported as SchemaInvalid,
-// because it needs a migration rather than patience, while everything else is
-// reported as unreachable.
-func TestProbeClassifiesASchemaMismatch(t *testing.T) {
+// TestProbeClassifiesItsFailures proves the two classifications the manager makes,
+// and the default everything else falls into.
+//
+// Both classified cases are "this will not fix itself with time" verdicts that need
+// a human, and they need *different* humans: a schema mismatch needs a migration,
+// and a credential that could not be obtained needs whoever owns the workload's
+// identity. Everything else is reachability, which the manager keeps retrying on
+// its own. Collapsing any two of the three would leave the reconciler unable to
+// write a condition that says what to do next.
+func TestProbeClassifiesItsFailures(t *testing.T) {
 	tests := []struct {
 		name       string
 		probeErr   error
@@ -702,6 +775,12 @@ func TestProbeClassifiesASchemaMismatch(t *testing.T) {
 			name:       "a wrapped schema mismatch is permanent",
 			probeErr:   fmt.Errorf("%w: table %q is missing", ErrSchemaInvalid, "resource_states"),
 			wantReason: ProbeReasonSchemaInvalid,
+		},
+		{
+			name: "a wrapped credential failure is about identity, not reachability",
+			probeErr: fmt.Errorf("write probe object to bucket %q: %w: no EC2 IMDS role found",
+				"audit", ErrCredentialsUnavailable),
+			wantReason: ProbeReasonCredentialsInvalid,
 		},
 		{
 			name:       "any other failure is unreachable",
