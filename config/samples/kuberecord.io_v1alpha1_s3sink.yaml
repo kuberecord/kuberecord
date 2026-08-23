@@ -1,0 +1,73 @@
+apiVersion: kuberecord.io/v1alpha1
+kind: S3Sink
+metadata:
+  name: archive
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # kuberecord never creates the bucket: retention, encryption, lifecycle and
+  # Object Lock all belong to whoever owns the account.
+  bucket: kuberecord-audit
+  # A path fragment, never a path: no leading or trailing slash. The object key
+  # is built as <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/...
+  prefix: clusters/prod
+  region: us-east-1
+  # endpoint + forcePathStyle are what point this at MinIO instead of AWS. A
+  # bucket-as-subdomain URL only resolves if DNS covers *.<endpoint>, which a
+  # Service name does not — hence path style.
+  endpoint: http://minio.kuberecord-system.svc:9000
+  forcePathStyle: true
+  credentials:
+    secretRef:
+      # namespace is omitted on purpose: it defaults to the operator's own
+      # namespace, which is the only place the operator holds Secret read
+      # rights (Task 1.9, D7).
+      name: kuberecord-s3-credentials
+  # Remove the whole `credentials` block to authenticate from the ambient chain
+  # instead — IRSA, workload identity or an instance role. That is the preferred
+  # shape on a cloud provider: there is no long-lived key to leak or rotate.
+  format: jsonl-v1-zstd
+  rotation:
+    # The object is the batch: whichever of these fires first closes it and PUTs
+    # it. 64Mi encoded, or five minutes after the object's first record.
+    maxObjectBytes: 67108864
+    maxObjectAge: 5m
+  # Per-object retention applied at PUT. The bucket must already have Object
+  # Lock enabled — that can only be done when the bucket is created. COMPLIANCE
+  # cannot be lifted by anyone, including the account root, until the date
+  # passes; GOVERNANCE can, by a principal holding the bypass permission.
+  objectLock:
+    mode: GOVERNANCE
+    retainDays: 365
+  writer:
+    queueSize: 5000
+    # Each worker accumulates its own object, so the memory ceiling here is
+    # workers x maxObjectBytes.
+    workers: 4
+    enqueueTimeout: 2s
+    # The drain closes and PUTs each worker's partial object, so this budget
+    # covers a round-trip per worker, not just the queue's length.
+    drainTimeout: 15s
+  # batchMaxRows/batchMaxWait/checkpointEvery have no twin here on purpose: for
+  # S3 the object is the batch (spec.rotation governs it), and a Writer-only
+  # sink emits no diffs to checkpoint (D12).
+  policy:
+    # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
+    # entirely to admit everything except the hard deny-list (D8: v1/Secret).
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds: ["*"]
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+      - Service
+    # The redaction floor is the same shape, and just as binding, as a
+    # ClickHouseSink's: values on these paths are replaced with "[REDACTED]"
+    # after normalization and *before* hashing, so they never reach the bucket.
+    # Choosing an archive tier is not a way around a sink's redaction floor.
+    redaction:
+    - fieldPath: data.password
+    - annotation: my.company.io/api-token

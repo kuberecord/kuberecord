@@ -220,19 +220,37 @@ func objectMeta(namespace string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: "placeholder", Namespace: namespace}
 }
 
-// durationString and int32String render an optional field for comparison in the
-// defaulting tables, mapping a nil (i.e. "the apiserver applied no default at
-// all") to a distinctive value rather than to a plausible-looking zero.
+// unsetRendering is what an optional field the apiserver applied no default to
+// renders as in the defaulting tables. It is deliberately not a
+// plausible-looking zero: "0" or "" would read as a default that fired and set
+// that value, which is the one failure these tables exist to catch.
+const unsetRendering = "<nil>"
+
+// durationString, int32String and int64String render an optional field for
+// comparison in the defaulting tables.
 func durationString(d *metav1.Duration) string {
 	if d == nil {
-		return "<nil>"
+		return unsetRendering
 	}
 	return d.Duration.String()
 }
 
 func int32String(v *int32) string {
 	if v == nil {
-		return "<nil>"
+		return unsetRendering
 	}
 	return strconv.Itoa(int(*v))
 }
+
+func int64String(v *int64) string {
+	if v == nil {
+		return unsetRendering
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// boolString renders a plain bool for the same tables. It takes a value rather
+// than a pointer because a bool field defaulted to false is indistinguishable
+// from an un-defaulted one either way, so a pointer would promise a distinction
+// it cannot keep.
+func boolString(v bool) string { return strconv.FormatBool(v) }

@@ -86,6 +86,59 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 			},
 		},
 		{
+			name: "s3sink",
+			file: "kuberecord.io_s3sinks.yaml",
+			mustContain: []string{
+				// Printer columns: READY, BUCKET (see the type comment on S3Sink for
+				// why the prefix is not in it).
+				`jsonPath: .status.conditions[?(@.type=="Ready")].status`,
+				"name: READY",
+				"jsonPath: .spec.bucket",
+				"name: BUCKET",
+				"name: AGE",
+				"scope: Cluster",
+				// A bucket is the one required field, and the whole minimal spec.
+				"\n            - bucket\n",
+				"minLength: 1",
+				// The object-key prefix: no leading slash, no trailing slash, no
+				// empty segment. It is the authored half of a public contract (D15).
+				"pattern: " + S3PrefixPattern,
+				// The format enum is deliberately one member wide; widening it is an
+				// additive release decision, so it is matched with its list item.
+				"enum:\n                - jsonl-v1-zstd\n",
+				"default: jsonl-v1-zstd",
+				// Rotation: 1Mi..1Gi, and a duration range no Minimum/Maximum can
+				// express, so a CEL rule that leads with its own shape guard.
+				"minimum: 1048576",
+				"maximum: 1073741824",
+				"default: 67108864",
+				"default: 5m",
+				"rule: self.matches('^([0-9]+(ns|us|ms|s|m|h))+$') && duration(self)",
+				// The credential union: a Secret, or nothing at all. The message is
+				// asserted because it is what tells an author which state they meant.
+				"rule: has(self.secretRef)",
+				"spec.credentials must name a secretRef",
+				// Object Lock, matched with its list items: adding a mode is an S3 API
+				// fact, not a refactor.
+				"enum:\n                    - GOVERNANCE\n                    - COMPLIANCE\n",
+				"maximum: 36500",
+				// The shared policy shape reaches this CRD too — redaction is a floor,
+				// and choosing a backend must not be a way around it.
+				"pattern: " + RedactionFieldPathPattern,
+				"rule: has(self.fieldPath) != has(self.annotation)",
+				"x-kubernetes-list-type: set",
+			},
+			mustNotExist: []string{
+				// The three writer knobs this backend does not have. Their absence is
+				// a design statement (the object is the batch; a Writer-only sink
+				// writes no diffs), so it is pinned rather than left to review — see
+				// TestSharedWriterKnobsAgreeAcrossSinks for the other half.
+				"batchMaxRows:",
+				"batchMaxWait:",
+				"checkpointEvery:",
+			},
+		},
+		{
 			name: "streamrule",
 			file: "kuberecord.io_streamrules.yaml",
 			mustContain: []string{
@@ -114,7 +167,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// refactor — has to be made here too.
 				"\n            - sink\n",
 				"default: ClickHouseSink",
-				"enum:\n                    - ClickHouseSink\n",
+				"enum:\n                    - ClickHouseSink\n                    - S3Sink\n",
 				"minLength: 1",
 				"rule: self == oldSelf",
 				// Redaction path syntax, and the one rule a pattern cannot
@@ -157,7 +210,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// on the embedded spec.
 				"\n            - sink\n",
 				"default: ClickHouseSink",
-				"enum:\n                    - ClickHouseSink\n",
+				"enum:\n                    - ClickHouseSink\n                    - S3Sink\n",
 				"rule: self == oldSelf",
 				// Inlining must carry the redaction rules across too.
 				"pattern: " + RedactionFieldPathPattern,
@@ -210,6 +263,9 @@ func TestCRDPatternConstantsMatchMarkers(t *testing.T) {
 		{name: "redactionFieldPath", file: "kuberecord.io_streamrules.yaml", pattern: RedactionFieldPathPattern},
 		{name: "redactionAnnotation", file: "kuberecord.io_streamrules.yaml", pattern: RedactionAnnotationPattern},
 		{name: "redactionFieldPathOnSink", file: "kuberecord.io_clickhousesinks.yaml",
+			pattern: RedactionFieldPathPattern},
+		{name: "s3Prefix", file: "kuberecord.io_s3sinks.yaml", pattern: S3PrefixPattern},
+		{name: "redactionFieldPathOnS3Sink", file: "kuberecord.io_s3sinks.yaml",
 			pattern: RedactionFieldPathPattern},
 	}
 
@@ -282,7 +338,7 @@ var ruleCRDFiles = []string{
 func TestSinkReferenceHasNoMaterializingDefault(t *testing.T) {
 	for _, file := range ruleCRDFiles {
 		t.Run(strings.TrimSuffix(file, ".yaml"), func(t *testing.T) {
-			specSchema := ruleSpecSchema(t, file)
+			specSchema := crdSpecSchema(t, file)
 
 			if !specRequires(t, specSchema, "sink") {
 				t.Errorf("generated CRD %s no longer lists `sink` in spec.required.\n"+
@@ -327,10 +383,10 @@ func TestSinkReferenceHasNoMaterializingDefault(t *testing.T) {
 	}
 }
 
-// ruleSpecSchema decodes one generated rule CRD and returns the schema of its
-// `spec` — the node every assertion in TestSinkReferenceHasNoMaterializingDefault
-// hangs off.
-func ruleSpecSchema(t *testing.T, file string) map[string]any {
+// crdSpecSchema decodes one generated CRD and returns the schema of its `spec` —
+// the node the parsed assertions in this file hang off, for a rule CRD and a sink
+// CRD alike.
+func crdSpecSchema(t *testing.T, file string) map[string]any {
 	t.Helper()
 
 	raw, err := os.ReadFile(filepath.Join(crdBasesDir, file))
@@ -388,4 +444,90 @@ func specRequires(t *testing.T, specSchema map[string]any, field string) bool {
 		t.Fatalf("the generated spec schema has no required list")
 	}
 	return slices.Contains(required, any(field))
+}
+
+// The two sink CRDs, named here because the writer-shape assertions below read
+// both of them in one breath.
+const (
+	clickHouseSinkCRDFile = "kuberecord.io_clickhousesinks.yaml"
+	s3SinkCRDFile         = "kuberecord.io_s3sinks.yaml"
+)
+
+// sharedWriterKnobs are the writer knobs every sink CRD carries, and
+// clickHouseOnlyWriterKnobs are the ones only ClickHouse's does.
+//
+// The split is the API promise Task 6.1 makes: an author who has tuned one sink's
+// write path has tuned the other's, and the fields that are missing are missing
+// for a stated reason rather than by oversight.
+var (
+	sharedWriterKnobs         = []string{"queueSize", "workers", "enqueueTimeout", "drainTimeout"}
+	clickHouseOnlyWriterKnobs = []string{"batchMaxRows", "batchMaxWait", "checkpointEvery"}
+)
+
+// TestSharedWriterKnobsAgreeAcrossSinks pins the relationship between
+// ClickHouseSink's WriterSpec and S3Sink's S3WriterSpec: the four shared knobs
+// validate and default identically, and the three ClickHouse-only ones exist
+// nowhere on the S3 side.
+//
+// The two are separate Go types on purpose. Their bounds coincide but their
+// reasons do not — `workers` is capped at 64 because ClickHouse punishes insert
+// concurrency, and at 64 on the S3 side because each worker holds a whole object
+// in memory — and a comment true of neither backend would be worse than the
+// duplication. What that choice costs is the compiler's guarantee that the two
+// cannot drift, so this test buys it back: change a default or a bound on one
+// side and this fails, naming the knob.
+//
+// The comparison is deliberately over the *machine-enforced* keys only. The
+// descriptions are expected to differ; that is the whole point of not sharing the
+// type.
+//
+// The absence half matters just as much. batchMaxRows and batchMaxWait would be a
+// second set of controls over a decision spec.rotation already owns, and
+// checkpointEvery would be a cadence over diffs a Writer-only sink never writes
+// (D12) — a knob that silently does nothing is worse than no knob, so their
+// absence is asserted rather than assumed.
+func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
+	chWriter := schemaNode(t, clickHouseSinkCRDFile,
+		crdSpecSchema(t, clickHouseSinkCRDFile), "properties", "writer", "properties")
+	s3Writer := schemaNode(t, s3SinkCRDFile,
+		crdSpecSchema(t, s3SinkCRDFile), "properties", "writer", "properties")
+
+	// The keys the API server actually enforces. `description` is excluded by
+	// omission, not by oversight.
+	enforced := []string{"type", "format", "default", "minimum", "maximum"}
+
+	for _, knob := range sharedWriterKnobs {
+		t.Run(knob, func(t *testing.T) {
+			ch := schemaNode(t, clickHouseSinkCRDFile, chWriter, knob)
+			s3 := schemaNode(t, s3SinkCRDFile, s3Writer, knob)
+			for _, key := range enforced {
+				chValue, onCH := ch[key]
+				s3Value, onS3 := s3[key]
+				if onCH != onS3 || chValue != s3Value {
+					t.Errorf("spec.writer.%s disagrees on %q: ClickHouseSink has %v (present=%v), "+
+						"S3Sink has %v (present=%v).\n"+
+						"The four shared writer knobs are an API promise that tuning one sink tunes "+
+						"the other; they are separate Go types only so each can explain itself in its "+
+						"own backend's terms.",
+						knob, key, chValue, onCH, s3Value, onS3)
+				}
+			}
+		})
+	}
+
+	for _, knob := range clickHouseOnlyWriterKnobs {
+		t.Run("no-"+knob+"-on-s3", func(t *testing.T) {
+			if _, found := chWriter[knob]; !found {
+				t.Fatalf("spec.writer.%s is gone from %s, so its absence from the S3Sink proves "+
+					"nothing — this test is now vacuous", knob, clickHouseSinkCRDFile)
+			}
+			if got, found := s3Writer[knob]; found {
+				t.Errorf("spec.writer.%s appeared on the S3Sink (%v).\n"+
+					"batchMaxRows and batchMaxWait would be a second set of controls over what "+
+					"spec.rotation already decides, and checkpointEvery a cadence over diffs a "+
+					"Writer-only sink never writes (D12). A knob that does nothing is worse than "+
+					"no knob.", knob, got)
+			}
+		})
+	}
 }

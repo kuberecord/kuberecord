@@ -624,11 +624,16 @@ func sinkIDFrom(ref v1alpha1.SinkReference) sink.ID {
 // targets stay installed in that case — see RuleReconciler's doc comment for why.
 func (r *RuleReconciler) resolveSink(ctx context.Context, id sink.ID) (*v1alpha1.ClickHouseSink, sinkVerdict, error) {
 	if id.Kind != clickHouseSinkKind {
-		// Not reachable through admission — the CRD's enum lists only the kinds this
-		// build serves — but perfectly reachable in etcd: a rule stored by a newer
-		// operator, or one whose kind this binary was downgraded out of serving.
-		// SinkMissing is the honest verdict for both: the sink the rule asked for is
-		// not here, and no other sink may stand in for it.
+		// Three ways to arrive here, all of them handled the same way. A kind no
+		// release serves cannot be admitted (the CRD's enum) but is perfectly
+		// storable in etcd: a rule written by a newer operator, or one whose kind
+		// this binary was downgraded out of serving. And since Task 6.1 there is a
+		// third, ordinary route — S3Sink is admitted by the enum but has no
+		// reconciler behind it until Task 6.4, so a rule may legitimately name it
+		// today and find nothing here.
+		//
+		// SinkMissing is the honest verdict for all three: the sink the rule asked
+		// for is not here, and no other sink may stand in for it.
 		return nil, sinkVerdict{
 			reason: ReasonSinkMissing,
 			message: fmt.Sprintf("Sink %s does not exist: this operator serves no sink of kind %q",
