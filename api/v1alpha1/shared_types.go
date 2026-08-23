@@ -27,14 +27,54 @@ import (
 // otherwise silently produce a condition nobody is watching for. Every type
 // listed here follows the Kubernetes convention that `True` is the healthy
 // state, so a `False` value always means "this specific thing is wrong" and
-// never "this thing is fine".
+// never "this thing is fine" — with exactly one deliberate exception,
+// ConditionHistoryUnavailable, which documents its own inversion.
 const (
-	// ConditionReady is the roll-up condition present on all three CRDs: the
+	// ConditionReady is the roll-up condition present on all four CRDs: the
 	// object is fully realised (a sink is connected and schema-checked, a rule
 	// has all its watches running). It is False whenever any of the more
 	// specific conditions below is False, so a single `kubectl get` column can
 	// summarise health (Invariant 5: one bad rule degrades only itself).
+	//
+	// ConditionHistoryUnavailable is the one condition it does not roll up. A
+	// Writer-only sink (D12) reports that condition True forever and is
+	// nonetheless entirely healthy: a declared capability limit is not a fault,
+	// and folding it into Ready would leave an operator permanently unable to
+	// tell a working archive from a broken one.
 	ConditionReady = "Ready"
+)
+
+// Condition types shared by every sink CRD.
+const (
+	// ConditionCredentialsResolved reports whether the credential this sink
+	// names was found and was usable — the Secret at
+	// spec.connection.credentialsSecretRef for a ClickHouseSink, the one at
+	// spec.credentials.secretRef for an S3Sink. It is a condition of its own so
+	// an operator can tell "I cannot authenticate" apart from every other way a
+	// backend can be unreachable or wrong.
+	//
+	// A sink that names no Secret at all — an S3Sink using ambient credentials —
+	// still reports it: there is nothing to resolve from the cluster, but whether
+	// the ambient chain produced a credential is exactly as worth knowing.
+	ConditionCredentialsResolved = "CredentialsResolved"
+
+	// ConditionHistoryUnavailable reports that this sink cannot read its own
+	// history back, so the behaviours that depend on reading it — dedup cache
+	// warm-up, zombie garbage collection, and boot reconciliation of scope
+	// epochs — are disabled for it, and every record it receives is a permanent
+	// Snapshot (D12).
+	//
+	// It inverts this file's convention on purpose: `True` is the abnormal-sounding
+	// value and yet the sink is healthy, in the same shape as a Node's
+	// NetworkUnavailable. The inversion is the point. A Writer-only sink's
+	// degradation is invisible in its output — an archive with no deletions in it
+	// and a full re-snapshot after every restart looks exactly like an archive of
+	// a cluster where nothing was deleted — so the only honest place to state it is
+	// a condition that is present, positive and permanent, rather than a False
+	// reading of some capability that a reader might never think to look for.
+	//
+	// It never drags Ready False; see ConditionReady.
+	ConditionHistoryUnavailable = "HistoryUnavailable"
 )
 
 // Condition types specific to ClickHouseSink.
@@ -46,12 +86,16 @@ const (
 	// that sets it is asynchronous — control-plane reconcilers never dial
 	// ClickHouse on the reconcile path (Invariant 1).
 	ConditionSchemaValid = "SchemaValid"
+)
 
-	// ConditionCredentialsResolved reports whether the Secret named by
-	// spec.connection.credentialsSecretRef was found and contained the expected
-	// key. It is distinct from SchemaValid so an operator can tell "I cannot
-	// authenticate" apart from "I authenticated but the tables are wrong".
-	ConditionCredentialsResolved = "CredentialsResolved"
+// Condition types specific to S3Sink.
+const (
+	// ConditionBucketReachable reports whether the bucket named by spec.bucket
+	// answered, and answered to a *write*. It is deliberately not a HEAD: a
+	// read-only credential passes a HEAD and then fails every PUT, which would
+	// produce a sink reporting Ready while archiving nothing — the exact silent
+	// degradation this backend must not ship with (Invariant 5).
+	ConditionBucketReachable = "BucketReachable"
 )
 
 // Condition types specific to StreamRule and ClusterStreamRule.
@@ -79,10 +123,11 @@ const (
 	ConditionResourceResolved = "ResourceResolved"
 )
 
-// kindPattern and its `kinds`-entry variant are the single source of truth for
-// what kuberecord accepts as a Kubernetes Kind. They are duplicated verbatim
-// into the `+kubebuilder:validation:Pattern` markers below (markers cannot
-// reference Go constants) and re-asserted against the generated CRD YAML in
+// The patterns every `+kubebuilder:validation:Pattern` marker in this package
+// spells out. They are the single source of truth for the shapes kuberecord
+// accepts — a Kubernetes Kind, a redaction path, an object-key prefix — and they
+// are duplicated verbatim into the markers below (markers cannot reference Go
+// constants) and re-asserted against the generated CRD YAML in
 // crdmanifests_test.go, so a drift between the two is a test failure rather
 // than a silently weaker schema.
 const (
@@ -133,6 +178,19 @@ const (
 	// pipeline.AnnotationRedactionPath), and a key able to close that quote could
 	// express a path its author did not write.
 	RedactionAnnotationPattern = `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+
+	// S3PrefixPattern matches an S3Sink's optional object-key prefix: slash-joined
+	// segments of an unreserved character set, or nothing at all.
+	//
+	// What it forbids is as load-bearing as what it admits. A leading slash, a
+	// trailing slash and an empty segment all produce a `//` in every key the sink
+	// writes, because the key is built by joining this prefix to a fixed layout
+	// (`<prefix>/format=jsonl-v1/…`) — and that layout is a public contract (D15)
+	// whose readers glob on it. The character set is the conservative subset that
+	// needs no escaping in a key, a URL or a query engine's glob; it can be widened
+	// later without invalidating a single object already written, which is not true
+	// of narrowing it.
+	S3PrefixPattern = `^([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)?$`
 )
 
 // RedactionRule names one value to scrub out of every streamed object before it
@@ -277,21 +335,25 @@ type GVKSelector struct {
 // way from any namespace.
 type SinkReference struct {
 	// Kind is the sink CR's kind, spelled as the API server spells it —
-	// "ClickHouseSink". Omitting it means ClickHouseSink, which is the default
-	// only because ClickHouse was the first backend and is what every rule
+	// "ClickHouseSink", "S3Sink". Omitting it means ClickHouseSink, which is the
+	// default only because ClickHouse was the first backend and is what every rule
 	// written before the kind existed meant; nothing in the runtime treats that
 	// kind specially, and no path falls back to it when another kind fails to
-	// resolve.
+	// resolve. In particular a rule meaning to archive to an S3Sink must say so:
+	// the default is inherited history, not a preference.
 	//
-	// The enum lists only the kinds this build actually serves, which is the
+	// The enum lists only the kinds this release ships a backend for, which is the
 	// point of having one: a rule naming a kind no reconciler implements would
 	// otherwise be admitted and then park forever with nothing to bind to, and
 	// its author's only clue would be a condition on an object they may not think
 	// to read. Rejecting the spelling at admission puts the error where they
 	// typed it. Each new backend adds itself here as it lands.
+	//
+	// Widening it is a release decision rather than a refactor, so it is asserted
+	// literally, with its list items, in crdmanifests_test.go.
 	// +optional
 	// +kubebuilder:default="ClickHouseSink"
-	// +kubebuilder:validation:Enum=ClickHouseSink
+	// +kubebuilder:validation:Enum=ClickHouseSink;S3Sink
 	Kind string `json:"kind,omitempty"`
 
 	// Name is the sink CR's name.
@@ -414,6 +476,46 @@ type StreamRuleStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
+// SinkPolicy is the sink owner's admission policy over what may be written to
+// it. Every sink CRD carries one, in this one shape.
+//
+// It exists because sink ownership and rule ownership are different roles: the
+// platform team owning a backend needs a say in what lands in it that does not
+// depend on reviewing every StreamRule anyone writes.
+//
+// That the shape is shared rather than per-backend is a property, not tidiness.
+// Redaction is a per-sink floor, so a backend whose policy block were weaker or
+// absent would make *choosing that backend* a way around the floor — and the
+// temptation is worst exactly where the risk is: an archive nobody queries, whose
+// objects outlive every rule and reviewer that produced them.
+type SinkPolicy struct {
+	// AllowedGVKs restricts which resource types may be streamed to this sink.
+	//
+	// An empty (or omitted) list allows everything *except* the hard deny-list
+	// — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+	// re-enable it. Deny is enforced in code, not merely in config, so the
+	// permissive default can never become a way to exfiltrate Secrets.
+	// +optional
+	// +kubebuilder:validation:MaxItems=128
+	AllowedGVKs []GVKSelector `json:"allowedGVKs,omitempty"`
+
+	// Redaction is this sink's redaction floor: value paths scrubbed out of
+	// every object any rule streams here, before hashing (Task 3.3).
+	//
+	// It lives on the sink for the same reason AllowedGVKs does. Whoever owns
+	// the backend owns what may land in it, and that authority has to hold
+	// without reviewing every StreamRule anyone writes — so a rule may add paths
+	// through its own `spec.extraRedaction`, but nothing a rule declares can
+	// remove one listed here.
+	//
+	// An empty list is not "no redaction": the data plane always scrubs
+	// `kubectl.kubernetes.io/last-applied-configuration`, which embeds whole
+	// prior copies of the objects it annotates.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	Redaction []RedactionRule `json:"redaction,omitempty"`
+}
+
 // SecretReference points at a Secret holding a sink's credentials.
 //
 // It is a local type rather than corev1.SecretReference so the namespace can
@@ -430,12 +532,13 @@ type SecretReference struct {
 	//
 	// That default is a security property, not a convenience: the operator's
 	// aggregated ClusterRole grants Secret read access *only* in its own
-	// namespace (Task 1.9, D7). A cluster-scoped ClickHouseSink is editable by
-	// anyone with cluster-level write access to the CRD, so if this field
-	// could freely name any namespace, creating a sink would become a way to
-	// make the operator read a Secret its RBAC never intended to expose. Left
-	// empty, a sink can only ever reach credentials an administrator has
-	// deliberately placed alongside the operator.
+	// namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+	// editable by anyone with cluster-level write access to the CRD, so if this
+	// field could freely name any namespace, creating a sink would become a way
+	// to make the operator read a Secret its RBAC never intended to expose —
+	// and, with a sink that ships the value straight to a bucket, to read it
+	// back out again. Left empty, a sink can only ever reach credentials an
+	// administrator has deliberately placed alongside the operator.
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`

@@ -97,9 +97,15 @@ func (h *harness) stageLegacyRule(ruleKind, namespace, name, legacySinkRef strin
 	}, dropRequiredSink)
 }
 
-// stageRuleNamingSinkKind stores a rule naming a sink kind this build does not
-// serve, which admission refuses (the CRD's enum lists only the served kinds) and
-// only a newer operator — or a downgraded one — could have written.
+// stageRuleNamingSinkKind stores a rule naming a sink kind no reconciler in this
+// build serves.
+//
+// It relaxes the CRD's kind enum on the way in, which is what a kind no *release*
+// serves needs — such a rule could only have been written by a newer operator, or
+// by one this binary was downgraded from. For a kind the enum already admits but
+// nothing yet serves (S3Sink, until Task 6.4 registers its reconciler) the
+// relaxation is a no-op and the write would have succeeded anyway; the helper is
+// used for both so the staging is not a claim about which case applies.
 func (h *harness) stageRuleNamingSinkKind(ruleKind, namespace, name, sinkKind, sinkName string,
 	resources ...v1alpha1.WatchedResource) client.Object {
 	h.t.Helper()
@@ -619,9 +625,10 @@ func TestLegacyRuleIsReportedAndRegistersNothing(t *testing.T) {
 // else. The lower tiers guard the same property on their own keys (sink.ID, the
 // pipeline's per-sink state, plan.Registry.RulesForSink); this is the last hop.
 //
-// A *resolvable* second kind cannot be tested yet — S3Sink has no CRD and no
-// reconciler until Task 6.1 — so the second rule here parks rather than streaming to
-// its own backend. Extending it to assert two live backends is that task's job.
+// A *resolvable* second kind cannot be tested yet: Task 6.1 gave S3Sink a CRD, so
+// the reference below is now one admission accepts, but nothing serves it until Task
+// 6.4 registers its reconciler. The second rule therefore parks rather than streaming
+// to its own backend. Extending it to assert two live backends is that task's job.
 func TestSinkResolutionComparesTypedIdentities(t *testing.T) {
 	h := newHarness(t, harnessOptions{allowAll: true})
 	sharedName := uniqueName("shared")

@@ -48,6 +48,7 @@ func TestDefaultValuesRenderTheExpectedObjects(t *testing.T) {
 		"ClusterRoleBinding/kuberecord-watcher-rolebinding",
 		"CustomResourceDefinition/clickhousesinks.kuberecord.io",
 		"CustomResourceDefinition/clusterstreamrules.kuberecord.io",
+		"CustomResourceDefinition/s3sinks.kuberecord.io",
 		"CustomResourceDefinition/streamrules.kuberecord.io",
 		"Deployment/kuberecord-controller-manager",
 		"Role/kuberecord-leader-election-role",

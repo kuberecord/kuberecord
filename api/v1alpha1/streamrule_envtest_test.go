@@ -80,15 +80,20 @@ func unstructuredRule(kind, namespace string, sink map[string]any) clientObject 
 	return u
 }
 
-// The sink names and kinds the table below references. defaultSinkKind is the
-// only kind this build implements, so it is both the shipped default and the
-// whole enum; unknownSinkKind is a kind a *later* release adds (Task 6.1), used
-// here to prove that this one refuses to admit it.
+// The sink names and kinds the table below references.
+//
+// defaultSinkKind is the kind an unqualified reference defaults to; otherSinkKind
+// is the second kind this build serves (Task 6.1), which is what makes a *kind*
+// change a legal edit to attempt and therefore what finally exercises the sink
+// reference's immutability rule rather than its enum. unknownSinkKind is a kind
+// only a later release serves (D6/D13 put Postgres in v0.3.0), used here to prove
+// that this one refuses to admit it.
 const (
 	defaultSinkName = "default"
 	otherSinkName   = "other-sink"
 	defaultSinkKind = "ClickHouseSink"
-	unknownSinkKind = "S3Sink"
+	otherSinkKind   = "S3Sink"
+	unknownSinkKind = "PostgresSink"
 )
 
 // ruleEditor bundles the two CRD-specific operations the shared rule table
@@ -183,6 +188,15 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			wantErr: "Unsupported value",
 		},
 		{
+			// The accepting direction of the same rule, which is what stops the
+			// enum from being widened in the Go marker and nowhere else: every kind
+			// this build serves must be spellable.
+			name: "the-second-served-sink-kind-is-accepted",
+			obj: unstructuredRule(e.kind, e.namespace, map[string]any{
+				"kind": otherSinkKind, "name": defaultSinkName,
+			}),
+		},
+		{
 			name: "fully-spelled-sink-is-accepted",
 			obj: unstructuredRule(e.kind, e.namespace, map[string]any{
 				"kind": defaultSinkKind, "name": otherSinkName,
@@ -201,17 +215,21 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			wantErr: "sink is immutable",
 		},
 		{
-			// The enum is what stops this today, and asserting it is the honest
-			// expectation while the enum holds a single value: there is no legal
-			// second kind to move to, and the apiserver does not even evaluate the
-			// immutability rule here — it reports "some validation rules were not
-			// checked because the object was invalid" alongside the enum error.
-			// Task 6.1 adds S3Sink, at which point a kind change becomes
-			// structurally valid and this expectation moves to "sink is immutable".
+			// Now that Task 6.1 has added a second served kind, this edit is
+			// structurally valid and the *immutability* rule is what refuses it —
+			// which is the expectation that was unreachable while the enum held one
+			// value and the apiserver rejected the spelling before ever evaluating a
+			// transition rule.
+			//
+			// It is also the edit with the worst consequences if it were allowed:
+			// re-pointing a live rule from a ClickHouseSink to an S3Sink would strand
+			// the dedup baseline the pipeline built for every object in scope, and
+			// silently move that rule onto a backend that can never reconstruct
+			// history (D12).
 			name:    "sink-kind-mutation-is-rejected",
 			obj:     e.build(ruleSpec(deploymentResource())),
 			mutate:  e.setSinkKind,
-			wantErr: "Unsupported value",
+			wantErr: "sink is immutable",
 		},
 		{
 			name:   "resources-remain-mutable",
@@ -311,7 +329,7 @@ func TestStreamRuleValidation(t *testing.T) {
 			o.(*StreamRule).Spec.Sink.Name = otherSinkName
 		},
 		setSinkKind: func(o clientObject) {
-			o.(*StreamRule).Spec.Sink.Kind = unknownSinkKind
+			o.(*StreamRule).Spec.Sink.Kind = otherSinkKind
 		},
 		appendResource: func(o clientObject) {
 			r := o.(*StreamRule)
