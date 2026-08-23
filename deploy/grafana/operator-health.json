@@ -568,7 +568,7 @@
       "id": 8,
       "type": "stat",
       "title": "SafeMode scopes",
-      "description": "How many (sink, scope) pairs are still warming their dedup baseline from sink history. While a scope is in SafeMode its cache misses are recorded as Snapshot rather than as Added, so nothing is mistaken for a creation. A handful right after a restart or a new rule is normal and clears within seconds; a count that stays up means warm-up is not completing — usually a sink that cannot be read back.",
+      "description": "How many (sink, scope) pairs are still warming their dedup baseline from sink history. While a scope is in SafeMode its cache misses are recorded as Snapshot rather than as Added, so nothing is mistaken for a creation. A handful right after a restart or a new rule is normal and clears within seconds. A count that stays up has two readings, and the sink's own HistoryUnavailable condition says which: warm-up is not completing for a sink that should be readable, or the sink is a Writer-only archive tier (an S3Sink), for which every scope stays at 1 permanently and by design. This gauge is the only metric for either case — there is no separate writer-only series.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

@@ -819,10 +819,19 @@ spec:
                 type: integer
               conditions:
                 description: |-
-                  Conditions carries Ready, RBACGranted, PolicyAllowed and
-                  ResourceResolved (see the constants above). A rule that cannot run
-                  degrades here and only here: the process never exits and every other
-                  rule keeps streaming (Invariant 5).
+                  Conditions carries Ready, RBACGranted, PolicyAllowed,
+                  ResourceResolved and HistoryUnavailable (see the constants above). A
+                  rule that cannot run degrades here and only here: the process never
+                  exits and every other rule keeps streaming (Invariant 5).
+
+                  HistoryUnavailable is the odd one out, and is mirrored from the sink
+                  the rule names rather than decided about the rule: a rule bound to a
+                  Writer-only sink (D12) reports it True, permanently, while staying
+                  entirely Ready. It is here because the two objects usually have
+                  different owners — a rule's author may never read the cluster-scoped
+                  sink they named — and an author who sees only Ready=True would have no
+                  way to learn that their stream will contain no deletions. See
+                  ConditionHistoryUnavailable.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -1796,10 +1805,19 @@ spec:
                 type: integer
               conditions:
                 description: |-
-                  Conditions carries Ready, RBACGranted, PolicyAllowed and
-                  ResourceResolved (see the constants above). A rule that cannot run
-                  degrades here and only here: the process never exits and every other
-                  rule keeps streaming (Invariant 5).
+                  Conditions carries Ready, RBACGranted, PolicyAllowed,
+                  ResourceResolved and HistoryUnavailable (see the constants above). A
+                  rule that cannot run degrades here and only here: the process never
+                  exits and every other rule keeps streaming (Invariant 5).
+
+                  HistoryUnavailable is the odd one out, and is mirrored from the sink
+                  the rule names rather than decided about the rule: a rule bound to a
+                  Writer-only sink (D12) reports it True, permanently, while staying
+                  entirely Ready. It is here because the two objects usually have
+                  different owners — a rule's author may never read the cluster-scoped
+                  sink they named — and an author who sees only Ready=True would have no
+                  way to learn that their stream will contain no deletions. See
+                  ConditionHistoryUnavailable.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

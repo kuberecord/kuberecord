@@ -114,7 +114,10 @@ rule that cannot run degrades **only itself**, and the process never exits over
 one bad rule.
 
 `Ready` is a roll-up: it is non-`True` whenever any specific condition below is,
-and it carries that condition's own reason forward. Every *transition* of `Ready`
+and it carries that condition's own reason forward. The one exception is
+`HistoryUnavailable`, which `Ready` deliberately ignores — it reports a declared
+capability limit of a backend rather than something going wrong, and reads
+backwards from every other condition here (see below). Every *transition* of `Ready`
 also emits an event (`Warning` on a degrade, `Normal` on recovery) — transitions
 only, so a permanently degraded rule does not flood the namespace's event log on
 every resync.
@@ -131,6 +134,57 @@ All three come from probes the sink runtime runs on **its own** goroutines; no
 reconciler ever dials ClickHouse, so an unreachable sink costs a condition and
 nothing else.
 
+### `S3Sink`
+
+| Condition | Why it is not `True` |
+|---|---|
+| `CredentialsResolved` | `SecretNotFound` or `SecretKeyMissing`, as for a `ClickHouseSink`. A sink that names **no** Secret is `True` with `AmbientCredentials` — it authenticates from IRSA, workload identity or an instance role, which is the recommended shape on a cloud provider. If that chain then produces nothing, the probe reports it here as `CredentialsUnavailable`, not as an unreachable bucket. |
+| `BucketReachable` | `BucketUnreachable` (DNS, a refused connection, a 5xx, a rejected credential — clears on its own) or `BucketIncompatible` (the bucket answered and refused the *shape* of object this sink writes, today a `spec.objectLock` against a bucket with no Object Lock configuration — permanent until a human changes the bucket or the spec). The probe **writes**, not `HEAD`s: a read-only credential passes a `HEAD` and then fails every `PUT`. |
+| `Ready` | Rolls the two up. |
+| `HistoryUnavailable` | **Reads backwards, and is `True` on a healthy sink.** See below. |
+
+#### `HistoryUnavailable` — a limit, not a fault
+
+Every other condition in this document follows the Kubernetes convention that
+`True` is healthy. This one inverts it deliberately, in the same shape as a Node's
+`NetworkUnavailable`, and the inversion is the point.
+
+An `S3Sink` is a `Writer`-only backend (D12): it cannot read its own history back,
+because "what was the last recorded state of every object in this scope?" would
+mean listing and decompressing every object ever written under the prefix — on the
+operator's boot path, growing forever. So three behaviours are off for it:
+
+* dedup **cache warm-up** — a restarting operator cannot learn what the archive
+  already holds, so every record is a permanent `Snapshot` rather than
+  `Added`/`Modified`;
+* **zombie garbage collection** — an object deleted while the operator was down is
+  never recorded as deleted; the archive's last word on it is its last observed
+  state;
+* **boot reconciliation of scope epochs** — a scope left open by a process that
+  died stays open in the archive, so a reader must treat an unmatched `Started` as
+  an epoch whose end is unknown.
+
+That degradation is invisible in the archive itself — an object store with no
+deletions in it looks exactly like an archive of a cluster where nothing was
+deleted — which is why it is stated in the API rather than left to be inferred:
+
+| Where | What it says |
+|---|---|
+| The sink | `HistoryUnavailable=True`, reason `WriterOnlySink`, with the three behaviours and both consequences in the message. `Ready` stays `True`. |
+| A `Warning` event | Emitted once, when the condition is first established, so it shows up in `kubectl describe` without anyone knowing to look for the condition. |
+| Every rule bound to it | The same condition, mirrored, naming the sink — because a rule's author may never read the cluster-scoped sink they named. |
+| `kuberecord_safe_mode` | Pinned at `1` for every scope on the sink. See [`docs/OPERATING.md`](OPERATING.md). |
+
+`Unknown`/`CapabilitiesUnknown` means the sink has no running instance yet, so
+nothing has been detected. It resolves within a second or so of the first health
+probe — unless the sink's credentials never resolved, in which case it was never
+handed to the sink runtime at all and `CredentialsResolved` is the condition to
+read.
+
+The supported way to have both a queryable timeline and a cheap immutable archive
+is the tee pattern (D14): two rules over the same resources, one naming a
+`ClickHouseSink` and one naming an `S3Sink`.
+
 ### `StreamRule` / `ClusterStreamRule`
 
 | Condition | Why it is not `True` |
@@ -139,6 +193,7 @@ nothing else.
 | `ResourceResolved` | `KindsUnresolved`, with a per-kind message: a kind whose CRD is not installed **yet** (self-heals, no restart), or a cluster-scoped kind named by a namespaced `StreamRule` (permanent until the rule is edited — use a `ClusterStreamRule`). |
 | `RBACGranted` | `MissingPermissions`, naming the resource, which of `get`/`list`/`watch` are missing, and the scope. The operator can never self-escalate: an administrator adds the grant and the rule activates on its own within one resync (~2m), no restart. `AccessReviewFailed` is `Unknown` — the review itself did not complete, which is not a verdict about the rule. |
 | `Ready` | Rolls the three up, and additionally reports `SinkMissing` (its `spec.sink` names no sink that exists — targets are withdrawn), `SinkNotReady` (the sink exists but is unhealthy — targets are **kept**, see below) or `LegacySinkRef` (the rule names no sink at all, which is what a rule authored against v0.1.0 looks like after an upgrade — see [`docs/UPGRADING.md`](UPGRADING.md)). |
+| `HistoryUnavailable` | Mirrored from the sink this rule names, and **not** rolled into `Ready`: `True`/`WriterOnlySink` when that sink cannot reconstruct history, so an author reading only their rule still learns that its records are permanent `Snapshot`s and that deletions during an operator outage go unrecorded. See the `S3Sink` section above. |
 
 Failures are per-target wherever they can be: a rule naming five kinds, one of
 which is not installed, streams the other four and says so in `ResourceResolved`.

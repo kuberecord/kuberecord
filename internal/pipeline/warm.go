@@ -314,7 +314,11 @@ type WarmCoordinator struct {
 	// pass runs once per sink rather than once per tick. A failed pass is left
 	// unmarked and retried.
 	bootDone map[sink.ID]struct{}
-	stopped  bool
+	// writerOnly records the sinks whose missing read half has already been
+	// announced, so the announcement is one line per sink rather than one per
+	// scope. See announceWriterOnly.
+	writerOnly map[sink.ID]struct{}
+	stopped    bool
 	// wg tracks the warm goroutines, so Start returns only once every one of them
 	// has exited (a goleak-verified property).
 	wg sync.WaitGroup
@@ -361,6 +365,7 @@ func NewWarmCoordinator(opts WarmOptions) (*WarmCoordinator, error) {
 		bootInterval:     boot,
 		runs:             make(map[scopeRef]*warmRun),
 		bootDone:         make(map[sink.ID]struct{}),
+		writerOnly:       make(map[sink.ID]struct{}),
 	}, nil
 }
 
@@ -475,12 +480,16 @@ func (c *WarmCoordinator) StopScope(id sink.ID, scope ScopeKey) {
 // It is safe to call for a sink the coordinator never saw, which is what lets the
 // teardown path call it unconditionally. Matching is on the whole identity, so
 // deleting one of two same-named sinks of different kinds leaves the other's warm
-// state and boot mark exactly as they were.
+// state, boot mark and writer-only announcement exactly as they were.
 func (c *WarmCoordinator) ForgetSink(id sink.ID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	delete(c.bootDone, id)
+	// Paired with bootDone, and for the same reason: a sink re-created under this
+	// identity is a new detection, and its capability limit deserves the same one
+	// unprompted line the first one got.
+	delete(c.writerOnly, id)
 	for ref, run := range c.runs {
 		if ref.sink == id {
 			run.cancel()
@@ -734,7 +743,7 @@ func (c *WarmCoordinator) seedScope(ctx context.Context, log logr.Logger,
 		reader, err := c.readerFor(ref.sink)
 		if err != nil {
 			if errors.Is(err, errNoStateReader) {
-				log.Info("Sink cannot read its own history; warm-up and zombie GC are disabled for this scope")
+				c.announceWriterOnly(log, ref.sink)
 				return backoff.Permanent(err)
 			}
 			log.V(1).Info("Sink is not live yet, retrying warm-up", "reason", err.Error())
@@ -844,6 +853,42 @@ func splitIncarnations(group []sink.KnownState) (current sink.KnownState, unclos
 // Conflating them would either spin a goroutine forever on a Writer-only sink or
 // permanently disable warm-up for a sink that was merely a second late to become
 // ready.
+// announceWriterOnly states a sink's missing read half exactly once, however many
+// scopes go on to discover the same thing.
+//
+// The volume is the whole reason it exists. A Writer-only sink is asked for its
+// history once per scope, and a busy cluster has hundreds of scopes per sink — so
+// the honest per-scope log is a storm, and a storm about an expected condition is
+// how the *unexpected* ones stop being noticed. The condition is also not an
+// anomaly, so it is never logged at Error: nothing has gone wrong, the backend is
+// doing what it was built to do (D12).
+//
+// One line, at Info, naming all three behaviours it switches off, and then silence
+// at V(1). The durable statements live elsewhere and are the ones an operator is
+// meant to end up at: HistoryUnavailable=True on the sink and on every rule bound
+// to it, and kuberecord_safe_mode pinned at 1 for each of the sink's scopes.
+//
+//nolint:logcheck // Takes the caller's already-decorated logger; see warm.
+func (c *WarmCoordinator) announceWriterOnly(log logr.Logger, id sink.ID) {
+	c.mu.Lock()
+	_, announced := c.writerOnly[id]
+	if !announced {
+		c.writerOnly[id] = struct{}{}
+	}
+	c.mu.Unlock()
+
+	if announced {
+		log.V(1).Info("Sink cannot read its own history; nothing to warm, collect or reconcile",
+			"sink", id.String())
+		return
+	}
+	log.Info("Sink cannot read its own history: cache warm-up, zombie garbage collection and boot "+
+		"reconciliation of scope epochs are disabled for every scope on it, and every record it receives "+
+		"is a permanent Snapshot. Reported as HistoryUnavailable=True on the sink and on the rules bound "+
+		"to it; observable as kuberecord_safe_mode staying at 1 for its scopes",
+		"sink", id.String())
+}
+
 func (c *WarmCoordinator) readerFor(id sink.ID) (sink.StateReader, error) {
 	if reader, ok := c.readers.StateReaderFor(id); ok {
 		return reader, nil
@@ -1335,10 +1380,11 @@ func (c *WarmCoordinator) closeOrphanedScopes(ctx context.Context, log logr.Logg
 	reader, err := c.readerFor(id)
 	if err != nil {
 		if errors.Is(err, errNoStateReader) {
-			// No history to reconcile against. Marked done by the caller so this
-			// is decided once per sink, not once per tick.
-			log.V(1).Info("Sink cannot read its own history; skipping scope-epoch reconciliation",
-				"sink", id.String())
+			// No history to reconcile against. Marked done by the caller so this is
+			// decided once per sink, not once per tick — and announced through the
+			// same one-per-sink gate the warm path uses, so a sink whose scopes
+			// already said this does not say it twice.
+			c.announceWriterOnly(log, id)
 			return nil
 		}
 		return err

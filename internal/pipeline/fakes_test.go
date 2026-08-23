@@ -325,16 +325,32 @@ func (w *fakeWriter) awaitRecords(t *testing.T, n int) []sink.Record {
 // as often as expected (Invariant 4: zero silent errors; plus the rate-limited
 // logging requirement for an unavailable sink). It is concurrency-safe because
 // commit callbacks and workers log from different goroutines.
+//
+// It captures Info messages too, at level 0 only. That is not completeness for its
+// own sake: one requirement in this package is about log *volume* rather than log
+// content — a Writer-only sink must announce its missing read half once per sink
+// and not once per scope (see WarmCoordinator.announceWriterOnly) — and volume is
+// only assertable by counting. Filtering to level 0 is what makes the count mean
+// "lines an operator sees at the default verbosity", so a V(1) line demoted from
+// Info still reads as silence here.
 type recordingLogSink struct {
 	mu     sync.Mutex
 	errors []error
+	infos  []string
 }
 
 func (s *recordingLogSink) Init(logr.RuntimeInfo)          {}
 func (s *recordingLogSink) Enabled(int) bool               { return true }
-func (s *recordingLogSink) Info(int, string, ...any)       {}
 func (s *recordingLogSink) WithValues(...any) logr.LogSink { return s }
 func (s *recordingLogSink) WithName(string) logr.LogSink   { return s }
+func (s *recordingLogSink) Info(level int, msg string, _ ...any) {
+	if level != 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.infos = append(s.infos, msg)
+}
 func (s *recordingLogSink) Error(err error, _ string, _ ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -356,6 +372,14 @@ func (s *recordingLogSink) countOf(target error) int {
 		}
 	}
 	return n
+}
+
+// infoLines returns the captured level-0 Info messages, in order, so a test can
+// assert on how many times something was said as well as that it was.
+func (s *recordingLogSink) infoLines() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.infos)
 }
 
 // testHarness bundles a Pipeline with the doubles behind it, so each test states

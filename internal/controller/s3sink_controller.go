@@ -152,10 +152,14 @@ type S3SinkConfigBuilder func(name string, spec v1alpha1.S3SinkSpec, creds S3Cre
 // — they share as functions, which is where the duplication that matters was
 // removed.
 //
-// HistoryUnavailable is deliberately *not* set here. It is this backend's declared
-// capability limit rather than a health verdict, it is decided from what the
-// running instance implements rather than from the CR, and surfacing it — on the
-// sink and on the rules bound to it — is Task 6.5's whole subject.
+// HistoryUnavailable is the one condition here that is not a health verdict. It is
+// this backend's declared capability limit, and it is decided from what the
+// *running instance* turned out to implement rather than from the CR — so it is
+// read from the sink runtime (SinkRuntime.CapabilitiesFor) rather than derived from
+// the kind. That indirection is deliberate: a reconciler that hard-coded "an S3Sink
+// cannot read history" would keep reporting it even if this backend ever grew a
+// StateReader, which is precisely the kind of stale claim a status condition must
+// never make.
 type S3SinkReconciler struct {
 	// Client reads sinks and Secrets and writes sink status.
 	Client client.Client
@@ -249,8 +253,13 @@ func (r *S3SinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 	}
 	r.setHealthConditions(status, &s3Sink, creds, credErr)
+	r.setHistoryUnavailable(status, &s3Sink)
 
 	previousReady := findCondition(s3Sink.Status.Conditions, v1alpha1.ConditionReady)
+	previousHistory := findCondition(s3Sink.Status.Conditions, v1alpha1.ConditionHistoryUnavailable)
+	// s3SinkReadyOrder does not contain HistoryUnavailable, which is what keeps a
+	// declared capability limit from degrading a healthy sink (Invariant 5 read the
+	// other way round: degradation must be visible, and *only* degradation).
 	ready := readyFor(status, s3SinkReadyOrder, ReasonArchiving,
 		fmt.Sprintf("Bucket %s accepted a write from this sink's credentials", s3Sink.Spec.Bucket))
 	status.set(v1alpha1.ConditionReady, ready.Status, ready.Reason, ready.Message)
@@ -262,8 +271,43 @@ func (r *S3SinkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, fmt.Errorf("update S3Sink %q status: %w", s3Sink.Name, err)
 	}
 	emitReadyEvent(r.Recorder, &s3Sink, previousReady, ready)
+	// Read back rather than threaded out of the setter: the events are emitted from
+	// one place, after the write that made the conditions real, so a status update
+	// that failed cannot leave an event claiming something no reader can confirm.
+	if history := findCondition(status.conditions, v1alpha1.ConditionHistoryUnavailable); history != nil {
+		emitCapabilityLimitEvent(r.Recorder, &s3Sink, previousHistory, *history)
+	}
 
 	return ctrl.Result{RequeueAfter: r.resyncPeriod()}, nil
+}
+
+// setHistoryUnavailable reports whether this sink's running instance can read its
+// own history back.
+//
+// The answer comes from the sink runtime, not from the kind: the runtime resolved
+// it once, by type assertion, when it built the instance (see
+// sink.Capabilities). Three states, and the third is the one worth spelling out —
+// a sink with no running instance has not been *found* to be capable of anything,
+// and reporting False there would be the one genuinely misleading answer available,
+// since False is the reassuring value on this inverted condition.
+//
+// A sink whose credentials never resolved stays in that third state permanently,
+// and correctly: it was never handed to the runtime, so nothing about its backend
+// has been established. Its CredentialsResolved condition is where an operator is
+// meant to be looking.
+func (r *S3SinkReconciler) setHistoryUnavailable(status *statusWriter, s3Sink *v1alpha1.S3Sink) {
+	caps, live := r.Sinks.CapabilitiesFor(s3SinkID(s3Sink.Name))
+	switch {
+	case !live:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionUnknown, ReasonCapabilitiesUnknown,
+			"This sink has no running instance yet, so what its backend can do has not been detected")
+	case caps.HistoryReadable:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionFalse, ReasonHistoryReadable,
+			historyReadableMessage)
+	default:
+		status.set(v1alpha1.ConditionHistoryUnavailable, metav1.ConditionTrue, ReasonWriterOnlySink,
+			writerOnlySinkMessage)
+	}
 }
 
 // resolveCredentials reads the sink's access key out of the Secret its

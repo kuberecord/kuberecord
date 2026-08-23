@@ -19,13 +19,16 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/goleak"
 
 	"github.com/yelzhy/kuberecord/internal/sink"
@@ -138,6 +141,22 @@ func (h *warmHarness) awaitWarm(t *testing.T, scope ScopeKey) {
 		st := h.pipeline.sinks.get(testSink)
 		return st.scopeWarm(Key{Sink: testSink, Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace})
 	}, func() string { return "the scope to be marked warm" })
+}
+
+// writerOnlyAnnouncements returns the coordinator's "this sink cannot read its own
+// history" lines, at the default verbosity an operator actually sees.
+//
+// It counts rather than merely detects because the requirement is about volume: one
+// line per sink, however many scopes discover the same thing (see
+// WarmCoordinator.announceWriterOnly).
+func (h *warmHarness) writerOnlyAnnouncements() []string {
+	var out []string
+	for _, msg := range h.logs.infoLines() {
+		if strings.Contains(msg, "cannot read its own history") {
+			out = append(out, msg)
+		}
+	}
+	return out
 }
 
 // deletedRecords returns the Deleted rows accepted by the sink — the thing most of
@@ -1182,21 +1201,157 @@ func TestWarmScopeStaysColdUntilTheSinkAnswers(t *testing.T) {
 // TestWarmScopeDisabledForASinkThatCannotReadItsHistory covers the Writer-only
 // sink: warm-up and GC are disabled, the scope stays permanently in Snapshot mode
 // (the safe direction), and the goroutine does not spin retrying forever.
+//
+// Three scopes, not one, and that is the point of the shape. The coordinator asks
+// for history once per scope, so the naive implementation announces the missing
+// read half once per scope too — and a real cluster has hundreds of scopes per
+// sink. A storm of expected lines is how the *unexpected* ones stop being read, so
+// Task 6.5 requires one informational line per sink and nothing at Error.
 func TestWarmScopeDisabledForASinkThatCannotReadItsHistory(t *testing.T) {
+	h := newWarmHarness(t)
+	h.backends.removeReader(testSink)
+
+	scopes := []ScopeKey{
+		podScope,
+		{Group: "", Kind: "Pod", Namespace: "other"},
+		{Group: "apps", Kind: "Deployment", Namespace: "default"},
+	}
+
+	h.run(t)
+	for _, scope := range scopes {
+		h.warmNow(scope)
+	}
+
+	for _, scope := range scopes {
+		stayFalse(t, func() bool {
+			st := h.pipeline.sinks.get(testSink)
+			return st.scopeWarm(Key{Sink: testSink, Group: scope.Group, Kind: scope.Kind, Namespace: scope.Namespace})
+		}, "a sink with no StateReader marked its scope warm, which would let a cache miss claim an object is genuinely new")
+	}
+
+	// Not one call, for any scope: the reader is never resolved, so nothing even
+	// attempts to read an archive that cannot answer.
+	if reads := h.reader.historyReads(); len(reads) != 0 {
+		t.Errorf("history was read for a sink with no StateReader: %+v", reads)
+	}
+	if calls := h.reader.activeScopesCallCount(); calls != 0 {
+		t.Errorf("ActiveScopes was called %d times for a sink with no StateReader, want 0", calls)
+	}
+	if calls := h.reader.epochProbes(); len(calls) != 0 {
+		t.Errorf("ScopeWasActive was called for a sink with no StateReader: %+v", calls)
+	}
+
+	// Exactly one line, for three scopes plus the boot pass.
+	announced := h.writerOnlyAnnouncements()
+	if len(announced) != 1 {
+		t.Errorf("announced the missing read half %d times across %d scopes, want exactly 1:\n%v",
+			len(announced), len(scopes), announced)
+	}
+	// And it names all three behaviours it switches off, so the line is worth the
+	// one time it is printed.
+	for _, want := range []string{"cache warm-up", "zombie garbage collection", "boot reconciliation"} {
+		if len(announced) == 1 && !strings.Contains(announced[0], want) {
+			t.Errorf("the announcement does not name %q:\n%s", want, announced[0])
+		}
+	}
+	// Never at Error. Nothing has gone wrong: the backend is doing what it was
+	// built to do, and an Error here would put a permanent fault in every
+	// operator's log for a declared design decision (D12).
+	if errs := h.logs.loggedErrors(); len(errs) != 0 {
+		t.Errorf("a Writer-only sink logged %d errors, want none: %v", len(errs), errs)
+	}
+}
+
+// TestWriterOnlySinkIsAnnouncedAgainAfterItIsForgotten pairs with ForgetSink's
+// clearing of the boot-reconciliation mark, for the same reason that exists.
+//
+// A sink deleted and re-created under one identity is a new detection. If the
+// announcement latched for the life of the process, the operator who created the
+// replacement would get no line at all — and "I applied a sink and the log said
+// nothing about it" is indistinguishable from "the sink was never picked up".
+func TestWriterOnlySinkIsAnnouncedAgainAfterItIsForgotten(t *testing.T) {
 	h := newWarmHarness(t)
 	h.backends.removeReader(testSink)
 
 	h.run(t)
 	h.warmNow(podScope)
+	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 1 },
+		func() string { return "the first announcement" })
 
-	stayFalse(t, func() bool {
-		st := h.pipeline.sinks.get(testSink)
-		return st.scopeWarm(Key{Sink: testSink, Group: "", Kind: "Pod", Namespace: "default"})
-	}, "a sink with no StateReader marked its scope warm, which would let a cache miss claim an object is genuinely new")
+	h.coord.ForgetSink(testSink)
+	h.warmNow(podScope)
 
-	if reads := h.reader.historyReads(); len(reads) != 0 {
-		t.Errorf("history was read for a sink with no StateReader: %+v", reads)
+	waitFor(t, func() bool { return len(h.writerOnlyAnnouncements()) == 2 },
+		func() string {
+			return fmt.Sprintf("a second announcement after ForgetSink, got %d",
+				len(h.writerOnlyAnnouncements()))
+		})
+}
+
+// TestWriterOnlySinkProducesNoDeletedRowsFromTheGCPath is Task 6.5's test (d), and
+// it is deliberately a *paired* test: one fixture, run twice, differing only in
+// whether the sink can read its own history back.
+//
+// The fixture is the textbook zombie — history holds two objects, reality has one,
+// the scope's log says it was watched in a previous epoch, the informer reports
+// synced — which on a ClickHouseSink is exactly the case that must produce one
+// Deleted row. Asserting zero rows against a Writer-only sink means nothing on its
+// own (a fixture that produces nothing anywhere would pass); asserting that the
+// *same* fixture produces one row on a readable sink is what makes the zero
+// meaningful.
+//
+// And the zero is the property that makes the archive's silence explicable. An S3
+// archive contains no Deleted records at all, so a reader must be able to trust
+// that this is a documented, total absence rather than a lossy one — a sink that
+// emitted deletions sometimes would be far worse than one that never does.
+func TestWriterOnlySinkProducesNoDeletedRowsFromTheGCPath(t *testing.T) {
+	// setup installs the identical zombie fixture on a fresh harness.
+	setup := func(t *testing.T) *warmHarness {
+		t.Helper()
+		h := newWarmHarness(t)
+		filter := scopeFilterFor(podScope)
+		h.reader.setStates(filter,
+			knownState("gone", "uid-gone", "hash-gone"),
+			knownState("alive", "uid-alive", "hash-alive"))
+		h.reader.setWasActive(filter, true)
+		h.lister.set(podKey("alive"), newPod("alive", "uid-alive", "7", "nginx"))
+		h.scopes.markSynced(podScope)
+		return h
 	}
+
+	t.Run("a sink that can read its history writes exactly one Deleted row", func(t *testing.T) {
+		h := setup(t)
+
+		h.run(t)
+		h.warmNow(podScope)
+		h.awaitWarm(t, podScope)
+
+		waitFor(t, func() bool { return len(h.deletedRecords()) >= 1 },
+			func() string { return "one Deleted row for the zombie" })
+		if deleted := h.deletedRecords(); len(deleted) != 1 {
+			t.Fatalf("wrote %d Deleted rows, want exactly 1: %+v", len(deleted), deleted)
+		}
+	})
+
+	t.Run("the same fixture on a Writer-only sink writes none", func(t *testing.T) {
+		h := setup(t)
+		// The only difference. Everything else — the history, the epoch, the live
+		// object, the synced informer — is identical.
+		h.backends.removeReader(testSink)
+
+		h.run(t)
+		h.warmNow(podScope)
+
+		stayFalse(t, func() bool { return len(h.deletedRecords()) > 0 },
+			"a Writer-only sink was sent a Deleted row by the GC path: the archive's silence about deletions "+
+				"must be total, since a reader cannot tell a rare fabricated deletion from a real one")
+		// Nor a close-out, which is the *other* Deleted-row producer on this path:
+		// the fixture has no reincarnation, but a pass that ran at all would have
+		// had to read history to find that out.
+		if records := h.writer.recorded(); len(records) != 0 {
+			t.Errorf("the GC path wrote %d records to a Writer-only sink, want none: %+v", len(records), records)
+		}
+	})
 }
 
 // TestWarmScopeRetriesWhileTheSinkIsNotLiveYet covers the other absent-reader case:
@@ -1474,4 +1629,100 @@ func TestWarmEventsRestartDoesNotReEmitUnchangedEvents(t *testing.T) {
 	}
 	stayFalse(t, func() bool { return len(h.writer.recorded()) > 1 },
 		"a restart re-emitted a row for a live, unchanged Event")
+}
+
+// TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart is Task 6.5's
+// test (c): a sink that cannot read its own history can never claim an object is
+// genuinely new, so no record it receives is ever tagged Added — not on the first
+// process's watch, and not on the next one's.
+//
+// The restart is the half that matters. Within one process a Writer-only sink looks
+// almost normal: the first sighting is a Snapshot and subsequent changes diff as
+// Modified off the in-memory baseline, exactly as they would anywhere. It is the
+// restart that exposes the limit — the baseline dies with the process and cannot be
+// rebuilt from the archive, so every live object is a first sighting again and is
+// re-snapshotted in full. That is the documented cost of the archive tier, and this
+// test is what makes it a property rather than a claim.
+//
+// The counterpart is TestPipelineSnapshotTaggingUntilScopeWarm, where a scope that
+// *does* warm goes on to tag its next miss Added. Without it the "never Added" here
+// would be satisfiable by a pipeline that never emitted Added at all.
+func TestWriterOnlySinkTagsEveryFirstSightingSnapshotAcrossARestart(t *testing.T) {
+	h := newWarmHarness(t)
+	h.backends.removeReader(testSink)
+
+	web, api := podKey("web"), podKey("api")
+	h.lister.set(web, newPod(web.Name, "uid-web", "1", "nginx:1"))
+	h.lister.set(api, newPod(api.Name, "uid-api", "1", "envoy:1"))
+
+	stop := h.run(t)
+	h.warmNow(podScope)
+
+	// Two first sightings, both Snapshot: the scope is never marked warm, so the
+	// hedge never lifts.
+	for _, key := range []Key{web, api} {
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process(%s): %v", key.Name, err)
+		}
+	}
+	// A change within one process still diffs, which is correct and is the reason
+	// the claim is "never Added" rather than "only ever Snapshot": the archive holds
+	// the Snapshot this diff is relative to, because this process wrote it.
+	h.lister.set(web, newPod(web.Name, "uid-web", "2", "nginx:2"))
+	if err := h.pipeline.Process(h.ctx, web); err != nil {
+		t.Fatalf("Process(web after the edit): %v", err)
+	}
+
+	if got, want := h.writer.eventTypes(), []string{"Snapshot", "Snapshot", "Modified"}; !slices.Equal(got, want) {
+		t.Fatalf("event types before the restart = %v, want %v", got, want)
+	}
+	// safe_mode is pinned at 1 for the scope, which is the metrics-side observation
+	// of exactly this. Task 6.5 requires it stay there and forbids a second metric
+	// saying the same thing.
+	if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(
+		testSink.String(), podScope.Group, podScope.Kind, podScope.Namespace)); got != 1 {
+		t.Errorf("safe_mode = %v on a Writer-only sink, want 1", got)
+	}
+
+	// The restart. The lister and the sink survive it, exactly as the API server and
+	// the bucket do; every in-memory baseline does not.
+	stop()
+	h.restartWarm(t)
+	h.run(t)
+	h.warmNow(podScope)
+
+	// Both live objects are first sightings again, and both are re-snapshotted in
+	// full. This is the "full re-snapshot on every restart" the release summary
+	// names as the visible cost of D12.
+	for _, key := range []Key{web, api} {
+		if err := h.pipeline.Process(h.ctx, key); err != nil {
+			t.Fatalf("Process(%s) after the restart: %v", key.Name, err)
+		}
+	}
+
+	got := h.writer.eventTypes()
+	want := []string{"Snapshot", "Snapshot", "Modified", "Snapshot", "Snapshot"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("event types across the restart = %v, want %v", got, want)
+	}
+	// The invariant, stated over everything the sink ever received: Added is the one
+	// event type that asserts "this object did not exist before", and nothing that
+	// cannot read its own history is entitled to say it.
+	for _, eventType := range got {
+		if eventType == "Added" {
+			t.Errorf("a Writer-only sink received an Added record; event types were %v", got)
+		}
+	}
+	// Still pinned after the restart, on the new process's gauge.
+	if got := testutil.ToFloat64(h.pipeline.metrics.safeMode.WithLabelValues(
+		testSink.String(), podScope.Group, podScope.Kind, podScope.Namespace)); got != 1 {
+		t.Errorf("safe_mode = %v after the restart, want 1", got)
+	}
+	// And the announcement is still one line per sink: the restarted coordinator is
+	// a new object, so this also proves the dedup is per coordinator rather than
+	// accidentally global — the second process is entitled to say it once too.
+	if announced := h.writerOnlyAnnouncements(); len(announced) != 2 {
+		t.Errorf("announced the missing read half %d times across two processes, want 2:\n%v",
+			len(announced), announced)
+	}
 }

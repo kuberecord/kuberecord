@@ -23,6 +23,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 
 	"github.com/yelzhy/kuberecord/api/v1alpha1"
 	"github.com/yelzhy/kuberecord/internal/sink"
@@ -403,5 +404,196 @@ func TestTruncateMessage(t *testing.T) {
 				t.Error("a truncated message does not say so")
 			}
 		})
+	}
+}
+
+// TestEmitCapabilityLimitEvent is Task 6.5's "a Warning event is emitted **once**
+// on first registration".
+//
+// Once is the entire property, and it is worth a dedicated test because the
+// failure modes are opposite and both are bad. Emit level-triggered and a
+// permanent limit becomes a permanent stream of identical Warnings on every
+// resync, which is how an event log stops being read. Emit never and an operator
+// who did not know to look for an inverted condition learns from row counts
+// months later that their archive has no deletions in it.
+func TestEmitCapabilityLimitEvent(t *testing.T) {
+	writerOnly := metav1.Condition{
+		Type:    v1alpha1.ConditionHistoryUnavailable,
+		Status:  metav1.ConditionTrue,
+		Reason:  ReasonWriterOnlySink,
+		Message: writerOnlySinkMessage,
+	}
+
+	tests := []struct {
+		name      string
+		previous  *metav1.Condition
+		current   metav1.Condition
+		wantEvent bool
+	}{
+		{
+			name:      "first registration warns",
+			previous:  nil,
+			current:   writerOnly,
+			wantEvent: true,
+		},
+		{
+			name: "a resync of the same verdict says nothing",
+			// The condition is already on the object, so this pass is re-deciding
+			// what is already true. This is the case that runs every two minutes
+			// for the life of the sink.
+			previous:  &writerOnly,
+			current:   writerOnly,
+			wantEvent: false,
+		},
+		{
+			name: "a sink that gained a read half is not warned about",
+			previous: &metav1.Condition{
+				Type: v1alpha1.ConditionHistoryUnavailable, Status: metav1.ConditionTrue,
+				Reason: ReasonWriterOnlySink,
+			},
+			current: metav1.Condition{
+				Type: v1alpha1.ConditionHistoryUnavailable, Status: metav1.ConditionFalse,
+				Reason: ReasonHistoryReadable, Message: historyReadableMessage,
+			},
+			wantEvent: false,
+		},
+		{
+			name:     "an undetected sink is not warned about either",
+			previous: nil,
+			current: metav1.Condition{
+				Type: v1alpha1.ConditionHistoryUnavailable, Status: metav1.ConditionUnknown,
+				Reason: ReasonCapabilitiesUnknown, Message: "no running instance yet",
+			},
+			// Unknown is "nobody has looked". Warning about it would tell an
+			// operator something about their backend at the one moment nothing
+			// about it is known — and it clears within a second of the first probe.
+			wantEvent: false,
+		},
+		{
+			name: "an undetected sink that becomes writer-only still warns",
+			previous: &metav1.Condition{
+				Type: v1alpha1.ConditionHistoryUnavailable, Status: metav1.ConditionUnknown,
+				Reason: ReasonCapabilitiesUnknown,
+			},
+			current:   writerOnly,
+			wantEvent: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := record.NewFakeRecorder(4)
+			obj := &v1alpha1.S3Sink{ObjectMeta: metav1.ObjectMeta{Name: "archive"}}
+
+			emitCapabilityLimitEvent(recorder, obj, tt.previous, tt.current)
+			close(recorder.Events)
+
+			var got []string
+			for event := range recorder.Events {
+				got = append(got, event)
+			}
+			if !tt.wantEvent {
+				if len(got) != 0 {
+					t.Fatalf("emitted %d events, want none: %v", len(got), got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("emitted %d events, want exactly 1: %v", len(got), got)
+			}
+			// A Warning, and filed under its own reason rather than Degraded: an
+			// operator grepping events for a degrade must not find a healthy sink.
+			for _, want := range []string{"Warning", EventReasonHistoryUnavailable, ReasonWriterOnlySink} {
+				if !strings.Contains(got[0], want) {
+					t.Errorf("event %q does not carry %q", got[0], want)
+				}
+			}
+			if strings.Contains(got[0], EventReasonDegraded) {
+				t.Errorf("event %q is filed as a degrade; a declared capability limit is not one", got[0])
+			}
+			// The three behaviours and both consequences travel with the event, so
+			// `kubectl describe` alone is enough to understand it.
+			for _, want := range []string{
+				"cache warm-up", "zombie garbage collection", "boot reconciliation of scope epochs",
+				"permanent Snapshot", "while the operator is down are never recorded",
+			} {
+				if !strings.Contains(got[0], want) {
+					t.Errorf("event %q does not name %q", got[0], want)
+				}
+			}
+		})
+	}
+}
+
+// TestWriterOnlyMessagesNameEveryDisabledBehaviour pins the wording Task 6.5
+// requires, on both the sink's message and the rule's.
+//
+// It is a test about *text*, which is unusual and deliberate. This condition's
+// entire job is to be read by a human who did not know to look for it, so the
+// message is the feature: a future edit that tightened it into "history is
+// unavailable" would leave the condition technically present and practically
+// useless, and nothing else in the suite would notice.
+func TestWriterOnlyMessagesNameEveryDisabledBehaviour(t *testing.T) {
+	behaviours := []string{"cache warm-up", "zombie garbage collection", "boot reconciliation of scope epochs"}
+
+	t.Run("the sink's message", func(t *testing.T) {
+		for _, want := range behaviours {
+			if !strings.Contains(writerOnlySinkMessage, want) {
+				t.Errorf("writerOnlySinkMessage does not name the disabled behaviour %q", want)
+			}
+		}
+		// Both consequences. The second is the one that cannot be inferred from the
+		// archive: an object store with no Deleted records looks exactly like an
+		// archive of a cluster where nothing was deleted.
+		for _, want := range []string{"permanent Snapshot", "while the operator is down are never recorded"} {
+			if !strings.Contains(writerOnlySinkMessage, want) {
+				t.Errorf("writerOnlySinkMessage does not state the consequence %q", want)
+			}
+		}
+		// And the metric, which is where the same fact is observable without the API.
+		if !strings.Contains(writerOnlySinkMessage, "kuberecord_safe_mode") {
+			t.Error("writerOnlySinkMessage does not point at the gauge that observes it")
+		}
+	})
+
+	t.Run("the rule's message", func(t *testing.T) {
+		message := writerOnlySinkRuleMessage("S3Sink/archive")
+		// The rule's author may never read the sink, so the message has to name it.
+		if !strings.Contains(message, "S3Sink/archive") {
+			t.Errorf("rule message %q does not name the sink", message)
+		}
+		for _, want := range []string{"permanent Snapshot", "while the operator is down is never recorded"} {
+			if !strings.Contains(message, want) {
+				t.Errorf("rule message %q does not state the consequence %q", message, want)
+			}
+		}
+		// And it must not read as the rule's own fault, since the rule is fine.
+		if !strings.Contains(message, "not a fault of this rule") {
+			t.Errorf("rule message %q does not say the limit belongs to the sink", message)
+		}
+	})
+}
+
+// TestHistoryUnavailableIsNeverInAReadyOrder is the structural half of "Ready
+// remains True when everything else is healthy".
+//
+// The condition-by-condition tests could all pass while a later edit quietly added
+// HistoryUnavailable to one of these lists, at which point every S3Sink in every
+// cluster would report Ready=False and every rule bound to one would look broken.
+// readyFor consults exactly these slices, so asserting on them forecloses that
+// whole class of regression in one place.
+func TestHistoryUnavailableIsNeverInAReadyOrder(t *testing.T) {
+	orders := map[string][]string{
+		"sinkReadyOrder":   sinkReadyOrder,
+		"s3SinkReadyOrder": s3SinkReadyOrder,
+		"ruleReadyOrder":   ruleReadyOrder,
+	}
+	for name, order := range orders {
+		for _, condType := range order {
+			if condType == v1alpha1.ConditionHistoryUnavailable {
+				t.Errorf("%s contains %s: a declared capability limit would drag Ready to False",
+					name, v1alpha1.ConditionHistoryUnavailable)
+			}
+		}
 	}
 }
