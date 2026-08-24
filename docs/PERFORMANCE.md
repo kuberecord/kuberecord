@@ -102,6 +102,144 @@ go test ./internal/pipeline/ -run '^$' -bench BenchmarkHashCacheShortCircuit -be
   logs at `Error` level and falls back to a **full-state write**, identical to
   the missing-baseline path. The event is never dropped or mis-recorded.
 
+## S3 writer memory: the `workers` multiplier (Task 6.7)
+
+The two sections above describe the operator's two large caches, and both are
+shared by every sink. This one is neither shared nor a cache: it is what a single
+`S3Sink`'s write path holds, and it is the one place in kuberecord where a
+throughput knob is also a memory knob.
+
+**`workers` means something different on an `S3Sink` than on a `ClickHouseSink`,
+and that asymmetry is the whole trap.** On a `ClickHouseSink` a worker holds a row
+batch bounded by `batchMaxRows` (1,000 rows) and flushed on `batchMaxWait`, so
+raising `workers` buys concurrent inserts at a cost that stays small: it is a
+throughput knob. On an `S3Sink` **the object is the batch** — each worker opens an
+object of its own and accumulates compressed bytes into it until
+`rotation.maxObjectBytes` or `rotation.maxObjectAge` closes it. The writer's
+steady-state ceiling is therefore
+
+```text
+workers × maxObjectBytes        per sink
+```
+
+so on this backend `workers` is a throughput knob **and** a memory multiplier.
+Same field name, two sinks, two different purchases.
+
+### The sizing table
+
+Every figure here is arithmetic over two spec fields — a **model**, not a
+measurement. Nothing under [`docs/perf/`](perf/) and no `make bench-load` profile
+exercises the S3 write path (the harness drives ClickHouse), so there is no
+measured S3 envelope to quote and none is invented below.
+
+| `writer.workers` | `rotation.maxObjectBytes` | steady-state ceiling | the shape it buys |
+|---|---|---|---|
+| **4** (default) | **64Mi** (default) | **256Mi** | the shipped compromise |
+| 8 | 64Mi | 512Mi | double the concurrent PUTs, double the memory |
+| 64 (the field's max) | 64Mi | **4Gi** (the admission bound) | maximum request concurrency |
+| 4 | 1Gi (the field's max) | **4Gi** (the admission bound) | fewest, largest objects |
+
+The object *count* moves with the same knob in the other direction, which is the
+consequence most easily missed: N workers hold N partial objects, and each closes
+on its own, so where one worker would have closed a single full object, N workers
+close N smaller ones. `maxObjectAge` sharpens it — at the deadline every open
+object closes regardless of how little it holds, so on a quiet cluster 64 workers
+write 64 near-empty objects where 4 write 4. The 1Mi floor on `maxObjectBytes`
+exists to keep an archive out of the small-file explosion that makes it expensive
+to query; a high worker count is the other way to arrive there.
+
+One term sits on top of the ceiling rather than inside it. Records are rendered to
+their JSONL line at *enqueue*, not on the worker (`marshalRecordLine`, see
+[`internal/sink/s3/object.go`](../internal/sink/s3/object.go)), so a saturated
+hand-off queue holds `writer.queueSize` rendered records as bytes — 5,000 by
+default, which at a 2 KiB record is roughly 10 MiB. Small beside the object
+ceiling, and worth knowing because it is the term that grows while a sink is
+*unreachable* rather than while it is busy.
+
+### The ceiling is soft
+
+`maxObjectBytes` is a rotation **trigger**, not a cap. `objectBuilder.append`
+never refuses a record for making an object too large, and `full()` is evaluated
+only *after* the record has been written into the frame — see
+[`internal/sink/s3/object.go`](../internal/sink/s3/object.go), where the mechanism
+and its bound are documented on `objectFlushSlack`. An object therefore overshoots
+`maxObjectBytes` by at most the bytes written since the builder last refreshed its
+compressed-length reading (256Ki of input, and the refresh is forced as soon as
+the un-refreshed input could carry the object over the limit, so an object is
+never closed *late* — only, at worst, slightly over). The true per-worker figure
+is:
+
+```text
+maxObjectBytes + overshoot + that worker's zstd encoder state
+```
+
+The encoder state is a per-worker allocation — window and match tables at
+`SpeedDefault`, concurrency 1 — that lives as long as the open frame does. It is
+small beside a 64Mi object, and it is not zero.
+
+**How much the overshoot matters depends entirely on where `maxObjectBytes` is
+set**, because it is an absolute quantity rather than a proportion. At the 64Mi
+default it is noise: a fraction of a percent of the object, invisible in any
+memory limit you would actually set. At the 1Mi floor it is the same quantity
+against an object 64 times smaller, and a sink tuned for small objects should be
+sized against a figure meaningfully above its nominal product.
+
+### Under a tee, the ceilings add
+
+[`docs/TEE.md`](TEE.md)'s pattern is two rules over the same resources naming two
+sinks. On the read side that is genuinely nearly free — one informer, one watch,
+one informer cache, shared. Everything downstream of the work key is per sink,
+though, so a second backend adds a second `hashCache` and a second write path's
+footprint on top:
+
+| term | how it is arrived at | at 20,000 watched objects |
+|---|---|---|
+| informer caches + one `hashCache` + the ClickHouse write path | **measured** — the `massive` profile run recorded in [`docs/perf/after/summary.txt`](perf/after/summary.txt) (peak RSS 398.1 MiB, Go heap in use 333.6 MiB) | ~400 MiB |
+| the second `hashCache` | **modelled** by scaling a measured share: the committed heap profile attributes ~22 % of live heap to the compressed diff baselines ([`docs/perf/after/top-heap.txt`](perf/after/top-heap.txt)) | ~75 MiB |
+| the `S3Sink` writer at defaults | **modelled**: 4 × 64Mi | 256 MiB |
+| that sink's hand-off queue, saturated | **modelled**: 5,000 × ~2 KiB | ~10 MiB |
+| **total** | | **~740 MiB** |
+
+**So: budget on the order of 1 GiB for a defaults-everywhere tee at this scale**,
+and re-derive the third row from your own `workers × maxObjectBytes` if you have
+tuned it. Two honesty notes on that total. The measured row is an upper bound
+rather than an attribution, because the load harness runs the churn generator in
+the same process as the operator
+([what these numbers do and do not attribute](#what-these-numbers-do-and-do-not-attribute)),
+so the sum errs in the direction a memory limit wants. And it describes memory
+only: a tee also doubles per-event CPU, since two keys mean two normalizations and
+two hashes, which no row here captures.
+
+### Where the ceiling is enforced
+
+At admission, by a CEL rule on `S3Sink.spec`: `spec.writer.workers ×
+spec.rotation.maxObjectBytes` must not exceed **4Gi**. Both fields' own bounds are
+individually reasonable and multiply into something that is not — 64 workers at
+1Gi each is 64Gi — so the pairing is rejected when the sink is applied rather than
+discovered when the pod is OOM-killed. An operator who meets
+
+```text
+spec.writer.workers × spec.rotation.maxObjectBytes must not exceed 4Gi …
+```
+
+is reading the enforcement of this section. The 4Gi figure is chosen as a bound
+that sits legibly next to a container memory limit, not measured from a benchmark:
+Task 6.6 exercised the write path against MinIO for correctness and recorded no
+memory figure, so there is nothing to derive a different number from. It leaves
+every shape that actually helps throughput available — 64 workers at 64Mi is
+exactly 4Gi, and S3 rewards request concurrency rather than object size.
+
+**One case the rule does not judge.** Structural defaulting never descends into an
+absent parent, so an `S3Sink` that omits the whole `spec.writer` block has no
+`workers` value for the rule to read, and the rule assumes the schema default of
+4. The write path, in that same case, falls back to the operator's
+`--writer-workers` instead (`newS3SinkConfigBuilder` in `cmd/main.go`) — which is
+also 4, unless the deployment raised it. A cluster running `--writer-workers=32`
+with an `S3Sink` that omits `spec.writer` entirely therefore runs 32 workers
+against a rule that admitted 4. State `spec.writer.workers` on the sink and the
+two agree exactly; that is the shape to prefer on any deployment that has moved
+the flag.
+
 ## Load harness + write-path baseline (Task 0.8)
 
 `test/loadgen` is a synthetic-churn harness that drives realistic object churn

@@ -106,12 +106,19 @@ migration is at the bottom of this section.
 - **The tee pattern: both, without choosing.** A rule targets exactly one sink,
   permanently (D14). To have a queryable timeline *and* a cheap immutable
   archive, write two rules over the same resources — one naming a
-  `ClickHouseSink`, one naming an `S3Sink`. This is nearly free: the informer
-  cache, the watch, the normalization and the hashing are shared, and only the
-  write half doubles.
+  `ClickHouseSink`, one naming an `S3Sink`. This is nearly free on the read side:
+  one informer, one API-server watch and one informer cache serve both rules, so
+  a cold tier adds no watch load at all. What doubles is everything downstream of
+  the work key — two pipeline keys per event, each normalized, hashed and written
+  on its own, and one `hashCache` per sink — over a workqueue and worker pool the
+  two sinks share.
 
   It is documented in [`docs/TEE.md`](docs/TEE.md), including the ways the two
-  halves are *not* equivalent, and shipped as a runnable example in
+  halves are *not* equivalent and exactly
+  [what the two failure domains isolate](docs/TEE.md#isolated-for-correctness-shared-for-throughput):
+  they are independent for correctness — no record is lost when one backend is
+  down — and they share throughput, so a sustained outage on one sink slows the
+  other. It ships as a runnable example in
   [`examples/tee/`](examples/tee/) — MinIO, both sinks, both rules and a workload
   to change — which CI stands up and asserts on rather than leaving as prose.
 

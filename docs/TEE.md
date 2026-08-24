@@ -65,7 +65,9 @@ traffic and no cache memory. This is asserted directly, by pool size, in
 What it *does* add is one queue slot, one hash and one write per event per sink,
 and one `hashCache` per sink — so budget the second backend's write path and its
 dedup memory, not a second watch. [`docs/PERFORMANCE.md`](PERFORMANCE.md) has the
-per-sink envelopes.
+per-sink envelopes, and
+[its S3 section](PERFORMANCE.md#s3-writer-memory-the-workers-multiplier-task-67)
+works a defaults-everywhere tee's memory total end to end.
 
 **Two dedup caches, decided independently.** The `hashCache` is per sink
 (`kuberecord_hashcache_entries{sink}`), and version-gated commits are per sink.
@@ -76,12 +78,91 @@ observation, while the healthy half carries on with a baseline the failure never
 touched. The same separation holds for scope epochs — each sink gets its own
 `Started` and `Stopped` record for the same watch.
 
-**Two sets of status conditions, two failure domains.** An unreachable ClickHouse
-degrades the hot rule and leaves the cold one streaming; an object store rejecting
-writes degrades the cold rule and leaves the timeline intact. Neither tears down
-the shared informer, because a sink being down is the failure the pipeline's
-requeue path exists to absorb (see
-[`docs/CRDS.md`](CRDS.md#why-sinknotready-keeps-streaming)).
+**Two sets of status conditions, two failure domains — for correctness.** An
+unreachable ClickHouse degrades the hot rule and leaves the cold one streaming; an
+object store rejecting writes degrades the cold rule and leaves the timeline
+intact, in the sense that matters first: no record is lost, no record is
+mis-recorded, and neither half's dedup state is touched by the other's failure.
+Neither tears down the shared informer, because a sink being down is the failure
+the pipeline's requeue path exists to absorb (see
+[`docs/CRDS.md`](CRDS.md#why-sinknotready-keeps-streaming)). What the two domains
+do **not** separate is *throughput* — the workqueue and the workers draining it
+are shared — which is the next section, and the one to read before you size a node
+for a tee.
+
+### Isolated for correctness, shared for throughput
+
+**What is isolated.** Everything that decides *what gets recorded*. Status
+conditions are per rule and per sink; the `hashCache` and its version-gated
+commits are per sink; a dedup decision on one side can neither suppress nor
+duplicate a write on the other. A sink that is down loses nothing: its failed
+writes revert their reserved cache versions, their keys go back on the workqueue,
+and each key is written when it comes round again — at the object's *current*
+state, because the pipeline is level-triggered rather than event-replaying. Every
+job still settles exactly one `commit(ok)`, on every path (Invariant 3). Nothing
+below qualifies any of that.
+
+**What is not isolated.** The data plane has **one** workqueue and **one** worker
+pool — 8 goroutines by default, shared across every sink and every watch target
+(`DefaultWorkers` in `internal/pipeline/pipeline.go`) — and a tee puts **two keys
+on that queue per event**, one per sink. Handing a record to a sink is an
+asynchronous hand-off into that sink's own queue, but the hand-off itself is not
+free when the queue is full: `Enqueue` waits up to `spec.writer.enqueueTimeout`
+for room, and it waits *on the pipeline worker*. So a sink that cannot accept
+writes does not merely degrade its own rule — it holds shared workers while it
+fails.
+
+The sequence during an object-store outage is worth having in mind, because the
+coupling does not start immediately:
+
+1. PUTs begin failing, and each S3 writer worker retries the object it is holding
+   (up to a minute) instead of draining its queue.
+2. The sink's hand-off queue — 5,000 jobs by default — fills.
+3. Only now do `Enqueue` calls start waiting, and every one that waits out its
+   timeout has occupied one of the eight pipeline workers for those 2 seconds.
+4. ClickHouse is healthy throughout. There are simply fewer workers left to serve
+   it, so the hot side's throughput falls behind its own cluster's churn.
+
+**The bound.** Three properties, each worth naming, because together they make
+this something to size for rather than something to fear:
+
+- **Time-bounded per key.** A worker gives up a blocked hand-off after
+  `spec.writer.enqueueTimeout` — 2s on an `S3Sink` by default — and is
+  immediately free for the next key. No key can hold a worker indefinitely.
+- **Spread by the rate limiter.** A key whose hand-off timed out is re-added
+  through `AddRateLimited`, which paces mass retries at 10 keys/second overall
+  and backs each key off exponentially. The dead sink's keys therefore re-arrive
+  as a trickle rather than as a herd. Ordinary informer events for the *healthy*
+  sink take the undelayed `Add` path and are never paced by it — see
+  [`docs/PERFORMANCE.md`](PERFORMANCE.md#workqueue-retry-pacing-client-gos-default-controller-rate-limiter-unchanged).
+- **It cannot deadlock, and it cannot lose data.** `Enqueue` always returns —
+  on room, on its timeout, or on context cancellation — so a worker is never
+  parked permanently; the key is re-queued rather than dropped; and the record
+  that eventually lands is the object's current state.
+
+**The two knobs that bound it further.** Both already exist; neither has a new
+setting behind it:
+
+- **`--pipeline-workers` / `PIPELINE_WORKERS`** (default `8`,
+  [`docs/CONFIGURATION.md`](CONFIGURATION.md#flags-and-environment-variables)).
+  More workers means more of them left over while some are parked on a dead
+  sink's queue. Raising it is safe for correctness at any value — per-key
+  serialization comes from the workqueue contract, not from the worker count —
+  and the trade is the ordinary one: goroutines, CPU, and more concurrent
+  normalizations in flight during a healthy burst.
+- **The archive sink's `spec.writer.enqueueTimeout`** (S3 default `2s`). Lowering
+  it on the *cold* sink makes a dead backend surrender a worker faster: at `250ms`
+  a refused key costs an eighth of what it costs today. The trade is that the same
+  shorter fuse also gives up on merely *transient* fullness sooner, so more of the
+  archive's keys bounce onto the retry rate limiter and the archive itself takes
+  longer to catch up once the store recovers. Lower it on the sink you are willing
+  to have lag, which under this pattern is the archive rather than the timeline.
+
+A useful default reading: with 8 workers and a 2s timeout, a totally dead archive
+can cost the hot side up to 8 worker-slots at a time, and the retry limiter caps
+how often those keys can come back to claim them. If that is not headroom you can
+spare, raise the first knob before lowering the second — worker count costs CPU,
+whereas a short enqueue timeout costs the archive's recovery time.
 
 ## The two halves are not equivalent
 

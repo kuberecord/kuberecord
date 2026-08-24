@@ -25,7 +25,10 @@ The quickstart's cluster, plus:
 - a demo Deployment and ConfigMap to change.
 
 One informer on the API server serves both rules. Two dedup caches, two sets of
-status conditions, two independent failure domains.
+status conditions, two failure domains that are independent for correctness —
+though not for throughput, since the pipeline's workqueue and its workers are
+shared by both sinks
+([`docs/TEE.md`](../../docs/TEE.md#isolated-for-correctness-shared-for-throughput)).
 
 ## The files
 

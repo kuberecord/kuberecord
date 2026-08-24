@@ -174,6 +174,13 @@ trail. Read the `ClickHouseSink`'s conditions (`kubectl describe clickhousesink
 report a distinct reason. The operator keeps its watches running throughout, and
 recovers without re-emitting the world, so there is nothing to restart.
 
+If the failing sink is one half of a tee, expect the *other* half to slow while
+this one is down, and do not go looking for a second fault to explain it: the two
+sinks' failure domains are independent for correctness but share one workqueue and
+one worker pool. What that can and cannot cost you, and the two knobs that bound
+it, are in
+[`docs/TEE.md`](TEE.md#isolated-for-correctness-shared-for-throughput).
+
 ### Rules not ready
 
 A rule can legitimately be `Ready=False` for a few minutes during ordinary
@@ -195,6 +202,15 @@ on the workqueue and the informer cache still holds the object's latest state â€
 but the pipeline has stopped keeping up, and every requeue adds to how far behind
 ClickHouse is. Treat it as the escalation of queue saturation above; seeing both
 at once means the sink is undersized rather than briefly slow.
+
+This counter is also the signal that one sink is spending another sink's
+capacity. Every enqueue that waits out its timeout does so **on a shared pipeline
+worker**, so a backend that stays full holds workers that every other sink and
+watch target is drawing from â€” which is why a rise here on one `sink` label can
+show up as falling throughput on a different one. The mechanism, its bounds and
+the two knobs that shorten it (`--pipeline-workers`, and the affected sink's
+`spec.writer.enqueueTimeout`) are in
+[`docs/TEE.md`](TEE.md#isolated-for-correctness-shared-for-throughput).
 
 ## Validating changes to these files
 

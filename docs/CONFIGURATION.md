@@ -21,7 +21,7 @@ flag wins if both are set.
 | `--pipeline-workers` | `PIPELINE_WORKERS` | `8` | Goroutines draining the shared data-plane workqueue. Safe to raise at any value — per-key serialization comes from the workqueue contract, not the worker count. |
 | `--ch-auto-create-schema` | `CH_AUTO_CREATE_SCHEMA` | `false` | Make every sink instance execute the shipped DDL ([`deploy/clickhouse/schema`](../deploy/clickhouse/schema/)) idempotently before its first write. Off by default — the operator never mutates ClickHouse DDL unless asked. Operator-level rather than per-sink on purpose: "may this operator run DDL?" is a deployment-time decision, not one the author of a sink CR grants themselves. |
 | `--writer-queue-size` | `WRITER_QUEUE_SIZE` | `5000` | Fallback for `spec.writer.queueSize`: capacity (jobs) of a sink's async write hand-off queue. |
-| `--writer-workers` | `WRITER_WORKERS` | `4` | Fallback for `spec.writer.workers`: workers draining a sink's write queue into ClickHouse. |
+| `--writer-workers` | `WRITER_WORKERS` | `4` | Fallback for `spec.writer.workers`: workers draining a sink's write queue. On a `ClickHouseSink` that is a throughput knob; on an `S3Sink` it is **also a memory multiplier**, because each worker accumulates an object of its own — the sink's steady-state ceiling is `workers × maxObjectBytes`, and the pairing is capped at 4Gi at admission. See [`docs/PERFORMANCE.md`](PERFORMANCE.md#s3-writer-memory-the-workers-multiplier-task-67). |
 | `--writer-batch-max-rows` | `WRITER_BATCH_MAX_ROWS` | `1000` | Fallback for `spec.writer.batchMaxRows`: row count at which a worker flushes its accumulated insert batch. |
 | `--writer-batch-max-wait` | `WRITER_BATCH_MAX_WAIT` | `1s` | Fallback for `spec.writer.batchMaxWait`: max time a batch's first job waits for the batch to fill before flushing regardless. |
 | `--writer-enqueue-timeout` | `WRITER_ENQUEUE_TIMEOUT` | `2s` | Fallback for `spec.writer.enqueueTimeout`: how long `Enqueue` waits for queue room before returning an error (the job is never dropped silently). |
@@ -44,6 +44,17 @@ The six `--writer-*` flags are applied **per field**: a `ClickHouseSink` that
 states `spec.writer.workers` uses its own value, one that omits it uses the flag.
 Operators must be able to size the write path per environment, and a fleet-wide
 default should not have to be repeated on every sink.
+
+Four of the six also back an `S3Sink`'s writer — `queueSize`, `workers`,
+`enqueueTimeout` and `drainTimeout`, the knobs the two backends share. The two
+batching flags have no `S3Sink` twin, because there the object *is* the batch and
+`spec.rotation` decides when it closes. **`workers` is the one flag that does not
+mean the same thing on both**: on an `S3Sink` it multiplies memory as well as
+concurrency, and a sink that omits its `spec.writer` block entirely takes this
+flag's value while the admission rule that caps `workers × maxObjectBytes` at 4Gi
+judged the schema default of 4 — so on a deployment that has raised this flag,
+state `spec.writer.workers` on the sink. Both are spelled out in
+[`docs/PERFORMANCE.md`](PERFORMANCE.md#s3-writer-memory-the-workers-multiplier-task-67).
 
 The per-attempt retry backoff cap (60s) remains an internal default, with no flag
 and no CRD field.
