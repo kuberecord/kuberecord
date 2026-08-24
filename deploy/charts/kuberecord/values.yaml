@@ -144,37 +144,59 @@ priorityClassName: ""
 # spec.writer.drainTimeout exceeds this value will be cut short mid-drain.
 terminationGracePeriodSeconds: 10
 
-# A starter ClickHouseSink named `defaultSink.name`, off by default: a sink needs
-# a reachable address and a password, and the password is a Secret this chart
-# deliberately never creates or templates (a chart that took a password as a
-# value would put it in the release's stored manifest and in every `helm get
-# values` output). Create the Secret yourself, in the operator's namespace:
+# The sinks this release creates, one entry per backend CR. Empty by default: a
+# sink needs a reachable backend and, usually, credentials — and the credentials
+# are a Secret this chart deliberately never creates or templates (a chart that
+# took a password as a value would put it in the release's stored manifest and in
+# every `helm get values` output). Create the Secret yourself, in the operator's
+# namespace, then list the sink here; or apply your own CRs and leave this empty.
 #
-#   kubectl create secret generic clickhouse-credentials \
-#     --namespace <release namespace> --from-literal=password='…'
+# An entry is three fields: the `kind` of backend, the `name` rules will name in
+# `spec.sink.name`, and `spec`, passed through verbatim to the CR.
 #
-# then either enable this or apply your own CR. With it enabled,
-# defaultSink.connection.addr is required.
-createDefaultSink: false
-defaultSink:
-  # The name rules name in spec.sink. A sink reference is a (kind, name) pair —
-  # a name is only unique within a kind — and the kind half defaults to
-  # ClickHouseSink, which is what this chart creates.
-  name: default
-  connection:
-    addr: ""
-    database: kuberecord
-    username: kuberecord
-    credentialsSecretRef:
-      # Resolved in the operator's own namespace — the only namespace it holds
-      # Secret read rights in (D7).
-      name: clickhouse-credentials
-    dialTimeout: ""
-    readTimeout: ""
-  # Passed through verbatim; anything omitted keeps its CRD default. See the
-  # ClickHouseSink reference in docs/CRDS.md for every field.
-  writer: {}
-  policy: {}
+# Verbatim is the design. Every field of every sink CRD is reachable without this
+# chart growing a value per field, a future backend needs no new chart code, and
+# what is *valid* is decided by the CRD's own structural schema and CEL rules
+# (D4) rather than by a second, drifting copy of them here. Anything omitted
+# keeps its CRD default, so a spec says only what you are choosing.
+#
+# A sink is identified by the (kind, name) pair, not by the name alone (D10): a
+# ClickHouseSink and an S3Sink may both be called `hot`. Two entries sharing both
+# halves are refused at render time rather than rendering one object twice.
+#
+# The example below is the tee pattern (D14) — the same resources streamed to a
+# queryable ClickHouse timeline and to a cheap immutable S3 archive, by two rules
+# naming these two sinks. See docs/TEE.md, and docs/CRDS.md for every field.
+#
+#   sinks:
+#     - kind: ClickHouseSink
+#       name: hot
+#       spec:
+#         connection:
+#           addr: clickhouse.kuberecord-system.svc:9000
+#           database: kuberecord
+#           username: kuberecord
+#           credentialsSecretRef:
+#             # No namespace: it defaults to the operator's own, the only
+#             # namespace it holds Secret read rights in (D7).
+#             name: clickhouse-credentials
+#     - kind: S3Sink
+#       name: cold
+#       spec:
+#         bucket: kuberecord-archive
+#         region: eu-west-1
+#         # Omitting `credentials` entirely is the recommended shape on a cloud
+#         # provider: the sink authenticates from the ambient chain (IRSA,
+#         # workload identity, an instance role), so no long-lived key exists to
+#         # leak or rotate. MinIO and on-premises deployments name a Secret:
+#         #   credentials:
+#         #     secretRef:
+#         #       name: s3-credentials
+#
+# The kinds this chart can create are the sink CRDs it ships in crds/:
+# ClickHouseSink and S3Sink. Naming any other kind fails the render rather than
+# producing a manifest the API server has no CRD for.
+sinks: []
 
 nameOverride: ""
 fullnameOverride: ""

@@ -5,7 +5,7 @@ IMG ?= controller:latest
 # IMG's default — IMG is a developer's local build tag, VERSION is what a user
 # installs — and it is the one place a release bump has to happen (see
 # deploy/charts/kuberecord/Chart.yaml, which must carry the same value).
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -514,7 +514,7 @@ KUBECONFORM_K8S_VERSION ?= $(ENVTEST_K8S_VERSION).0
 # -ignore-missing-schemas — with an explicit list, a *typo'd* kind is still a hard
 # failure:
 #
-#   - our own three CRs have no published upstream schema. Their shape is
+#   - our own four CRs have no published upstream schema. Their shape is
 #     enforced by the CRDs themselves, in envtest (api/v1alpha1) and in the kind
 #     smokes, which is stricter than anything kubeconform could do here.
 #   - CustomResourceDefinition: the upstream schema repository publishes no
@@ -524,7 +524,7 @@ KUBECONFORM_K8S_VERSION ?= $(ENVTEST_K8S_VERSION).0
 #
 # --include-crds is still passed when rendering, so a CRD that failed to render
 # at all remains a parse error here.
-KUBECONFORM_SKIP ?= ClickHouseSink,StreamRule,ClusterStreamRule,CustomResourceDefinition
+KUBECONFORM_SKIP ?= ClickHouseSink,S3Sink,StreamRule,ClusterStreamRule,CustomResourceDefinition
 KUBECONFORM_FLAGS ?= -strict -summary \
 	-kubernetes-version $(KUBECONFORM_K8S_VERSION) \
 	-skip $(KUBECONFORM_SKIP)

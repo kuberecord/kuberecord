@@ -3,33 +3,93 @@ kuberecord {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} i
 The operator boots healthy and idle: it streams nothing until a sink and a rule
 exist. Three steps from here.
 
-1. Credentials. The operator reads sink passwords from Secrets in its own
-   namespace only — that is the whole of its Secret grant.
+{{- /*
+Collect what the sinks in this release imply, once, so the steps below can be
+about the install the reader actually got rather than about the chart in general.
+An S3Sink with no spec.credentials contributes no Secret on purpose: ambient
+credentials are the recommended shape on a cloud provider.
+*/ -}}
+{{- $chSinks := list }}
+{{- $s3Sinks := list }}
+{{- $secrets := list }}
+{{- $seenSecrets := dict }}
+{{- range .Values.sinks }}
+{{- $name := "" }}
+{{- $literals := list }}
+{{- if eq .kind "ClickHouseSink" }}
+{{- $chSinks = append $chSinks . }}
+{{- $name = dig "connection" "credentialsSecretRef" "name" "" .spec }}
+{{- $literals = list "--from-literal=password='<your-password>'" }}
+{{- else if eq .kind "S3Sink" }}
+{{- $s3Sinks = append $s3Sinks . }}
+{{- $name = dig "credentials" "secretRef" "name" "" .spec }}
+{{- $literals = list "--from-literal=accessKeyId='<id>'" "--from-literal=secretAccessKey='<key>'" }}
+{{- end }}
+{{- if and $name (not (hasKey $seenSecrets $name)) }}
+{{- $seenSecrets = set $seenSecrets $name true }}
+{{- $secrets = append $secrets (dict "name" $name "literals" $literals) }}
+{{- end }}
+{{- end }}
 
-     kubectl create secret generic {{ .Values.defaultSink.connection.credentialsSecretRef.name }} \
-       --namespace {{ .Release.Namespace }} --from-literal=password='<your-password>'
+1. Credentials. The operator reads sink credentials from Secrets in its own
+   namespace only — that is the whole of its Secret grant, and it is what makes
+   a cluster-scoped sink unable to reach a Secret somebody else owns.
+{{- if $secrets }}
 
-{{- if .Values.createDefaultSink }}
+   The sinks below name these Secrets. Create each one, if you have not already:
+{{- range $secrets }}
 
-2. Your sink `{{ .Values.defaultSink.name }}` was created by this release, pointed at
-   {{ .Values.defaultSink.connection.addr }}. Wait for it to connect:
-
-     kubectl get clickhousesink {{ .Values.defaultSink.name }} -o jsonpath='{.status.conditions}'
-
-   Ready=True means it dialled ClickHouse and validated the schema v1 tables.
-   SchemaValid=False names the columns that do not match; apply
-   deploy/clickhouse/schema/*.sql, or add --ch-auto-create-schema to
-   `extraArgs` to let the operator apply the shipped DDL itself.
+     kubectl create secret generic {{ .name }} \
+       --namespace {{ $.Release.Namespace }} \
+       {{ join " \\\n       " .literals }}
+{{- end }}
 {{- else }}
 
-2. A sink. Create a ClickHouseSink and name it whatever the rules below will name
-   in spec.sink, or set `createDefaultSink=true` and
-   `defaultSink.connection.addr` and let this chart create one called
-   `{{ .Values.defaultSink.name }}`:
+     kubectl create secret generic <name> \
+       --namespace {{ .Release.Namespace }} --from-literal=password='<your-password>'
+
+   An S3Sink on a cloud provider needs no Secret at all: omit spec.credentials
+   and it authenticates from the ambient chain (IRSA, workload identity or an
+   instance role), so no long-lived key exists to leak.
+{{- end }}
+{{- if .Values.sinks }}
+
+2. Your sinks. This release created {{ len .Values.sinks }}:
+{{- range .Values.sinks }}
+
+     kubectl get {{ .kind | lower }} {{ .name }} -o jsonpath='{.status.conditions}'
+{{- end }}
+{{- if $chSinks }}
+
+   On a ClickHouseSink, Ready=True means it dialled ClickHouse and validated the
+   schema v1 tables. SchemaValid=False names the columns that do not match; apply
+   deploy/clickhouse/schema/*.sql, or add --ch-auto-create-schema to `extraArgs`
+   to let the operator apply the shipped DDL itself.
+{{- end }}
+{{- if $s3Sinks }}
+
+   On an S3Sink, HistoryUnavailable=True is expected and permanent, on a healthy
+   sink: it is a Writer-only archive tier (D12) that cannot read back what it
+   wrote, so cache warm-up, zombie GC and boot reconciliation are disabled for it
+   and every record is a full Snapshot. Ready=True is still the health signal.
+   BucketReachable=False names a bucket that does not exist, cannot be
+   authenticated to, or lacks the Object Lock this sink asks for.
+{{- end }}
+{{- else }}
+
+2. A sink. Create a ClickHouseSink or an S3Sink and name it whatever the rules
+   below will name in spec.sink, or let this chart create it — the `sinks` value
+   takes a list of {kind, name, spec}, with spec passed through verbatim:
 
      helm upgrade {{ .Release.Name }} <chart> --namespace {{ .Release.Namespace }} --reuse-values \
-       --set createDefaultSink=true \
-       --set defaultSink.connection.addr=clickhouse.{{ .Release.Namespace }}.svc:9000
+       --set sinks[0].kind=ClickHouseSink \
+       --set sinks[0].name=default \
+       --set sinks[0].spec.connection.addr=clickhouse.{{ .Release.Namespace }}.svc:9000 \
+       --set sinks[0].spec.connection.credentialsSecretRef.name=clickhouse-credentials
+
+   Past one or two fields, a values file is kinder than --set. The commented
+   example in values.yaml is the tee pattern: one ClickHouse timeline and one S3
+   archive, fed by two rules.
 {{- end }}
 
 3. A rule, over kinds you have granted. Enabled watch presets in this release:
@@ -44,6 +104,7 @@ exist. Three steps from here.
      (none — every rule will report RBACGranted=False until you enable one
      with --set rbac.presets.<name>=true, or apply your own labelled ClusterRole)
 {{- end }}
+{{- $first := first .Values.sinks }}
 
      kubectl apply -f - <<'EOF'
      apiVersion: kuberecord.io/v1alpha1
@@ -53,8 +114,8 @@ exist. Three steps from here.
        namespace: default
      spec:
        sink:
-         kind: ClickHouseSink
-         name: {{ .Values.defaultSink.name }}
+         kind: {{ if $first }}{{ $first.kind }}{{ else }}ClickHouseSink{{ end }}
+         name: {{ if $first }}{{ $first.name }}{{ else }}default{{ end }}
        resources:
        - group: apps
          version: v1
@@ -63,10 +124,26 @@ exist. Three steps from here.
 
      kubectl get streamrule -A
 
-Then query `{{ .Values.defaultSink.connection.database }}.resource_states`, filtering on
+A rule names exactly one sink, permanently (D14). To stream the same resources to
+two backends — a queryable timeline and an immutable archive — write two rules,
+one per sink: that is the tee pattern, and it is documented in docs/TEE.md.
+{{- if $chSinks }}
+{{- $ch := first $chSinks }}
+
+Then query `{{ dig "connection" "database" "kuberecord" $ch.spec }}.resource_states`, filtering on
 cluster_id = '{{ .Values.clusterID }}'. Note that CLUSTER_ID is stamped on every row
 this operator writes{{ if eq .Values.clusterID "local-kind-cluster" }} and is still the shipped placeholder — set `clusterID` to
 something that identifies this cluster before it matters, because rows already
 written keep the old value{{ end }}.
+{{- else }}
+
+CLUSTER_ID is stamped on every row and every object this operator writes, and is
+part of an object's identity (Invariant 7).
+{{- if eq .Values.clusterID "local-kind-cluster" }}
+It is still the shipped placeholder `{{ .Values.clusterID }}` — set `clusterID` to
+something that identifies this cluster before it matters, because rows already
+written keep the old value.
+{{- end }}
+{{- end }}
 
 Metrics: {{ if .Values.metrics.enabled }}served on :{{ .Values.metrics.port }} over {{ if .Values.metrics.secure }}HTTPS, authenticated and authorized{{ else }}plain HTTP{{ end }}; bind a scraper to the ClusterRole {{ include "kuberecord.fullname" . }}-metrics-reader.{{ else }}disabled (metrics.enabled=false).{{ end }}

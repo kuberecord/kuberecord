@@ -2,13 +2,14 @@ apiVersion: v2
 name: kuberecord
 description: |
   Kubernetes-native operator that streams cluster state changes to ClickHouse
-  for audit, GitOps forensics and change intelligence.
+  and to S3-compatible object storage for audit, GitOps forensics and change
+  intelligence.
 type: application
 # version is the chart's own version; appVersion is the operator release it
 # installs by default (values.yaml leaves image.tag empty so it follows this
 # field). Both must move together with the Makefile's VERSION.
-version: 0.1.0
-appVersion: "v0.1.0"
+version: 0.2.0
+appVersion: "v0.2.0"
 # The chart installs no webhooks and no cert-manager (D4): validation is entirely
 # CRD structural schemas plus CEL (x-kubernetes-validations), which is why the
 # floor is 1.29 — the release where CEL validation cost budgets and
@@ -21,6 +22,7 @@ keywords:
   - kubernetes
   - audit
   - clickhouse
+  - s3
   - observability
   - gitops
 annotations:

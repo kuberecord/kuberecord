@@ -291,7 +291,7 @@ Both artifacts are also attached to every [release](https://github.com/yelzhy/ku
 with checksums, if you would rather install a tag than a checkout:
 
 ```sh
-kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.2.0/install.yaml
 ```
 
 From v0.2.0 the image is signed with cosign, the image and every attached asset

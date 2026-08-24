@@ -263,16 +263,30 @@ func TestNoLegacySinkRefAuthoring(t *testing.T) {
 	})
 }
 
-// TestMigrationRecordStillNamesThem is the other half of the check above, and
-// the reason it is worth writing down: "the old names appear nowhere" would be
+// TestMigrationRecordStillNamesThem is the other half of both scans above, and
+// the reason they are worth writing down: "the old names appear nowhere" would be
 // satisfied by deleting the migration table, which would leave an upgrading user
 // with no way to find out what their configuration became.
+//
+// The retired `sinkRef` field is held to the same bargain as the retired
+// environment variables, and for a slightly sharper reason. CHANGELOG.md is
+// exempt from TestNoLegacySinkRefAuthoring *so that* it can carry the migration
+// steps; without this half, that exemption would let the steps be deleted with
+// the scan still green — the removal record for a breaking change quietly
+// removed, in the one file where a v0.x break is supposed to be spelled out. It
+// is matched with legacySinkRefField rather than with a substring because
+// `SinkReference` is a live type name a substring check would happily accept.
 func TestMigrationRecordStillNamesThem(t *testing.T) {
 	changelog := readFile(t, "CHANGELOG.md")
 	for _, name := range []string{"WATCHED_GVKS", "CH_ADDR", "CH_DATABASE", "CH_USERNAME", "CH_PASSWORD"} {
 		if !strings.Contains(changelog, name) {
 			t.Errorf("CHANGELOG.md no longer names %s; the migration table is how a user finds out what it became", name)
 		}
+	}
+	if !legacySinkRefField.MatchString(changelog) {
+		t.Error("CHANGELOG.md no longer names `sinkRef`; it is exempt from the scan above so that " +
+			"it can, and the migration record is how a user holding a rule authored against v0.1.0 " +
+			"finds out that the field became `spec.sink {kind, name}` (D10)")
 	}
 }
 

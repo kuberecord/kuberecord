@@ -2,7 +2,7 @@
 
 Installs the kuberecord operator: the CRDs, its RBAC (including the aggregated
 watch role and whichever watch presets you enable), the manager Deployment and,
-optionally, a starter `ClickHouseSink`.
+optionally, the sinks you list — `ClickHouseSink`, `S3Sink`, or both.
 
 This chart is one of two supported install paths. The other is the single-file
 `dist/install.yaml` built by `make build-installer`. They install **the same
@@ -32,8 +32,8 @@ comes out named exactly as the kustomize install names it
 release name works, but the names gain a prefix and anything referring to them —
 a scrape config, a ClusterRoleBinding for metrics readers — has to follow.
 
-The operator boots healthy and **idle**: it streams nothing until a
-`ClickHouseSink` and at least one `StreamRule` or `ClusterStreamRule` exist. The
+The operator boots healthy and **idle**: it streams nothing until a sink and at
+least one `StreamRule` or `ClusterStreamRule` exist. The
 post-install notes walk through those three steps; the project
 [README](../../../README.md#installing) covers them in full, and
 [`examples/quickstart/`](../../../examples/quickstart/) runs the whole sequence
@@ -41,14 +41,23 @@ end to end on a kind cluster.
 
 ### Credentials are yours to create
 
-The chart never creates or templates a Secret. A password passed as a Helm value
-would be stored in the release's manifest and echoed by `helm get values`, so the
-sink's password has to be created out of band, in the operator's namespace — the
-only namespace the operator can read Secrets in:
+The chart never creates or templates a Secret. A credential passed as a Helm value
+would be stored in the release's manifest and echoed by `helm get values`, so a
+sink's credentials have to be created out of band, in the operator's namespace —
+the only namespace the operator can read Secrets in:
 
 ```sh
+# A ClickHouseSink's password.
 kubectl create secret generic clickhouse-credentials \
   --namespace kuberecord-system --from-literal=password='<your-password>'
+
+# An S3Sink's access key — needed for MinIO and on-premises stores. On a cloud
+# provider, omit spec.credentials instead and authenticate from the ambient chain
+# (IRSA, workload identity, an instance role), so no long-lived key exists at all.
+kubectl create secret generic s3-credentials \
+  --namespace kuberecord-system \
+  --from-literal=accessKeyId='<id>' \
+  --from-literal=secretAccessKey='<key>'
 ```
 
 ### Upgrades and CRDs
@@ -62,10 +71,10 @@ kubectl apply -f deploy/charts/kuberecord/crds/
 helm upgrade kuberecord deploy/charts/kuberecord --namespace kuberecord-system
 ```
 
-`helm uninstall` likewise leaves the CRDs — and therefore your `ClickHouseSink`
-and rules — in place. Deleting them deletes every CR of those kinds; the rows
-already in ClickHouse are untouched, since the sink is the durable store
-(Invariant 6).
+`helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —
+in place. Deleting them deletes every CR of those kinds; the rows already in
+ClickHouse and the objects already in S3 are untouched, since the sink is the
+durable store (Invariant 6).
 
 ## Values
 
@@ -189,24 +198,61 @@ The full flag list is in
 most installs want to decide about explicitly, since it is what lets the operator
 create the schema v1 tables itself instead of you applying the DDL.
 
-### Starter sink (optional)
+### Sinks (optional)
 
 | Value | Type | Default | Description |
 |---|---|---|---|
-| `createDefaultSink` | bool | `false` | Render a `ClickHouseSink`. Off by default: a sink needs an address and a password, and the password is yours to create. |
-| `defaultSink.name` | string | `default` | The sink's name — what a rule names in `spec.sink.name`. The `spec.sink.kind` half defaults to `ClickHouseSink`, which is what this chart creates. |
-| `defaultSink.connection.addr` | string | `""` | `host:port` of ClickHouse's native protocol (9000). **Required** when `createDefaultSink` is true. |
-| `defaultSink.connection.database` | string | `kuberecord` | Database holding the schema v1 tables. |
-| `defaultSink.connection.username` | string | `kuberecord` | ClickHouse user. |
-| `defaultSink.connection.credentialsSecretRef.name` | string | `clickhouse-credentials` | Secret with a `password` key, resolved in the operator's own namespace. |
-| `defaultSink.connection.dialTimeout` | duration | `""` | Dial timeout; empty keeps the CRD default. |
-| `defaultSink.connection.readTimeout` | duration | `""` | Read timeout; empty keeps the CRD default. |
-| `defaultSink.writer` | object | `{}` | `spec.writer` verbatim (`queueSize`, `workers`, `batchMaxRows`, `batchMaxWait`, `enqueueTimeout`, `drainTimeout`, `checkpointEvery`). Omitted fields keep their CRD defaults. |
-| `defaultSink.policy` | object | `{}` | `spec.policy` verbatim (`allowedGVKs`). Omitted admits everything except the hard deny-list. |
+| `sinks` | list | `[]` | The sink CRs this release creates. Empty means the chart creates none — apply your own, or add entries here. |
+| `sinks[].kind` | string | — | `ClickHouseSink` or `S3Sink`: the sink CRDs this chart ships. Any other kind fails the render. |
+| `sinks[].name` | string | — | The sink's name — what a rule names in `spec.sink.name`. A name is unique only *within* a kind (D10), so a `ClickHouseSink` and an `S3Sink` may share one. |
+| `sinks[].spec` | object | — | The CR's `spec`, passed through **verbatim**. Every field of the kind's CRD is reachable; see the [`ClickHouseSink`](../../../docs/CRDS.md#clickhousesink) and [`S3Sink`](../../../docs/CRDS.md#s3sink) condition and field references. |
 
-Every unset field is *omitted* from the rendered CR rather than written out with a
-copy of its default, so the CRD's defaults — and only those — apply, and a future
-change to one of them reaches existing installs.
+`spec` is passed through rather than mapped field by field, which is what lets one
+value serve every backend and a future one arrive without a chart change. What is
+*valid* is decided by the CRD's own structural schema and CEL rules (D4) — not by
+a second copy of them here that could drift. Every unset field is simply absent
+from the rendered CR rather than written out with a copy of its default, so the
+CRD's defaults — and only those — apply, and a future change to one of them
+reaches existing installs.
+
+The chart refuses, at render time, what the API server would either reject too
+late or explain badly: an unknown `kind` (which would otherwise fail as a missing
+CRD rather than as a typo), a missing `name` or `spec`, two entries sharing one
+(kind, name) identity, and the one connection field per backend that cannot be
+defaulted — `spec.connection.addr` and `spec.connection.credentialsSecretRef.name`
+for a `ClickHouseSink`, `spec.bucket` for an `S3Sink`.
+
+**The chart never creates a Secret**, at any values, and no sink spec carries a
+credential inline — a password given as a value would land in the release's stored
+manifest and in every `helm get values` output. Create it yourself in the release
+namespace, which is the only namespace the operator can read Secrets in (D7). An
+`S3Sink` on a cloud provider needs no Secret at all: omit `spec.credentials` and it
+authenticates from the ambient chain (IRSA, workload identity, an instance role).
+
+The two-sink example below is the tee pattern (D14) — one queryable ClickHouse
+timeline and one immutable S3 archive, fed by two rules over the same resources.
+See [`docs/TEE.md`](../../../docs/TEE.md).
+
+```yaml
+sinks:
+  - kind: ClickHouseSink
+    name: hot
+    spec:
+      connection:
+        addr: clickhouse.kuberecord-system.svc:9000
+        credentialsSecretRef:
+          name: clickhouse-credentials
+  - kind: S3Sink
+    name: cold
+    spec:
+      bucket: kuberecord-archive
+      region: eu-west-1
+```
+
+An `S3Sink` is a `Writer`-only archive tier (D12): it reports
+`HistoryUnavailable=True` permanently while `Ready` stays `True`, cannot warm its
+dedup cache from its own history, and records every object as a full `Snapshot` on
+each restart. That is a declared capability limit, not a fault.
 
 ### Naming overrides
 

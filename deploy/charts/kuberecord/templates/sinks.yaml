@@ -1,0 +1,33 @@
+{{- /*
+The sink CRs this release creates, from the `sinks` list (empty by default — see
+values.yaml for why a chart that took a password as a value would be the wrong
+shape).
+
+Each entry's `spec` is passed through verbatim rather than mapped field by field.
+That is what makes one template serve every backend: the CRDs ship in crds/ and
+carry their own structural schema and CEL rules (D4), so this file decides *which*
+objects exist and the API server decides whether they are valid. Fields left unset
+are simply absent here, so the CRD's own defaults — and only those — apply.
+
+Every sink kind is cluster-scoped (D6): rules in any namespace reference it by
+name, and a backend is infrastructure owned by the platform team rather than by
+whoever owns a namespace. Hence no namespace below — and the name is deliberately
+*not* release-qualified, because it is the name rules already carry in
+spec.sink.name and prefixing it would break every rule this chart did not write.
+
+`kuberecord.validateValues` has already rejected an entry naming a kind this
+release does not serve, missing a name or a spec, duplicating another entry's
+(kind, name) identity, or omitting the one connection field its backend cannot
+default. By this point the list is renderable.
+*/ -}}
+{{- range $sink := .Values.sinks }}
+---
+apiVersion: kuberecord.io/v1alpha1
+kind: {{ $sink.kind }}
+metadata:
+  name: {{ $sink.name }}
+  labels:
+    {{- include "kuberecord.labels" $ | nindent 4 }}
+spec:
+  {{- toYaml $sink.spec | nindent 2 }}
+{{- end }}
