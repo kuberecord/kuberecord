@@ -1,0 +1,20 @@
+# The tee pattern, as one apply.
+#
+# It brings up everything except the workload: the object store, the credentials,
+# both sinks, the namespace and both rules. examples/tee/workload.yaml is applied
+# afterwards, on purpose — see the comment at the top of that file.
+#
+# The order below is reading order, not apply order; kustomize emits namespaces
+# and other cluster-scoped objects first regardless.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+# The cold backend and the credentials both halves of the key pair live in.
+- minio.yaml
+- secret.yaml
+# The two sinks: where state goes.
+- hot-sink.yaml
+- cold-sink.yaml
+# The namespace and the two rules: what goes there.
+- namespace.yaml
+- rules.yaml

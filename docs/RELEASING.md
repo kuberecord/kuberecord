@@ -9,18 +9,24 @@ promises, plus the mechanics of cutting one.
 - [Rehearsing a release](#rehearsing-a-release)
 - [What the gate refuses](#what-the-gate-refuses)
 
+Verifying a release you downloaded is the other side of this page, and it is its
+own: [`VERIFYING.md`](VERIFYING.md).
+
 ## Versioning policy
 
-kuberecord carries **three version numbers, and they are deliberately
+kuberecord carries **four version numbers, and they are deliberately
 independent**. Conflating them is the mistake this section exists to prevent: an
 operator upgrade is not a schema migration, and a schema that is frozen does not
-mean an operator that cannot change.
+mean an operator that cannot change. The fourth is new in v0.2.0 — the S3 object
+format is its own contract on its own timeline (D15), because a storage format
+that outlives the operator by years cannot be versioned with it.
 
 | What | Version | What it promises |
 |---|---|---|
 | **The operator** (image, chart, `install.yaml`) | `v0.x.y` — semver, **pre-1.0** | A **minor bump may break**: flags, defaults, RBAC and behaviour are all fair game while the leading digit is `0`. Every break is spelled out in [`CHANGELOG.md`](../CHANGELOG.md). A **patch** bump is fixes only — no new flags, no new permissions, no behaviour change beyond the bug named in the notes. |
 | **The CRDs** | `kuberecord.io/v1alpha1` | Alpha in the Kubernetes sense, and the honest reading of it: a field may be removed, renamed or re-defaulted in an operator minor. There are **no conversion webhooks** (D4), so there is exactly one served and stored version and an incompatible change is a manual edit of your custom resources, guided by the changelog. |
-| **The ClickHouse schema** | `v1` — **frozen** | Within `v1` no column is renamed, retyped, repurposed or removed, and neither the engines nor the sort keys change. Changes are additive only. This is the strongest of the three promises, and it does not weaken when the operator's does: see [`SCHEMA.md`](SCHEMA.md#stability--versioning). |
+| **The ClickHouse schema** | `v1` — **frozen** | Within `v1` no column is renamed, retyped, repurposed or removed, and neither the engines nor the sort keys change. Changes are additive only. This is the strongest of the four promises, and it does not weaken when the operator's does: see [`SCHEMA.md`](SCHEMA.md#stability--versioning). |
+| **The S3 object format** | `jsonl-v1` — **frozen**, stamped into every key | Within `jsonl-v1` the line format, the field names, the key layout and the definition of the content hash do not change; fields may only be added, and a reader must tolerate ones it does not know. A change that cannot be expressed additively ships as a sibling `format=jsonl-v2/` partition rather than a rewrite — archived objects may be under Object Lock and legally immutable. See [`SCHEMA.md`](SCHEMA.md#versioning-the-object-format). |
 
 Two consequences worth stating outright:
 
@@ -57,8 +63,22 @@ publishes:
 | `ghcr.io/yelzhy/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
 | `install.yaml` | `kubectl apply -f` it: CRDs, RBAC and the manager, with the image above pinned exactly. For a non-prerelease tag it is byte-identical to the committed [`dist/install.yaml`](../dist/install.yaml) — the artifact you download is the file that was reviewed. |
 | `kuberecord-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
-| `checksums.txt` | `sha256` over both artifacts. Verify with `sha256sum -c checksums.txt` in the directory you downloaded them to. |
+| `kuberecord-X.Y.Z-sbom.spdx.json` | An SPDX 2.3 SBOM of the published image, produced by syft from the pushed `linux/amd64` manifest by digest. One document, because every platform is the same static binary in the same base image. |
+| `checksums.txt` | `sha256` over the install artifacts and the SBOM. Verify with `sha256sum -c checksums.txt` in the directory you downloaded them to. |
 | The Release body | That version's section of [`CHANGELOG.md`](../CHANGELOG.md), extracted verbatim by `hack/changelog-section.sh`. The changelog *is* the release notes. |
+
+And, from v0.2.0 onward, the evidence for all of it (Task 7.4):
+
+| Evidence | Notes |
+|---|---|
+| A **cosign signature** on the image | Keyless: no key exists, so none can leak. The signature is bound to a Fulcio certificate naming this workflow at this tag, and `--recursive` means the manifest list *and* each per-platform manifest carry one. |
+| **SLSA build provenance** for the image | Recorded against this repository *and* pushed into the registry beside the image, so verification need not depend on this repository's API. Carrying either across a mirror takes a referrers-aware copy — see [`VERIFYING.md`](VERIFYING.md#the-build-provenance). |
+| **SLSA build provenance** for every attached asset | Generated from `checksums.txt` itself, so what is checksummed and what is attested are the same set by construction. |
+
+The verification commands, and — just as important — what they do and do not
+prove, are [`VERIFYING.md`](VERIFYING.md). The release job runs them against what
+it just published, before the Release page that advertises them exists: a
+signature that does not verify fails the release rather than shipping.
 
 **There is no floating `latest` tag**, for images or for artifacts. What a cluster
 runs is decided by the tag somebody chose, not by whatever moved last. To pin
@@ -66,8 +86,15 @@ harder than a tag, resolve the digest once and use it — the chart takes
 `image.digest`:
 
 ```sh
-docker buildx imagetools inspect ghcr.io/yelzhy/kuberecord:v0.1.0 --format '{{.Manifest.Digest}}'
+# A digest is the hash of the manifest bytes, so this is exact by construction.
+# macOS: shasum -a 256. With crane installed it is one word: `crane digest <ref>`.
+docker buildx imagetools inspect --raw ghcr.io/yelzhy/kuberecord:v0.1.0 | sha256sum
 ```
+
+(Not `--format '{{.Manifest.Digest}}'`: on at least one shipped buildx — Docker
+Desktop's v0.22 — a template referencing `.Manifest` is ignored and the default
+listing is printed instead, with exit code 0. Anything parsing that output gets
+whatever the text happens to look like.)
 
 A tag carrying a prerelease suffix is published as a GitHub prerelease, so it
 stays out of "latest release" on the repository's front page.
@@ -100,12 +127,32 @@ Everything below happens on a branch, in one commit, reviewed like any other.
    the notes, not on the test suites — those already ran on the commit, and
    re-running them at tag time would only tell you what you already knew, an hour
    later.
+6. **Verify the published release before announcing it.** The workflow already
+   verified its own signature and attestation, which is the check that must fail
+   *before* the Release page exists; this is the same check from outside, as a
+   stranger runs it, against what is now public:
+
+   ```sh
+   make release-verify RELEASE_VERSION=v0.2.0   # or the commands in VERIFYING.md
+   ```
+
+   [`VERIFYING.md`](VERIFYING.md) is what you are pointing anyone who asks at, so
+   it is worth having run its commands yourself once per release.
 
 ## Rehearsing a release
 
 `make release-dry-run` is the whole sequence with nothing published: the notes,
-both install artifacts, their checksums, `verify-packaging` over each install
-path, and the full multi-arch image build with no registry to push to.
+both install artifacts, the SBOM, their checksums, `verify-packaging` over each
+install path, and the full multi-arch image build with no registry to push to.
+
+Two of the supply-chain steps cannot be rehearsed, because performing them *is*
+publishing: a signature writes to a registry and to a public transparency log,
+and an attestation writes a record against the repository. The rehearsal goes as
+far as it can — it builds a single-platform image locally so the SBOM scan runs
+against a real image, it computes every attestation subject, and it prints the
+signing and verification commands it is deliberately not running. What that
+leaves unproven is stated in
+[`VERIFYING.md`](VERIFYING.md#a-rehearsal-proves-less-than-a-release).
 
 ```sh
 # Rehearse the committed version.
@@ -129,6 +176,18 @@ make release-verify-version RELEASE_VERSION=v0.2.0   # the tag agrees with the t
 make release-notes RELEASE_VERSION=v0.2.0            # → dist/release/RELEASE_NOTES.md
 make release-artifacts RELEASE_VERSION=v0.2.0        # install.yaml + chart + checksums
 make release-image RELEASE_VERSION=v0.2.0 BUILDX_OUTPUT=   # build every platform, push nothing
+make release-sbom-local RELEASE_VERSION=v0.2.0       # a local image, described by syft
+make release-checksums RELEASE_VERSION=v0.2.0        # re-hash whatever is in dist/release/
+make release-rehearse-publishing                     # print the steps a rehearsal must not run
+```
+
+The three that only make sense against something published, and that the workflow
+runs for real, need cosign (and syft, and `gh` for the provenance half):
+
+```sh
+make release-image-digest RELEASE_VERSION=v0.2.0     # what the push actually produced
+make release-sign RELEASE_VERSION=v0.2.0             # keyless, so it needs an OIDC identity
+make release-verify RELEASE_VERSION=v0.2.0           # the commands VERIFYING.md publishes
 ```
 
 ## What the gate refuses

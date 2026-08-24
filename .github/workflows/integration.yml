@@ -1,0 +1,54 @@
+# The suites that need a real backend (Task 3.2, Task 6.6, Task 7.2).
+#
+# `make test` proves everything a fake can prove. This job exists for the claims
+# that only a server can answer, and every one of them is a promise made to a
+# reader of the documentation:
+#
+#   - Every statement in docs/QUERIES.md and every Grafana panel's SQL runs against
+#     a ClickHouse whose tables were built from the shipped DDL and nothing else, so
+#     "only frozen columns" is checked by ClickHouse's own parser.
+#   - Every DuckDB recipe on that page runs against a real archive in MinIO and
+#     must return rows, so a recipe that is valid but selects nothing fails here
+#     rather than in front of an auditor.
+#   - The S3 writer's key layout, decode fidelity, retry idempotency, rotation
+#     triggers and Object Lock headers are asserted against a real object store.
+#
+# Both backends run as throwaway containers that the Makefile target brings up and
+# tears down, so there is nothing to provision here beyond a Go toolchain: Docker
+# is already on the runner, and the duckdb CLI is fetched into bin/ by the target's
+# own prerequisite.
+#
+# It is a separate workflow rather than a step of the test job so that a query
+# recipe that stopped working reports as exactly that, and not as a failing unit
+# test.
+name: Integration Tests
+
+on:
+  push:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  integration:
+    permissions:
+      contents: read
+    name: Published queries and both backends
+    runs-on: ubuntu-latest
+    # Well above the target's own cost (a few minutes, most of it the two images
+    # and the DuckDB download): if a container never becomes ready, the job should
+    # end as a failure with output rather than as a runner timeout.
+    timeout-minutes: 25
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run the integration suites against ClickHouse, MinIO and DuckDB
+        run: make test-integration

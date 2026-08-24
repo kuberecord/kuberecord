@@ -1082,6 +1082,15 @@ spec:
                   ObjectLock applies per-object retention at PUT time. Omitted means objects
                   are written with no retention of their own, and the bucket's own lifecycle
                   and default-retention settings apply unchanged.
+
+                  Object Lock must already be enabled on the bucket; kuberecord cannot enable
+                  it and a sink asking for retention against a bucket without it reports
+                  BucketReachable=False/BucketIncompatible, permanently. Retention applies to
+                  object *versions*, and an Object Lock bucket is always versioned — so a
+                  retried write is accepted rather than refused and leaves one current version
+                  plus, at most, one byte-identical extra one. COMPLIANCE makes that extra
+                  version, and every object this sink writes, undeletable by anyone until its
+                  date passes. See docs/RETENTION.md before choosing a mode.
                 properties:
                   mode:
                     description: |-
@@ -1334,9 +1343,11 @@ spec:
 
                   It carries a strict subset of ClickHouse's knobs: batchMaxRows and batchMaxWait
                   are absent because for S3 the object *is* the batch and spec.rotation
-                  governs it, and checkpointEvery is absent because a Writer-only sink emits
-                  no diffs to checkpoint (D12). See S3WriterSpec for the full reasoning — the
-                  omissions are deliberate, not pending.
+                  governs it, and checkpointEvery is absent because a Writer-only sink cannot
+                  warm from history — it re-snapshots on every restart, so a replay is already
+                  bounded by the current process and a cadence would add nothing (D12). See
+                  S3WriterSpec for the full reasoning — the omissions are deliberate, not
+                  pending.
                 properties:
                   drainTimeout:
                     default: 15s
@@ -2246,7 +2257,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: ghcr.io/yelzhy/kuberecord:v0.1.0
+        image: ghcr.io/yelzhy/kuberecord:v0.2.0
         livenessProbe:
           httpGet:
             path: /healthz

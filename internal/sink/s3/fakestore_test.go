@@ -40,9 +40,13 @@ import (
 //     is what makes "no partial-failure path" a property under test rather than an
 //     assumption.
 //   - A key holds one object. A second PUT of the same key *replaces* the object
-//     already there, in place and without moving it, exactly as S3 does — so a
-//     retried write leaves one object, and the store's contents (not a tally of
-//     attempts) are what the conformance suite's durable set is derived from.
+//     already there, in place and without moving it — so a retried write leaves
+//     one object, and the store's contents (not a tally of attempts) are what the
+//     conformance suite's durable set is derived from. That is an unversioned
+//     bucket, and it is the right model for the properties under test here: a
+//     versioned bucket keeps the replaced bytes as a noncurrent version instead,
+//     which changes what the bucket is billed for and nothing about what the
+//     writer did or what a reader sees (docs/RETENTION.md).
 //   - Overwriting is only harmless if the bytes match. A repeat PUT carrying
 //     different bytes under the same key would be an idempotency bug the object
 //     key is supposed to make impossible, so this store treats it as a harness

@@ -112,8 +112,8 @@ const (
 
 	// ReasonBucketIncompatible marks a bucket that answered and refused the *shape*
 	// of object this sink is configured to write — today, a spec.objectLock against
-	// a bucket with no Object Lock configuration, which on S3 can only be enabled
-	// at bucket creation.
+	// a bucket with no Object Lock configuration, which only a human on the account
+	// can give it (docs/RETENTION.md).
 	//
 	// It is distinct from ReasonBucketUnreachable because it will never clear on
 	// its own: every write this sink attempts will fail identically until a human

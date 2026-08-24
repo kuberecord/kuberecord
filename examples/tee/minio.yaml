@@ -1,0 +1,163 @@
+# An object store for the tee example to archive into.
+#
+# This is an *evaluation* fixture, not a deployment recipe. A real cold tier is
+# S3, or a MinIO somebody else operates with real storage, real credentials and
+# Object Lock enabled on the bucket — none of which this file has. What it is for
+# is making `kubectl apply -k examples/tee` produce a working two-backend cluster
+# on a laptop, so the pattern can be read against a system that is actually doing
+# it.
+#
+# Four choices are worth explaining, because three of them are shortcuts and one
+# is not:
+#
+#   - Its own namespace, so `kubectl delete namespace kuberecord-tee` removes the
+#     whole cold side in one command, and so the restricted Pod Security Standard
+#     the operator's namespace carries does not have to be relaxed for a
+#     third-party image.
+#   - Storage is an emptyDir. Deleting this pod deletes the archive, which is the
+#     exact opposite of what an archive is for — but durability here would mean a
+#     StorageClass dependency and a slower teardown, and the point being
+#     demonstrated is where records go, not that they survive.
+#   - The root credentials are committed in plain text, in the Secret below and
+#     again in examples/tee/secret.yaml. See that file for why, and for what a
+#     real install does instead.
+#   - $HOME is a writable emptyDir. That one is not a shortcut: the MinIO image
+#     ships `mc`, so a writable home is what lets you read the archive with
+#     `kubectl exec` (see examples/tee/README.md) instead of exposing the object
+#     store outside the cluster. The e2e scenario that tests this example asserts
+#     through the same door.
+#
+# There is no console. `server /data` alone serves the S3 API on 9000, which is
+# the only interface anything here uses.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kuberecord-tee
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: kuberecord-tee
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+type: Opaque
+stringData:
+  # The server side of the key pair. examples/tee/secret.yaml carries the same
+  # two values beside the operator, and a test in test/docs asserts that the two
+  # files still agree — a tee whose cold half cannot authenticate would report
+  # BucketReachable=False and archive nothing, which is a confusing first
+  # experience to debug.
+  accessKeyId: "kuberecord"
+  secretAccessKey: "kuberecord-tee-secret"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: kuberecord-tee
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two servers must never share the emptyDir, and
+  # there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Any non-root uid will do — the image bakes none in — and fsGroup is what
+        # makes the emptyDir volumes writable for it without a root init
+        # container. MinIO refuses to start against a /data it cannot write, so
+        # this pairing is load bearing rather than decorative.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+        # The image is side-loaded into the kind node by whoever brings this up,
+        # so it must never be re-pulled from a registry mid-run.
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - /data
+        env:
+        # `mc` writes a config directory under $HOME, and the image's default home
+        # is not writable by the uid above. /tmp is (see the volumes below).
+        - name: HOME
+          value: /tmp
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: accessKeyId
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: secretAccessKey
+        ports:
+        - name: s3
+          containerPort: 9000
+        # /minio/health/ready answers only once the server will actually serve
+        # object requests, which is the edge not to race: the S3Sink's first
+        # health probe *writes* an object.
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: s3
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: kuberecord-tee
+  labels:
+    app: minio
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: s3
+    port: 9000
+    targetPort: s3

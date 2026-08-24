@@ -1,0 +1,97 @@
+# The cold half of the tee: the immutable archive.
+#
+# A `Writer`-only backend (D12). It cannot read its own history back, so three
+# behaviours are switched off for it — dedup cache warm-up, zombie garbage
+# collection, and boot reconciliation of scope epochs — and it says so in
+# `HistoryUnavailable=True/WriterOnlySink` while staying `Ready`, because this is
+# a declared capability limit and not a fault. Every rule naming it mirrors that
+# condition. docs/TEE.md is what those consequences mean when the hot half is
+# sitting next to it; docs/CRDS.md#historyunavailable--a-limit-not-a-fault is the
+# limit itself.
+#
+# kuberecord never creates the bucket. Retention, encryption, lifecycle and Object
+# Lock all belong to whoever owns the account, and Object Lock in particular is
+# irreversible once enabled and implies versioning — docs/RETENTION.md is what to
+# read before turning it on. examples/tee/README.md has the one command that makes
+# this example's bucket exist.
+apiVersion: kuberecord.io/v1alpha1
+kind: S3Sink
+metadata:
+  name: cold
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+spec:
+  bucket: kuberecord-tee
+  # A path fragment, never a path: no leading or trailing slash. Keys are built as
+  # <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<sha256>.jsonl.zst
+  # — a versioned public contract (D15), which is what makes the DuckDB and Athena
+  # recipes in docs/QUERIES.md possible.
+  prefix: audit
+  # MinIO ignores the region and the SDK insists on one. This is the CRD's
+  # default, spelled out so a reader need not look up what the client was built
+  # with.
+  region: us-east-1
+  # endpoint + forcePathStyle are what point this at an in-cluster MinIO rather
+  # than at AWS. Delete both for real S3. Path style is required here because a
+  # bucket-as-subdomain URL only resolves where DNS (and any TLS certificate)
+  # covers *.<endpoint>, which a Service name does not.
+  endpoint: http://minio.kuberecord-tee.svc:9000
+  forcePathStyle: true
+  credentials:
+    secretRef:
+      # No namespace: it resolves to the operator's own, the only namespace the
+      # operator holds Secret read rights in. See examples/tee/secret.yaml.
+      name: kuberecord-tee-s3-credentials
+  format: jsonl-v1-zstd
+  rotation:
+    # The object *is* the batch: whichever of these fires first closes it and PUTs
+    # it. Both are tuned for watching rather than for running — 30 seconds means
+    # an object closes while you still have the terminal open, where the shipped
+    # default of 5m means an idle cluster's first archived record appears five
+    # minutes after you made the change and you conclude the tee is broken.
+    #
+    # A real archive wants the defaults or larger: every engine reading this
+    # layout pays per object, so a cluster rotating every 30s is buying latency
+    # with the small-file explosion that makes an archive expensive to query.
+    # config/samples/kuberecord.io_v1alpha1_s3sink.yaml is the production shape.
+    maxObjectBytes: 8388608
+    maxObjectAge: 30s
+  writer:
+    queueSize: 1000
+    # Each worker accumulates an object of its own, so this sink's steady-state
+    # memory ceiling is workers x maxObjectBytes — 16Mi here. The CRD enforces a
+    # 4Gi bound on that product, which is why `workers` is not the plain
+    # throughput knob it is on a ClickHouseSink.
+    workers: 2
+    enqueueTimeout: 2s
+    # The drain closes and PUTs each worker's partial object rather than waiting
+    # for rotation, so this budget covers a request per worker. Keep it under the
+    # manager pod's terminationGracePeriodSeconds (10 in config/manager), or
+    # SIGKILL truncates the drain instead of the drain finishing.
+    drainTimeout: 8s
+  # `objectLock` is deliberately absent. This example's MinIO has no Object Lock
+  # configuration, and a sink asking for retention against a bucket that cannot
+  # provide it reports BucketReachable=False/BucketIncompatible — permanent until
+  # a human changes the bucket or the spec. Enabling it is the subject of
+  # docs/RETENTION.md, not of this example.
+  #
+  # batchMaxRows/batchMaxWait/checkpointEvery have no twin here either: for S3 the
+  # object is the batch (spec.rotation governs it), and a Writer-only sink emits
+  # no diffs to checkpoint.
+  policy:
+    # The same two kinds the hot sink admits. See the note there for why they must
+    # not drift apart.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+    # The same redaction floor, for the same reason — and with more at stake on
+    # this side, because an archived value cannot be scrubbed after the fact.
+    redaction:
+    - fieldPath: data.password

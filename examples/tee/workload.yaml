@@ -1,0 +1,76 @@
+# Something for the tee to record.
+#
+# Applied *after* the pattern, as a separate step, and that ordering is the point
+# rather than tidiness: a tee that was already watching records this Deployment's
+# creation as a creation. Apply it in the same breath as the rules and the hot
+# half may well tag the first sighting `Snapshot` instead of `Added`, because the
+# scope had not finished warming from ClickHouse when the informer's initial list
+# arrived. Both are truthful — `Snapshot` means "first time I saw it", `Added`
+# means "it is new" — and docs/SCHEMA.md explains the difference. Waiting for both
+# rules to report Streaming first is what gets you the sharper one.
+#
+# Nothing here is kuberecord-specific. Point the rules at your own namespace and
+# your own workloads and the result is the same.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: tee-demo
+  labels:
+    app: checkout-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+    spec:
+      containers:
+      - name: app
+        # `pause` does nothing, which is the point: this is about recording a
+        # Deployment's spec and status changing, not about running an
+        # application. Every kind node already has this image cached, so no
+        # registry is on the critical path.
+        image: registry.k8s.io/pause:3.10
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            cpu: 10m
+            memory: 16Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65535
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkout-config
+  namespace: tee-demo
+data:
+  feature_flags: "new-checkout=off"
+  # Deliberately named `password`, because both sinks set `data.password` as their
+  # redaction floor. Look this ConfigMap up in either backend afterwards and the
+  # value is `[REDACTED]` — scrubbed after normalization and *before* hashing, so
+  # it is absent from the payload, absent from every diff, and not recoverable
+  # from the sha256 either.
+  #
+  # Checking it on *both* sides is worth doing once. Choosing an archive tier is
+  # not a way around a sink's redaction floor, and the cold side is where it
+  # matters most: redaction is forward-only, and an already-archived value cannot
+  # be scrubbed later — under Object Lock in COMPLIANCE mode it cannot even be
+  # deleted. See docs/SCHEMA.md#redaction.
+  password: "hunter2"

@@ -77,6 +77,7 @@ const (
 	kindService            = "Service"
 	kindServiceAccount     = "ServiceAccount"
 	kindClickHouseSink     = "ClickHouseSink"
+	kindS3Sink             = "S3Sink"
 	kindCRD                = "CustomResourceDefinition"
 )
 

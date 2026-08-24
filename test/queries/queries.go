@@ -30,6 +30,24 @@ limitations under the License.
 // The execution half lives in clickhouse_integration_test.go (build tag
 // `integration`), which builds its tables from deploy/clickhouse/schema alone, so
 // "the query ran" is exactly "the query touched only frozen-schema columns".
+//
+// Since Task 7.2 the library publishes recipes for two backends, and a fenced
+// block therefore declares which engine it is written for and what may be done
+// with it. The marker is the second word of the fence's info string — GitHub
+// derives its syntax highlighting from the first word alone, so ```sql duckdb
+// still renders as SQL while being unambiguous to this package:
+//
+//	```sql                    a ClickHouse recipe: executed against ClickHouse
+//	```sql duckdb             a DuckDB recipe: executed against the S3 archive
+//	```sql duckdb-parameters  the reader-edited variable block; parsed, never run
+//	```sql duckdb-setup       the session preamble; executed before every recipe
+//	```sql athena             DDL validated by structure only — CI has no AWS
+//
+// The split is load bearing rather than tidy. A DuckDB recipe handed to
+// ClickHouse fails on read_json_auto and tells a maintainer nothing, and the
+// Athena DDL's `${cluster_id}` projection template is indistinguishable from a
+// Grafana variable reference, so a single undifferentiated pool of "sql" would
+// have made both suites lie.
 package queries
 
 import (
@@ -52,6 +70,48 @@ type Query struct {
 	Source string
 	// SQL is the statement exactly as published, macros and variables unexpanded.
 	SQL string
+	// Dialect is the engine the block declared itself for. It is never empty: an
+	// unmarked ```sql fence is DialectClickHouse, which is what every fence in the
+	// library meant before a second backend existed.
+	Dialect Dialect
+}
+
+// Dialect is the engine a published block is written for, and with it what this
+// package may do with the block. See the package comment for the fence markers
+// that select each one.
+type Dialect string
+
+const (
+	// DialectClickHouse is an unmarked ```sql fence: a recipe for the ClickHouse
+	// backend, executed against a real ClickHouse built from the shipped DDL.
+	DialectClickHouse Dialect = "clickhouse"
+	// DialectDuckDB is a recipe for the S3 archive, executed through the duckdb
+	// CLI against a real object store.
+	DialectDuckDB Dialect = "duckdb"
+	// DialectDuckDBParameters is the variable block a reader edits before running
+	// anything. It is parsed for the names it declares and never executed: its
+	// values name somebody else's bucket.
+	DialectDuckDBParameters Dialect = "duckdb-parameters"
+	// DialectDuckDBSetup is the session preamble — extension load, credentials,
+	// and the globs derived from the parameters. It is executed verbatim ahead of
+	// every DuckDB recipe, which is what makes the published setup a tested claim
+	// rather than an illustration.
+	DialectDuckDBSetup Dialect = "duckdb-setup"
+	// DialectAthena is DDL for a query engine CI cannot reach. It is validated by
+	// structure alone; see AthenaTable.
+	DialectAthena Dialect = "athena"
+)
+
+// dialects is the closed set of markers a fence may carry. It is closed on
+// purpose: a mistyped marker must fail loudly rather than land in a bucket
+// nothing executes, which is the silent-skip failure mode this project has
+// already been bitten by twice.
+var dialects = map[string]Dialect{
+	"":                  DialectClickHouse,
+	"duckdb":            DialectDuckDB,
+	"duckdb-parameters": DialectDuckDBParameters,
+	"duckdb-setup":      DialectDuckDBSetup,
+	"athena":            DialectAthena,
 }
 
 // Variable is one Grafana template variable declared by a dashboard.
@@ -94,12 +154,21 @@ func (d *Dashboard) VariableNames() []string {
 	return names
 }
 
-// sqlFence matches a fenced ```sql block in Markdown. Only sql-tagged fences are
-// taken, which is also how a document declares that a snippet is *not* meant to
-// run: fence it as text or console and this package will not try to execute it.
-var sqlFence = regexp.MustCompile("(?s)```sql\n(.*?)\n```")
+// sqlFence matches a fenced ```sql block in Markdown, capturing the rest of the
+// info string as the dialect marker. Only sql-tagged fences are taken, which is
+// also how a document declares that a snippet is *not* meant to run: fence it as
+// text or console and this package will not try to execute it.
+//
+// The marker group requires a leading space, so ```sqlite is not a `sql` fence
+// with the marker "ite" — it is simply not one of ours.
+var sqlFence = regexp.MustCompile("(?s)```sql([ \t][^\n]*)?\n(.*?)\n```")
 
-// FromMarkdown extracts every runnable SQL block from a Markdown document.
+// FromMarkdown extracts every SQL block from a Markdown document, each tagged
+// with the dialect its fence declared.
+//
+// An unrecognised marker is an error rather than a skipped block: a document that
+// publishes a recipe no suite runs is exactly the state this package exists to
+// prevent.
 func FromMarkdown(path string) ([]Query, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -110,16 +179,44 @@ func FromMarkdown(path string) ([]Query, error) {
 	matches := sqlFence.FindAllStringSubmatchIndex(text, -1)
 	out := make([]Query, 0, len(matches))
 	for _, m := range matches {
-		block := text[m[2]:m[3]]
 		// The line number of the fence itself, so the Source reads like a location
 		// an editor can jump to.
 		line := 1 + strings.Count(text[:m[0]], "\n")
+		source := fmt.Sprintf("%s:%d", path, line)
+
+		marker := ""
+		if m[2] >= 0 {
+			marker = strings.TrimSpace(text[m[2]:m[3]])
+		}
+		dialect, ok := dialects[marker]
+		if !ok {
+			return nil, fmt.Errorf("%s: fence marker %q is not one this package knows; "+
+				"see the dialect list in its package comment", source, marker)
+		}
+
 		out = append(out, Query{
-			Source: fmt.Sprintf("%s:%d", path, line),
-			SQL:    block,
+			Source:  source,
+			SQL:     text[m[4]:m[5]],
+			Dialect: dialect,
 		})
 	}
 	return out, nil
+}
+
+// ByDialect returns the blocks written for one engine, in document order.
+//
+// Callers filter rather than being handed a pre-split map because every suite
+// wants to assert that its own slice is non-empty, and a map lookup that yields
+// nothing is indistinguishable from a document that stopped publishing the thing
+// the suite was built to check.
+func ByDialect(queries []Query, dialect Dialect) []Query {
+	out := make([]Query, 0, len(queries))
+	for _, q := range queries {
+		if q.Dialect == dialect {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // dashboardDoc is the decode target for a Grafana dashboard. It is deliberately

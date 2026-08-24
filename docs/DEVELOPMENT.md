@@ -105,9 +105,12 @@ in ClickHouse what the stand-in assumes.
 
 ## Integration tests — `make test-integration`
 
-Three suites run against real, dockerized backends (build tag `integration`) — a
+Four suites run against real, dockerized backends (build tag `integration`) — a
 ClickHouse and a MinIO, both in containers the target creates and always tears
-down:
+down. The whole target runs in CI on every push
+([`.github/workflows/integration.yml`](../.github/workflows/integration.yml)),
+which is what makes the published-query claims below promises rather than
+intentions:
 
 - `internal/sink/clickhouse` exercises the writer and reader paths against a real
   server;
@@ -116,12 +119,26 @@ down:
   against tables built from the shipped DDL alone. That is how "these queries
   only touch frozen-schema columns" stays a tested claim rather than a review
   convention.
+- The same package also executes every **DuckDB** recipe on that page against a
+  real archive in MinIO, through the `duckdb` CLI the Makefile fetches into `bin/`.
+  It builds the archive with the shipped `s3.Encode` rather than by driving the
+  live writer, because an object is filed under its first record's timestamp and
+  the fixture needs records in chosen date and hour partitions — a writer rotating
+  against the wall clock can only ever produce the current one, and the
+  partition-pruning recipe would then prove nothing about the layout. Rows are
+  required, not merely a successful run: a recipe that is valid but selects nothing
+  is indistinguishable from a lost archive. The Athena DDL on the page is checked
+  for structure only, in `make test`, and says so — there is no AWS in CI.
 - `internal/sink/s3/awsstore` writes through the real S3 `Writer` to MinIO and
   reads the objects back: that they land at the documented key layout, that the
   decompressed JSONL decodes to exactly the records enqueued, that a retried
   write leaves **one** object rather than a duplicate, that both rotation
   triggers fire independently, and that the Object Lock retention headers really
-  are on the object. It lives beside the AWS SDK because that is the only place
+  are on the object. One case is there because the documentation was wrong before
+  it existed: on an Object Lock bucket — versioned, necessarily — a retried write
+  is *accepted* rather than refused, so what it asserts is one **current** version
+  holding the right bytes while allowing the second, byte-identical version the
+  bucket keeps underneath ([`docs/RETENTION.md`](RETENTION.md#what-a-retried-upload-does-on-a-versioned-bucket)). It lives beside the AWS SDK because that is the only place
   the SDK and the shipped writer can meet — `internal/sink/s3` links no SDK by
   design, which is what keeps the write path testable against a stand-in store.
 
@@ -134,7 +151,10 @@ custom resources while **asserting by reading the backend directly** — not by
 reading the operator's own status. The archive scenario brings up its own MinIO
 (`test/e2e/manifests/minio.yaml`) rather than adding it to the suite's setup, so a
 focused run of the ClickHouse scenarios — which is what the two install-path
-smokes below are — pays none of its two minutes.
+smokes below are — pays none of its two minutes. The tee scenario does the same
+with the MinIO the published example ships, which is also why the two do not
+share one: Ginkgo randomises top-level containers, so a scenario borrowing
+another's fixture would pass or fail on the seed.
 
 | Scenario | What it proves |
 |---|---|
@@ -146,6 +166,7 @@ smokes below are — pays none of its two minutes.
 | Events | a rule naming `v1/Event` persists the Event stream past its TTL, with no false `Deleted` rows |
 | Redaction | a configured path is scrubbed before hashing, and neither the payload, the diff nor the hash can reveal it |
 | Archive (S3) | an `S3Sink` over an in-cluster MinIO reports `HistoryUnavailable=True` while staying `Ready`, and its rule mirrors it; a Deployment's lifecycle lands in the bucket as rotated zstd-compressed JSONL at the documented key layout — a full `Snapshot` first (never `Added`), a diff-only `Modified` for a change — and after a restart the live object is re-snapshotted in full while an object deleted during the outage produces **no** `Deleted` record at all (D12). Every assertion reads the bucket, not the operator |
+| Tee pattern | the published example ([`examples/tee/`](../examples/tee/)) is applied through an overlay that patches one address, and two rules over one resource set — one naming a `ClickHouseSink`, one an `S3Sink` — both reach `Ready` while disagreeing about `HistoryUnavailable`; one Deployment's creation is then recorded as `Added` in ClickHouse and `Snapshot` in the bucket **from the same event**, and its scale as the same `/spec/replicas` diff in both. The tag disagreeing is the assertion: it is only possible because dedup state is per sink |
 
 It needs Docker and [kind] and nothing else — the suite installs everything it
 depends on and tears the cluster down afterwards. Budget under 15 minutes; the
@@ -229,11 +250,27 @@ make release-notes RELEASE_VERSION=v0.2.0         # the gate, on its own
 ```
 
 The dry run writes `dist/release/` (git-ignored): the notes extracted from
-`CHANGELOG.md`, `install.yaml`, the packaged chart, and `checksums.txt` — and it
-builds the image for every supported platform without a registry to push to.
-`test/release` covers the extractor and the wiring under `make test`.
+`CHANGELOG.md`, `install.yaml`, the packaged chart, an SBOM and `checksums.txt` —
+and it builds the image for every supported platform without a registry to push
+to. `test/release` covers the extractor and the wiring under `make test`.
 [`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
 cutting one.
+
+The supply-chain half of a release (Task 7.4) needs two tools that are **not**
+bootstrapped into `bin/`, because their own installers verify the binaries they
+fetch and hand-rolling that in the task about supply-chain integrity would be a
+step backwards:
+
+```sh
+brew install cosign syft    # or each project's own install instructions
+```
+
+CI installs both from SHA-pinned vendor actions. Without them the rehearsal fails
+at the SBOM with a message naming the tool and how to get it, rather than at a
+missing binary. Signing and attesting are the two steps a rehearsal cannot
+perform — doing them *is* publishing — so it prints them instead:
+`make release-rehearse-publishing`. What a release publishes and how anyone checks
+it is [`docs/VERIFYING.md`](VERIFYING.md).
 
 ## Documentation checks
 
@@ -258,6 +295,6 @@ finds out what each became.
 | `install-paths.yml` | `make verify-packaging`, the chart tests, a `dist/install.yaml` staleness check, and the Helm and installer smokes on Kind |
 | `observability.yml` | `make verify-observability` |
 | `quickstart.yml` | `make quickstart` with `QUICKSTART_BUDGET_SECONDS=600` — the ten-minute claim, tested |
-| `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, then the artifacts and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed or published |
+| `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, its cosign signature, SBOM and provenance, then the artifacts, their provenance and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed, signed, attested or published |
 
 [kind]: https://kind.sigs.k8s.io/

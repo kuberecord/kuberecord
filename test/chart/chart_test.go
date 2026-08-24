@@ -17,6 +17,7 @@ limitations under the License.
 package chart
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -400,29 +401,43 @@ func TestExtraLabelsReachEveryObjectButNoSelector(t *testing.T) {
 // teamLabel is the arbitrary user label TestExtraLabels… threads through.
 const teamLabel = "team"
 
-// TestDefaultSinkToggle covers the optional starter sink: off by default,
-// complete when on, and refused rather than rendered half-configured.
-func TestDefaultSinkToggle(t *testing.T) {
-	const addr = "clickhouse.kuberecord-system.svc:9000"
+// TestSinksListRendersEveryBackend covers the `sinks` list: nothing by default,
+// one CR per entry with the spec passed through verbatim, and every backend the
+// chart ships reachable through the same value.
+//
+// The value is generic on purpose — an entry is {kind, name, spec} and the spec
+// reaches the CR untouched — so what needs asserting is not any individual field
+// but that the passthrough is faithful: what is set arrives, and what is unset
+// stays absent so the CRD's own defaults apply.
+func TestSinksListRendersEveryBackend(t *testing.T) {
+	const (
+		addr   = "clickhouse.kuberecord-system.svc:9000"
+		bucket = "kuberecord-archive"
+	)
 
-	t.Run("off by default", func(t *testing.T) {
+	t.Run("empty by default", func(t *testing.T) {
 		rendered := render(t, renderArgs{})
-		if rendered.has(kindClickHouseSink, "default") {
-			t.Error("createDefaultSink defaults to false; no ClickHouseSink should be rendered")
+		for _, kind := range []string{kindClickHouseSink, kindS3Sink} {
+			for key := range rendered {
+				if strings.HasPrefix(key, kind+"/") {
+					t.Errorf("sinks defaults to []; no %s should be rendered, got %s", kind, key)
+				}
+			}
 		}
 	})
 
-	t.Run("on", func(t *testing.T) {
+	t.Run("ClickHouseSink", func(t *testing.T) {
 		rendered := render(t, renderArgs{sets: []string{
-			"createDefaultSink=true",
-			"defaultSink.connection.addr=" + addr,
+			"sinks[0].kind=ClickHouseSink",
+			"sinks[0].name=hot",
+			"sinks[0].spec.connection.addr=" + addr,
+			"sinks[0].spec.connection.credentialsSecretRef.name=clickhouse-credentials",
 		}})
 		var sink struct {
 			Spec struct {
 				Connection struct {
 					Addr                 string `json:"addr"`
 					Database             string `json:"database"`
-					Username             string `json:"username"`
 					CredentialsSecretRef struct {
 						Name      string `json:"name"`
 						Namespace string `json:"namespace"`
@@ -432,7 +447,7 @@ func TestDefaultSinkToggle(t *testing.T) {
 				Policy map[string]any `json:"policy"`
 			} `json:"spec"`
 		}
-		rendered.get(t, kindClickHouseSink, "default").decode(t, &sink)
+		rendered.get(t, kindClickHouseSink, "hot").decode(t, &sink)
 
 		if sink.Spec.Connection.Addr != addr {
 			t.Errorf("addr = %q; want %q", sink.Spec.Connection.Addr, addr)
@@ -446,23 +461,162 @@ func TestDefaultSinkToggle(t *testing.T) {
 		if ns := sink.Spec.Connection.CredentialsSecretRef.Namespace; ns != "" {
 			t.Errorf("credentialsSecretRef.namespace = %q; want it omitted", ns)
 		}
-		// Unset sections are omitted rather than rendered empty, so the CRD's own
-		// defaults apply to them.
+		// Unset fields are omitted rather than rendered empty, so the CRD's own
+		// defaults apply to them. This is the whole reason the spec is passed
+		// through verbatim rather than assembled from a value per field.
+		if db := sink.Spec.Connection.Database; db != "" {
+			t.Errorf("unset database should be omitted; got %q", db)
+		}
 		if len(sink.Spec.Writer) != 0 || len(sink.Spec.Policy) != 0 {
 			t.Errorf("unset writer/policy should be omitted; got writer=%v policy=%v",
 				sink.Spec.Writer, sink.Spec.Policy)
 		}
 	})
 
-	t.Run("requires an address", func(t *testing.T) {
-		out, err := renderRaw(t, renderArgs{sets: []string{"createDefaultSink=true"}})
-		if err == nil {
-			t.Fatalf("createDefaultSink=true with no addr rendered successfully; want failure\n%s", out)
+	t.Run("S3Sink", func(t *testing.T) {
+		rendered := render(t, renderArgs{sets: []string{
+			"sinks[0].kind=S3Sink",
+			"sinks[0].name=cold",
+			"sinks[0].spec.bucket=" + bucket,
+			"sinks[0].spec.forcePathStyle=true",
+		}})
+		var sink struct {
+			Spec struct {
+				Bucket         string         `json:"bucket"`
+				Region         string         `json:"region"`
+				ForcePathStyle bool           `json:"forcePathStyle"`
+				Credentials    map[string]any `json:"credentials"`
+			} `json:"spec"`
 		}
-		if !strings.Contains(out, "defaultSink.connection.addr") {
-			t.Errorf("failure message does not name the missing value:\n%s", out)
+		rendered.get(t, kindS3Sink, "cold").decode(t, &sink)
+
+		if sink.Spec.Bucket != bucket {
+			t.Errorf("bucket = %q; want %q", sink.Spec.Bucket, bucket)
+		}
+		if !sink.Spec.ForcePathStyle {
+			t.Error("forcePathStyle = false; the value set it to true")
+		}
+		if sink.Spec.Region != "" {
+			t.Errorf("unset region should be omitted; got %q", sink.Spec.Region)
+		}
+		// An absent credentials block is *meaningful* for this backend: it selects
+		// the ambient credential chain (IRSA, workload identity, an instance role).
+		// Rendering an empty one would be rejected by the CRD's own CEL rule.
+		if len(sink.Spec.Credentials) != 0 {
+			t.Errorf("omitted credentials should stay omitted; got %v", sink.Spec.Credentials)
 		}
 	})
+
+	t.Run("both kinds, one name", func(t *testing.T) {
+		// A name is unique only within a kind (D10), so this pair is legal and is
+		// what the tee pattern looks like when both halves are named for the role
+		// they play rather than for their backend.
+		rendered := render(t, renderArgs{sets: []string{
+			"sinks[0].kind=ClickHouseSink",
+			"sinks[0].name=audit",
+			"sinks[0].spec.connection.addr=" + addr,
+			"sinks[0].spec.connection.credentialsSecretRef.name=clickhouse-credentials",
+			"sinks[1].kind=S3Sink",
+			"sinks[1].name=audit",
+			"sinks[1].spec.bucket=" + bucket,
+		}})
+		if !rendered.has(kindClickHouseSink, "audit") || !rendered.has(kindS3Sink, "audit") {
+			t.Errorf("both sinks should render; got %v", rendered.keys())
+		}
+	})
+
+	// Every rejection the chart makes on its own, rather than leaving to the API
+	// server. Each names the offending entry by index, because a list is edited by
+	// index and "which one" is the first thing the author needs.
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{
+			name: "unknown kind",
+			sets: []string{"sinks[0].kind=PostgresSink", "sinks[0].name=x"},
+			want: "not a sink kind this release serves",
+		},
+		{
+			name: "missing kind",
+			sets: []string{"sinks[0].name=x", "sinks[0].spec.bucket=" + bucket},
+			want: "not a sink kind this release serves",
+		},
+		{
+			name: "missing name",
+			sets: []string{"sinks[0].kind=S3Sink", "sinks[0].spec.bucket=" + bucket},
+			want: "has no name",
+		},
+		{
+			name: "missing spec",
+			sets: []string{"sinks[0].kind=S3Sink", "sinks[0].name=x"},
+			want: "has no spec",
+		},
+		{
+			name: "duplicate identity",
+			sets: []string{
+				"sinks[0].kind=S3Sink", "sinks[0].name=x", "sinks[0].spec.bucket=one",
+				"sinks[1].kind=S3Sink", "sinks[1].name=x", "sinks[1].spec.bucket=two",
+			},
+			want: "sinks[1] duplicates S3Sink/x",
+		},
+		{
+			name: "ClickHouseSink without an address",
+			sets: []string{
+				"sinks[0].kind=ClickHouseSink", "sinks[0].name=x",
+				"sinks[0].spec.connection.credentialsSecretRef.name=clickhouse-credentials",
+			},
+			want: "needs spec.connection.addr",
+		},
+		{
+			name: "ClickHouseSink without a credentials Secret",
+			sets: []string{
+				"sinks[0].kind=ClickHouseSink", "sinks[0].name=x",
+				"sinks[0].spec.connection.addr=" + addr,
+			},
+			want: "needs spec.connection.credentialsSecretRef.name",
+		},
+		{
+			name: "S3Sink without a bucket",
+			sets: []string{
+				"sinks[0].kind=S3Sink", "sinks[0].name=x", "sinks[0].spec.region=eu-west-1",
+			},
+			want: "needs spec.bucket",
+		},
+	} {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			out, err := renderRaw(t, renderArgs{sets: tc.sets})
+			if err == nil {
+				t.Fatalf("rendered successfully; want failure\n%s", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("failure message does not contain %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestChartNeverRendersACredential is the property the `sinks` passthrough makes
+// worth restating as a test of its own.
+//
+// `spec` reaches the CR verbatim, so the chart no longer inspects the fields it
+// carries — which is exactly when "the chart never templates a password" stops
+// being obvious from reading the template. It holds because no sink CRD has an
+// inline credential field at all: both kinds name a Secret instead. This asserts
+// the consequence directly, at the largest values the chart ships.
+func TestChartNeverRendersACredential(t *testing.T) {
+	rendered := render(t, renderArgs{valuesFiles: []string{chartDir + "/ci/all-features-values.yaml"}})
+	for key, obj := range rendered {
+		if obj.kind == "Secret" {
+			t.Errorf("the chart must never render a Secret; found %s", key)
+		}
+		for _, banned := range []string{"password:", "secretAccessKey:", "accessKeyId:"} {
+			if bytes.Contains(obj.raw, []byte(banned)) {
+				t.Errorf("%s contains %q; credentials are named by secretRef, never inlined", key, banned)
+			}
+		}
+	}
 }
 
 // TestCIValuesFilesRender asserts the two shipped ci/ values files — the smallest

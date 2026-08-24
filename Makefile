@@ -5,7 +5,7 @@ IMG ?= controller:latest
 # IMG's default — IMG is a developer's local build tag, VERSION is what a user
 # installs — and it is the one place a release bump has to happen (see
 # deploy/charts/kuberecord/Chart.yaml, which must carry the same value).
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -77,17 +77,21 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots throwaway containers, waits for each to answer,
 # runs the tagged tests, and always tears them down.
 #
-# Three suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# Four suites run here. internal/sink/clickhouse exercises the ClickHouse writer
 # and reader paths. test/queries executes every query kuberecord publishes —
 # docs/QUERIES.md and the Grafana dashboards — against tables built from the
 # shipped DDL alone, which is how Task 3.2's "only frozen-schema columns"
 # criterion is asserted; it uses a database of its own, because `go test` runs
 # package binaries concurrently and two suites recreating resource_states in one
-# database would delete each other's fixtures. And internal/sink/s3/awsstore
-# writes through the real S3 Writer to MinIO and reads the objects back (Task
-# 6.6): key layout, decode fidelity, retry idempotency, both rotation triggers and
-# the Object Lock headers, none of which a fake store can vouch for. It creates a
-# bucket per test, so it needs no database-style isolation.
+# database would delete each other's fixtures. The same package also runs every
+# published *DuckDB* recipe against a real archive in MinIO through the duckdb CLI
+# (Task 7.2) — the read path an S3 archive has, since the sink itself has none
+# (D12) — and requires rows back, so a recipe that parses but selects nothing
+# fails. And internal/sink/s3/awsstore writes through the real S3 Writer to MinIO
+# and reads the objects back (Task 6.6): key layout, decode fidelity, retry
+# idempotency, both rotation triggers and the Object Lock headers, none of which a
+# fake store can vouch for. Both S3 suites create a bucket per test, so they need
+# no database-style isolation.
 #
 # Non-standard host ports throughout, so this never collides with a developer's
 # own ClickHouse on 9000/8123 or MinIO on 9000. ClickHouse's image default user is
@@ -108,7 +112,7 @@ MINIO_IT_USER ?= kuberecord
 MINIO_IT_PASSWORD ?= kuberecord
 
 .PHONY: test-integration
-test-integration: ## Run integration tests against a dockerized ClickHouse and MinIO.
+test-integration: duckdb ## Run integration tests against a dockerized ClickHouse and MinIO.
 	@echo "Starting ClickHouse container '$(CH_IT_CONTAINER)'..."
 	@$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) >/dev/null 2>&1 || true
 	@$(CONTAINER_TOOL) run -d --name $(CH_IT_CONTAINER) \
@@ -144,6 +148,7 @@ test-integration: ## Run integration tests against a dockerized ClickHouse and M
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
 	S3_TEST_ENDPOINT=$(MINIO_IT_ENDPOINT) \
 	S3_TEST_ACCESS_KEY_ID=$(MINIO_IT_USER) S3_TEST_SECRET_ACCESS_KEY=$(MINIO_IT_PASSWORD) \
+	DUCKDB="$(DUCKDB)" \
 		go test -tags=integration ./internal/sink/... ./test/queries/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
@@ -509,7 +514,7 @@ KUBECONFORM_K8S_VERSION ?= $(ENVTEST_K8S_VERSION).0
 # -ignore-missing-schemas — with an explicit list, a *typo'd* kind is still a hard
 # failure:
 #
-#   - our own three CRs have no published upstream schema. Their shape is
+#   - our own four CRs have no published upstream schema. Their shape is
 #     enforced by the CRDs themselves, in envtest (api/v1alpha1) and in the kind
 #     smokes, which is stricter than anything kubeconform could do here.
 #   - CustomResourceDefinition: the upstream schema repository publishes no
@@ -519,7 +524,7 @@ KUBECONFORM_K8S_VERSION ?= $(ENVTEST_K8S_VERSION).0
 #
 # --include-crds is still passed when rendering, so a CRD that failed to render
 # at all remains a parse error here.
-KUBECONFORM_SKIP ?= ClickHouseSink,StreamRule,ClusterStreamRule,CustomResourceDefinition
+KUBECONFORM_SKIP ?= ClickHouseSink,S3Sink,StreamRule,ClusterStreamRule,CustomResourceDefinition
 KUBECONFORM_FLAGS ?= -strict -summary \
 	-kubernetes-version $(KUBECONFORM_K8S_VERSION) \
 	-skip $(KUBECONFORM_SKIP)
@@ -609,6 +614,83 @@ RELEASE_IMAGE ?= $(IMAGE_REPO):$(RELEASE_VERSION)
 RELEASE_CHART_VERSION = $(patsubst v%,%,$(RELEASE_VERSION))
 CHANGELOG_SECTION := hack/changelog-section.sh
 
+# Supply chain (Task 7.4). A release whose subject is tamper-evident audit has to
+# be verifiable itself, so a tag publishes three things beyond the artifacts: a
+# keyless cosign signature over the image, SLSA build provenance for the image and
+# for every attached asset, and an SBOM of the image. What each of those proves —
+# and, just as important, what it does not — is docs/VERIFYING.md.
+#
+# cosign and syft are expected on PATH rather than bootstrapped into bin/, which
+# is the KUBECTL/KIND convention rather than the promtool/duckdb one. The reason
+# is specific to these two: their own installers verify the checksum of the binary
+# they fetch, and hand-rolling a `curl | tar` for them in the task about supply
+# chain integrity would be trading a verified download for an unverified one. CI
+# installs them with the pinned installer actions; a maintainer rehearsing locally
+# installs them once (see docs/DEVELOPMENT.md). Every target below says which one
+# it needs and how to get it.
+COSIGN ?= cosign
+SYFT ?= syft
+
+# GITHUB_REPO is <owner>/<repo>, read out of the module path rather than written
+# down again. It is what a keyless signature's certificate identity is built from
+# and what `gh attestation verify` is pointed at, so a fork or a rename cannot
+# leave the published verification commands naming somebody else's repository.
+GITHUB_REPO ?= $(shell sed -n 's|^module github.com/||p' go.mod)
+
+# The workflow that is allowed to have signed a release. A keyless signature does
+# not say "somebody at this project signed this" — it says "this exact workflow,
+# on this exact ref, in this repository signed this", and that whole string is the
+# thing a verifier has to pin. Anything less specific accepts a signature from any
+# workflow in any repository the issuer serves.
+RELEASE_WORKFLOW ?= .github/workflows/release.yml
+COSIGN_ISSUER ?= https://token.actions.githubusercontent.com
+COSIGN_IDENTITY ?= https://github.com/$(GITHUB_REPO)/$(RELEASE_WORKFLOW)@refs/tags/$(RELEASE_VERSION)
+
+# The image's digest and repository, written down by release-image-digest so the
+# steps that follow name what was actually pushed rather than re-deriving it. A
+# signature or an attestation is about a digest, never a tag: a tag can be moved
+# to another image after the fact, which would leave a valid signature describing
+# something nobody released.
+RELEASE_DIGEST_FILE ?= $(RELEASE_DIR)/image-digest.txt
+RELEASE_IMAGE_NAME_FILE ?= $(RELEASE_DIR)/image-name.txt
+
+# The SBOM is one document for one platform. Every platform in PLATFORMS is the
+# same statically linked binary built from the same go.mod into the same
+# distroless/static base, so the package set does not differ between them — only
+# the architecture of the one binary does. Shipping four near-identical documents
+# would imply a difference that is not there; the platform is stated in
+# docs/VERIFYING.md instead.
+#
+# The SPDX spec version is pinned along with the format, so a syft upgrade cannot
+# quietly change the shape of a published artifact.
+RELEASE_SBOM ?= $(RELEASE_DIR)/kuberecord-$(RELEASE_CHART_VERSION)-sbom.spdx.json
+SBOM_FORMAT ?= spdx-json@2.3
+SBOM_PLATFORM ?= linux/amd64
+# SBOM_SOURCE is what syft scans. Empty means "the image that was just pushed, by
+# digest" — the only correct answer for a release. A rehearsal has no pushed image
+# and passes a locally built one instead (see release-dry-run).
+SBOM_SOURCE ?=
+# The floor below which an SBOM is not an SBOM. A real scan of the manager finds
+# well over a hundred packages — 123 at the time of writing, almost all of them Go
+# modules read out of the binary — while a scan that found the distroless base and
+# missed the binary finds about a dozen. That is the failure this catches. The
+# floor sits far below the real count on purpose, so a dependency bump never has
+# to move it.
+SBOM_MIN_PACKAGES ?= 50
+
+# require-tool fails with the sentence a reader needs rather than
+# "make: cosign: No such file or directory".
+# $1 - the tool (a name on PATH or a path)
+# $2 - how to get it
+define require-tool
+@command -v "$(1)" >/dev/null 2>&1 || { \
+	echo 'release: $(1) is not installed, and this target cannot run without it.'; \
+	echo '  $(2)'; \
+	echo '  CI installs it from a SHA-pinned action; see $(RELEASE_WORKFLOW).'; \
+	exit 1; \
+}
+endef
+
 .PHONY: release-verify-version
 release-verify-version: ## Check that RELEASE_VERSION agrees with the committed VERSION and the chart.
 	@base="$(RELEASE_VERSION)"; base="$${base#v}"; base="$${base%%-*}"; \
@@ -647,8 +729,15 @@ release-notes: ## Extract this release's CHANGELOG.md section into RELEASE_NOTES
 release-artifacts: release-verify-version release-notes helm helm-sync kubeconform ## Build install.yaml, the packaged chart and checksums into RELEASE_DIR.
 	@# Stale artifacts from an earlier version in the same directory would end up in
 	@# checksums.txt and then on the release, so the outputs are removed by name
-	@# first (not the whole directory — the notes were just written into it).
-	rm -f "$(RELEASE_DIR)/install.yaml" "$(RELEASE_DIR)"/*.tgz "$(RELEASE_DIR)/checksums.txt"
+	@# first (not the whole directory — the notes were just written into it). The
+	@# SBOM is named here for the same reason, and removing it is safe in both
+	@# orders that exist: a rehearsal and the release workflow alike build the
+	@# artifacts first and scan an image afterwards. The recorded digest goes too:
+	@# a digest left behind by an earlier rehearsal is what release-sbom and
+	@# release-sign would otherwise read, and they would then describe and sign an
+	@# image from a previous run without anything looking wrong.
+	rm -f "$(RELEASE_DIR)/install.yaml" "$(RELEASE_DIR)"/*.tgz "$(RELEASE_DIR)/checksums.txt" \
+		"$(RELEASE_SBOM)" "$(RELEASE_DIGEST_FILE)" "$(RELEASE_IMAGE_NAME_FILE)"
 	$(MAKE) build-installer INSTALLER_IMG=$(RELEASE_IMAGE) INSTALLER_OUT=$(RELEASE_DIR)/install.yaml
 	@# The manifest people apply is the manifest that was validated, rather than a
 	@# sibling of it built from the same sources.
@@ -656,30 +745,246 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	"$(HELM)" package "$(CHART_DIR)" \
 		--version $(RELEASE_CHART_VERSION) --app-version $(RELEASE_VERSION) \
 		--destination "$(RELEASE_DIR)"
+	$(MAKE) release-checksums
+
+# checksums.txt is one file listing every asset a release attaches, and it is
+# recomputed rather than appended to: the SBOM is produced after the install
+# artifacts (it describes an image that has to exist first), so this target runs
+# twice on a real release and has to give the same answer as one run over a
+# finished directory.
+#
+# It is also the attestation's subject list. `actions/attest-build-provenance` is
+# handed this file rather than a glob, so "what is checksummed" and "what is
+# attested" are the same set by construction — a glob that stopped matching would
+# have quietly narrowed the attestation with nothing failing.
+.PHONY: release-checksums
+release-checksums: ## Hash every asset in RELEASE_DIR into checksums.txt.
+	@# The install artifacts are mandatory: a checksums file that silently omits
+	@# install.yaml is worse than no checksums file, because it looks complete.
+	@# The SBOM is optional only in the sense that it is written later.
 	@# sha256sum is GNU, shasum ships with macOS; the release runs on the first and
 	@# a maintainer rehearses on either. Names in the file are relative to the
 	@# directory, so `sha256sum -c checksums.txt` works wherever the assets land.
-	@cd "$(RELEASE_DIR)" && \
+	@set -e; cd "$(RELEASE_DIR)"; \
+	assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz"; \
+	for f in $$assets; do \
+		[ -f "$$f" ] || { \
+			echo "release: $(RELEASE_DIR)/$$f is missing; run release-artifacts first."; \
+			exit 1; \
+		}; \
+	done; \
+	if [ -f "$(notdir $(RELEASE_SBOM))" ]; then \
+		assets="$$assets $(notdir $(RELEASE_SBOM))"; \
+	fi; \
 	if command -v sha256sum >/dev/null 2>&1; then \
-		sha256sum install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
+		sha256sum $$assets > checksums.txt; \
 	else \
-		shasum -a 256 install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz > checksums.txt; \
+		shasum -a 256 $$assets > checksums.txt; \
 	fi
-	@echo; echo "release: artifacts for $(RELEASE_VERSION) in $(RELEASE_DIR):"
+	@echo; echo "release: assets for $(RELEASE_VERSION) in $(RELEASE_DIR):"
 	@cat "$(RELEASE_DIR)/checksums.txt"
 
 .PHONY: release-image
 release-image: release-verify-version ## Build the multi-arch release image (BUILDX_OUTPUT= to build without pushing).
 	$(MAKE) docker-buildx IMG=$(RELEASE_IMAGE)
 
+# release-image-digest records what was pushed, the same way a user pins by digest
+# (see docs/VERIFYING.md) — so the release resolves its own subject exactly the way
+# somebody verifying it does.
+#
+# The digest is computed from the raw manifest bytes rather than read out of a
+# `--format '{{.Manifest.Digest}}'` template, and that is not fussiness: on at
+# least one shipped buildx (Docker Desktop's v0.22) a template referencing
+# `.Manifest` is ignored and the *default human-readable listing* is printed
+# instead, exit code 0. A release that trusted it would sign whatever that text
+# happened to parse as. Hashing the bytes is what a digest *is*, needs no jq, and
+# behaves identically for a single manifest and an index.
+#
+# The repository name is written out beside the digest so the steps that follow
+# (and the attestation step in the workflow, which cannot read a make variable)
+# name the registry from the one place that decides it, IMAGE_REPO.
+.PHONY: release-image-digest
+release-image-digest: ## Record the pushed release image's digest and name in RELEASE_DIR.
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	if command -v sha256sum >/dev/null 2>&1; then sha=sha256sum; else sha="shasum -a 256"; fi; \
+	raw="$$($(CONTAINER_TOOL) buildx imagetools inspect --raw $(RELEASE_IMAGE))"; \
+	if [ -z "$$raw" ]; then \
+		echo "release: $(RELEASE_IMAGE) has no manifest to read, so nothing was pushed."; \
+		echo "  The empty string hashes to a perfectly well-formed digest, which is why"; \
+		echo "  this is checked rather than hashed straight out of a pipeline."; \
+		exit 1; \
+	fi; \
+	digest="sha256:$$(printf '%s' "$$raw" | $$sha | cut -d' ' -f1)"; \
+	case "$$digest" in sha256:*) ;; *) \
+		echo "release: $(RELEASE_IMAGE) resolved to \"$$digest\", which is not a sha256 digest."; \
+		echo "  Nothing may be signed or attested until the push has produced one."; \
+		exit 1 ;; \
+	esac; \
+	if [ "$${#digest}" -ne 71 ]; then \
+		echo "release: \"$$digest\" is not 64 hex characters long; refusing to sign a truncated digest."; \
+		exit 1; \
+	fi; \
+	printf '%s\n' "$$digest" > "$(RELEASE_DIGEST_FILE)"; \
+	printf '%s\n' "$(IMAGE_REPO)" > "$(RELEASE_IMAGE_NAME_FILE)"; \
+	echo "release: $(RELEASE_IMAGE) is $(IMAGE_REPO)@$$digest"
+
+# release-image-subject is the digest-qualified reference every supply-chain
+# target below operates on, read back from the file above so a signature and an
+# SBOM cannot end up describing two different images.
+release-image-subject = $$(cat "$(RELEASE_DIGEST_FILE)")
+
+.PHONY: release-sbom
+release-sbom: ## Generate the image SBOM (SPDX JSON) into RELEASE_DIR.
+	$(call require-tool,$(SYFT),Install syft: https://github.com/anchore/syft#installation (`brew install syft`).)
+	@mkdir -p "$(RELEASE_DIR)"
+	@# Written through a temporary file for the same reason the notes are: a syft
+	@# failure part-way must not leave a truncated document that the next step
+	@# happily checksums and attaches to a release.
+	@set -e; \
+	source="$(SBOM_SOURCE)"; \
+	if [ -z "$$source" ]; then \
+		if [ ! -f "$(RELEASE_DIGEST_FILE)" ]; then \
+			echo "release: $(RELEASE_DIGEST_FILE) does not exist, so there is no pushed image to describe."; \
+			echo "  Run release-image-digest after a push, or scan a local image with"; \
+			echo "  SBOM_SOURCE=docker:$(RELEASE_IMAGE) SBOM_PLATFORM= (what release-dry-run does)."; \
+			exit 1; \
+		fi; \
+		source="registry:$(IMAGE_REPO)@$(release-image-subject)"; \
+	fi; \
+	platform=""; \
+	if [ -n "$(SBOM_PLATFORM)" ]; then platform="--platform $(SBOM_PLATFORM)"; fi; \
+	set -x; \
+	"$(SYFT)" scan "$$source" $$platform \
+		--source-name "$(IMAGE_REPO)" --source-version "$(RELEASE_VERSION)" \
+		-o '$(SBOM_FORMAT)=$(RELEASE_SBOM).tmp'
+	@# An SBOM that parses but describes nothing is the failure mode worth
+	@# catching: syft succeeds on an image whose binary it could not read, and the
+	@# result is a valid SPDX document listing the base image and little else.
+	@set -e; \
+	if ! grep -q '"spdxVersion"' "$(RELEASE_SBOM).tmp"; then \
+		rm -f "$(RELEASE_SBOM).tmp"; \
+		echo "release: syft did not produce an SPDX document."; \
+		exit 1; \
+	fi; \
+	if ! grep -q 'github.com/$(GITHUB_REPO)' "$(RELEASE_SBOM).tmp"; then \
+		rm -f "$(RELEASE_SBOM).tmp"; \
+		echo "release: the SBOM does not mention github.com/$(GITHUB_REPO), so syft did not read"; \
+		echo "  the manager binary — it described the base image only. Check the platform"; \
+		echo "  (SBOM_PLATFORM=$(SBOM_PLATFORM)) actually exists in the image being scanned."; \
+		exit 1; \
+	fi; \
+	packages="$$(grep -o -E '"SPDXID": ?"SPDXRef-Package' "$(RELEASE_SBOM).tmp" | wc -l | tr -d ' ')"; \
+	if [ "$$packages" -lt $(SBOM_MIN_PACKAGES) ]; then \
+		rm -f "$(RELEASE_SBOM).tmp"; \
+		echo "release: the SBOM lists $$packages packages, fewer than the $(SBOM_MIN_PACKAGES) a real"; \
+		echo "  scan of the manager finds. It is describing something other than this image."; \
+		exit 1; \
+	fi; \
+	mv "$(RELEASE_SBOM).tmp" "$(RELEASE_SBOM)"; \
+	echo "release: $$packages packages in $(RELEASE_SBOM)"
+
+# The SBOM a rehearsal can produce. Nothing has been pushed, so there is no
+# registry image to scan; a single-platform local build gives syft something real
+# to read, which is the half of the step worth exercising — a scan that finds
+# nothing fails here rather than attaching an empty document to a release.
+#
+# SBOM_PLATFORM is cleared because a local build produces the host's architecture,
+# which on a maintainer's machine is not necessarily SBOM_PLATFORM. A rehearsal
+# therefore describes the runner; a release describes $(SBOM_PLATFORM).
+.PHONY: release-sbom-local
+release-sbom-local: ## Build a single-platform image locally and describe that (the SBOM a rehearsal can produce).
+	$(MAKE) docker-build IMG=$(RELEASE_IMAGE)
+	$(MAKE) release-sbom SBOM_SOURCE=docker:$(RELEASE_IMAGE) SBOM_PLATFORM=
+
+# Keyless, so there is no key to store, rotate or leak: the signature is bound to
+# an ephemeral Fulcio certificate naming the workflow that asked for it, and the
+# proof it existed is a public Rekor entry. The consequence is that a signature is
+# a public statement — see docs/VERIFYING.md — which is exactly what it is for.
+#
+# --recursive because the release is a manifest list. Signing only the index leaves
+# every per-platform digest unsigned, and a user who pins the arm64 image (the
+# thing an admission controller resolves to) would then find nothing to verify.
+.PHONY: release-sign
+release-sign: ## Sign the pushed release image with cosign (keyless/OIDC).
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_DIGEST_FILE)" ]; then \
+		echo "release: $(RELEASE_DIGEST_FILE) does not exist; run release-image-digest after the push."; \
+		echo "  Signing a tag rather than a digest is refused: a tag can be moved afterwards."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(COSIGN)" sign --yes --recursive "$(IMAGE_REPO)@$(release-image-subject)"
+
+# The published verification commands, run against what was just published. This
+# target exists so docs/VERIFYING.md is not a promise nobody checks: the release
+# fails if the signature it just made does not verify under the identity the
+# documentation tells a reader to pin.
+.PHONY: release-verify
+release-verify: ## Verify the published signature and provenance the way a user would.
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_DIGEST_FILE)" ]; then \
+		echo "release: $(RELEASE_DIGEST_FILE) does not exist; there is nothing published to verify."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(COSIGN)" verify \
+		--certificate-oidc-issuer "$(COSIGN_ISSUER)" \
+		--certificate-identity "$(COSIGN_IDENTITY)" \
+		"$(IMAGE_REPO)@$(release-image-subject)" > /dev/null
+	@echo "release: the signature on $(IMAGE_REPO)@$(release-image-subject) is valid,"
+	@echo "  and it was made by $(COSIGN_IDENTITY)"
+	@# gh is the documented path for provenance because it is what publishes it:
+	@# `actions/attest-build-provenance` writes a Sigstore bundle to GitHub's
+	@# attestations API, and gh knows how to fetch and verify it. It is optional
+	@# here rather than required so this target still verifies the signature on a
+	@# machine with no gh login.
+	@set -e; \
+	if command -v gh >/dev/null 2>&1; then \
+		set -x; \
+		gh attestation verify "oci://$(IMAGE_REPO)@$(release-image-subject)" --repo "$(GITHUB_REPO)"; \
+	else \
+		echo "release: gh is not installed, so the provenance attestation was not checked."; \
+		echo "  See docs/VERIFYING.md for the command."; \
+	fi
+
+# What a rehearsal must not do, printed instead of done. Signing writes to a
+# registry and to a public transparency log, and attesting writes a record to
+# GitHub; all three are publications, so a rehearsal that performed them would not
+# be a rehearsal. Printing the expanded recipes still catches the failure a
+# rehearsal is for — a variable that does not expand, a target that no longer
+# exists, a flag that was renamed — without publishing anything.
+.PHONY: release-rehearse-publishing
+release-rehearse-publishing: ## Print, without running, the publishing steps a rehearsal must not perform.
+	@echo "release: a rehearsal stops short of publishing. A real run would execute:"
+	@echo
+	@$(MAKE) --dry-run --no-print-directory release-sign release-verify \
+		RELEASE_VERSION="$(RELEASE_VERSION)" | sed 's/^/    /'
+	@echo
+	@echo "  ...and, from the workflow rather than from make, the two"
+	@echo "  actions/attest-build-provenance calls over:"
+	@echo "    $(IMAGE_REPO)@<the pushed digest>"
+	@echo "    every asset listed in $(RELEASE_DIR)/checksums.txt"
+
 .PHONY: release-dry-run
-release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to end: notes, artifacts, checksums, and the multi-arch build with nothing pushed.
+release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to end: notes, artifacts, SBOM, checksums, and the multi-arch build with nothing pushed.
 	$(MAKE) release-image BUILDX_OUTPUT=
+	@# The multi-arch build above deliberately keeps nothing, so the SBOM comes
+	@# from a locally built image — the same target the workflow's rehearsal path
+	@# calls, so the two rehearsals exercise one code path.
+	$(MAKE) release-sbom-local
+	$(MAKE) release-checksums
+	@echo
+	$(MAKE) release-rehearse-publishing
 	@echo
 	@echo "release: dry run for $(RELEASE_VERSION) complete. Nothing was pushed or published."
 	@echo "  image      $(RELEASE_IMAGE) (built for $(PLATFORMS), discarded)"
 	@echo "  notes      $(RELEASE_NOTES)"
 	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_DIR)/kuberecord-$(RELEASE_CHART_VERSION).tgz, $(RELEASE_DIR)/checksums.txt"
+	@echo "  sbom       $(RELEASE_SBOM)"
+	@echo "  unsigned   a rehearsal signs nothing and attests nothing; see docs/VERIFYING.md"
 
 ##@ Deployment
 
@@ -812,6 +1117,14 @@ KUBECONFORM ?= $(LOCALBIN)/kubeconform
 # installed from outside its own module. It is fetched from the release tarball
 # instead — see the promtool target.
 PROMTOOL ?= $(LOCALBIN)/promtool
+# duckdb is not a Go program at all. It is the read path an S3 archive has: the
+# recipes in docs/QUERIES.md are executed through this binary against a real
+# MinIO (Task 7.2), so the CLI is a test dependency rather than a build one and is
+# fetched from the upstream release like promtool. It is deliberately *not* a Go
+# module dependency: nothing kuberecord ships links DuckDB, and adding a CGO
+# database driver to go.mod so a documentation test could run would be paying for
+# the archive's read path in every operator image.
+DUCKDB ?= $(LOCALBIN)/duckdb
 
 ## Tool Versions
 #
@@ -838,6 +1151,13 @@ KUBECONFORM_VERSION ?= v0.7.0
 # (the Go module version of the same release reads v0.313.2 — the repository never
 # adopted a /v3 module path — but no Go path is involved here).
 PROMTOOL_VERSION ?= 3.13.2
+# The DuckDB CLI release the published recipes are tested against. It is a floor,
+# not a ceiling: the recipes use `SET VARIABLE`/`getvariable()` (1.1.0 and later)
+# and `read_json_auto`'s hive_partitioning, filename and map_inference_threshold
+# parameters, so anything from this release forward runs them. Raising the pin is
+# a normal dependency bump; lowering it below 1.1 would silently stop the
+# parameter block from working.
+DUCKDB_VERSION ?= 1.5.5
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -906,6 +1226,39 @@ $(PROMTOOL): $(LOCALBIN)
 	chmod +x "$(PROMTOOL)-$(PROMTOOL_VERSION)"; \
 	} ;\
 	ln -sf "$$(realpath "$(PROMTOOL)-$(PROMTOOL_VERSION)")" "$(PROMTOOL)"
+
+# duckdb is extracted from the official DuckDB release, choosing the single-file
+# `.gz` asset over the `.zip` one so the download needs nothing but gzip — `unzip`
+# is not universally present, and this target runs on developer machines as well
+# as in CI. The version-suffixed binary and the symlink follow go-install-tool's
+# convention, so switching DUCKDB_VERSION re-fetches rather than silently keeping
+# the old binary.
+#
+# `INSTALL httpfs` runs here rather than being left to the first test: reading an
+# s3:// URL needs that extension, DuckDB downloads it from extensions.duckdb.org
+# on demand, and a network failure at bootstrap is a clear message about a missing
+# prerequisite while the same failure mid-suite reads like a broken recipe. It is
+# idempotent and a no-op once the extension is cached under the user's home.
+#
+# GOOS is mapped rather than used directly: DuckDB spells Darwin "osx", and the
+# arch names (amd64/arm64) already agree.
+.PHONY: duckdb
+duckdb: $(DUCKDB) ## Download the DuckDB CLI locally if necessary (used by the published-recipe tests).
+$(DUCKDB): $(LOCALBIN)
+	@[ -f "$(DUCKDB)-$(DUCKDB_VERSION)" ] && \
+		[ "$$(readlink -- "$(DUCKDB)" 2>/dev/null)" = "$(DUCKDB)-$(DUCKDB_VERSION)" ] || { \
+	set -e; \
+	case "$$(go env GOOS)" in darwin) os=osx ;; *) os=$$(go env GOOS) ;; esac; \
+	arch=$$(go env GOARCH); \
+	url="https://github.com/duckdb/duckdb/releases/download/v$(DUCKDB_VERSION)/duckdb_cli-$$os-$$arch.gz"; \
+	echo "Downloading $$url"; \
+	curl -fsSL "$$url" | gzip -dc > "$(DUCKDB)-$(DUCKDB_VERSION)"; \
+	chmod +x "$(DUCKDB)-$(DUCKDB_VERSION)"; \
+	rm -f "$(DUCKDB)"; \
+	} ;\
+	ln -sf "$$(realpath "$(DUCKDB)-$(DUCKDB_VERSION)")" "$(DUCKDB)"
+	@echo "Installing the DuckDB httpfs extension (needed to read s3:// archives)..."
+	@"$(DUCKDB)" -c "INSTALL httpfs;" >/dev/null
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

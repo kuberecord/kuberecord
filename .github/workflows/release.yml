@@ -1,10 +1,19 @@
 # Tag-triggered releases (Task 3.5). Strangers install tags, not `main`.
 #
-# Pushing `vX.Y.Z` publishes three things: a multi-arch image at
+# Pushing `vX.Y.Z` publishes a multi-arch image at
 # ghcr.io/<owner>/kuberecord:vX.Y.Z, a GitHub Release whose body is that version's
-# CHANGELOG.md section, and the two install artifacts plus their checksums
-# attached to it. `workflow_dispatch` runs the identical sequence with nothing
+# CHANGELOG.md section, and the install artifacts plus their checksums and an SBOM
+# attached to it. Since Task 7.4 it also publishes the evidence: the image carries
+# a keyless cosign signature, and the image and every attached asset carry SLSA
+# build provenance. `workflow_dispatch` runs the identical sequence with nothing
 # pushed and nothing published, which is what makes a rehearsal meaningful.
+#
+# A signature and an attestation are themselves publications — a registry write, a
+# public transparency-log entry, a record against this repository — so a rehearsal
+# cannot perform them and still be a rehearsal. It goes as far as it can: it builds
+# a real SBOM from a locally built image, computes every attestation subject, and
+# prints the signing and verification commands it is deliberately not running.
+# docs/VERIFYING.md is the reader-facing half of all of this.
 #
 # Every step is `make <target>`, and the targets are the ones a maintainer runs by
 # hand (see the Release section of the Makefile and docs/RELEASING.md). This file
@@ -81,11 +90,41 @@ jobs:
       # permissions cannot depend on an env value. The login step is what is
       # actually skipped on a dry run, so an unpushed rehearsal never authenticates.
       packages: write
+      # Keyless signing and build provenance both need an OIDC token, and this is
+      # the first point in the release at which there is anything to sign: a
+      # signature is about a digest, and the digest does not exist until the push
+      # above it. Granted here rather than at the top of the file so the gate job —
+      # the one that runs before anything is published, and the one most worth
+      # keeping powerless — cannot mint a signing identity for this repository.
+      id-token: write
+      # actions/attest-build-provenance writes the attestation to GitHub's
+      # attestations API; push-to-registry additionally stores it beside the image,
+      # which is what `packages: write` above already covers.
+      attestations: write
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      # cosign and syft are installed by their vendors' own actions, both pinned
+      # like every other action here. The versions are pinned too, rather than
+      # floating on each action's default: what signed a release and what described
+      # it are part of the release, and a tool that changed under us between two
+      # tags would be invisible in the artifacts.
+      #
+      # Installed on a rehearsal as well, though a rehearsal signs nothing. A pin
+      # that no longer resolves, or an installer whose interface moved, then fails
+      # in the rehearsal — which is the run where a failure costs nothing.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.51.0
 
       # The image is cross-compiled inside the builder stage (the Dockerfile takes
       # GOARCH from TARGETARCH with CGO disabled), so every platform builds
@@ -106,6 +145,94 @@ jobs:
             make release-image RELEASE_VERSION="$RELEASE_VERSION"
           fi
 
+      # Everything below is about what was just pushed, so all of it is skipped on
+      # a rehearsal — except the SBOM, which a rehearsal produces from a local
+      # build, and the summary of what a real run would have signed.
+      - name: Record what was pushed
+        id: image
+        if: env.DRY_RUN == 'false'
+        run: |
+          make release-image-digest RELEASE_VERSION="$RELEASE_VERSION"
+          # The attestation step cannot read a make variable, so it reads the two
+          # files the target just wrote. IMAGE_REPO stays named in one place.
+          {
+            printf 'name=%s\n' "$(cat dist/release/image-name.txt)"
+            printf 'digest=%s\n' "$(cat dist/release/image-digest.txt)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign the image
+        if: env.DRY_RUN == 'false'
+        run: make release-sign RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Describe the image (SBOM)
+        if: env.DRY_RUN == 'false'
+        run: make release-sbom RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Describe a locally built image instead (rehearsal)
+        if: env.DRY_RUN == 'true'
+        run: make release-sbom-local RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Attest the image's build provenance
+        if: env.DRY_RUN == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          # Stored beside the image as well as against the repository, so
+          # verification does not have to depend on this repository's API still
+          # answering. It does not make the attestation survive a naive mirror —
+          # signatures and attestations live under their own references, and
+          # `docker pull && docker push` copies neither (docs/VERIFYING.md says so
+          # to a reader, rather than letting them find out).
+          push-to-registry: true
+
+      # The published verification commands, run against what was just published.
+      # This is what keeps docs/VERIFYING.md honest: if the signature does not
+      # verify under the identity the documentation tells a reader to pin, the
+      # release fails here — before the GitHub Release that advertises it exists.
+      - name: Verify the signature and the attestation
+        if: env.DRY_RUN == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make release-verify RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Show what a real run would sign and attest (rehearsal)
+        if: env.DRY_RUN == 'true'
+        run: make release-rehearse-publishing RELEASE_VERSION="$RELEASE_VERSION"
+
+      # The SBOM is attached to the Release by the publish job, which cannot
+      # produce it: it describes an image, and the image exists here.
+      - name: Hand the SBOM to the publish job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: kuberecord-${{ env.RELEASE_VERSION }}-sbom
+          path: dist/release/*-sbom.spdx.json
+          if-no-files-found: error
+
+      - name: Summarise
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "## Rehearsal: image and SBOM for $RELEASE_VERSION"
+              echo
+              echo "Nothing was pushed, signed or attested. The SBOM attached to this"
+              echo "run describes a locally built image of the runner's architecture."
+            else
+              echo "## Signed and attested $RELEASE_VERSION"
+              echo
+              echo "| What | Value |"
+              echo "|---|---|"
+              echo "| Image | \`$(cat dist/release/image-name.txt)\` |"
+              echo "| Digest | \`$(cat dist/release/image-digest.txt)\` |"
+              # github.workflow_ref is exactly the certificate identity a keyless
+              # signature carries, minus the scheme — so this row is the string a
+              # verifier has to pin, read from the run itself rather than retyped.
+              echo "| Signed by | \`https://github.com/${{ github.workflow_ref }}\` |"
+              echo
+              echo "Verify it: https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   publish:
     name: Artifacts and GitHub Release
     # Both, not just the gate: an image that failed to build must not get a
@@ -115,6 +242,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The second job that needs OIDC, and for the other half of the release: an
+      # attestation names a digest, the artifacts below are built here, and they
+      # exist nowhere earlier. Splitting it this way keeps each job unable to do
+      # the other's damage — this one cannot push an image, and the image job
+      # cannot publish a Release.
+      id-token: write
+      attestations: write
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -131,6 +265,43 @@ jobs:
       - name: Build the release artifacts
         run: make release-artifacts RELEASE_VERSION="$RELEASE_VERSION"
 
+      # The SBOM describes the image, so the image job produced it; it is attached
+      # to the Release, so this job publishes it. Downloaded before the checksums
+      # are computed, because it is one of the assets they cover.
+      - name: Collect the SBOM built beside the image
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: kuberecord-${{ env.RELEASE_VERSION }}-sbom
+          path: dist/release
+
+      - name: Checksum every asset, the SBOM included
+        run: make release-checksums RELEASE_VERSION="$RELEASE_VERSION"
+
+      # checksums.txt is handed over as the subject list rather than a glob of
+      # dist/release/: "what is checksummed" and "what is attested" are then the
+      # same set by construction. A glob that stopped matching one asset would
+      # have narrowed the attestation silently, and an attestation nobody notices
+      # is missing is worth very little.
+      - name: Attest the artifacts' build provenance
+        if: env.DRY_RUN == 'false'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/release/checksums.txt
+
+      - name: Show the subjects a real run would attest (rehearsal)
+        if: env.DRY_RUN == 'true'
+        run: |
+          {
+            echo "## Rehearsal: the subjects a release would attest"
+            echo
+            echo "Each line below would become one SLSA provenance subject. Nothing"
+            echo "was attested."
+            echo
+            echo '```'
+            cat dist/release/checksums.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Uploaded on every run, dry or not. On a rehearsal this is the *only* place
       # the artifacts exist, and being able to diff a candidate's install.yaml
       # against the previous release's is most of the value of rehearsing.
@@ -142,6 +313,7 @@ jobs:
             dist/release/install.yaml
             dist/release/*.tgz
             dist/release/checksums.txt
+            dist/release/*-sbom.spdx.json
             dist/release/RELEASE_NOTES.md
           if-no-files-found: error
 
@@ -163,7 +335,8 @@ jobs:
             $prerelease \
             dist/release/install.yaml \
             dist/release/kuberecord-*.tgz \
-            dist/release/checksums.txt
+            dist/release/checksums.txt \
+            dist/release/*-sbom.spdx.json
 
       - name: Summarise
         run: |
@@ -178,6 +351,9 @@ jobs:
               # Read the image back out of the manifest rather than restating it:
               # what the release actually pins is what install.yaml says it pins.
               echo "Image: \`$(grep -o 'image: [^ ]*kuberecord:[^ ]*' dist/release/install.yaml | head -1 | cut -d' ' -f2)\`"
+              echo
+              echo "Signed, attested and described. How to check any of that:"
+              echo "https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"
             fi
             echo
             echo '```'

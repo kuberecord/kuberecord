@@ -162,6 +162,85 @@ they group `by (sink)` and template the label rather than pinning a value. Only
 expressions you wrote yourself are affected.
 [`docs/OPERATING.md`](OPERATING.md#getting-the-metrics) has the full metric table.
 
+### The Helm chart's starter sink is now a `sinks` list
+
+Only relevant if you install with the chart *and* had it create a sink for you —
+`createDefaultSink: true`. If you applied your own `ClickHouseSink` and left that
+value alone, there is nothing to do here.
+
+`createDefaultSink` and the `defaultSink` block are gone. The chart takes a list
+instead, one entry per sink CR, because one value per field could only ever
+express one sink of one kind — and this release ships two kinds:
+
+```yaml
+# before
+createDefaultSink: true
+defaultSink:
+  name: default
+  connection:
+    addr: clickhouse.kuberecord-system.svc:9000
+    credentialsSecretRef:
+      name: clickhouse-credentials
+
+# after
+sinks:
+  - kind: ClickHouseSink
+    name: default
+    spec:
+      connection:
+        addr: clickhouse.kuberecord-system.svc:9000
+        credentialsSecretRef:
+          name: clickhouse-credentials
+```
+
+The fields map one-to-one — `defaultSink.name` → `sinks[0].name`,
+`defaultSink.connection.*` → `sinks[0].spec.connection.*`, and the same for
+`writer` and `policy` — plus `kind`, which the old values had no way to say. The
+rendered CR is unchanged, so an upgrade that converts the values correctly is a
+no-op for the sink itself: same name, same spec, same object.
+
+**A stale `createDefaultSink` is silent.** Helm ignores values a chart does not
+use, so nothing warns and nothing fails — the sink is simply no longer rendered,
+and on `helm upgrade` the existing CR is *deleted* along with every rule bound to
+it going `Ready=False`/`SinkMissing`. Convert the values in the same change that
+bumps the chart.
+
+Two things to know beyond the rename. `spec` is now passed through **verbatim**,
+so every field of the sink's CRD is reachable without waiting for the chart to
+grow a value for it — and what is valid is decided by the CRD's own schema and
+CEL rules rather than by the chart. And the chart can now create an `S3Sink` the
+same way, which is how the [tee pattern](TEE.md) is installed from the chart
+alone:
+
+```yaml
+sinks:
+  - kind: ClickHouseSink
+    name: hot
+    spec:
+      connection:
+        addr: clickhouse.kuberecord-system.svc:9000
+        credentialsSecretRef:
+          name: clickhouse-credentials
+  - kind: S3Sink
+    name: cold
+    spec:
+      bucket: kuberecord-archive
+```
+
+For that to work the `S3Sink` CRD has to exist first, and Helm installs `crds/`
+but never upgrades it — so apply the CRDs explicitly before the upgrade, exactly
+as step 4 of the rule migration above requires anyway:
+
+```sh
+kubectl apply -f deploy/charts/kuberecord/crds/
+```
+
+The chart still never creates a Secret, at any values, and no sink spec carries a
+credential inline. Both kinds name one instead — and an `S3Sink` on a cloud
+provider needs none at all, since omitting `spec.credentials` authenticates from
+the ambient chain. The full values reference is the
+[chart README](../deploy/charts/kuberecord/README.md#sinks-optional).
+
 ## See also
 
 - [`CHANGELOG.md`](../CHANGELOG.md) — every change, release by release, including

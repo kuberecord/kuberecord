@@ -97,6 +97,17 @@ const (
 	itPrefix    = "audit/kuberecord"
 )
 
+// itLockMode is the only Object Lock mode this suite ever writes.
+//
+// GOVERNANCE, never COMPLIANCE: a COMPLIANCE-retained version cannot be removed
+// by anyone until its date passes — including the suite that wrote it — so a run
+// would leave a bucket behind for as long as the retention it asked for. What
+// COMPLIANCE means is asserted from the CRD's validation and stated in
+// docs/RETENTION.md; it does not need an undeletable object written on every CI
+// run to be true. It is a constant rather than a literal per call site so the
+// choice is made once and visibly.
+const itLockMode = "GOVERNANCE"
+
 // itSinkID labels the metrics this suite's writers publish. Nothing asserts on
 // them — the write path's metrics are covered by unit tests — but a Writer needs
 // a non-nil Metrics, and building it the way cmd/main.go does keeps this fixture
@@ -181,9 +192,14 @@ var itBucketSeq int
 // test is exact by construction instead: every object in it was written by the
 // test that is asserting on it.
 //
-// locked buckets are created with Object Lock enabled, which on S3 is only
-// possible at creation time — the prerequisite kuberecord documents that it
-// cannot set for an operator (see v1alpha1.S3ObjectLockSpec).
+// locked buckets are created with Object Lock enabled, which also enables
+// versioning: the two cannot be separated, and both are prerequisites kuberecord
+// documents that it cannot set for an operator (see v1alpha1.S3ObjectLockSpec
+// and docs/RETENTION.md). Enabling the lock at creation rather than afterwards is
+// this fixture's choice and not S3's requirement — AWS S3 and recent MinIO both
+// allow it on an existing versioned bucket, but the MinIO release the Makefile
+// pins predates that, and creation-time is the shape every implementation
+// supports.
 //
 // Cleanup is best effort and reported rather than silent (Invariant 4 applied to
 // the suite itself): the container `make test-integration` stands up is thrown
@@ -274,6 +290,82 @@ func (b *bucketFixture) keys(ctx context.Context, t *testing.T) []string {
 	}
 }
 
+// versionIDsOf lists the version IDs the store holds for exactly one key, plus
+// how many delete markers sit on it.
+//
+// It exists because on a versioned bucket "how many objects are at this key?" and
+// "how many versions are at this key?" are different questions with different
+// answers, and only the first one is what a reader of the archive sees. keys and
+// objects above answer the first (ListObjectsV2 returns current versions); this
+// answers the second. A retried PUT is visible only here — see
+// TestARetriedObjectOnALockedBucketLeavesOneCurrentVersionIntegration.
+//
+// The listing is filtered by prefix, which S3 cannot do more precisely than that,
+// so the exact-key check is done here: a content-hash key cannot be a prefix of
+// another key in this layout, but relying on that would make the helper wrong the
+// day the layout gains a suffix.
+func (b *bucketFixture) versionIDsOf(ctx context.Context, t *testing.T, key string) (versions []string, deleteMarkers int) {
+	t.Helper()
+	var keyMarker, versionMarker *string
+	for {
+		page, err := b.client.ListObjectVersions(ctx, &awss3.ListObjectVersionsInput{
+			Bucket:          aws.String(b.name),
+			Prefix:          aws.String(key),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+		})
+		if err != nil {
+			t.Fatalf("list the versions of %q in bucket %q: %v", key, b.name, err)
+		}
+		for _, v := range page.Versions {
+			if aws.ToString(v.Key) == key {
+				versions = append(versions, aws.ToString(v.VersionId))
+			}
+		}
+		for _, m := range page.DeleteMarkers {
+			if aws.ToString(m.Key) == key {
+				deleteMarkers++
+			}
+		}
+		if !aws.ToBool(page.IsTruncated) {
+			return versions, deleteMarkers
+		}
+		keyMarker, versionMarker = page.NextKeyMarker, page.NextVersionIdMarker
+	}
+}
+
+// objectVersion reads one named version of one key whole, with the retention the
+// store reports for that version. Retention is a property of a version and not
+// of a key, so this is the only way to ask about a version that is no longer the
+// current one.
+func (b *bucketFixture) objectVersion(ctx context.Context, t *testing.T, key, versionID string) storedObject {
+	t.Helper()
+	out, err := b.client.GetObject(ctx, &awss3.GetObjectInput{
+		Bucket:    aws.String(b.name),
+		Key:       aws.String(key),
+		VersionId: aws.String(versionID),
+	})
+	if err != nil {
+		t.Fatalf("get version %q of object %q from bucket %q: %v", versionID, key, b.name, err)
+	}
+	defer func() {
+		if closeErr := out.Body.Close(); closeErr != nil {
+			t.Errorf("close the body of version %q of object %q: %v", versionID, key, closeErr)
+		}
+	}()
+
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(out.Body); err != nil {
+		t.Fatalf("read version %q of object %q from bucket %q: %v", versionID, key, b.name, err)
+	}
+	return storedObject{
+		key:         key,
+		body:        body.Bytes(),
+		lockMode:    string(out.ObjectLockMode),
+		retainUntil: aws.ToTime(out.ObjectLockRetainUntilDate),
+	}
+}
+
 // object reads one object whole, with the retention the store reports for it.
 func (b *bucketFixture) object(ctx context.Context, t *testing.T, key string) storedObject {
 	t.Helper()
@@ -351,12 +443,9 @@ func (b *bucketFixture) records(ctx context.Context, t *testing.T) []sink.Record
 
 // removeQuietly empties the bucket and deletes it.
 //
-// Governance retention is bypassed on the way, which is why the suite's locked
-// buckets use GOVERNANCE and never COMPLIANCE: a COMPLIANCE-retained object
-// cannot be removed by anyone, including its writer, until its date passes, so a
-// suite that wrote one would leave it behind for as long as it asked for. What
-// COMPLIANCE means is asserted from the CRD's validation and its documentation,
-// not by writing an undeletable object into a bucket on every run.
+// Governance retention is bypassed on the way, per version, which is what makes
+// itLockMode's choice of GOVERNANCE the load-bearing one: this is the code that
+// could not clean up after a COMPLIANCE run.
 func (b *bucketFixture) removeQuietly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

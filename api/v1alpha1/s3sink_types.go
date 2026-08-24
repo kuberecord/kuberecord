@@ -155,17 +155,27 @@ type S3RotationSpec struct {
 // S3ObjectLockSpec applies per-object S3 Object Lock retention at PUT time.
 //
 // kuberecord does not configure the bucket and cannot: Object Lock must already
-// be enabled on it (which on S3 is only possible at bucket creation). This block
-// sets the retention *of each object kuberecord writes*, which is the half an
-// operator can express declaratively — and the half that makes the archive
-// tamper-evident, since a retained object cannot be overwritten or deleted before
-// its date even by the credential that wrote it.
+// be enabled on it, which is a human's operation on the account — at bucket
+// creation, or afterwards on a bucket that already has versioning. This block
+// sets the retention *of each object version kuberecord writes*, which is the
+// half an operator can express declaratively — and the half that makes the
+// archive tamper-evident, since a retained version cannot be overwritten or
+// deleted before its date even by the credential that wrote it.
 //
-// One consequence deserves stating here rather than in a runbook: retention makes
-// the idempotent-overwrite property of the object key conditional. A retried PUT
-// of an identical batch produces the same key and the same bytes (Task 6.2), and
-// S3 rejects the overwrite of a locked object — harmlessly, because the object
-// already holds exactly those bytes, but visibly in the sink's logs.
+// One consequence deserves stating here rather than in a runbook, because the
+// obvious reading of it is wrong. Object Lock requires versioning, so a bucket
+// that can hold a retained object is always a versioned one — and on a versioned
+// bucket S3 has no idempotent PUT. A retried PUT of an identical batch produces
+// the same key and the same bytes (Task 6.2) and is *accepted*: it creates a
+// second, byte-identical version, and the retained one keeps its own retention.
+// Nothing is refused and nothing appears in the sink's logs. So the key's
+// deduplication is reader-visible rather than storage-level: the key has exactly
+// one current version holding exactly the right bytes, which is what every
+// reader of the archive sees, while the bucket may hold two versions of it and
+// bill for both. Under COMPLIANCE that duplicate cannot be removed by anyone,
+// or by a lifecycle expiration, until RetainDays has passed. It takes a lost
+// acknowledgement to produce one, so it is rare — see docs/RETENTION.md, and
+// the integration case that asserts both halves against a real locked bucket.
 type S3ObjectLockSpec struct {
 	// Mode is the retention mode applied to every object. COMPLIANCE is
 	// irreversible for the objects it covers — see ObjectLockModeCompliance.
@@ -191,10 +201,14 @@ type S3ObjectLockSpec struct {
 //     object *is* the batch and spec.rotation governs it. Having both would be
 //     two sets of controls over one decision, and an author would have to know
 //     which one won.
-//   - checkpointEvery bounds the cost of replaying diffs, and an S3Sink writes no
-//     diffs: it cannot read its own history, so every record it receives is a
-//     permanent Snapshot (D12). A cadence over a thing that never happens would
-//     read as a knob that does nothing.
+//   - checkpointEvery bounds how far a replay has to walk back to the last
+//     full-state record, and for this backend that walk is already bounded. A
+//     Writer-only sink cannot warm from its own history, so it re-snapshots
+//     everything in scope on every restart (D12) and no replay reaches further back
+//     than the current process's first sighting. A cadence on top of that would buy
+//     nothing. Diffs themselves are written as usual — an object changed while this
+//     process is watching produces a Modified carrying a patch, identically to the
+//     ClickHouse side (docs/TEE.md); it is the *first* sighting that differs.
 //
 // What the four shared knobs mean is identical to their ClickHouse twins, down to
 // the defaults, so an author who has tuned one sink has tuned both. That identity
@@ -397,6 +411,15 @@ type S3SinkSpec struct {
 	// ObjectLock applies per-object retention at PUT time. Omitted means objects
 	// are written with no retention of their own, and the bucket's own lifecycle
 	// and default-retention settings apply unchanged.
+	//
+	// Object Lock must already be enabled on the bucket; kuberecord cannot enable
+	// it and a sink asking for retention against a bucket without it reports
+	// BucketReachable=False/BucketIncompatible, permanently. Retention applies to
+	// object *versions*, and an Object Lock bucket is always versioned — so a
+	// retried write is accepted rather than refused and leaves one current version
+	// plus, at most, one byte-identical extra one. COMPLIANCE makes that extra
+	// version, and every object this sink writes, undeletable by anyone until its
+	// date passes. See docs/RETENTION.md before choosing a mode.
 	// +optional
 	ObjectLock *S3ObjectLockSpec `json:"objectLock,omitempty"`
 
@@ -404,9 +427,11 @@ type S3SinkSpec struct {
 	//
 	// It carries a strict subset of ClickHouse's knobs: batchMaxRows and batchMaxWait
 	// are absent because for S3 the object *is* the batch and spec.rotation
-	// governs it, and checkpointEvery is absent because a Writer-only sink emits
-	// no diffs to checkpoint (D12). See S3WriterSpec for the full reasoning — the
-	// omissions are deliberate, not pending.
+	// governs it, and checkpointEvery is absent because a Writer-only sink cannot
+	// warm from history — it re-snapshots on every restart, so a replay is already
+	// bounded by the current process and a cadence would add nothing (D12). See
+	// S3WriterSpec for the full reasoning — the omissions are deliberate, not
+	// pending.
 	// +optional
 	Writer S3WriterSpec `json:"writer,omitempty"`
 

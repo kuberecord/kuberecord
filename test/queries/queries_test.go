@@ -37,6 +37,12 @@ func repoPath(elems ...string) string {
 	return filepath.Join(append([]string{root}, elems...)...)
 }
 
+// shortSource trims a source label down to something readable as a subtest name.
+func shortSource(source string) string {
+	trimmed := strings.TrimPrefix(source, repoPath()+"/")
+	return strings.ReplaceAll(trimmed, " ", "_")
+}
+
 // queryLibraries are the Markdown documents that publish runnable SQL, and
 // productDashboards are the four ClickHouse-reading dashboards Task 3.2 ships.
 // operator-health.json is deliberately absent: it queries Prometheus and carries
@@ -373,10 +379,10 @@ func TestShippedQueriesInterpolate(t *testing.T) {
 			if err != nil {
 				t.Fatalf("FromMarkdown: %v", err)
 			}
-			if len(library) == 0 {
-				t.Fatal("this document holds no SQL blocks; the check would pass vacuously")
+			if len(ByDialect(library, DialectClickHouse)) == 0 {
+				t.Fatal("this document holds no ClickHouse SQL blocks; the check would pass vacuously")
 			}
-			for _, q := range library {
+			for _, q := range ByDialect(library, DialectClickHouse) {
 				// The libraries use ClickHouse-native {name:Type} parameters rather
 				// than Grafana variables, so interpolation is a no-op that must still
 				// leave the statement untouched — and must not mistake a parameter for

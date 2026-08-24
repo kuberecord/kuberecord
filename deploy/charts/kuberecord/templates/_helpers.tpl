@@ -116,10 +116,74 @@ than leaving the user to discover it from the pods.
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.leaderElection.enabled) }}
 {{- fail "kuberecord: replicaCount > 1 requires leaderElection.enabled=true — two active operators would double-write every row" }}
 {{- end }}
-{{- if and .Values.createDefaultSink (not .Values.defaultSink.connection.addr) }}
-{{- fail "kuberecord: createDefaultSink=true requires defaultSink.connection.addr (host:9000 of your ClickHouse)" }}
+{{- include "kuberecord.validateSinks" . }}
 {{- end }}
-{{- if and .Values.createDefaultSink (not .Values.defaultSink.connection.credentialsSecretRef.name) }}
-{{- fail "kuberecord: createDefaultSink=true requires defaultSink.connection.credentialsSecretRef.name — create the Secret yourself; the chart never templates a password" }}
+
+{{/*
+The sink kinds this chart can create: the sink CRDs it ships in crds/.
+
+The list is here rather than derived, because there is nothing to derive it from
+at render time — and it is worth spelling out, since a kind that is not on it is
+one the installed operator has no reconciler for. Rendering such a CR would
+produce a manifest the API server rejects for a *missing CRD*, which names
+neither the typo that caused it nor the file it is in. Adding a backend means
+adding its CRD to crds/ (via `make helm-sync`) and its kind here.
+*/}}
+{{- define "kuberecord.sinkKinds" -}}
+ClickHouseSink S3Sink
+{{- end }}
+
+{{/*
+Validate the `sinks` list, per entry, before any of it is rendered.
+
+Only four things are checked, and the boundary is deliberate. Everything about
+whether a *spec* is valid belongs to the CRD's structural schema and its CEL
+rules (D4) — duplicating any of it here would mean two validators to keep in
+step, and the chart's copy would be the stale one. What the API server cannot
+catch in time, or cannot phrase usefully, is what is checked:
+
+  - an unknown `kind`, which fails as a missing CRD rather than as a typo;
+  - a missing `name`, which is what rules name in spec.sink.name;
+  - a duplicated (kind, name) identity — the pair is a sink's identity (D10), so
+    two entries sharing both are one object rendered twice, and Helm would apply
+    the second over the first with no warning;
+  - the one connection field per backend that has no default and cannot be
+    guessed, so the failure lands at `helm install` rather than on a CR that
+    admits and then never connects.
+*/}}
+{{- define "kuberecord.validateSinks" -}}
+{{- $kinds := splitList " " (include "kuberecord.sinkKinds" .) }}
+{{- $seen := dict }}
+{{- range $i, $sink := .Values.sinks }}
+{{- $at := printf "sinks[%d]" $i }}
+{{- if not (kindIs "map" $sink) }}
+{{- fail (printf "kuberecord: %s is not a mapping — each entry is {kind, name, spec}" $at) }}
+{{- end }}
+{{- if not (has $sink.kind $kinds) }}
+{{- fail (printf "kuberecord: %s.kind=%s is not a sink kind this release serves; expected one of %s" $at ($sink.kind | default "<empty>" | quote) (join ", " $kinds)) }}
+{{- end }}
+{{- if not $sink.name }}
+{{- fail (printf "kuberecord: %s has no name — the name is what a rule names in spec.sink.name" $at) }}
+{{- end }}
+{{- $identity := printf "%s/%s" $sink.kind $sink.name }}
+{{- if hasKey $seen $identity }}
+{{- fail (printf "kuberecord: %s duplicates %s — a sink is identified by its (kind, name) pair, so both entries are the same object and only the last would survive" $at $identity) }}
+{{- end }}
+{{- $_ := set $seen $identity true }}
+{{- if not (kindIs "map" $sink.spec) }}
+{{- fail (printf "kuberecord: %s has no spec — it is passed through verbatim to the %s CR, so an empty one creates a sink that configures nothing" $at $sink.kind) }}
+{{- end }}
+{{- if eq $sink.kind "ClickHouseSink" }}
+{{- if not (dig "connection" "addr" "" $sink.spec) }}
+{{- fail (printf "kuberecord: %s needs spec.connection.addr (host:9000 of ClickHouse's native protocol)" $at) }}
+{{- end }}
+{{- if not (dig "connection" "credentialsSecretRef" "name" "" $sink.spec) }}
+{{- fail (printf "kuberecord: %s needs spec.connection.credentialsSecretRef.name — create the Secret yourself in the release namespace; the chart never templates a password" $at) }}
+{{- end }}
+{{- else if eq $sink.kind "S3Sink" }}
+{{- if not (dig "bucket" "" $sink.spec) }}
+{{- fail (printf "kuberecord: %s needs spec.bucket — kuberecord never creates a bucket, because a bucket carries retention, encryption and Object Lock settings that are yours to own" $at) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

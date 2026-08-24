@@ -291,8 +291,23 @@ Both artifacts are also attached to every [release](https://github.com/yelzhy/ku
 with checksums, if you would rather install a tag than a checkout:
 
 ```sh
-kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.2.0/install.yaml
 ```
+
+From v0.2.0 the image is signed with cosign, the image and every attached asset
+carry SLSA build provenance, and an SBOM ships beside them — worth checking before
+you run an operator that will watch your whole cluster:
+
+```sh
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  ghcr.io/yelzhy/kuberecord:v0.2.0
+```
+
+[`docs/VERIFYING.md`](docs/VERIFYING.md) has the rest — provenance, the SBOM,
+checksums, and what a signature on the operator does *not* say about the records
+it writes.
 
 The operator is pre-1.0 — while it is `v0.x` a minor bump may break, and every
 break is spelled out in [`CHANGELOG.md`](CHANGELOG.md). The ClickHouse schema
@@ -353,16 +368,19 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 
 | Page | What is in it |
 |---|---|
-| [`docs/SCHEMA.md`](docs/SCHEMA.md) | The frozen v1 schema, column by column: the `event_type` state machine, the RFC 6902 diff format, checkpoint rows and state reconstruction, redaction, the version-agnostic identity rule, delivery semantics. |
-| [`docs/QUERIES.md`](docs/QUERIES.md) | The query library. Incident windows, drift by actor, flap reports, state reconstruction, Events for an object, what a deleted object last contained — every statement executed against a real ClickHouse in CI. |
+| [`docs/SCHEMA.md`](docs/SCHEMA.md) | What is stored, in three parts: the backend-independent record contract (the `event_type` state machine, the RFC 6902 diff format, checkpoints and state reconstruction, redaction, the version-agnostic identity rule), then the **frozen v1 ClickHouse schema** column by column, then the **`jsonl-v1` S3 object format** and its key layout. |
+| [`docs/QUERIES.md`](docs/QUERIES.md) | The query library, for both backends. Incident windows, drift by actor, flap reports, state reconstruction, Events for an object, what a deleted object last contained — plus DuckDB recipes and an Athena table for the S3 archive. Every ClickHouse statement is executed against a real ClickHouse in CI, and every DuckDB recipe against a real object store. |
 | [`docs/RBAC.md`](docs/RBAC.md) | The aggregated-ClusterRole model, the no-self-escalation argument, granting a new kind in 30 seconds, and the honest read-flattening caveat. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured envelopes per scale profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — and how to reproduce them. |
 | [`docs/CRDS.md`](docs/CRDS.md) | Every field of the three custom resources, what each validation rejects and why, and every status condition they report. |
+| [`docs/TEE.md`](docs/TEE.md) | Hot and cold: a queryable ClickHouse timeline and a cheap immutable object-store archive, from one watch. Why the answer is two rules rather than one clever sink, why one informer serves both, why dedup state is per sink — and exactly which guarantees the archive half does not carry. Runnable: [`examples/tee/`](examples/tee/). |
+| [`docs/RETENTION.md`](docs/RETENTION.md) | Tamper-evidence and retention: enabling S3 Object Lock (a bucket prerequisite kuberecord cannot set), what `spec.objectLock` applies per object, `GOVERNANCE` versus `COMPLIANCE`, how lifecycle rules interact with a locked archive — and an explicit limits section, because kuberecord signs nothing and redaction is forward-only. |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Operator flags and environment variables, and how the `--writer-*` fallbacks relate to a sink's own fields. |
 | [`docs/OPERATING.md`](docs/OPERATING.md) | Watching the operator: every exported metric, the shipped dashboard and alerts, and a runbook per alert. |
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Building, the make targets, and what each test suite proves. |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | What a version number promises: the operator's `v0.x` (pre-1.0, a minor may break), the CRDs' `v1alpha1`, and the frozen schema `v1` — three numbers that move independently. Plus what a tagged release publishes and how to cut one. |
+| [`docs/VERIFYING.md`](docs/VERIFYING.md) | Checking a release before you run it: the keyless `cosign verify` command with the issuer and identity to pin, the SLSA provenance attestation for the image and for every asset, the SBOM, and `checksums.txt`. Plus the limit that matters — a signed *operator* is not a signed *audit trail*. |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | What to do when a `v0.x` minor breaks: the version-by-version upgrade steps, with the exact `kubectl` sequence for each. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Including the migration table from the removed environment-variable configuration to the custom resources that replaced it. |
 
@@ -375,7 +393,13 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 - **SecOps** — an operator-owned record of resource state that does not depend on
   the API server's audit retention window.
 - **Compliance** — a durable, timestamped history of workload state changes, per
-  cluster, for retrospective review.
+  cluster, for retrospective review. Where retention outlives what is worth
+  keeping queryable, stream the same resources to two backends at once: a
+  ClickHouse timeline for the questions people ask, and a WORM-capable object
+  store for the years nobody reads. That is the **tee pattern**,
+  [`docs/TEE.md`](docs/TEE.md) — one watch, two rules, no extra load on the API
+  server. What "WORM-capable" is worth, precisely — and what it is not, since
+  kuberecord signs nothing — is [`docs/RETENTION.md`](docs/RETENTION.md).
 
 ## Development
 

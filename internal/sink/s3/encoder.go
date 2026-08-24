@@ -169,9 +169,12 @@ type Object struct {
 // encodes to byte-identical output, because Record's field order is fixed by its
 // declaration, encoding/json emits map keys (Labels) in sorted order, and
 // EncodeAll runs a single deterministic pass. That is what makes a retried PUT
-// land on the same key with the same bytes — an overwrite rather than a
-// duplicate. It is this backend's answer to ClickHouse's ReplacingMergeTree, but
-// synchronous and exact instead of eventual and best-effort.
+// land on the same key with the same bytes, so no reader of the archive can see
+// a duplicate: on an unversioned bucket the second PUT replaces the first, and
+// on a versioned one it becomes the current version of the same key. It is this
+// backend's answer to ClickHouse's ReplacingMergeTree, but synchronous and exact
+// instead of eventual and best-effort. What a versioned bucket keeps underneath
+// is docs/RETENTION.md's subject, not the key's.
 //
 // The content hash is taken over the **uncompressed** payload, deliberately. A
 // compressor's output is not required to be bit-stable across library versions

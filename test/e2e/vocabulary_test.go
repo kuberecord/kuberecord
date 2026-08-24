@@ -64,6 +64,25 @@ var mio = &harness.MinIO{
 	ClusterID:  clusterID,
 }
 
+// teeArchive is this suite's view of the *example's* object store (Task 7.1).
+//
+// A second view rather than a reuse of mio, because it addresses a different
+// store: examples/tee ships its own MinIO, in its own namespace, under its own
+// bucket. Keeping them separate is what lets the two scenarios run in either
+// order — Ginkgo randomises top-level containers — and what keeps the archive
+// scenario's whole-bucket layout assertion from meeting objects the tee example
+// wrote.
+//
+// User, Password, Bucket and Prefix are deliberately absent here and filled in by
+// the scenario from the cluster it just applied the example to. They are the
+// example's values, not the suite's, and reading them back is what makes it
+// impossible for this view to drift from the manifests CI applied.
+var teeArchive = &harness.MinIO{
+	Namespace:  teeMinIONamespace,
+	Deployment: teeMinIODeployment,
+	ClusterID:  clusterID,
+}
+
 // fieldManager is the field-manager name every object the suite applies is
 // written under.
 //
@@ -134,6 +153,18 @@ func applyYAML(manifest string) { harness.ApplyYAML(fieldManager, manifest) }
 func clientSideApplyYAML(manifest string) { harness.ClientSideApplyYAML(manifest) }
 
 func applyFile(path string) { harness.ApplyFile(path) }
+
+// applyFileAs and applyKustomization are how the tee scenario applies a
+// *published* example rather than a suite-local copy of one: the overlay for its
+// sinks and rules, the example's own file for the workload whose actors it then
+// asserts on. See harness.ApplyKustomization.
+func applyFileAs(path string) { harness.ApplyFileAs(fieldManager, path) }
+
+func applyKustomization(dir string) { harness.ApplyKustomization(dir) }
+
+func secretValue(name, namespace, key string) (string, error) {
+	return harness.SecretValue(name, namespace, key)
+}
 
 func deleteResource(kind, name, namespace string) { harness.DeleteResource(kind, name, namespace) }
 

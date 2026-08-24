@@ -30,12 +30,19 @@ limitations under the License.
 package docs
 
 import (
+	"bufio"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/yaml"
+
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
 )
 
 // repoPath resolves a repository-relative path from this test's own source
@@ -256,16 +263,30 @@ func TestNoLegacySinkRefAuthoring(t *testing.T) {
 	})
 }
 
-// TestMigrationRecordStillNamesThem is the other half of the check above, and
-// the reason it is worth writing down: "the old names appear nowhere" would be
+// TestMigrationRecordStillNamesThem is the other half of both scans above, and
+// the reason they are worth writing down: "the old names appear nowhere" would be
 // satisfied by deleting the migration table, which would leave an upgrading user
 // with no way to find out what their configuration became.
+//
+// The retired `sinkRef` field is held to the same bargain as the retired
+// environment variables, and for a slightly sharper reason. CHANGELOG.md is
+// exempt from TestNoLegacySinkRefAuthoring *so that* it can carry the migration
+// steps; without this half, that exemption would let the steps be deleted with
+// the scan still green — the removal record for a breaking change quietly
+// removed, in the one file where a v0.x break is supposed to be spelled out. It
+// is matched with legacySinkRefField rather than with a substring because
+// `SinkReference` is a live type name a substring check would happily accept.
 func TestMigrationRecordStillNamesThem(t *testing.T) {
 	changelog := readFile(t, "CHANGELOG.md")
 	for _, name := range []string{"WATCHED_GVKS", "CH_ADDR", "CH_DATABASE", "CH_USERNAME", "CH_PASSWORD"} {
 		if !strings.Contains(changelog, name) {
 			t.Errorf("CHANGELOG.md no longer names %s; the migration table is how a user finds out what it became", name)
 		}
+	}
+	if !legacySinkRefField.MatchString(changelog) {
+		t.Error("CHANGELOG.md no longer names `sinkRef`; it is exempt from the scan above so that " +
+			"it can, and the migration record is how a user holding a rule authored against v0.1.0 " +
+			"finds out that the field became `spec.sink {kind, name}` (D10)")
 	}
 }
 
@@ -393,6 +414,383 @@ func TestQuickstartIsWiredUp(t *testing.T) {
 }
 
 //
+// The tee example is complete, self-consistent and CI-tested (Task 7.1)
+//
+
+// teeExampleFiles is every file the tee example and docs/TEE.md promise between
+// them. The acceptance criteria ask for a *runnable* example, and an example
+// missing the object store it archives into, or the credentials it authenticates
+// with, is not one.
+var teeExampleFiles = []string{
+	"examples/tee/README.md",
+	"examples/tee/kustomization.yaml",
+	"examples/tee/minio.yaml",
+	"examples/tee/secret.yaml",
+	"examples/tee/hot-sink.yaml",
+	"examples/tee/cold-sink.yaml",
+	"examples/tee/namespace.yaml",
+	"examples/tee/rules.yaml",
+	"examples/tee/workload.yaml",
+	"examples/tee/bucket.sh",
+	"docs/TEE.md",
+}
+
+func TestTeeExampleFilesExist(t *testing.T) {
+	for _, rel := range teeExampleFiles {
+		t.Run(rel, func(t *testing.T) {
+			info, err := os.Stat(repoPath(rel))
+			if err != nil {
+				t.Fatalf("%s is promised by the tee example but missing: %v", rel, err)
+			}
+			if info.Size() == 0 {
+				t.Fatalf("%s is empty", rel)
+			}
+		})
+	}
+
+	script := repoPath("examples/tee/bucket.sh")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat bucket.sh: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Error("examples/tee/bucket.sh is not executable; the README runs it directly")
+	}
+}
+
+// teeKeyPair is the key-pair Secret shape both halves of the example carry.
+var teeKeyPair = []string{"accessKeyId", "secretAccessKey"}
+
+// stringDataValue matches one quoted `stringData` entry of a manifest.
+func stringDataValue(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `:\s*"([^"]*)"`)
+}
+
+// TestTeeExampleCredentialsAgree guards the same class of mistake
+// TestQuickstartPasswordsAgree does, one backend along: the object store's root
+// credentials are written down twice — once for the server, once beside the
+// operator — and if the two drift, the S3Sink reports BucketReachable=False and
+// archives nothing while the ClickHouse half keeps working perfectly.
+//
+// That is a nastier failure than an outright broken example, because a half-
+// working tee looks like a working one until somebody reads the bucket.
+func TestTeeExampleCredentialsAgree(t *testing.T) {
+	server := readFile(t, "examples/tee/minio.yaml")
+	operator := readFile(t, "examples/tee/secret.yaml")
+
+	for _, key := range teeKeyPair {
+		t.Run(key, func(t *testing.T) {
+			pattern := stringDataValue(key)
+			serverMatch := pattern.FindStringSubmatch(server)
+			operatorMatch := pattern.FindStringSubmatch(operator)
+			if serverMatch == nil {
+				t.Fatalf("examples/tee/minio.yaml sets no %s", key)
+			}
+			if operatorMatch == nil {
+				t.Fatalf("examples/tee/secret.yaml sets no %s", key)
+			}
+			if serverMatch[1] != operatorMatch[1] {
+				t.Errorf("%s is %q in minio.yaml but %q in secret.yaml; the sink could not authenticate",
+					key, serverMatch[1], operatorMatch[1])
+			}
+			if serverMatch[1] == "" {
+				t.Errorf("%s is empty in both files", key)
+			}
+		})
+	}
+}
+
+// TestTeeBucketScriptMatchesTheSink is the seam between the example's one
+// imperative step and its declarative half.
+//
+// bucket.sh creates a bucket by name and the S3Sink writes to a bucket by name,
+// and nothing connects the two but this check. Rename either and the example
+// stands up a cluster where MinIO is healthy, the bucket exists, and the sink
+// sits at BucketReachable=False pointing at a bucket that does not — which reads
+// as a broken operator rather than as a typo in a shell variable.
+func TestTeeBucketScriptMatchesTheSink(t *testing.T) {
+	script := readFile(t, "examples/tee/bucket.sh")
+	sinkSpec := readFile(t, "examples/tee/cold-sink.yaml")
+
+	declared := regexp.MustCompile(`(?m)^\s*bucket:\s*(\S+)`).FindStringSubmatch(sinkSpec)
+	if declared == nil {
+		t.Fatal("examples/tee/cold-sink.yaml sets no spec.bucket")
+	}
+	created := regexp.MustCompile(`(?m)^BUCKET="\$\{BUCKET:-([^}]*)\}"`).FindStringSubmatch(script)
+	if created == nil {
+		t.Fatal("examples/tee/bucket.sh declares no default BUCKET")
+	}
+	if declared[1] != created[1] {
+		t.Errorf("the S3Sink archives to bucket %q but bucket.sh creates %q", declared[1], created[1])
+	}
+
+	// The same story one level down: the script reads the key pair out of the
+	// Secret the example's MinIO manifest ships, so a renamed Secret breaks it.
+	if !strings.Contains(readFile(t, "examples/tee/minio.yaml"), "name: minio-credentials") {
+		t.Error("examples/tee/minio.yaml no longer ships the Secret bucket.sh reads its credentials from")
+	}
+}
+
+// teeCustomResources are the example's custom resources and the types they must
+// decode into.
+var teeCustomResources = []struct {
+	file string
+	// objects returns one empty target per document in the file, in order.
+	objects func() []any
+}{
+	{"examples/tee/hot-sink.yaml", func() []any { return []any{&v1alpha1.ClickHouseSink{}} }},
+	{"examples/tee/cold-sink.yaml", func() []any { return []any{&v1alpha1.S3Sink{}} }},
+	{"examples/tee/rules.yaml", func() []any { return []any{&v1alpha1.StreamRule{}, &v1alpha1.StreamRule{}} }},
+}
+
+// TestTeeExampleCustomResourcesDecode decodes the example's CRs into the typed
+// structs with unknown fields rejected.
+//
+// It is a cheap stand-in for the thing that would otherwise catch a typo — an
+// API server — and it catches the failure that matters most in a hand-written
+// example: a field name that was renamed, or never existed. A CRD prunes unknown
+// fields silently rather than rejecting them, so `spec.rotation.maxObjectAg: 30s`
+// would apply cleanly, default to five minutes, and leave a reader waiting for an
+// object that arrives ten times later than the file says.
+//
+// It does not evaluate CEL, bounds or defaults; the e2e scenario applies these
+// same files against a real API server, which does.
+func TestTeeExampleCustomResourcesDecode(t *testing.T) {
+	for _, tc := range teeCustomResources {
+		t.Run(tc.file, func(t *testing.T) {
+			documents := splitYAML(t, readFile(t, tc.file))
+			targets := tc.objects()
+			if len(documents) != len(targets) {
+				t.Fatalf("%s holds %d documents, expected %d", tc.file, len(documents), len(targets))
+			}
+			for i, doc := range documents {
+				if err := yaml.UnmarshalStrict(doc, targets[i]); err != nil {
+					t.Errorf("%s document %d does not decode into %T: %v", tc.file, i+1, targets[i], err)
+				}
+			}
+		})
+	}
+}
+
+// splitYAML returns the non-empty documents of a multi-document manifest.
+func splitYAML(t *testing.T, content string) [][]byte {
+	t.Helper()
+	reader := yaml.NewYAMLReader(bufio.NewReader(strings.NewReader(content)))
+	var documents [][]byte
+	for {
+		doc, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return documents
+		}
+		if err != nil {
+			t.Fatalf("split YAML: %v", err)
+		}
+		if len(strings.TrimSpace(string(doc))) > 0 {
+			documents = append(documents, doc)
+		}
+	}
+}
+
+// TestTeeExampleIsCITested is the seam Task 7.1's third criterion depends on.
+//
+// The acceptance criterion is that CI applies *the example*, and the only thing
+// making that true is one line in the e2e overlay naming examples/tee as its
+// base. Copy the manifests into test/e2e/manifests instead — the obvious thing to
+// do when the example is inconvenient to patch — and every assertion still
+// passes while the file a reader copies is no longer tested by anything.
+func TestTeeExampleIsCITested(t *testing.T) {
+	overlay := readFile(t, "test/e2e/manifests/tee/kustomization.yaml")
+	if !strings.Contains(overlay, "examples/tee") {
+		t.Error("test/e2e/manifests/tee/kustomization.yaml no longer bases on examples/tee; " +
+			"CI would be applying a copy of the example rather than the example")
+	}
+
+	// Both paths reach the scenario through constants, so these assert on the
+	// constants' values rather than on the scenario body.
+	suite := readFile(t, "test/e2e/e2e_suite_test.go")
+	for _, want := range []string{"test/e2e/manifests/tee", "examples/tee/workload.yaml"} {
+		if !strings.Contains(suite, want) {
+			t.Errorf("the e2e suite no longer names %q; the tee scenario cannot be applying the example", want)
+		}
+	}
+	if !strings.Contains(readFile(t, "test/e2e/tee_test.go"), "applyKustomization(teeOverlay)") {
+		t.Error("test/e2e/tee_test.go no longer applies the tee overlay")
+	}
+}
+
+// TestTeeExampleHotSinkMatchesQuickstart keeps the example's two-command promise
+// honest.
+//
+// examples/tee/README.md tells a reader to run `make quickstart` and then apply
+// this example, which only works while the ClickHouseSink here names the
+// ClickHouse the quickstart actually stands up and the Secret the quickstart
+// actually creates. Move either and the reader gets a sink parked at
+// Unreachable — and the e2e suite would not catch it, because its overlay patches
+// exactly this address.
+func TestTeeExampleHotSinkMatchesQuickstart(t *testing.T) {
+	hot := readFile(t, "examples/tee/hot-sink.yaml")
+
+	addr := regexp.MustCompile(`(?m)^\s*addr:\s*(\S+)`).FindStringSubmatch(hot)
+	if addr == nil {
+		t.Fatal("examples/tee/hot-sink.yaml sets no spec.connection.addr")
+	}
+	host, _, ok := strings.Cut(addr[1], ":")
+	if !ok {
+		t.Fatalf("addr %q has no port", addr[1])
+	}
+	service, namespace, ok := strings.Cut(strings.TrimSuffix(host, ".svc"), ".")
+	if !ok {
+		t.Fatalf("addr %q is not a <service>.<namespace>.svc name", addr[1])
+	}
+
+	quickstart := readFile(t, "examples/quickstart/clickhouse.yaml")
+	if !strings.Contains(quickstart, "name: "+namespace) {
+		t.Errorf("the tee example points at namespace %q, which examples/quickstart/clickhouse.yaml does not create",
+			namespace)
+	}
+	if !strings.Contains(quickstart, "name: "+service) {
+		t.Errorf("the tee example points at Service %q, which examples/quickstart/clickhouse.yaml does not create",
+			service)
+	}
+
+	secretRef := regexp.MustCompile(`credentialsSecretRef:\s*\n\s*name:\s*(\S+)`).FindStringSubmatch(hot)
+	if secretRef == nil {
+		t.Fatal("examples/tee/hot-sink.yaml names no credentialsSecretRef")
+	}
+	if !strings.Contains(readFile(t, "examples/quickstart/secret.yaml"), "name: "+secretRef[1]) {
+		t.Errorf("the tee example reads Secret %q, which the quickstart does not create", secretRef[1])
+	}
+}
+
+//
+// Tamper-evidence: the page, and the claim it retracts (Task 7.3)
+//
+
+// retentionPageClaims is what "Tamper-evidence and retention" has to keep saying.
+//
+// Each entry is load-bearing rather than structural: this page exists because a
+// compliance claim was stated imprecisely once, and each phrase below is a place
+// where the imprecise version is the tempting one to write. The check is for
+// presence and not for wording — the prose should be free to improve — but a page
+// that has lost the limits half has lost the reason it was written.
+var retentionPageClaims = []struct {
+	want string
+	why  string
+}{
+	{"GOVERNANCE", "the mode an operator should start with"},
+	{"COMPLIANCE", "the mode nobody, including the account root, can undo"},
+	{"reader-visible", "idempotency on a versioned bucket is reader-visible, not storage-level"},
+	{"forward-only", "redaction cannot reach what is already archived"},
+	{"delete marker", "Object Lock stops destruction, not concealment"},
+	{"does not sign", "the archive is not a cryptographic chain of custody"},
+	{"lifecycle", "expiration cannot remove a locked version; transitions can still run"},
+}
+
+// TestRetentionPageCoversItsSubject is the positive half of the pair below.
+//
+// A forbidden-token scan on its own is satisfied by a repository that says
+// nothing at all about Object Lock, which is exactly the state this task was
+// written to end. So the retired claim being absent only counts as progress if
+// the honest replacement is present, here and in the API types a reader meets
+// through `kubectl explain`.
+func TestRetentionPageCoversItsSubject(t *testing.T) {
+	page := readFile(t, "docs/RETENTION.md")
+	for _, tc := range retentionPageClaims {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(page), strings.ToLower(tc.want)) {
+				t.Errorf("docs/RETENTION.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
+	}
+
+	// The S3ObjectLockSpec comment is the one that was wrong, and it is published
+	// twice over: as Go documentation, and (for the field beside it) as the CRD
+	// description `kubectl explain s3sink.spec.objectLock` prints.
+	types := readFile(t, "api/v1alpha1/s3sink_types.go")
+	for _, want := range []string{"reader-visible", "docs/RETENTION.md"} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api/v1alpha1/s3sink_types.go no longer says %q; the objectLock comment is "+
+				"where the retracted claim lived, and where its replacement has to stay", want)
+		}
+	}
+	crd := readFile(t, "config/crd/bases/kuberecord.io_s3sinks.yaml")
+	if !strings.Contains(crd, "docs/RETENTION.md") {
+		t.Error("the generated S3Sink CRD no longer points at docs/RETENTION.md; run `make manifests`, " +
+			"since the objectLock description is what kubectl explain shows")
+	}
+}
+
+// retiredObjectLockClaims are the two statements about S3 Object Lock that this
+// repository made and that are not true.
+//
+//   - A retained object refusing an overwrite. It does not: Object Lock requires
+//     versioning, and on a versioned bucket a repeat PUT is accepted and creates a
+//     new version. The old wording also promised the refusal would be visible in
+//     the sink's logs, so it described an observable that never appears.
+//   - Object Lock being enablable only when a bucket is created. AWS S3 and recent
+//     MinIO both allow it on an existing versioned bucket. The claim mattered
+//     because it was the stated reason `BucketIncompatible` is permanent, and that
+//     argument holds without it — enabling the lock is a human's operation either
+//     way.
+//
+// Both are scanned for rather than trusted to stay fixed, because each was
+// repeated across the API types, the write path, the controller, the examples and
+// the docs — nine places between them — and a claim that lives in nine places
+// comes back.
+var retiredObjectLockClaims = []struct {
+	name    string
+	pattern *regexp.Regexp
+	instead string
+}{
+	{
+		name:    "a locked object refusing an overwrite",
+		pattern: regexp.MustCompile(`(?i)(reject|refus)[a-z]*\s+the\s+overwrite`),
+		instead: "a versioned bucket accepts the retried PUT and keeps both versions; " +
+			"the deduplication a reader sees is of current versions",
+	},
+	{
+		name:    "Object Lock being creation-only",
+		pattern: regexp.MustCompile(`(?i)only[^.\n]{0,60}(at bucket creation|when a bucket is created|at creation time)`),
+		instead: "it is a bucket-level setting only a human on the account can turn on, " +
+			"at creation or afterwards on a versioned bucket",
+	},
+}
+
+// allowedToNameRetiredObjectLockClaims are the files whose job is to say what the
+// claim was — the same bargain the two scans above strike with the migration
+// record.
+var allowedToNameRetiredObjectLockClaims = map[string]string{
+	"docs/RETENTION.md": "the page that retracts them, and quotes what they said",
+	"internal/sink/s3/awsstore/writer_minio_integration_test.go": "the test that disproves the first " +
+		"claim against a real locked bucket, which has to state what it disproves",
+	"kuberecord-backlog-v0.2.md": "the roadmap that specified the correction",
+	"task.md":                    "the task brief handed to the agent",
+	"test/docs/docs_test.go":     "this test",
+}
+
+// TestNoRetiredObjectLockClaims is the negative half: the imprecise version of
+// the WORM story must not survive anywhere that a reader would take as
+// instruction.
+//
+// It is a repository-wide scan and not a docs-only one on purpose. The claim that
+// caused this task was in a Go doc comment on an API type, which is the least
+// likely place anyone rereads and the most likely place a future contributor
+// copies from.
+func TestNoRetiredObjectLockClaims(t *testing.T) {
+	walkRepositoryText(t, func(rel, content string) {
+		if _, exempt := allowedToNameRetiredObjectLockClaims[rel]; exempt {
+			return
+		}
+		for _, claim := range retiredObjectLockClaims {
+			for _, loc := range claim.pattern.FindAllStringIndex(content, -1) {
+				t.Errorf("%s:%d states the retired claim that %s. It is not true: %s. See docs/RETENTION.md.",
+					rel, lineOf(content, loc[0]), claim.name, claim.instead)
+			}
+		}
+	})
+}
+
+//
 // The README says what it must, and every link resolves
 //
 
@@ -428,7 +826,18 @@ func TestREADMEStructure(t *testing.T) {
 	}
 
 	// The four reference documents the acceptance criteria name explicitly.
-	for _, doc := range []string{"docs/SCHEMA.md", "docs/RBAC.md", "docs/PERFORMANCE.md", "docs/QUERIES.md"} {
+	for _, doc := range []string{
+		"docs/SCHEMA.md", "docs/RBAC.md", "docs/PERFORMANCE.md", "docs/QUERIES.md",
+		// The tee page is linked from the feature list rather than only from the
+		// documentation index (Task 7.1): a reader deciding whether kuberecord can
+		// give them both a queryable timeline and a compliance archive is reading the
+		// feature list, and the answer is a pattern rather than a setting.
+		"docs/TEE.md",
+		// And the retention page beside it (Task 7.3), because the same reader is the
+		// one being told the archive is WORM-capable: the page that qualifies that
+		// claim has to be reachable from where the claim is made.
+		"docs/RETENTION.md",
+	} {
 		t.Run("links "+doc, func(t *testing.T) {
 			if !strings.Contains(readme, "("+doc+")") {
 				t.Errorf("README.md no longer links %s", doc)
@@ -438,6 +847,9 @@ func TestREADMEStructure(t *testing.T) {
 
 	if !strings.Contains(readme, "examples/quickstart/") {
 		t.Error("README.md no longer points at examples/quickstart/")
+	}
+	if !strings.Contains(readme, "examples/tee/") {
+		t.Error("README.md no longer points at examples/tee/, the runnable half of the tee pattern")
 	}
 }
 
@@ -480,6 +892,7 @@ func publishedPages(t *testing.T) []string {
 		"README.md",
 		"CHANGELOG.md",
 		"examples/quickstart/README.md",
+		"examples/tee/README.md",
 		"deploy/charts/kuberecord/README.md",
 	}
 	entries, err := os.ReadDir(repoPath("docs"))

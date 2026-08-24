@@ -3,11 +3,11 @@
 All notable changes to kuberecord are recorded here. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-The project carries three version numbers that move independently — the
-operator's, the CRDs' (`v1alpha1`) and the ClickHouse schema's (`v1`, frozen) —
-and [`docs/RELEASING.md`](docs/RELEASING.md) is the policy for all three. The
-short version: the operator is pre-1.0, so while it is `v0.x` a **minor bump may
-break**, and every break is spelled out below.
+The project carries four version numbers that move independently — the operator's,
+the CRDs' (`v1alpha1`), the ClickHouse schema's (`v1`, frozen) and the S3 object
+format's (`jsonl-v1`, frozen) — and [`docs/RELEASING.md`](docs/RELEASING.md) is the
+policy for all four. The short version: the operator is pre-1.0, so while it is
+`v0.x` a **minor bump may break**, and every break is spelled out below.
 
 Every tagged release must have a section here. `hack/changelog-section.sh` reads
 it, the release workflow refuses to publish a tag that lacks one, and what it
@@ -15,6 +15,180 @@ reads becomes the GitHub Release body — so this file *is* the release notes ra
 than a summary of them.
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.2.0] - 2026-08-24
+
+The release that makes kuberecord multi-backend. Phase 4 rebuilt the sink
+reference into a typed `(kind, name)` identity so that a second backend could
+exist without colliding with the first, Phase 5 turned the sink contract into an
+executable conformance suite so that every backend is held to it rather than to a
+reading of it, Phase 6 added `S3Sink` — the first `Writer`-only archive tier —
+and Phase 7 made the result usable and its compliance claim checkable.
+
+Two things break for anyone running from `main`, both spelled out under
+**Changed**: a rule's sink reference, and the Helm chart's sink values. The
+migration is at the bottom of this section.
+
+### Added
+
+- **A second backend: `S3Sink`, an immutable archive tier.** The same cluster
+  state kuberecord streams into ClickHouse can now be streamed into S3, or into
+  anything that speaks its API — MinIO, and the on-premises stores beside it.
+  `S3Sink` is a cluster-scoped CRD like `ClickHouseSink`, and the reference to
+  one is spelled `sink: {kind: S3Sink, name: …}`.
+
+  Its objects are its batches. Records accumulate in memory and are closed and
+  PUT when `spec.rotation.maxObjectBytes` (64Mi) or `spec.rotation.maxObjectAge`
+  (5m) fires, whichever comes first — there is no `batchMaxRows`/`batchMaxWait`
+  pair for this backend, because the object *is* the batch and two sets of
+  controls over one decision would leave an author guessing which one won. Each
+  object is JSON Lines, one `sink.Record` per line under the Record's own field
+  names, zstd-compressed, at a key built from the record content:
+
+  ```
+  <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<content-hash>.jsonl.zst
+  ```
+
+  The hash in the key is what makes a retry safe: a re-sent batch is the same
+  bytes at the same key, so the archive a reader sees holds one copy of it
+  regardless of how many times the network took the acknowledgement away. Scope
+  events are filed under `scopes/` alongside. The layout is deliberately the one
+  a query engine partitions on, and it is a **versioned contract of its own**
+  (`format=jsonl-v1`, D15) — not covered by the ClickHouse schema v1 freeze, and
+  free to gain siblings without disturbing it.
+
+  Authentication has a preferred shape and a supported one. Omit
+  `spec.credentials` entirely and the sink builds its client from the ambient
+  chain — IRSA, workload identity, an instance role — so no long-lived key exists
+  to leak or rotate; that is the recommendation on a cloud provider. Name a
+  Secret (`accessKeyId`, `secretAccessKey`) instead where there is no ambient
+  identity to use. `spec.endpoint` and `spec.forcePathStyle` are what point the
+  sink at MinIO.
+
+  Writes are asynchronous, exactly as ClickHouse's are: no `PUT` ever happens on
+  a workqueue worker (Invariant 1). Because each writer worker accumulates an
+  object of its own, `spec.writer.workers × spec.rotation.maxObjectBytes` is the
+  sink's steady-state memory ceiling, and the pair is capped at 4Gi at admission
+  — both fields' individual bounds are reasonable and multiply into something
+  that is not. The sink reports `Ready`, `CredentialsResolved`,
+  `BucketReachable` — probed once a minute by writing a probe object, because a
+  bucket that lists is not necessarily a bucket that accepts writes — and
+  `HistoryUnavailable`, below. Every field is documented in
+  [`docs/CRDS.md`](docs/CRDS.md), the object format in
+  [`docs/SCHEMA.md`](docs/SCHEMA.md).
+
+  **kuberecord never creates the bucket**, and will not: a bucket carries
+  retention, encryption, lifecycle and Object Lock settings that belong to
+  whoever owns the account, and an operator that created its own would create one
+  with none of them.
+
+- **A `Writer`-only sink says so, permanently and out loud.** `S3Sink` cannot
+  read back what it wrote (D12). That single limit has consequences an operator
+  must not have to discover from a graph: dedup-cache warm-up, zombie garbage
+  collection and boot reconciliation of scope epochs are all disabled for such a
+  sink, so after a restart every object in scope is re-recorded as a full
+  `Snapshot` rather than de-duplicated against history. (While the process is
+  watching, changes are still written as `Modified` records carrying a patch,
+  exactly as on the ClickHouse side — it is the *first* sighting after a restart
+  that differs.)
+
+  So it is reported rather than inferred. The sink carries
+  `HistoryUnavailable=True` with reason `WriterOnlySink` — a condition whose
+  `True` is the healthy state, which is why it is deliberately left out of the
+  `Ready` roll-up: `Ready` stays `True`, because nothing is wrong. Every rule
+  bound to such a sink mirrors the condition onto its own status, so the
+  operator's-eye view of a rule says what its backend cannot do, and a `Warning`
+  event is emitted the first time. Silent degradation is the failure mode this
+  release most wanted not to ship (Invariant 5).
+
+- **The tee pattern: both, without choosing.** A rule targets exactly one sink,
+  permanently (D14). To have a queryable timeline *and* a cheap immutable
+  archive, write two rules over the same resources — one naming a
+  `ClickHouseSink`, one naming an `S3Sink`. This is nearly free: the informer
+  cache, the watch, the normalization and the hashing are shared, and only the
+  write half doubles.
+
+  It is documented in [`docs/TEE.md`](docs/TEE.md), including the ways the two
+  halves are *not* equivalent, and shipped as a runnable example in
+  [`examples/tee/`](examples/tee/) — MinIO, both sinks, both rules and a workload
+  to change — which CI stands up and asserts on rather than leaving as prose.
+
+- **A Sink Conformance Suite, and it gates every backend.** The properties in the
+  sink contract — most of all that `commit(ok)` fires exactly once per job on
+  every path, including rotation flush, retry and drain — were provable only for
+  ClickHouse. With one backend that is redundant; with two it is dangerous, since
+  a double commit corrupts the pipeline's version-gated dedup cache *silently*:
+  the audit trail simply stops recording an object's changes, with nothing in the
+  logs to say so.
+
+  `internal/sink/conformance` is those properties as an executable suite, written
+  against the sink interfaces alone and naming no backend (D11). The mandatory
+  `Writer` half applies to everything. The optional halves — `StateReader`,
+  `ScopeEventWriter`, `Prober` — are declared by each backend's harness and
+  checked against the same type assertion the runtime makes: the suite runs a
+  half when the claim and the backend agree it is there, says so by name when
+  they agree it is not, and **fails the build when they disagree in either
+  direction**. A capability that is quietly dropped, or quietly claimed, cannot
+  reach a release. Both shipped backends run it.
+
+- **Reading the archive: DuckDB recipes and an Athena table.**
+  [`docs/QUERIES.md`](docs/QUERIES.md) gains a section for the S3 side — session
+  setup, a day of the archive, one object's timeline, changes by actor, activity
+  by namespace, which objects cover a time window, and whether anybody was
+  watching — plus the Athena DDL for the same layout. An archive nothing can read
+  is a write-only black hole, and this is the read path an `S3Sink` has, since
+  the sink itself has none.
+
+  Every DuckDB recipe is **executed against a real object store in CI**, against
+  an archive the real writer produced, and is required to return rows — a recipe
+  that parses but selects nothing fails. The Athena DDL is held against the
+  record contract column by column instead: nothing in CI speaks to Athena, and
+  the check is honest about which of the two claims it is making.
+
+- **Object Lock, and a compliance story that states its limits.**
+  `spec.objectLock` applies S3 Object Lock retention to every object at PUT time
+  — `GOVERNANCE`, which a holder of the bypass permission can lift, or
+  `COMPLIANCE`, which nobody can, including the account root, until the date
+  passes. Object Lock must already be enabled on the bucket, which is a human's
+  operation on the account; a sink asking for retention against a bucket without
+  it reports `BucketReachable=False`/`BucketIncompatible` rather than writing
+  unprotected objects.
+
+  [`docs/RETENTION.md`](docs/RETENTION.md) is the page for it, and it is as
+  explicit about what this does not buy as about what it does: kuberecord signs
+  nothing, the operator's own credential can always write *new* objects, Object
+  Lock prevents destruction rather than concealment, redaction stays
+  forward-only, and an absence in the archive is not evidence of absence. It also
+  covers the one non-obvious consequence — an Object Lock bucket is versioned, so
+  a retried upload is *accepted* and can leave a second, byte-identical version
+  that under `COMPLIANCE` nobody can remove until its date passes.
+
+- **Releases are signed, attested and described.** A tag now publishes evidence
+  alongside the artifacts, which is the least a project about tamper-evident
+  audit can do for its own supply chain:
+
+  - The image carries a **keyless cosign signature** — over the manifest list and
+    over each per-platform manifest, so the digest a cluster actually resolves is
+    the one that verifies. There is no key: the signature is bound to a
+    short-lived certificate naming the release workflow at the tag that made it.
+  - The image and **every attached asset** carry **SLSA build provenance**. The
+    artifacts' attestation is generated from `checksums.txt` itself, so the set of
+    files that is checksummed and the set that is attested cannot drift apart. The
+    image's is also pushed into the registry beside the image, so it survives a
+    mirror.
+  - An **SPDX 2.3 SBOM** of the published image is attached to the release and
+    covered by `checksums.txt`.
+
+  The verification commands — and, in as many words, what they do *not* prove —
+  are [`docs/VERIFYING.md`](docs/VERIFYING.md). The short version of the limit: a
+  verified image says the operator is the one this project built. It says nothing
+  about the rows and objects that operator writes, which kuberecord does not sign
+  (see [`docs/RETENTION.md`](docs/RETENTION.md)).
+
+  `v0.1.0` predates this and has `checksums.txt` only; there is no signature to
+  look for on it.
 
 ### Changed
 
@@ -128,6 +302,39 @@ than a summary of them.
   template it rather than pinning a value); only expressions you wrote yourself
   are affected. See [`docs/OPERATING.md`](docs/OPERATING.md).
 
+- **The Helm chart's starter sink is now a `sinks` list** (breaking).
+  `createDefaultSink` and the `defaultSink` block are gone; the chart takes a
+  list of sinks instead, one entry per CR:
+
+  ```yaml
+  sinks:
+    - kind: ClickHouseSink
+      name: hot
+      spec:
+        connection:
+          addr: clickhouse.kuberecord-system.svc:9000
+          credentialsSecretRef:
+            name: clickhouse-credentials
+    - kind: S3Sink
+      name: cold
+      spec:
+        bucket: kuberecord-archive
+  ```
+
+  The old values could express exactly one sink, of exactly one kind, through a
+  value per field — a shape that would need a new block per backend and a chart
+  release to reach a field somebody needed. An entry is now `{kind, name, spec}`
+  with the **spec passed through verbatim**, so every field of every sink CRD is
+  reachable, a future backend needs no chart change, and what is *valid* is
+  decided by the CRD's own schema and CEL rules (D4) rather than by a second copy
+  of them in the chart that could drift. The tee pattern above is two entries.
+
+  There is no shim: an install still setting `createDefaultSink` renders no sink
+  at all, silently, because Helm ignores values a chart does not use. Convert it
+  before upgrading — the mapping is one-to-one and is in **Migration** below. The
+  chart still **never creates a Secret**, at any values, and no sink spec carries
+  a credential inline; both kinds name one instead.
+
 ### Migration
 
 Upgrading from v0.1.0 requires one manual step, because a rule's sink reference
@@ -154,6 +361,25 @@ old field:
    unchanged objects are not re-recorded.
 
 Then update any Prometheus expression that matched a `sink` label value exactly.
+
+If you install with the Helm chart and had `createDefaultSink: true`, convert the
+values in the same pass — the fields map one-to-one onto the first entry of the
+new list, and nothing about the rendered CR changes:
+
+| v0.1.0 | v0.2.0 |
+|---|---|
+| `createDefaultSink: true` | one entry in `sinks` |
+| `defaultSink.name` | `sinks[0].name` |
+| `defaultSink.connection.*` | `sinks[0].spec.connection.*` |
+| `defaultSink.writer` | `sinks[0].spec.writer` |
+| `defaultSink.policy` | `sinks[0].spec.policy` |
+
+plus `kind: ClickHouseSink` on the entry, which the old values had no way to say.
+A stale `createDefaultSink` is not an error and will not be reported: Helm ignores
+values a chart does not use, so the sink simply stops being rendered. Since the
+chart's `crds/` is installed but never upgraded by Helm, apply the CRDs
+explicitly first — `kubectl apply -f deploy/charts/kuberecord/crds/` — or the
+`S3Sink` kind will not exist to create.
 
 ## [0.1.0] - 2026-08-03
 
@@ -668,5 +894,6 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/yelzhy/kuberecord/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yelzhy/kuberecord/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yelzhy/kuberecord/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yelzhy/kuberecord/releases/tag/v0.1.0
