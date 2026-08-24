@@ -3,9 +3,10 @@
 **Git blame for your Kubernetes cluster.**
 
 A Kubernetes operator that streams every observed state change of the resources
-you name — `Added`, `Modified`, `Deleted` — into ClickHouse as immutable,
-append-only rows. So "what did this look like five minutes before it broke?" has
-an answer, and answering it is a query rather than an archaeology project.
+you name — `Added`, `Modified`, `Deleted` — into the sink you choose, as
+immutable, append-only records. So "what did this look like five minutes before
+it broke?" has an answer, and answering it is a query rather than an archaeology
+project.
 
 ```console
 $ make quickstart
@@ -45,6 +46,14 @@ rather than a live-only snapshot or a firehose of duplicates.
 The watched set is never a compiled-in list. Extending coverage to another
 built-in type or to your own CRDs is a custom resource and an RBAC grant — a
 configuration change, applied to a running operator, with no restart.
+
+Where those records land is a per-rule choice. A `ClickHouseSink` gives you the
+queryable timeline the queries below run against; an `S3Sink` gives you a cheap,
+compressed, optionally WORM-locked archive of the same stream — and one watch can
+feed both at once, which is the tee pattern ([`docs/TEE.md`](docs/TEE.md), runnable
+at [`examples/tee/`](examples/tee/)). What an immutable archive is worth, and
+precisely what kuberecord does *not* promise about it, is
+[`docs/RETENTION.md`](docs/RETENTION.md).
 
 ### This is not your audit log, and does not replace it
 
@@ -223,6 +232,7 @@ Two tiers, in the Prometheus-Operator shape: a control plane that decides what
 
 ```text
   ClickHouseSink ─┐                        CONTROL PLANE
+  S3Sink ─────────┤
   StreamRule ─────┼──▶  reconcilers ── validate intent · resolve credentials
   ClusterStreamRule┘         │           check RBAC (SelfSubjectAccessReview)
                              │           report status conditions
@@ -242,16 +252,19 @@ Two tiers, in the Prometheus-Operator shape: a control plane that decides what
                                        → diff → reserve a cache version
                              │  bounded, non-blocking hand-off
                              ▼
-       sink writer ── batched inserts, backoff retries, version-gated commit
+       sink writer ── batched inserts or rotated objects, backoff retries,
+                      version-gated commit
                              │
-                             ▼
-                    ClickHouse ── resource_states · watch_scopes
+       ┌─────────────────────┴─────────────┐
+       ▼                                   ▼
+       ClickHouse ── resource_states       S3 ── format=jsonl-v1/…/*.jsonl.zst
+                      · watch_scopes             · scopes/
 ```
 
 Four properties are worth knowing before you read anything else:
 
 - **Nothing blocks the hot path.** No informer handler, worker or reconciler ever
-  waits on ClickHouse. A slow or absent database costs a status condition and a
+  waits on a sink. A slow or unreachable backend costs a status condition and a
   growing queue, never a stalled watch — and never a restart.
 - **A stopped watch is not a deletion.** When the last rule wanting a scope goes
   away, that is recorded in `watch_scopes` as `Stopped` — and **no** `Deleted`

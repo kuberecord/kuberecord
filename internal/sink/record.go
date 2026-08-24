@@ -16,10 +16,22 @@ limitations under the License.
 
 // Package sink defines the backend-agnostic contract every kuberecord storage
 // backend implements. The pipeline (reconcilers, cache warm-up) depends only on
-// these interfaces and value types, never on a concrete driver, so a future
-// backend (Postgres, Elasticsearch, Kafka) is a new implementation of Writer /
-// ScopeEventWriter / StateReader rather than a change to the hot path.
-// ClickHouse is the only implementation today (see internal/sink/clickhouse).
+// these interfaces and value types, never on a concrete driver, so a further
+// backend — Postgres, Elasticsearch, Kafka, all still genuinely future — is a new
+// implementation of Writer / ScopeEventWriter / StateReader rather than a change
+// to the hot path.
+//
+// Two implementations ship today, and between them they are the evidence that the
+// contract's optional halves are real rather than theoretical. ClickHouse
+// (internal/sink/clickhouse) implements all four: Writer, StateReader,
+// ScopeEventWriter and Prober. S3 (internal/sink/s3) implements every half except
+// StateReader, because an archive tier cannot read its own history back — what
+// that costs, and why it is a declared limit rather than a gap, is documented once
+// at internal/sink/s3/instance.go and in docs/TEE.md rather than restated here.
+//
+// A backend is therefore free to implement as little as Writer. That is the point
+// of splitting the contract: the pipeline asks what a sink can do instead of
+// assuming, and a sink that can do less degrades visibly rather than silently.
 package sink
 
 import "time"

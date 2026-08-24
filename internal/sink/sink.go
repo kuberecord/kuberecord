@@ -24,13 +24,14 @@ import (
 // Job is a single record submitted to a Writer, together with the callback that
 // settles its outcome.
 //
-// commit is invoked by a CHWriter worker exactly once, only after the write
-// has been durably confirmed or definitively abandoned after retries — it is
-// the sole place cache mutation for that job's object is allowed to happen,
+// commit is invoked by one of the Writer's own workers exactly once, only after
+// the write has been durably confirmed or definitively abandoned after retries —
+// it is the sole place cache mutation for that job's object is allowed to happen,
 // so a failed write can never be mistaken for a persisted one.
 //
-// (The wording above is preserved verbatim from the original writeJob contract:
-// every Writer implementation must uphold it, whatever its backend.)
+// (The guarantee above is the original writeJob contract, generalised only in
+// whose worker fires it: every Writer implementation must uphold it, whatever its
+// backend.)
 type Job struct {
 	// Record is the row to persist.
 	Record Record
@@ -39,9 +40,17 @@ type Job struct {
 	Commit func(ok bool)
 }
 
-// Writer is the write half of a sink: a bounded, asynchronous hand-off that
-// decouples record persistence from the caller's hot path. ClickHouse is the
-// only implementation today (see internal/sink/clickhouse).
+// Writer is the write half of a sink, and the only half a backend is obliged to
+// implement: a bounded, asynchronous hand-off that decouples record persistence
+// from the caller's hot path. StateReader, ScopeEventWriter and Prober are all
+// optional, discovered by type assertion at registration (see Factory).
+//
+// A compliant implementation need not be a database. Two ship today: ClickHouse
+// (internal/sink/clickhouse), which inserts batched rows, and S3
+// (internal/sink/s3), which accumulates records into a compressed object and PUTs
+// it on rotation. What makes both of them Writers is this interface's contract —
+// never blocking the caller, and settling every job exactly once — rather than
+// anything they share about storage or a query language.
 type Writer interface {
 	// Start runs the Writer's worker pool until ctx is cancelled, then shuts
 	// down in a strict order so no write is ever stranded or raced against

@@ -39,7 +39,8 @@ const (
 )
 
 // ScopeEvent is one watch-scope epoch transition, destined for the sink's scope
-// log (the watch_scopes table in ClickHouse).
+// log — the watch_scopes table in ClickHouse, the scopes/ partition of an S3
+// archive.
 //
 // It is a first-class record type rather than a Record with a special
 // event_type: a scope transition has no object identity, no content hash and no
@@ -96,12 +97,15 @@ type ScopeEvent struct {
 // rows — high-volume, batched in the thousands, settled through the
 // version-gated commit contract. Scope transitions are rare (one per rule
 // lifecycle edge), have no cache state to settle, and must never queue behind a
-// backlog of object rows, so the ClickHouse implementation gives them their own
-// small batcher and retry queue rather than overloading the record path.
+// backlog of object rows, so each backend gives them their own small batcher and
+// retry queue rather than overloading the record path (clickhouse/scopewriter.go,
+// s3/scopewriter.go).
 //
-// Like Writer, it is optional for a future backend: a sink that cannot record
-// scope epochs simply never receives them, and the operator's audit trail loses
-// the epoch distinction for that sink alone.
+// It is optional, as every half beside Writer is: a sink that cannot record scope
+// epochs simply never receives them, and the operator's audit trail loses the
+// epoch distinction for that sink alone. Both shipped backends do implement it —
+// which is not the same as both reading it back, since an S3 archive's scope log
+// is written but never queried (D12, see StateReader).
 type ScopeEventWriter interface {
 	// EnqueueScopeEvent submits one transition without blocking the caller on
 	// the sink round-trip. The returned error means the event was not accepted

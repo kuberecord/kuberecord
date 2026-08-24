@@ -171,9 +171,9 @@ type InstanceConfig interface {
 //
 // The manager owns every lifecycle concern (starting, routing, draining,
 // probing) and the factory owns every backend concern (which driver, which
-// connection, which schema), which is the seam D6 anticipates: adding a
-// PostgresSink means supplying a second factory branch at wiring time, not
-// changing anything here.
+// connection, which schema), which is the seam D6 anticipates: S3Sink was added
+// by supplying one more factory branch at wiring time and changing nothing here,
+// and a PostgresSink would be added the same way.
 //
 // id is passed so the instance can label its own metrics with the sink it serves
 // (see pipeline.PipelineMetrics.ForSink, whose label value is ID.String()) — the
@@ -201,9 +201,12 @@ type Prober interface {
 	Probe(ctx context.Context) error
 }
 
-// ProbeResult is one probe attempt's outcome, destined for the SinkReconciler's
-// event channel (Task 1.7) where it becomes the CredentialsResolved / SchemaValid
-// / Ready conditions on the ClickHouseSink CR.
+// ProbeResult is one probe attempt's outcome, destined for the sink reconciler's
+// event channel (Task 1.7) where it becomes the CredentialsResolved and Ready
+// conditions on the sink CR, together with that backend's own reachability
+// condition: SchemaValid on a ClickHouseSink, BucketReachable on an S3Sink. The
+// reason strings below are shared; which condition carries them is the
+// reconciler's business, not this package's.
 //
 // This package deliberately stops at the channel: 1.8 lands before the
 // reconciler exists, and a sink runtime that wrote CR status itself would put a
@@ -606,9 +609,9 @@ func (m *SinkManager) Start(ctx context.Context) error {
 // runs only on the elected leader.
 //
 // A non-leader has no data plane to serve — the WatchManager and the pipeline are
-// leader-gated for the same reason — so holding open a ClickHouse connection per
-// sink CR on every replica would buy nothing and cost a connection, a probe
-// round-trip and a set of duplicate per-sink metric series each.
+// leader-gated for the same reason — so holding open a backend connection per sink
+// CR on every replica would buy nothing and cost a connection, a probe round-trip
+// and a set of duplicate per-sink metric series each.
 func (m *SinkManager) NeedLeaderElection() bool { return true }
 
 // Ensure declares that the sink identified by id must be running with cfg.

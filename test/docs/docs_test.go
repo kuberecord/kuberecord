@@ -101,13 +101,27 @@ var bannedConfig = []struct {
 // migrated from would be useless, so they are exempt — and the exemption is a
 // short, explicit list rather than a pattern, so adding to it is a decision
 // somebody makes on purpose.
+//
+// One rule governs this map and the two like it below, because the suite that
+// exists to prevent rot is the last place rot should be allowed to sit: an
+// exemption may only name a file that is tracked in the repository. A file listed
+// in .gitignore is absent from every clone and from CI, so an exemption for it can
+// never fire there — it is dead configuration, and it tells a reader the file
+// ships with the project when it does not. That is what the kuberecord-backlog-*
+// entries were, and why they are gone; do not re-add them because a local copy of
+// a backlog makes your own run red.
+//
+// CLAUDE.md and task.md are the deliberate exception, and the only one, in the
+// maps that name them: they are gitignored, but they are the agent-workflow files,
+// present in the working tree of every session that runs this suite, and they
+// legitimately quote the retired names in order to record what replaced them.
+// (This map names CLAUDE.md only. It previously carried a "task.txt" entry for a
+// file that has never existed under that name in this repository, which is why a
+// working tree holding a task.md reports it here.)
 var allowedToNameBannedConfig = map[string]string{
-	"CHANGELOG.md":               "the removal record and its migration table",
-	"kuberecord-backlog-v0.1.md": "the roadmap that specified the removal",
-	"kuberecord-backlog-v0.2.md": "the roadmap that carries it forward",
-	"CLAUDE.md":                  "the contributor guide, where D5 records what was removed",
-	"task.txt":                   "the task brief handed to the agent",
-	"test/docs/docs_test.go":     "this test",
+	"CHANGELOG.md":           "the removal record and its migration table",
+	"CLAUDE.md":              "the contributor guide, where D5 records what was removed",
+	"test/docs/docs_test.go": "this test",
 }
 
 // skippedDirs are directories with nothing user-facing in them: build output,
@@ -225,13 +239,11 @@ var legacySinkRefField = regexp.MustCompile(`\bsinkRef\b`)
 // exemption is a short, explicit list rather than a pattern — adding to it is a
 // decision somebody makes on purpose, and each entry says what earns it.
 var allowedToNameLegacySinkRef = map[string]string{
-	"CHANGELOG.md":                                      "the release record and its migration steps",
-	"docs/UPGRADING.md":                                 "the upgrade page: it must name what to replace",
-	"CLAUDE.md":                                         "the contributor guide, where D10 records the rename",
-	"kuberecord-backlog-v0.1.md":                        "the roadmap that specified the field",
-	"kuberecord-backlog-v0.2.md":                        "the roadmap that specified its removal",
-	"task.md":                                           "the task brief handed to the agent",
-	"internal/controller/conditions.go":                 "the LegacySinkRef reason, documented",
+	"CHANGELOG.md":                      "the release record and its migration steps",
+	"docs/UPGRADING.md":                 "the upgrade page: it must name what to replace",
+	"CLAUDE.md":                         "the contributor guide, where D10 records the rename",
+	"task.md":                           "the task brief handed to the agent",
+	"internal/controller/conditions.go": "the LegacySinkRef reason, documented",
 	"internal/controller/streamrule_controller.go":      "the legacy guard's condition message",
 	"internal/controller/streamrule_controller_test.go": "asserts that message names it",
 	"internal/controller/suite_test.go":                 "stages what an upgrade leaves in etcd",
@@ -763,9 +775,8 @@ var allowedToNameRetiredObjectLockClaims = map[string]string{
 	"docs/RETENTION.md": "the page that retracts them, and quotes what they said",
 	"internal/sink/s3/awsstore/writer_minio_integration_test.go": "the test that disproves the first " +
 		"claim against a real locked bucket, which has to state what it disproves",
-	"kuberecord-backlog-v0.2.md": "the roadmap that specified the correction",
-	"task.md":                    "the task brief handed to the agent",
-	"test/docs/docs_test.go":     "this test",
+	"task.md":                "the task brief handed to the agent",
+	"test/docs/docs_test.go": "this test",
 }
 
 // TestNoRetiredObjectLockClaims is the negative half: the imprecise version of
