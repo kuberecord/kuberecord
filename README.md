@@ -294,6 +294,21 @@ with checksums, if you would rather install a tag than a checkout:
 kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.1.0/install.yaml
 ```
 
+From v0.2.0 the image is signed with cosign, the image and every attached asset
+carry SLSA build provenance, and an SBOM ships beside them — worth checking before
+you run an operator that will watch your whole cluster:
+
+```sh
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0 \
+  ghcr.io/yelzhy/kuberecord:v0.2.0
+```
+
+[`docs/VERIFYING.md`](docs/VERIFYING.md) has the rest — provenance, the SBOM,
+checksums, and what a signature on the operator does *not* say about the records
+it writes.
+
 The operator is pre-1.0 — while it is `v0.x` a minor bump may break, and every
 break is spelled out in [`CHANGELOG.md`](CHANGELOG.md). The ClickHouse schema
 carries no such caveat: it is frozen at `v1`. The three version numbers and what
@@ -365,6 +380,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Building, the make targets, and what each test suite proves. |
 | [`docs/RELEASING.md`](docs/RELEASING.md) | What a version number promises: the operator's `v0.x` (pre-1.0, a minor may break), the CRDs' `v1alpha1`, and the frozen schema `v1` — three numbers that move independently. Plus what a tagged release publishes and how to cut one. |
+| [`docs/VERIFYING.md`](docs/VERIFYING.md) | Checking a release before you run it: the keyless `cosign verify` command with the issuer and identity to pin, the SLSA provenance attestation for the image and for every asset, the SBOM, and `checksums.txt`. Plus the limit that matters — a signed *operator* is not a signed *audit trail*. |
 | [`docs/UPGRADING.md`](docs/UPGRADING.md) | What to do when a `v0.x` minor breaks: the version-by-version upgrade steps, with the exact `kubectl` sequence for each. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Including the migration table from the removed environment-variable configuration to the custom resources that replaced it. |
 

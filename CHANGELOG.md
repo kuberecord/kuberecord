@@ -16,6 +16,33 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- **Releases are signed, attested and described.** A tag now publishes evidence
+  alongside the artifacts, which is the least a project about tamper-evident
+  audit can do for its own supply chain:
+
+  - The image carries a **keyless cosign signature** — over the manifest list and
+    over each per-platform manifest, so the digest a cluster actually resolves is
+    the one that verifies. There is no key: the signature is bound to a
+    short-lived certificate naming the release workflow at the tag that made it.
+  - The image and **every attached asset** carry **SLSA build provenance**. The
+    artifacts' attestation is generated from `checksums.txt` itself, so the set of
+    files that is checksummed and the set that is attested cannot drift apart. The
+    image's is also pushed into the registry beside the image, so it survives a
+    mirror.
+  - An **SPDX 2.3 SBOM** of the published image is attached to the release and
+    covered by `checksums.txt`.
+
+  The verification commands — and, in as many words, what they do *not* prove —
+  are [`docs/VERIFYING.md`](docs/VERIFYING.md). The short version of the limit: a
+  verified image says the operator is the one this project built. It says nothing
+  about the rows and objects that operator writes, which kuberecord does not sign
+  (see [`docs/RETENTION.md`](docs/RETENTION.md)).
+
+  `v0.1.0` predates this and has `checksums.txt` only; there is no signature to
+  look for on it.
+
 ### Changed
 
 - **The project is renamed `kubestream` → `kuberecord`.** Nothing had been
