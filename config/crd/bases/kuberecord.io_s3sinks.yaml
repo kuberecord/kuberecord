@@ -175,6 +175,15 @@ spec:
                   ObjectLock applies per-object retention at PUT time. Omitted means objects
                   are written with no retention of their own, and the bucket's own lifecycle
                   and default-retention settings apply unchanged.
+
+                  Object Lock must already be enabled on the bucket; kuberecord cannot enable
+                  it and a sink asking for retention against a bucket without it reports
+                  BucketReachable=False/BucketIncompatible, permanently. Retention applies to
+                  object *versions*, and an Object Lock bucket is always versioned — so a
+                  retried write is accepted rather than refused and leaves one current version
+                  plus, at most, one byte-identical extra one. COMPLIANCE makes that extra
+                  version, and every object this sink writes, undeletable by anyone until its
+                  date passes. See docs/RETENTION.md before choosing a mode.
                 properties:
                   mode:
                     description: |-

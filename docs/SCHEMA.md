@@ -1040,11 +1040,20 @@ layout belong in every reader's mind:
   the sink's `spec.writer.maxObjectAge`** (default 5 minutes, ceiling 1 hour). The
   upper bound needs no widening: an object never holds a record from before its own
   first one.
-- **A retried upload is an overwrite, not a duplicate.** The same batch encodes to
-  the same payload and therefore the same key, so at-least-once delivery collapses
-  in the store itself. This is the archive's answer to `ReplacingMergeTree`, and it
-  is synchronous and exact where that one is eventual and best-effort — there is no
-  `FINAL` here because there is nothing to merge.
+- **A retried upload is not a duplicate.** The same batch encodes to the same
+  payload and therefore the same key, so at-least-once delivery collapses in the
+  store: one key, holding exactly those bytes, however many times the PUT was
+  attempted. This is the archive's answer to `ReplacingMergeTree`, and it is
+  synchronous and exact where that one is eventual and best-effort — there is no
+  `FINAL` here because there is nothing to merge. On a **versioned** bucket the
+  collapse is what a reader sees rather than what the bucket stores: S3 has no
+  idempotent PUT, so the retry is accepted and becomes the current version of that
+  key while the previous, byte-identical one is kept as a noncurrent version. It
+  costs storage and it changes nothing about the archive's content. Since Object
+  Lock requires versioning, this is the normal case for a compliance archive —
+  [`docs/RETENTION.md`](RETENTION.md#what-a-retried-upload-does-on-a-versioned-bucket)
+  has the consequences, including why `COMPLIANCE` makes that noncurrent version
+  undeletable.
 - **The hash covers the uncompressed payload, deliberately.** A compressor's output
   is not required to be bit-stable across library versions, so hashing the
   compressed bytes would silently re-key every object the first time the compression
@@ -1100,11 +1109,18 @@ Two properties differ from the record objects, and both matter to a reader:
 <prefix>/.kuberecord-probe
 ```
 
-One fixed key per sink, overwritten by every health probe, holding a fixed
+One fixed key per sink, rewritten by every health probe, holding a fixed
 self-describing line. It sits **outside** `format=jsonl-v1/` on purpose: it is the
 one object under the prefix that is not audit data, and a reader globbing the
 archive must never be handed it. Two sinks sharing a bucket under different prefixes
 probe through different keys, so neither reads the other's health as its own.
+
+On a versioned bucket each probe adds a *version* of that key rather than
+replacing it, at roughly one a minute. Only the first carries Object Lock
+retention, deliberately — see
+[`docs/RETENTION.md`](RETENTION.md#the-probe-object-writes-once-per-minute), which
+also covers why a bucket-wide default retention is the one setting that makes this
+expensive.
 
 ### What the archive does not contain
 

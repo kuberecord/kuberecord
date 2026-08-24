@@ -10,9 +10,10 @@
 # limit itself.
 #
 # kuberecord never creates the bucket. Retention, encryption, lifecycle and Object
-# Lock all belong to whoever owns the account, and Object Lock in particular can
-# only be enabled when a bucket is created. examples/tee/README.md has the one
-# command that makes this example's bucket exist.
+# Lock all belong to whoever owns the account, and Object Lock in particular is
+# irreversible once enabled and implies versioning — docs/RETENTION.md is what to
+# read before turning it on. examples/tee/README.md has the one command that makes
+# this example's bucket exist.
 apiVersion: kuberecord.io/v1alpha1
 kind: S3Sink
 metadata:
@@ -72,8 +73,8 @@ spec:
   # `objectLock` is deliberately absent. This example's MinIO has no Object Lock
   # configuration, and a sink asking for retention against a bucket that cannot
   # provide it reports BucketReachable=False/BucketIncompatible — permanent until
-  # a human changes the bucket or the spec. Enabling it is the subject of the
-  # retention documentation, not of this example.
+  # a human changes the bucket or the spec. Enabling it is the subject of
+  # docs/RETENTION.md, not of this example.
   #
   # batchMaxRows/batchMaxWait/checkpointEvery have no twin here either: for S3 the
   # object is the batch (spec.rotation governs it), and a Writer-only sink emits

@@ -138,7 +138,7 @@ deleted?" from the archive, and do not plan to keep the timeline for seven years
 
 **Compliance retention.** The common shape: 90 days of queryable history and
 seven years of immutable archive. ClickHouse is where an auditor's question gets
-answered in a second; the bucket, with Object Lock enabled at creation and a
+answered in a second; the bucket, with Object Lock enabled on it and a
 lifecycle policy underneath, is where the seven-year obligation is actually met —
 and it is a claim ClickHouse structurally cannot make. An append-only table is
 append-only only by convention: anyone who can reach the database can `ALTER
@@ -148,15 +148,18 @@ point, and also the trade you are making in the same breath. **Redaction is
 forward-only** ([`docs/SCHEMA.md`](SCHEMA.md#what-redaction-is-not)), so a value
 already archived under `COMPLIANCE`-mode Object Lock cannot be scrubbed *or*
 deleted before its retention expires.
+[`docs/RETENTION.md`](RETENTION.md) is that whole story: how to enable the lock,
+what the two modes actually protect against, and the limits of the claim — no
+signing, so it is not a chain of custody.
 
 **Disaster recovery.** The archive is the only copy that survives losing the
 ClickHouse cluster, and it survives it without a backup schedule: the objects
 were written once, are immutable, and are keyed by content hash, so a retried PUT
-overwrites itself and can never duplicate. Rebuilding a queryable timeline from
-it is a bulk load, not a restore — the objects are line-delimited records of the
-same logical shape every backend stores (D9), so nothing is lost, but there is no
-supported tool that does the load for you. Treat this as "the data survived", not
-"the service survives".
+lands on its own key and no reader ever sees a duplicate. Rebuilding a queryable
+timeline from it is a bulk load, not a restore — the objects are line-delimited
+records of the same logical shape every backend stores (D9), so nothing is lost,
+but there is no supported tool that does the load for you. Treat this as "the
+data survived", not "the service survives".
 
 **Data-lake integration.** `format=jsonl-v1/cluster_id=…/date=…/hour=…` is a
 Hive-style layout on purpose (D15), so the bucket is directly readable by DuckDB,
@@ -247,8 +250,10 @@ that was never written. Keep the two blocks adjacent in one file, and diff them.
 the sinks and `spec.extraRedaction` on the rules. Redaction happens before
 hashing, so a floor that is set on the hot sink and missing from the cold one
 puts the cleartext value in the bucket — where, being forward-only, it cannot be
-scrubbed later, and under Object Lock cannot be deleted either. Choosing an
-archive tier must never be a way around a sink's redaction floor.
+scrubbed later, and under Object Lock cannot be deleted either
+([`docs/RETENTION.md`](RETENTION.md#redaction-remains-forward-only) spells out how
+little remediation is left under each mode). Choosing an archive tier must never
+be a way around a sink's redaction floor.
 
 **3. The `allowedGVKs` policies must agree.** A kind admitted by one sink and
 refused by the other gives you `PolicyAllowed=False` on one rule and a silently
@@ -291,6 +296,9 @@ Write down why, next to the rules.
 - [`examples/tee/`](../examples/tee/) — this page, runnable.
 - [`docs/CRDS.md`](CRDS.md#historyunavailable--a-limit-not-a-fault) — the
   `HistoryUnavailable` condition and the D12 argument in full.
+- [`docs/RETENTION.md`](RETENTION.md) — making the cold half immutable: Object
+  Lock, the two retention modes, lifecycle rules, and what the WORM claim does
+  and does not cover.
 - [`docs/SCHEMA.md`](SCHEMA.md) — the `event_type` state machine, so `Snapshot`
   and `Added` mean something precise when you compare the two backends.
 - [`docs/QUERIES.md`](QUERIES.md) — the ClickHouse query library, which is what

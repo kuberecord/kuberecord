@@ -134,7 +134,11 @@ intentions:
   decompressed JSONL decodes to exactly the records enqueued, that a retried
   write leaves **one** object rather than a duplicate, that both rotation
   triggers fire independently, and that the Object Lock retention headers really
-  are on the object. It lives beside the AWS SDK because that is the only place
+  are on the object. One case is there because the documentation was wrong before
+  it existed: on an Object Lock bucket — versioned, necessarily — a retried write
+  is *accepted* rather than refused, so what it asserts is one **current** version
+  holding the right bytes while allowing the second, byte-identical version the
+  bucket keeps underneath ([`docs/RETENTION.md`](RETENTION.md#what-a-retried-upload-does-on-a-versioned-bucket)). It lives beside the AWS SDK because that is the only place
   the SDK and the shipped writer can meet — `internal/sink/s3` links no SDK by
   design, which is what keeps the write path testable against a stand-in store.
 

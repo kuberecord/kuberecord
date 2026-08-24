@@ -183,6 +183,11 @@ func TestDecompressedObjectsDecodeToTheRecordsEnqueuedIntegration(t *testing.T) 
 //
 // Two PUTs reaching the store is asserted as well, because "exactly one object"
 // is only evidence of idempotency if the write really was attempted twice.
+//
+// The bucket here is unversioned, which is why the count is exact: the second PUT
+// replaces the first and there is nothing kept underneath. On a versioned bucket —
+// which every Object Lock bucket is — the answer differs, and that is
+// TestARetriedObjectOnALockedBucketLeavesOneCurrentVersionIntegration below.
 func TestARetriedObjectLeavesExactlyOneObjectIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), itTimeout)
 	defer cancel()
@@ -219,6 +224,122 @@ func TestARetriedObjectLeavesExactlyOneObjectIntegration(t *testing.T) {
 	got := bucket.records(ctx, t)
 	if !reflect.DeepEqual(got, records) {
 		t.Fatalf("the surviving object is not the batch that was written:\n got: %#v\nwant: %#v", got, records)
+	}
+}
+
+// TestARetriedObjectOnALockedBucketLeavesOneCurrentVersionIntegration is the same
+// idempotency property on the bucket a compliance archive actually runs on, and it
+// exists because the answer there is different from the one above — different
+// enough that this project documented the wrong one until this test was written.
+//
+// The retired claim was that S3 refuses the overwrite of a retained object, so a
+// retried PUT would fail harmlessly and say so in the sink's logs. It does not.
+// Object Lock requires versioning, and on a versioned bucket S3 has no idempotent
+// PUT: the retry is *accepted*, creates a second version, and the retained one
+// keeps its own retention. Nothing is refused and nothing is logged. Had this test
+// existed, it would have failed under that belief in the most direct way possible
+// — the second PUT erroring means the writer retries to maxRetryBackoff and
+// settles the whole batch as a failed write, so log.assertSettledOnce below would
+// have reported five jobs settled false for objects that were sitting in the
+// bucket.
+//
+// So the property is asserted at both levels, because they disagree and both
+// matter:
+//
+//   - What a reader sees: exactly one *current* version at the key, holding
+//     exactly the batch. Every consumer of this archive reads current versions —
+//     ListObjectsV2, an unversioned GET, the documented DuckDB and Athena recipes
+//     — so this is the level at which "a retried write leaves one object" is true.
+//   - What the bucket stores: one or two versions of that key. Two is the expected
+//     answer on a versioned store and is what MinIO and S3 both do; one is what an
+//     implementation that really did collapse the write would leave, and it is not
+//     a failure of the writer, so it passes and is reported. Anything else is a
+//     duplicate the content-addressed key was supposed to make impossible.
+//
+// Every version is decoded, not just the current one, which is what makes the
+// duplicate provably harmless rather than merely invisible: both hold the same
+// batch and carry the same retention. docs/RETENTION.md is where the consequence
+// of that duplicate under COMPLIANCE is spelled out.
+func TestARetriedObjectOnALockedBucketLeavesOneCurrentVersionIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), itTimeout)
+	defer cancel()
+
+	locked := newBucket(ctx, t, true)
+	records := itRecords(5)
+	log := newCommitLog()
+
+	store := newFaultOnce(newITStore(t))
+	w := kbs3.NewWriter(store, kbs3.Config{
+		Bucket:         locked.name,
+		Prefix:         itPrefix,
+		MaxObjectBytes: 64 << 20,
+		MaxObjectAge:   time.Hour,
+		Workers:        1,
+		// One day is the CRD's floor and the shortest retention this can ask for.
+		// The suite's cleanup bypasses governance retention, so nothing is left
+		// behind either way — but asking for the minimum keeps that true even if a
+		// future run's cleanup cannot bypass.
+		ObjectLock: &kbs3.ObjectLock{Mode: itLockMode, RetainDays: 1},
+	}, itMetrics())
+
+	runWriter(t, w, func() {
+		enqueueAll(ctx, t, w, records, log)
+	})
+
+	// The retry was accepted by a bucket that already held a retained version of
+	// that exact key. This is the assertion the retired claim would have failed.
+	log.assertSettledOnce(t, len(records))
+	if got := store.attempts(); got != 2 {
+		t.Errorf("the store saw %d PUTs, want 2 (the lost-ack attempt and its retry)", got)
+	}
+
+	current := locked.recordObjects(ctx, t)
+	if len(current) != 1 {
+		t.Fatalf("a retried object left %d current record objects, want exactly 1: %v",
+			len(current), locked.keys(ctx, t))
+	}
+	decoded, err := kbs3.Decode(current[0].body)
+	if err != nil {
+		t.Fatalf("decode the current version of %q: %v", current[0].key, err)
+	}
+	if !reflect.DeepEqual(decoded, records) {
+		t.Fatalf("the current version of %q is not the batch that was written:\n got: %#v\nwant: %#v",
+			current[0].key, decoded, records)
+	}
+
+	versions, deleteMarkers := locked.versionIDsOf(ctx, t, current[0].key)
+	if deleteMarkers != 0 {
+		t.Errorf("key %q carries %d delete markers; nothing in this test deletes anything",
+			current[0].key, deleteMarkers)
+	}
+	switch len(versions) {
+	case 1:
+		t.Logf("the store collapsed the retried PUT into one version of %q", current[0].key)
+	case 2:
+		t.Logf("the store kept %d versions of %q, which is what a versioned bucket does with a retried PUT",
+			len(versions), current[0].key)
+	default:
+		t.Fatalf("key %q has %d versions, want 1 or 2 (the accepted PUT and its retry)",
+			current[0].key, len(versions))
+	}
+
+	// Both versions, if there are two, are the same object: same records, same
+	// retention. A retry that had rebuilt or re-dated anything would show up here
+	// and nowhere else.
+	for _, versionID := range versions {
+		obj := locked.objectVersion(ctx, t, current[0].key, versionID)
+		versionRecords, err := kbs3.Decode(obj.body)
+		if err != nil {
+			t.Fatalf("decode version %q of %q: %v", versionID, current[0].key, err)
+		}
+		if !reflect.DeepEqual(versionRecords, records) {
+			t.Errorf("version %q of %q holds %d records, want the %d that were enqueued",
+				versionID, current[0].key, len(versionRecords), len(records))
+		}
+		if obj.lockMode != itLockMode {
+			t.Errorf("version %q of %q reports lock mode %q, want %q: every accepted PUT carries the retention",
+				versionID, current[0].key, obj.lockMode, itLockMode)
+		}
 	}
 }
 
@@ -369,9 +490,9 @@ func recordNames(records []sink.Record) []string {
 // object in the bucket, and when it is not, the object carries none of its own.
 //
 // It runs against a bucket created with Object Lock enabled, because that is the
-// only kind that can hold a retained object — on S3 the setting exists solely at
-// bucket creation, which is exactly why kuberecord documents it as a prerequisite
-// it cannot satisfy for an operator (see v1alpha1.S3ObjectLockSpec).
+// only kind that can hold a retained object — a bucket-level setting kuberecord
+// documents as a prerequisite it cannot satisfy for an operator (see
+// v1alpha1.S3ObjectLockSpec and docs/RETENTION.md).
 //
 // GOVERNANCE, never COMPLIANCE: a COMPLIANCE-retained object cannot be deleted by
 // anyone until its date passes, including the suite that wrote it, so a run would
@@ -394,7 +515,7 @@ func TestObjectLockRetentionTravelsWithTheObjectIntegration(t *testing.T) {
 		MaxObjectBytes: 64 << 20,
 		MaxObjectAge:   time.Hour,
 		Workers:        1,
-		ObjectLock:     &kbs3.ObjectLock{Mode: "GOVERNANCE", RetainDays: retainDays},
+		ObjectLock:     &kbs3.ObjectLock{Mode: itLockMode, RetainDays: retainDays},
 	}, itMetrics())
 
 	runWriter(t, w, func() {
@@ -407,8 +528,8 @@ func TestObjectLockRetentionTravelsWithTheObjectIntegration(t *testing.T) {
 		t.Fatalf("bucket holds %d record objects, want exactly 1: %v", len(objects), locked.keys(ctx, t))
 	}
 	obj := objects[0]
-	if obj.lockMode != "GOVERNANCE" {
-		t.Errorf("object %q reports lock mode %q, want GOVERNANCE", obj.key, obj.lockMode)
+	if obj.lockMode != itLockMode {
+		t.Errorf("object %q reports lock mode %q, want %q", obj.key, obj.lockMode, itLockMode)
 	}
 	// The retention is resolved when the object is built, from the wall clock, so
 	// it lands between "retainDays from just before the write" and "retainDays from
@@ -513,7 +634,7 @@ func TestProbeWritesAndClassifiesAgainstARealBucketIntegration(t *testing.T) {
 		w := kbs3.NewWriter(newITStore(t), kbs3.Config{
 			Bucket:     bucket.name,
 			Prefix:     itPrefix,
-			ObjectLock: &kbs3.ObjectLock{Mode: "GOVERNANCE", RetainDays: 1},
+			ObjectLock: &kbs3.ObjectLock{Mode: itLockMode, RetainDays: 1},
 		}, itMetrics())
 
 		err := w.Probe(ctx)

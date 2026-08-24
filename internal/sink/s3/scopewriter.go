@@ -259,11 +259,13 @@ func (w *Writer) scopeWorker(ctx context.Context, log logr.Logger) {
 // happens once and is unrecoverable if lost.
 //
 // A retried batch is content-addressed exactly as a record object is, so the
-// retry of an unchanged batch overwrites its own object rather than adding a
-// second copy of the epoch. A batch that is *regrouped* by the retry queue (its
-// events flushed together with later ones) does produce a distinct object — which
-// is why a reader of the scope log must treat a transition as identified by its
-// fields, not by the object it arrived in.
+// retry of an unchanged batch lands on its own key rather than adding a second
+// copy of the epoch to the log a reader sees (on a versioned bucket that is one
+// current version out of two identical ones — see docs/RETENTION.md). A batch
+// that is *regrouped* by the retry queue (its events flushed together with later
+// ones) does produce a distinct object — which is why a reader of the scope log
+// must treat a transition as identified by its fields, not by the object it
+// arrived in.
 //
 //nolint:logcheck
 func (w *Writer) flushScopeBatch(ctx context.Context, log logr.Logger, batch []sink.ScopeEvent) {

@@ -85,9 +85,12 @@ var (
 // probeObjectKey is the key the health probe writes to, relative to the sink's
 // prefix.
 //
-// It is a fixed key so repeated probes overwrite one object instead of littering
-// the bucket, and it deliberately sits *outside* the format=jsonl-v1 partition so
-// that no reader's glob over the archive ever meets it: it is operational
+// It is a fixed key so repeated probes leave one object instead of littering the
+// bucket — one *current* object: on a versioned bucket each probe adds a version
+// of this key, which is why retention is carried on the first probe only (see
+// Probe) and why a bucket-wide default retention interacts badly with probing at
+// all (docs/RETENTION.md). It deliberately sits *outside* the format=jsonl-v1
+// partition so that no reader's glob over the archive ever meets it: it is operational
 // exhaust, not audit data, and an object with a different line shape inside the
 // records tree would break schema inference for every query engine pointed at it.
 const probeObjectKey = ".kuberecord-probe"
@@ -113,9 +116,9 @@ var probeBody = []byte(`{"probe":"kuberecord","purpose":"verifies this sink can 
 // ClickHouse backend gives a drifted table and means the same thing to whoever is
 // on call: this will not clear on its own, a human has to change something. The
 // case that exists is an S3Sink configured with spec.objectLock against a bucket
-// that has no Object Lock configuration — which on S3 can only be enabled when
-// the bucket is created, so no amount of waiting fixes it and every write this
-// sink attempts will fail identically. Everything else — refused connections,
+// that has no Object Lock configuration — which only a human on the account can
+// give it, so no amount of waiting fixes it and every write this sink attempts
+// will fail identically. Everything else — refused connections,
 // DNS, expired credentials, a 5xx — is reachability, reported unwrapped, and the
 // manager keeps retrying it.
 //

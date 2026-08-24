@@ -3,9 +3,10 @@
 #
 # kuberecord never creates a bucket, on any backend and in any configuration.
 # Retention, encryption, lifecycle rules and Object Lock all belong to whoever
-# owns the account, and Object Lock in particular can only be enabled when a
-# bucket is created — so an operator that created buckets would be creating them
-# with the one property that matters permanently switched off.
+# owns the account — and Object Lock in particular is irreversible once enabled
+# and implies versioning, so an operator that created buckets would be deciding
+# the one property that matters permanently, on its own. `mc mb --with-lock` is
+# how this example's bucket would get it; docs/RETENTION.md is the whole subject.
 #
 # The work happens inside the MinIO pod, using the `mc` that ships in its image
 # and the writable $HOME examples/tee/minio.yaml gives it. That means no S3

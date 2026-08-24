@@ -359,6 +359,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured envelopes per scale profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — and how to reproduce them. |
 | [`docs/CRDS.md`](docs/CRDS.md) | Every field of the three custom resources, what each validation rejects and why, and every status condition they report. |
 | [`docs/TEE.md`](docs/TEE.md) | Hot and cold: a queryable ClickHouse timeline and a cheap immutable object-store archive, from one watch. Why the answer is two rules rather than one clever sink, why one informer serves both, why dedup state is per sink — and exactly which guarantees the archive half does not carry. Runnable: [`examples/tee/`](examples/tee/). |
+| [`docs/RETENTION.md`](docs/RETENTION.md) | Tamper-evidence and retention: enabling S3 Object Lock (a bucket prerequisite kuberecord cannot set), what `spec.objectLock` applies per object, `GOVERNANCE` versus `COMPLIANCE`, how lifecycle rules interact with a locked archive — and an explicit limits section, because kuberecord signs nothing and redaction is forward-only. |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Operator flags and environment variables, and how the `--writer-*` fallbacks relate to a sink's own fields. |
 | [`docs/OPERATING.md`](docs/OPERATING.md) | Watching the operator: every exported metric, the shipped dashboard and alerts, and a runbook per alert. |
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
@@ -381,7 +382,8 @@ the durable store, and nothing in an uninstall touches ClickHouse.
   ClickHouse timeline for the questions people ask, and a WORM-capable object
   store for the years nobody reads. That is the **tee pattern**,
   [`docs/TEE.md`](docs/TEE.md) — one watch, two rules, no extra load on the API
-  server.
+  server. What "WORM-capable" is worth, precisely — and what it is not, since
+  kuberecord signs nothing — is [`docs/RETENTION.md`](docs/RETENTION.md).
 
 ## Development
 

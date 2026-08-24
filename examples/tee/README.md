@@ -57,8 +57,9 @@ kubectl rollout status -n kuberecord-tee deploy/minio
 ```
 
 **3. The bucket.** kuberecord never creates one: retention, encryption, lifecycle
-and Object Lock all belong to whoever owns the account, and Object Lock can only
-be enabled at bucket creation. `mc` ships in the MinIO image, so this needs no
+and Object Lock all belong to whoever owns the account, and Object Lock is
+irreversible once enabled — [`docs/RETENTION.md`](../../docs/RETENTION.md) is
+what to read before turning it on. `mc` ships in the MinIO image, so this needs no
 client on your machine — [`bucket.sh`](bucket.sh) registers an alias inside the
 pod and creates the bucket, and is safe to re-run.
 

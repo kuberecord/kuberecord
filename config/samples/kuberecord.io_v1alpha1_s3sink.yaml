@@ -34,9 +34,10 @@ spec:
     maxObjectBytes: 67108864
     maxObjectAge: 5m
   # Per-object retention applied at PUT. The bucket must already have Object
-  # Lock enabled — that can only be done when the bucket is created. COMPLIANCE
-  # cannot be lifted by anyone, including the account root, until the date
-  # passes; GOVERNANCE can, by a principal holding the bypass permission.
+  # Lock enabled — only a human on the account can do that, and it cannot be
+  # undone. COMPLIANCE cannot be lifted by anyone, including the account root,
+  # until the date passes; GOVERNANCE can, by a principal holding the bypass
+  # permission. Read docs/RETENTION.md before choosing a mode.
   objectLock:
     mode: GOVERNANCE
     retainDays: 365

@@ -120,9 +120,10 @@ type Retention struct {
 // able to on its own.
 //
 // The case that exists today is an S3Sink configured with spec.objectLock
-// against a bucket that has no Object Lock configuration — which on S3 can only
-// be enabled at bucket creation, so no amount of waiting or retrying fixes it,
-// and every write this sink ever attempts will fail the same way.
+// against a bucket that has no Object Lock configuration — a bucket-level
+// setting only a human on the account can turn on, and never one this sink can,
+// so no amount of waiting or retrying fixes it and every write this sink ever
+// attempts will fail the same way.
 //
 // It exists as a sentinel here, rather than as SDK error-code matching in the
 // prober, because the classification is the only thing the sink contract cares

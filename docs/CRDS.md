@@ -187,6 +187,17 @@ is the tee pattern (D14): two rules over the same resources, one naming a
 carries its own dedup state, so the limits above apply to the archiving rule
 alone. See [`docs/TEE.md`](TEE.md).
 
+#### `spec.objectLock` and what `BucketIncompatible` is telling you
+
+`spec.objectLock` sets per-object S3 Object Lock retention, which is what makes
+the archive tamper-evident. kuberecord cannot enable Object Lock on the bucket —
+only a human on the account can, it implies versioning, and it cannot be undone —
+so a sink asking for retention against a bucket that has none reports
+`BucketReachable=False` with reason `BucketIncompatible` and stays there until
+someone changes the bucket or the spec. Both retention modes, the lifecycle
+interaction, and the honest limits of the WORM claim are
+[`docs/RETENTION.md`](RETENTION.md).
+
 ### `StreamRule` / `ClusterStreamRule`
 
 | Condition | Why it is not `True` |
@@ -233,5 +244,8 @@ because the operator that must release it is not running.
   back a sink's omitted writer fields.
 - [`docs/TEE.md`](TEE.md) — streaming one resource set to two sinks at once, and
   what each half does and does not guarantee.
+- [`docs/RETENTION.md`](RETENTION.md) — `spec.objectLock` in full: the bucket
+  prerequisite, `GOVERNANCE` versus `COMPLIANCE`, lifecycle rules, and the limits
+  of the tamper-evidence claim.
 - [`docs/UPGRADING.md`](UPGRADING.md) — what to do when a `v0.x` minor changes one
   of these fields, the v0.2.0 sink-reference rename included.

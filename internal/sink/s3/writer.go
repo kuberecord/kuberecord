@@ -582,8 +582,11 @@ func (w *Writer) worker(ctx context.Context, log logr.Logger) {
 // itself is at-least-once, because a timeout or a reset connection after the
 // object landed is indistinguishable from one before it. What makes that harmless
 // is the object key: a retry rebuilds nothing, it re-sends the same bytes under
-// the same content-addressed key, so the archive ends up with one object either
-// way (D15). Every commit still fires exactly once regardless.
+// the same content-addressed key, so every reader of the archive sees one object
+// either way (D15) — on an unversioned bucket because the second PUT replaces the
+// first, on a versioned one because the second version becomes the current one
+// and holds identical bytes (see docs/RETENTION.md for what the bucket stores in
+// that case). Every commit still fires exactly once regardless.
 //
 // There is deliberately no per-record isolation phase. A PUT has no partial
 // outcome to isolate: the object is visible with all its records or with none, so
@@ -673,8 +676,12 @@ func (w *Writer) settleAll(commits []func(bool), ok bool) {
 //
 // The request is built once, before the first attempt, so every retry re-sends a
 // byte-identical body under an identical key with an identical retention header.
-// That is what makes a retried write leave exactly one object rather than one per
-// attempt.
+// That is what makes a retried write leave exactly one *current* object rather
+// than one per attempt. A versioned bucket still records a version per accepted
+// PUT — S3 has no idempotent PUT, and a retained version does not refuse one —
+// so the duplicate is a second version of the same key holding the same bytes,
+// invisible to a reader and billed for until it can be expired (D15,
+// docs/RETENTION.md).
 func (w *Writer) put(ctx context.Context, obj Object) error {
 	in := PutObjectInput{
 		Bucket:    w.bucket,

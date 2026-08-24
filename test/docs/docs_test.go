@@ -649,6 +649,134 @@ func TestTeeExampleHotSinkMatchesQuickstart(t *testing.T) {
 }
 
 //
+// Tamper-evidence: the page, and the claim it retracts (Task 7.3)
+//
+
+// retentionPageClaims is what "Tamper-evidence and retention" has to keep saying.
+//
+// Each entry is load-bearing rather than structural: this page exists because a
+// compliance claim was stated imprecisely once, and each phrase below is a place
+// where the imprecise version is the tempting one to write. The check is for
+// presence and not for wording — the prose should be free to improve — but a page
+// that has lost the limits half has lost the reason it was written.
+var retentionPageClaims = []struct {
+	want string
+	why  string
+}{
+	{"GOVERNANCE", "the mode an operator should start with"},
+	{"COMPLIANCE", "the mode nobody, including the account root, can undo"},
+	{"reader-visible", "idempotency on a versioned bucket is reader-visible, not storage-level"},
+	{"forward-only", "redaction cannot reach what is already archived"},
+	{"delete marker", "Object Lock stops destruction, not concealment"},
+	{"does not sign", "the archive is not a cryptographic chain of custody"},
+	{"lifecycle", "expiration cannot remove a locked version; transitions can still run"},
+}
+
+// TestRetentionPageCoversItsSubject is the positive half of the pair below.
+//
+// A forbidden-token scan on its own is satisfied by a repository that says
+// nothing at all about Object Lock, which is exactly the state this task was
+// written to end. So the retired claim being absent only counts as progress if
+// the honest replacement is present, here and in the API types a reader meets
+// through `kubectl explain`.
+func TestRetentionPageCoversItsSubject(t *testing.T) {
+	page := readFile(t, "docs/RETENTION.md")
+	for _, tc := range retentionPageClaims {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(page), strings.ToLower(tc.want)) {
+				t.Errorf("docs/RETENTION.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
+	}
+
+	// The S3ObjectLockSpec comment is the one that was wrong, and it is published
+	// twice over: as Go documentation, and (for the field beside it) as the CRD
+	// description `kubectl explain s3sink.spec.objectLock` prints.
+	types := readFile(t, "api/v1alpha1/s3sink_types.go")
+	for _, want := range []string{"reader-visible", "docs/RETENTION.md"} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api/v1alpha1/s3sink_types.go no longer says %q; the objectLock comment is "+
+				"where the retracted claim lived, and where its replacement has to stay", want)
+		}
+	}
+	crd := readFile(t, "config/crd/bases/kuberecord.io_s3sinks.yaml")
+	if !strings.Contains(crd, "docs/RETENTION.md") {
+		t.Error("the generated S3Sink CRD no longer points at docs/RETENTION.md; run `make manifests`, " +
+			"since the objectLock description is what kubectl explain shows")
+	}
+}
+
+// retiredObjectLockClaims are the two statements about S3 Object Lock that this
+// repository made and that are not true.
+//
+//   - A retained object refusing an overwrite. It does not: Object Lock requires
+//     versioning, and on a versioned bucket a repeat PUT is accepted and creates a
+//     new version. The old wording also promised the refusal would be visible in
+//     the sink's logs, so it described an observable that never appears.
+//   - Object Lock being enablable only when a bucket is created. AWS S3 and recent
+//     MinIO both allow it on an existing versioned bucket. The claim mattered
+//     because it was the stated reason `BucketIncompatible` is permanent, and that
+//     argument holds without it — enabling the lock is a human's operation either
+//     way.
+//
+// Both are scanned for rather than trusted to stay fixed, because each was
+// repeated across the API types, the write path, the controller, the examples and
+// the docs — nine places between them — and a claim that lives in nine places
+// comes back.
+var retiredObjectLockClaims = []struct {
+	name    string
+	pattern *regexp.Regexp
+	instead string
+}{
+	{
+		name:    "a locked object refusing an overwrite",
+		pattern: regexp.MustCompile(`(?i)(reject|refus)[a-z]*\s+the\s+overwrite`),
+		instead: "a versioned bucket accepts the retried PUT and keeps both versions; " +
+			"the deduplication a reader sees is of current versions",
+	},
+	{
+		name:    "Object Lock being creation-only",
+		pattern: regexp.MustCompile(`(?i)only[^.\n]{0,60}(at bucket creation|when a bucket is created|at creation time)`),
+		instead: "it is a bucket-level setting only a human on the account can turn on, " +
+			"at creation or afterwards on a versioned bucket",
+	},
+}
+
+// allowedToNameRetiredObjectLockClaims are the files whose job is to say what the
+// claim was — the same bargain the two scans above strike with the migration
+// record.
+var allowedToNameRetiredObjectLockClaims = map[string]string{
+	"docs/RETENTION.md": "the page that retracts them, and quotes what they said",
+	"internal/sink/s3/awsstore/writer_minio_integration_test.go": "the test that disproves the first " +
+		"claim against a real locked bucket, which has to state what it disproves",
+	"kuberecord-backlog-v0.2.md": "the roadmap that specified the correction",
+	"task.md":                    "the task brief handed to the agent",
+	"test/docs/docs_test.go":     "this test",
+}
+
+// TestNoRetiredObjectLockClaims is the negative half: the imprecise version of
+// the WORM story must not survive anywhere that a reader would take as
+// instruction.
+//
+// It is a repository-wide scan and not a docs-only one on purpose. The claim that
+// caused this task was in a Go doc comment on an API type, which is the least
+// likely place anyone rereads and the most likely place a future contributor
+// copies from.
+func TestNoRetiredObjectLockClaims(t *testing.T) {
+	walkRepositoryText(t, func(rel, content string) {
+		if _, exempt := allowedToNameRetiredObjectLockClaims[rel]; exempt {
+			return
+		}
+		for _, claim := range retiredObjectLockClaims {
+			for _, loc := range claim.pattern.FindAllStringIndex(content, -1) {
+				t.Errorf("%s:%d states the retired claim that %s. It is not true: %s. See docs/RETENTION.md.",
+					rel, lineOf(content, loc[0]), claim.name, claim.instead)
+			}
+		}
+	})
+}
+
+//
 // The README says what it must, and every link resolves
 //
 
@@ -691,6 +819,10 @@ func TestREADMEStructure(t *testing.T) {
 		// give them both a queryable timeline and a compliance archive is reading the
 		// feature list, and the answer is a pattern rather than a setting.
 		"docs/TEE.md",
+		// And the retention page beside it (Task 7.3), because the same reader is the
+		// one being told the archive is WORM-capable: the page that qualifies that
+		// claim has to be reachable from where the claim is made.
+		"docs/RETENTION.md",
 	} {
 		t.Run("links "+doc, func(t *testing.T) {
 			if !strings.Contains(readme, "("+doc+")") {
