@@ -1,0 +1,14 @@
+# The namespace the tee watches.
+#
+# It is applied with the pattern rather than with the workload
+# (examples/tee/workload.yaml) on purpose: the two rules are namespaced, so the
+# namespace has to exist before they can be admitted, and the order the README
+# walks through — pattern first, workload second — is what makes an object's
+# creation get recorded *as* a creation. See docs/TEE.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tee-demo
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example

@@ -134,7 +134,10 @@ custom resources while **asserting by reading the backend directly** — not by
 reading the operator's own status. The archive scenario brings up its own MinIO
 (`test/e2e/manifests/minio.yaml`) rather than adding it to the suite's setup, so a
 focused run of the ClickHouse scenarios — which is what the two install-path
-smokes below are — pays none of its two minutes.
+smokes below are — pays none of its two minutes. The tee scenario does the same
+with the MinIO the published example ships, which is also why the two do not
+share one: Ginkgo randomises top-level containers, so a scenario borrowing
+another's fixture would pass or fail on the seed.
 
 | Scenario | What it proves |
 |---|---|
@@ -146,6 +149,7 @@ smokes below are — pays none of its two minutes.
 | Events | a rule naming `v1/Event` persists the Event stream past its TTL, with no false `Deleted` rows |
 | Redaction | a configured path is scrubbed before hashing, and neither the payload, the diff nor the hash can reveal it |
 | Archive (S3) | an `S3Sink` over an in-cluster MinIO reports `HistoryUnavailable=True` while staying `Ready`, and its rule mirrors it; a Deployment's lifecycle lands in the bucket as rotated zstd-compressed JSONL at the documented key layout — a full `Snapshot` first (never `Added`), a diff-only `Modified` for a change — and after a restart the live object is re-snapshotted in full while an object deleted during the outage produces **no** `Deleted` record at all (D12). Every assertion reads the bucket, not the operator |
+| Tee pattern | the published example ([`examples/tee/`](../examples/tee/)) is applied through an overlay that patches one address, and two rules over one resource set — one naming a `ClickHouseSink`, one an `S3Sink` — both reach `Ready` while disagreeing about `HistoryUnavailable`; one Deployment's creation is then recorded as `Added` in ClickHouse and `Snapshot` in the bucket **from the same event**, and its scale as the same `/spec/replicas` diff in both. The tag disagreeing is the assertion: it is only possible because dedup state is per sink |
 
 It needs Docker and [kind] and nothing else — the suite installs everything it
 depends on and tears the cluster down afterwards. Budget under 15 minutes; the

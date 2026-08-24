@@ -40,6 +40,7 @@ limitations under the License.
 package harness
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -107,6 +108,57 @@ func ApplyFile(path string) {
 	GinkgoHelper()
 	out, err := Kubectl("apply", "-f", path)
 	Expect(err).NotTo(HaveOccurred(), "failed to apply %s: %s", path, out)
+}
+
+// ApplyFileAs server-side-applies a manifest that lives in the repository, under
+// the given field manager.
+//
+// It is ApplyFile plus the two flags ApplyYAML explains: server-side apply is
+// what puts the manager's name into the object's managedFields, and therefore
+// into the actors column the suites assert on. ApplyFile stays the way in for
+// fixtures nothing asserts authorship of.
+func ApplyFileAs(fieldManager, path string) {
+	GinkgoHelper()
+	out, err := Kubectl("apply", "--server-side", "--field-manager="+fieldManager, "-f", path)
+	Expect(err).NotTo(HaveOccurred(), "failed to apply %s: %s", path, out)
+}
+
+// ApplyKustomization applies a kustomization directory, by repository-relative
+// path.
+//
+// It exists so a suite can apply a *published example* rather than a copy of one:
+// the tee scenario's overlay (test/e2e/manifests/tee) is examples/tee with one
+// address patched, and rendering it through kubectl's own kustomize is what keeps
+// the thing CI applies and the thing a reader copies the same file. A plain
+// apply, not server-side: nothing asserts authorship of a sink or a rule, and the
+// objects that are asserted on go through ApplyFileAs or ApplyYAML.
+func ApplyKustomization(dir string) {
+	GinkgoHelper()
+	out, err := Kubectl("apply", "-k", dir)
+	Expect(err).NotTo(HaveOccurred(), "failed to apply the kustomization at %s: %s", dir, out)
+}
+
+// SecretValue reads and base64-decodes one key of a Secret.
+//
+// A suite needs this where a fixture's credentials are defined by the manifest it
+// applied rather than by the suite itself: reading them back out of the cluster
+// is what makes "the harness authenticates as the identity this manifest
+// created" true by construction, instead of by two constants somebody has to keep
+// in step.
+func SecretValue(name, namespace, key string) (string, error) {
+	out, err := Kubectl("get", "secret", name, "-n", namespace, "-o", "jsonpath={.data."+key+"}")
+	if err != nil {
+		return "", err
+	}
+	encoded := strings.TrimSpace(out)
+	if encoded == "" {
+		return "", fmt.Errorf("secret %s/%s carries no %q key", namespace, name, key)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode %s/%s key %q: %w", namespace, name, key, err)
+	}
+	return string(decoded), nil
 }
 
 // DeleteResource removes one object and waits for it to be gone. Failures are

@@ -1,0 +1,69 @@
+# The hot half of the tee: the queryable timeline.
+#
+# Nothing about this sink is tee-specific. It is an ordinary ClickHouseSink, and
+# that is the point — the tee pattern needs no special mode on either backend, it
+# needs a second rule (see examples/tee/rules.yaml). Read this file and
+# examples/tee/cold-sink.yaml side by side: they are two independent sinks that
+# happen to be fed from one informer.
+#
+# `hot` rather than `default`, because "default" is a name and not a default: a
+# rule names its sink explicitly, and naming the two halves for what they are
+# makes the pair of rules readable at a glance. It also means this example can be
+# applied to a cluster that already has a ClickHouseSink called `default` without
+# taking it over — sinks are cluster-scoped, so a same-named apply would.
+#
+# The address below is the ClickHouse `make quickstart` stands up. Point it at
+# your own and the rest of the example is unchanged; the database, the username
+# and the Secret are the ones a quickstart install already created.
+apiVersion: kuberecord.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: hot
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+spec:
+  connection:
+    addr: clickhouse.kuberecord-quickstart.svc:9000
+    database: kuberecord
+    username: kuberecord
+    # No namespace: it resolves to the operator's own, the only namespace the
+    # operator can read Secrets in. `make quickstart` creates this Secret
+    # (examples/quickstart/secret.yaml); a standalone install creates its own.
+    credentialsSecretRef:
+      name: kuberecord-clickhouse-credentials
+  writer:
+    # Small and eager compared with the shipped defaults, so a handful of rows
+    # lands in about a fifth of a second rather than in about a second. Nothing
+    # about the write path changes — only how long a partial batch waits.
+    queueSize: 1000
+    workers: 2
+    batchMaxRows: 100
+    batchMaxWait: 200ms
+    # Every 50th consecutive diff-only Modified row for an object is written as a
+    # Checkpoint instead — the full state as well as the diff — so reconstructing
+    # "state at time T" replays at most 50 diffs. The cold half has no twin for
+    # this field and could not use one: a Writer-only sink emits no diffs to
+    # checkpoint (D12). See docs/TEE.md and docs/SCHEMA.md#checkpoint-rows.
+    checkpointEvery: 50
+  policy:
+    # Exactly the two kinds examples/tee/rules.yaml streams, and deliberately the
+    # same two the cold sink admits: a tee whose halves disagreed about what they
+    # accept would archive a different set of objects than it can query, which is
+    # the one way this pattern can quietly lie to you.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+    # The redaction floor for everything written here. It is set identically on
+    # the cold sink, and for the same reason: choosing an archive tier is not a
+    # way around a sink's redaction floor, and two floors that drift apart mean a
+    # value scrubbed from the timeline is sitting in the archive under Object
+    # Lock, where it cannot be scrubbed later. Redaction is forward-only.
+    redaction:
+    - fieldPath: data.password

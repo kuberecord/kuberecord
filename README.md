@@ -358,6 +358,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/RBAC.md`](docs/RBAC.md) | The aggregated-ClusterRole model, the no-self-escalation argument, granting a new kind in 30 seconds, and the honest read-flattening caveat. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured envelopes per scale profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — and how to reproduce them. |
 | [`docs/CRDS.md`](docs/CRDS.md) | Every field of the three custom resources, what each validation rejects and why, and every status condition they report. |
+| [`docs/TEE.md`](docs/TEE.md) | Hot and cold: a queryable ClickHouse timeline and a cheap immutable object-store archive, from one watch. Why the answer is two rules rather than one clever sink, why one informer serves both, why dedup state is per sink — and exactly which guarantees the archive half does not carry. Runnable: [`examples/tee/`](examples/tee/). |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Operator flags and environment variables, and how the `--writer-*` fallbacks relate to a sink's own fields. |
 | [`docs/OPERATING.md`](docs/OPERATING.md) | Watching the operator: every exported metric, the shipped dashboard and alerts, and a runbook per alert. |
 | [`docs/DASHBOARDS.md`](docs/DASHBOARDS.md) | The four ClickHouse-reading Grafana dashboards, panel by panel. |
@@ -375,7 +376,12 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 - **SecOps** — an operator-owned record of resource state that does not depend on
   the API server's audit retention window.
 - **Compliance** — a durable, timestamped history of workload state changes, per
-  cluster, for retrospective review.
+  cluster, for retrospective review. Where retention outlives what is worth
+  keeping queryable, stream the same resources to two backends at once: a
+  ClickHouse timeline for the questions people ask, and a WORM-capable object
+  store for the years nobody reads. That is the **tee pattern**,
+  [`docs/TEE.md`](docs/TEE.md) — one watch, two rules, no extra load on the API
+  server.
 
 ## Development
 

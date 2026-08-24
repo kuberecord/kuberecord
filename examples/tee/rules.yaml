@@ -1,0 +1,83 @@
+# The tee itself. This file is the whole pattern (D14).
+#
+# Two rules. Identical `resources`. Different `spec.sink`. That is all there is to
+# it — there is no multi-sink field, no fan-out mode, and no clever sink that
+# writes to two places. A rule targets exactly one sink, permanently, and teeing
+# is what you get by writing the rule twice.
+#
+# What the operator does with them is the part worth knowing, because it is the
+# reason this costs so little:
+#
+#   - **One informer, not two.** Informer identity is (resource, namespace); the
+#     sink is part of the *work key*, not of the watch. Both rules want
+#     apps/v1 Deployments in tee-demo, so there is one watch on the API server and
+#     each event becomes two pipeline keys. Adding the cold half doubles no watch
+#     load, no API-server traffic and no informer cache.
+#   - **Two dedup caches.** The hashCache is per sink, so the two halves decide
+#     independently whether an object changed, and neither can suppress a write to
+#     the other. That is why the same object's first record is `Added` in
+#     ClickHouse and `Snapshot` in S3 at the very same instant.
+#   - **Two sets of conditions.** An unreachable ClickHouse degrades the hot rule
+#     and leaves the cold one streaming, and the other way round. One backend
+#     failing is one rule's problem.
+#
+# Both rules are namespaced StreamRules, which is the delegable shape: a team can
+# tee its own workloads without holding cluster-level privileges. For a
+# fleet-wide compliance archive, write the same two rules as ClusterStreamRules
+# with a namespaceSelector — the pattern is identical, only the type changes. See
+# docs/TEE.md.
+apiVersion: kuberecord.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: hot-timeline
+  namespace: tee-demo
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+spec:
+  # `kind` is spelled out rather than left to its default, because this file is
+  # the one a reader copies and the two rules should differ visibly in exactly one
+  # place. A name is only unique *within* a kind — a ClickHouseSink named `hot`
+  # and an S3Sink named `hot` would be two unrelated backends — so both halves are
+  # the reference.
+  #
+  # The pair is immutable. Re-pointing a live rule at the other sink would strand
+  # the dedup and diff baselines the pipeline built for every object in scope, so
+  # moving a rule between backends is delete and recreate. A tee is therefore
+  # something you author, not something you migrate a single rule into.
+  sink:
+    kind: ClickHouseSink
+    name: hot
+  resources:
+  # `kind` is the Kind, not the plural resource: Deployment, not deployments.
+  - group: apps
+    version: v1
+    kind: Deployment
+  - group: ""
+    version: v1
+    kind: ConfigMap
+---
+apiVersion: kuberecord.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: cold-archive
+  namespace: tee-demo
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: tee-example
+spec:
+  # The one line that differs. Everything below it is byte-identical to the rule
+  # above, and it has to be: two rules whose `resources` drifted apart would
+  # archive a different set of objects than the timeline holds, and the divergence
+  # would be invisible until somebody went looking for a record that was never
+  # written.
+  sink:
+    kind: S3Sink
+    name: cold
+  resources:
+  - group: apps
+    version: v1
+    kind: Deployment
+  - group: ""
+    version: v1
+    kind: ConfigMap

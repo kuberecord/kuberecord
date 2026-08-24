@@ -103,6 +103,46 @@ const (
 	s3Prefix   = "audit"
 )
 
+// The published tee example and the fixtures it brings with it (examples/tee,
+// Task 7.1).
+//
+// This scenario owns none of these manifests: they are the example a reader
+// copies, applied through an overlay that patches one address (see
+// test/e2e/manifests/tee). What the suite has to know is only the *names* the
+// example uses, so it can address what it applied — everything with a value in it
+// (the key pair, the bucket, the prefix, the image) is read back out of the
+// cluster or out of the example file, so it cannot drift from what was applied.
+//
+// The fixture is brought up by the scenario rather than in BeforeSuite for the
+// same reason the archive fixture is, and one more: it applies cluster-scoped
+// sinks, and a suite-wide install would leave two extra sinks standing under
+// every other scenario.
+const (
+	teeMinIONamespace  = "kuberecord-tee"
+	teeMinIODeployment = "minio"
+	// teeMinIOSecret holds the store's root credentials, in the fixture's own
+	// namespace. The suite reads the key pair out of it rather than repeating it,
+	// so the harness authenticates as exactly the identity the example created.
+	teeMinIOSecret = "minio-credentials"
+	// teeS3CredentialsSecret is the same key pair beside the operator, which the
+	// example ships because that is the only namespace the operator may read
+	// Secrets in (Task 1.9).
+	teeS3CredentialsSecret = "kuberecord-tee-s3-credentials"
+	// The two sinks the example authors, named for the halves of the pattern.
+	// Neither may be called "default": sinks are cluster-scoped, and the suite
+	// already runs a ClickHouseSink of that name.
+	teeHotSinkName  = "hot"
+	teeColdSinkName = "cold"
+	// The namespace and the two rules over it. The rules differ in exactly one
+	// field, spec.sink, which is the whole of the pattern (D14).
+	teeNamespace = "tee-demo"
+	teeHotRule   = "hot-timeline"
+	teeColdRule  = "cold-archive"
+	// teeDeployment is the workload examples/tee/workload.yaml carries, and the
+	// object both backends are asserted on.
+	teeDeployment = "checkout-api"
+)
+
 // Manifest paths, relative to the project root — the directory utils.Run
 // executes every command in.
 const (
@@ -112,6 +152,16 @@ const (
 	s3SinkManifest      = "test/e2e/manifests/s3sink.yaml"
 	nodeWatcherManifest = "test/e2e/manifests/watcher-nodes.yaml"
 	networkingPreset    = "config/rbac/presets/networking.yaml"
+	// teeOverlay renders examples/tee with the suite's ClickHouse address patched
+	// in; teeWorkload and teeMinIOExample are read from the example directly,
+	// unpatched, because neither needs anything of this environment.
+	teeOverlay      = "test/e2e/manifests/tee"
+	teeWorkload     = "examples/tee/workload.yaml"
+	teeMinIOExample = "examples/tee/minio.yaml"
+	// teeBucketScript is the example's own bucket-creation step. The suite runs it
+	// rather than creating the bucket through the harness, so the one command in
+	// examples/tee/README.md that is not a kubectl apply is executed by CI too.
+	teeBucketScript = "./examples/tee/bucket.sh"
 )
 
 // Timeouts. Every wait in the suite is an Eventually or a `kubectl wait`; there

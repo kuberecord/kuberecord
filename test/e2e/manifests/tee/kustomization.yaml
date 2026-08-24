@@ -1,0 +1,43 @@
+# The tee example, pointed at the e2e suite's ClickHouse (Task 7.1).
+#
+# The base is examples/tee itself, unmodified and un-vendored, which is the whole
+# point of this overlay existing: the acceptance criterion is that CI applies *the
+# example*, not a suite-local paraphrase of it that could drift from the thing a
+# reader copies. Both rules, both sinks' policy, writer and rotation blocks, the
+# MinIO fixture, the credentials and the namespace are the example's, byte for
+# byte.
+#
+# One field is patched, and it is an address. examples/tee/hot-sink.yaml points at
+# the ClickHouse `make quickstart` stands up (kuberecord-quickstart), because that
+# is the cluster a reader following the example will have; this suite stands its
+# own up in kuberecord-e2e-clickhouse during BeforeSuite. Everything else about
+# the connection — the database, the username, the credentials Secret in the
+# operator's namespace — is already identical between the two, which is why this
+# is one line rather than a block.
+#
+# Deliberately *not* patched, so the record is explicit:
+#
+#   - spec.rotation. The example rotates every 30s, which is short enough for the
+#     scenario's budget and is the value a reader gets. Patching it down to the
+#     CRD's 10s floor would make this suite prove something about a rotation
+#     window nobody ships.
+#   - Either sink's policy or writer block. Those are the shapes the example
+#     teaches; a suite that tuned them would be asserting on its own manifest.
+#   - examples/tee/workload.yaml, which is not in the example's kustomization
+#     either: it is applied as a separate step, after both rules report Streaming,
+#     exactly as the example's README instructs. The ordering is load bearing —
+#     see the scenario.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../../examples/tee
+patches:
+- target:
+    group: kuberecord.io
+    version: v1alpha1
+    kind: ClickHouseSink
+    name: hot
+  patch: |-
+    - op: replace
+      path: /spec/connection/addr
+      value: clickhouse.kuberecord-e2e-clickhouse.svc:9000

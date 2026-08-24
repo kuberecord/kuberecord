@@ -183,7 +183,9 @@ read.
 
 The supported way to have both a queryable timeline and a cheap immutable archive
 is the tee pattern (D14): two rules over the same resources, one naming a
-`ClickHouseSink` and one naming an `S3Sink`.
+`ClickHouseSink` and one naming an `S3Sink`. One informer serves both and each
+carries its own dedup state, so the limits above apply to the archiving rule
+alone. See [`docs/TEE.md`](TEE.md).
 
 ### `StreamRule` / `ClusterStreamRule`
 
@@ -229,5 +231,7 @@ because the operator that must release it is not running.
 - [`docs/RBAC.md`](RBAC.md) — what a rule is allowed to watch, and how to grant more.
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — the operator-level settings that
   back a sink's omitted writer fields.
+- [`docs/TEE.md`](TEE.md) — streaming one resource set to two sinks at once, and
+  what each half does and does not guarantee.
 - [`docs/UPGRADING.md`](UPGRADING.md) — what to do when a `v0.x` minor changes one
   of these fields, the v0.2.0 sink-reference rename included.

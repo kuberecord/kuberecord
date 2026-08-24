@@ -30,12 +30,19 @@ limitations under the License.
 package docs
 
 import (
+	"bufio"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/yaml"
+
+	"github.com/yelzhy/kuberecord/api/v1alpha1"
 )
 
 // repoPath resolves a repository-relative path from this test's own source
@@ -393,6 +400,255 @@ func TestQuickstartIsWiredUp(t *testing.T) {
 }
 
 //
+// The tee example is complete, self-consistent and CI-tested (Task 7.1)
+//
+
+// teeExampleFiles is every file the tee example and docs/TEE.md promise between
+// them. The acceptance criteria ask for a *runnable* example, and an example
+// missing the object store it archives into, or the credentials it authenticates
+// with, is not one.
+var teeExampleFiles = []string{
+	"examples/tee/README.md",
+	"examples/tee/kustomization.yaml",
+	"examples/tee/minio.yaml",
+	"examples/tee/secret.yaml",
+	"examples/tee/hot-sink.yaml",
+	"examples/tee/cold-sink.yaml",
+	"examples/tee/namespace.yaml",
+	"examples/tee/rules.yaml",
+	"examples/tee/workload.yaml",
+	"examples/tee/bucket.sh",
+	"docs/TEE.md",
+}
+
+func TestTeeExampleFilesExist(t *testing.T) {
+	for _, rel := range teeExampleFiles {
+		t.Run(rel, func(t *testing.T) {
+			info, err := os.Stat(repoPath(rel))
+			if err != nil {
+				t.Fatalf("%s is promised by the tee example but missing: %v", rel, err)
+			}
+			if info.Size() == 0 {
+				t.Fatalf("%s is empty", rel)
+			}
+		})
+	}
+
+	script := repoPath("examples/tee/bucket.sh")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat bucket.sh: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Error("examples/tee/bucket.sh is not executable; the README runs it directly")
+	}
+}
+
+// teeKeyPair is the key-pair Secret shape both halves of the example carry.
+var teeKeyPair = []string{"accessKeyId", "secretAccessKey"}
+
+// stringDataValue matches one quoted `stringData` entry of a manifest.
+func stringDataValue(key string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `:\s*"([^"]*)"`)
+}
+
+// TestTeeExampleCredentialsAgree guards the same class of mistake
+// TestQuickstartPasswordsAgree does, one backend along: the object store's root
+// credentials are written down twice — once for the server, once beside the
+// operator — and if the two drift, the S3Sink reports BucketReachable=False and
+// archives nothing while the ClickHouse half keeps working perfectly.
+//
+// That is a nastier failure than an outright broken example, because a half-
+// working tee looks like a working one until somebody reads the bucket.
+func TestTeeExampleCredentialsAgree(t *testing.T) {
+	server := readFile(t, "examples/tee/minio.yaml")
+	operator := readFile(t, "examples/tee/secret.yaml")
+
+	for _, key := range teeKeyPair {
+		t.Run(key, func(t *testing.T) {
+			pattern := stringDataValue(key)
+			serverMatch := pattern.FindStringSubmatch(server)
+			operatorMatch := pattern.FindStringSubmatch(operator)
+			if serverMatch == nil {
+				t.Fatalf("examples/tee/minio.yaml sets no %s", key)
+			}
+			if operatorMatch == nil {
+				t.Fatalf("examples/tee/secret.yaml sets no %s", key)
+			}
+			if serverMatch[1] != operatorMatch[1] {
+				t.Errorf("%s is %q in minio.yaml but %q in secret.yaml; the sink could not authenticate",
+					key, serverMatch[1], operatorMatch[1])
+			}
+			if serverMatch[1] == "" {
+				t.Errorf("%s is empty in both files", key)
+			}
+		})
+	}
+}
+
+// TestTeeBucketScriptMatchesTheSink is the seam between the example's one
+// imperative step and its declarative half.
+//
+// bucket.sh creates a bucket by name and the S3Sink writes to a bucket by name,
+// and nothing connects the two but this check. Rename either and the example
+// stands up a cluster where MinIO is healthy, the bucket exists, and the sink
+// sits at BucketReachable=False pointing at a bucket that does not — which reads
+// as a broken operator rather than as a typo in a shell variable.
+func TestTeeBucketScriptMatchesTheSink(t *testing.T) {
+	script := readFile(t, "examples/tee/bucket.sh")
+	sinkSpec := readFile(t, "examples/tee/cold-sink.yaml")
+
+	declared := regexp.MustCompile(`(?m)^\s*bucket:\s*(\S+)`).FindStringSubmatch(sinkSpec)
+	if declared == nil {
+		t.Fatal("examples/tee/cold-sink.yaml sets no spec.bucket")
+	}
+	created := regexp.MustCompile(`(?m)^BUCKET="\$\{BUCKET:-([^}]*)\}"`).FindStringSubmatch(script)
+	if created == nil {
+		t.Fatal("examples/tee/bucket.sh declares no default BUCKET")
+	}
+	if declared[1] != created[1] {
+		t.Errorf("the S3Sink archives to bucket %q but bucket.sh creates %q", declared[1], created[1])
+	}
+
+	// The same story one level down: the script reads the key pair out of the
+	// Secret the example's MinIO manifest ships, so a renamed Secret breaks it.
+	if !strings.Contains(readFile(t, "examples/tee/minio.yaml"), "name: minio-credentials") {
+		t.Error("examples/tee/minio.yaml no longer ships the Secret bucket.sh reads its credentials from")
+	}
+}
+
+// teeCustomResources are the example's custom resources and the types they must
+// decode into.
+var teeCustomResources = []struct {
+	file string
+	// objects returns one empty target per document in the file, in order.
+	objects func() []any
+}{
+	{"examples/tee/hot-sink.yaml", func() []any { return []any{&v1alpha1.ClickHouseSink{}} }},
+	{"examples/tee/cold-sink.yaml", func() []any { return []any{&v1alpha1.S3Sink{}} }},
+	{"examples/tee/rules.yaml", func() []any { return []any{&v1alpha1.StreamRule{}, &v1alpha1.StreamRule{}} }},
+}
+
+// TestTeeExampleCustomResourcesDecode decodes the example's CRs into the typed
+// structs with unknown fields rejected.
+//
+// It is a cheap stand-in for the thing that would otherwise catch a typo — an
+// API server — and it catches the failure that matters most in a hand-written
+// example: a field name that was renamed, or never existed. A CRD prunes unknown
+// fields silently rather than rejecting them, so `spec.rotation.maxObjectAg: 30s`
+// would apply cleanly, default to five minutes, and leave a reader waiting for an
+// object that arrives ten times later than the file says.
+//
+// It does not evaluate CEL, bounds or defaults; the e2e scenario applies these
+// same files against a real API server, which does.
+func TestTeeExampleCustomResourcesDecode(t *testing.T) {
+	for _, tc := range teeCustomResources {
+		t.Run(tc.file, func(t *testing.T) {
+			documents := splitYAML(t, readFile(t, tc.file))
+			targets := tc.objects()
+			if len(documents) != len(targets) {
+				t.Fatalf("%s holds %d documents, expected %d", tc.file, len(documents), len(targets))
+			}
+			for i, doc := range documents {
+				if err := yaml.UnmarshalStrict(doc, targets[i]); err != nil {
+					t.Errorf("%s document %d does not decode into %T: %v", tc.file, i+1, targets[i], err)
+				}
+			}
+		})
+	}
+}
+
+// splitYAML returns the non-empty documents of a multi-document manifest.
+func splitYAML(t *testing.T, content string) [][]byte {
+	t.Helper()
+	reader := yaml.NewYAMLReader(bufio.NewReader(strings.NewReader(content)))
+	var documents [][]byte
+	for {
+		doc, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			return documents
+		}
+		if err != nil {
+			t.Fatalf("split YAML: %v", err)
+		}
+		if len(strings.TrimSpace(string(doc))) > 0 {
+			documents = append(documents, doc)
+		}
+	}
+}
+
+// TestTeeExampleIsCITested is the seam Task 7.1's third criterion depends on.
+//
+// The acceptance criterion is that CI applies *the example*, and the only thing
+// making that true is one line in the e2e overlay naming examples/tee as its
+// base. Copy the manifests into test/e2e/manifests instead — the obvious thing to
+// do when the example is inconvenient to patch — and every assertion still
+// passes while the file a reader copies is no longer tested by anything.
+func TestTeeExampleIsCITested(t *testing.T) {
+	overlay := readFile(t, "test/e2e/manifests/tee/kustomization.yaml")
+	if !strings.Contains(overlay, "examples/tee") {
+		t.Error("test/e2e/manifests/tee/kustomization.yaml no longer bases on examples/tee; " +
+			"CI would be applying a copy of the example rather than the example")
+	}
+
+	// Both paths reach the scenario through constants, so these assert on the
+	// constants' values rather than on the scenario body.
+	suite := readFile(t, "test/e2e/e2e_suite_test.go")
+	for _, want := range []string{"test/e2e/manifests/tee", "examples/tee/workload.yaml"} {
+		if !strings.Contains(suite, want) {
+			t.Errorf("the e2e suite no longer names %q; the tee scenario cannot be applying the example", want)
+		}
+	}
+	if !strings.Contains(readFile(t, "test/e2e/tee_test.go"), "applyKustomization(teeOverlay)") {
+		t.Error("test/e2e/tee_test.go no longer applies the tee overlay")
+	}
+}
+
+// TestTeeExampleHotSinkMatchesQuickstart keeps the example's two-command promise
+// honest.
+//
+// examples/tee/README.md tells a reader to run `make quickstart` and then apply
+// this example, which only works while the ClickHouseSink here names the
+// ClickHouse the quickstart actually stands up and the Secret the quickstart
+// actually creates. Move either and the reader gets a sink parked at
+// Unreachable — and the e2e suite would not catch it, because its overlay patches
+// exactly this address.
+func TestTeeExampleHotSinkMatchesQuickstart(t *testing.T) {
+	hot := readFile(t, "examples/tee/hot-sink.yaml")
+
+	addr := regexp.MustCompile(`(?m)^\s*addr:\s*(\S+)`).FindStringSubmatch(hot)
+	if addr == nil {
+		t.Fatal("examples/tee/hot-sink.yaml sets no spec.connection.addr")
+	}
+	host, _, ok := strings.Cut(addr[1], ":")
+	if !ok {
+		t.Fatalf("addr %q has no port", addr[1])
+	}
+	service, namespace, ok := strings.Cut(strings.TrimSuffix(host, ".svc"), ".")
+	if !ok {
+		t.Fatalf("addr %q is not a <service>.<namespace>.svc name", addr[1])
+	}
+
+	quickstart := readFile(t, "examples/quickstart/clickhouse.yaml")
+	if !strings.Contains(quickstart, "name: "+namespace) {
+		t.Errorf("the tee example points at namespace %q, which examples/quickstart/clickhouse.yaml does not create",
+			namespace)
+	}
+	if !strings.Contains(quickstart, "name: "+service) {
+		t.Errorf("the tee example points at Service %q, which examples/quickstart/clickhouse.yaml does not create",
+			service)
+	}
+
+	secretRef := regexp.MustCompile(`credentialsSecretRef:\s*\n\s*name:\s*(\S+)`).FindStringSubmatch(hot)
+	if secretRef == nil {
+		t.Fatal("examples/tee/hot-sink.yaml names no credentialsSecretRef")
+	}
+	if !strings.Contains(readFile(t, "examples/quickstart/secret.yaml"), "name: "+secretRef[1]) {
+		t.Errorf("the tee example reads Secret %q, which the quickstart does not create", secretRef[1])
+	}
+}
+
+//
 // The README says what it must, and every link resolves
 //
 
@@ -428,7 +684,14 @@ func TestREADMEStructure(t *testing.T) {
 	}
 
 	// The four reference documents the acceptance criteria name explicitly.
-	for _, doc := range []string{"docs/SCHEMA.md", "docs/RBAC.md", "docs/PERFORMANCE.md", "docs/QUERIES.md"} {
+	for _, doc := range []string{
+		"docs/SCHEMA.md", "docs/RBAC.md", "docs/PERFORMANCE.md", "docs/QUERIES.md",
+		// The tee page is linked from the feature list rather than only from the
+		// documentation index (Task 7.1): a reader deciding whether kuberecord can
+		// give them both a queryable timeline and a compliance archive is reading the
+		// feature list, and the answer is a pattern rather than a setting.
+		"docs/TEE.md",
+	} {
 		t.Run("links "+doc, func(t *testing.T) {
 			if !strings.Contains(readme, "("+doc+")") {
 				t.Errorf("README.md no longer links %s", doc)
@@ -438,6 +701,9 @@ func TestREADMEStructure(t *testing.T) {
 
 	if !strings.Contains(readme, "examples/quickstart/") {
 		t.Error("README.md no longer points at examples/quickstart/")
+	}
+	if !strings.Contains(readme, "examples/tee/") {
+		t.Error("README.md no longer points at examples/tee/, the runnable half of the tee pattern")
 	}
 }
 
@@ -480,6 +746,7 @@ func publishedPages(t *testing.T) []string {
 		"README.md",
 		"CHANGELOG.md",
 		"examples/quickstart/README.md",
+		"examples/tee/README.md",
 		"deploy/charts/kuberecord/README.md",
 	}
 	entries, err := os.ReadDir(repoPath("docs"))
