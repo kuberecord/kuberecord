@@ -1334,9 +1334,11 @@ spec:
 
                   It carries a strict subset of ClickHouse's knobs: batchMaxRows and batchMaxWait
                   are absent because for S3 the object *is* the batch and spec.rotation
-                  governs it, and checkpointEvery is absent because a Writer-only sink emits
-                  no diffs to checkpoint (D12). See S3WriterSpec for the full reasoning — the
-                  omissions are deliberate, not pending.
+                  governs it, and checkpointEvery is absent because a Writer-only sink cannot
+                  warm from history — it re-snapshots on every restart, so a replay is already
+                  bounded by the current process and a cadence would add nothing (D12). See
+                  S3WriterSpec for the full reasoning — the omissions are deliberate, not
+                  pending.
                 properties:
                   drainTimeout:
                     default: 15s

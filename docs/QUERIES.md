@@ -1,11 +1,18 @@
 # kuberecord Query Library
 
-Runnable SQL against the frozen v1 schema ([`docs/SCHEMA.md`](SCHEMA.md)). Every
-query here uses only frozen columns, so it keeps working across operator
-upgrades — and that is a tested claim rather than an intention: `make
-test-integration` executes every statement on this page against a ClickHouse
-whose tables were built from the shipped DDL and nothing else, so a query naming
-a column that is not frozen fails CI (`test/queries`).
+Runnable SQL against both of kuberecord's storage backends
+([`docs/SCHEMA.md`](SCHEMA.md)). The recipes up to [Reading Event history
+correctly](#reading-event-history-correctly) read a `ClickHouseSink`'s tables; the
+ones under [The S3 archive](#the-s3-archive) read an `S3Sink`'s objects with
+DuckDB.
+
+Every ClickHouse query here uses only frozen columns, so it keeps working across
+operator upgrades — and that is a tested claim rather than an intention: `make
+test-integration` runs on every push and executes every statement on this page
+against a ClickHouse whose tables were built from the shipped DDL and nothing else,
+so a query naming a column that is not frozen fails CI (`test/queries`). Every
+DuckDB recipe is executed by the same job against a real object store holding a
+real archive, and must return rows.
 
 The four shipped Grafana dashboards ask these same questions with the clicking
 already done; see [`docs/DASHBOARDS.md`](DASHBOARDS.md). Each section below names
@@ -469,3 +476,480 @@ Two traps, both consequences of Events being ephemera rather than durable state
   `api_group` deliberately — it wants Events however they were captured — but add
   `AND api_group = ''` when you need one row per occurrence rather than one per
   API.
+
+---
+
+## The S3 archive
+
+Everything above reads ClickHouse. Everything below reads the *archive* — the
+zstd-compressed JSON Lines objects an `S3Sink` writes — and the difference is not
+one of dialect but of capability. **An object store has no query engine.** There
+is no index to seek, no sort key to prune on, and no server to push a predicate
+down to; a question is answered by fetching objects and reading them. That is the
+trade D12 makes deliberately: the archive is cheap to write and cheap to keep
+forever, which is exactly what makes it expensive to interrogate.
+
+[DuckDB](https://duckdb.org) is what makes it interrogable anyway, with no
+infrastructure at all: one static binary reads `s3://` directly, so the recipes
+below are the whole read path. No cluster, no catalog, no ingest step.
+
+Two things to know before running any of them:
+
+- **Every record is a `Snapshot`, and deletions may be missing.** A `Writer`-only
+  sink never warms from its own history, so a first sighting is `Snapshot` rather
+  than `Added` — permanently, and again after every operator restart. An object
+  deleted while the operator was down produces **no record at all**. Neither is a
+  defect to query around; see [Hot and cold](TEE.md) for the asymmetry in full and
+  [the S3 mapping](SCHEMA.md#physical-mapping-to-s3-objects) for what the archive
+  therefore does and does not contain.
+- **Records and scope epochs are different objects with different line shapes.**
+  Both live under `format=jsonl-v1/`, so a glob of
+  `format=jsonl-v1/**/*.jsonl.zst` reads both and infers a schema from the union
+  of two unrelated JSON shapes. Records are under `cluster_id=`, the scope log
+  under `scopes/`; the setup block below derives one glob for each, and every
+  recipe names the one it means.
+
+Everything on this page is CI-tested, but not to the same depth, and the
+difference is worth stating: the **DuckDB** recipes are executed against a real
+MinIO holding a real archive and must return rows, so a recipe that is valid but
+selects nothing fails. The **Athena** DDL is checked for structure only — that it
+names every field of the record contract exactly once and projects the partitions
+the writer actually produces. There is no AWS account in CI, so nothing executes
+it.
+
+### Parameters (DuckDB)
+
+The DuckDB analogue of the `--param_*` table above. DuckDB has no query
+parameters of its own for a CLI session, so the library uses **session
+variables**: edit this one block, then paste any recipe below it unchanged.
+
+```sql duckdb-parameters
+-- Where the archive is. `archive` is the bucket plus the sink's spec.prefix, with
+-- no trailing slash; leave the prefix off entirely if spec.prefix is empty.
+SET VARIABLE archive = 's3://kuberecord-archive/audit';
+SET VARIABLE cluster = 'prod-eu-1';
+
+-- How to reach it. These are the AWS defaults; for an in-cluster MinIO use the
+-- Service address, url_style 'path' and use_ssl false (see the setup block).
+SET VARIABLE endpoint  = 's3.eu-central-1.amazonaws.com';
+SET VARIABLE region    = 'eu-central-1';
+SET VARIABLE url_style = 'vhost';
+SET VARIABLE use_ssl   = true;
+SET VARIABLE key_id    = 'AKIAEXAMPLE';
+SET VARIABLE secret    = 'wJalrXUtnFEMI/EXAMPLEKEY';
+
+-- What to look at. `day` is one UTC date partition; window_from/window_to bound a
+-- time window; the four object variables name one object, with '' for the core
+-- API group and '' for a cluster-scoped object's namespace.
+SET VARIABLE day         = '2026-08-20';
+SET VARIABLE window_from = '2026-08-20 09:30:00';
+SET VARIABLE window_to   = '2026-08-20 10:15:00';
+-- "group" is quoted because GROUP is a reserved word; getvariable('group')
+-- reads it by name either way.
+SET VARIABLE "group"     = 'apps';
+SET VARIABLE kind        = 'Deployment';
+SET VARIABLE namespace   = 'payments';
+SET VARIABLE name        = 'api';
+```
+
+| Variable | Meaning |
+|---|---|
+| `archive` | `s3://<bucket>/<spec.prefix>`, no trailing slash. |
+| `cluster` | `cluster_id` — the `cluster_id=` partition. Always part of the glob, never a `WHERE` clause: it selects which objects are fetched at all. |
+| `endpoint`, `region`, `url_style`, `use_ssl`, `key_id`, `secret` | How to reach the store. `url_style` is `'path'` for MinIO and most S3-compatible stores, `'vhost'` for AWS. |
+| `day` | One UTC date, as the `date=` partition spells it. |
+| `window_from`, `window_to` | A time window, as UTC timestamps. |
+| `group`, `kind`, `namespace`, `name` | One object's [canonical identity](SCHEMA.md#identity-is-version-agnostic), minus the cluster. |
+
+One property of session variables to know, because it decides how a mistake
+shows up: `getvariable('typo')` returns **NULL**, it does not fail. A recipe
+naming a variable you never set therefore filters on NULL and returns nothing at
+all, rather than telling you why — which is why CI asserts that the variables
+these recipes read and the variables this block declares are the same set.
+
+### Session setup
+
+Run once per DuckDB session. It loads the S3 client, registers the credential, and
+derives the two globs every recipe reads — so a recipe never spells the layout
+itself and a layout change is one edit here rather than one per query.
+
+```sql duckdb-setup
+-- httpfs is what teaches DuckDB to speak S3. It is an extension rather than
+-- built in, so the first run downloads it; after that it is cached.
+INSTALL httpfs;
+LOAD httpfs;
+
+-- The credential. PROVIDER config takes the key explicitly, which is what an
+-- in-cluster MinIO needs; on AWS you can instead write
+--     CREATE OR REPLACE SECRET kuberecord (TYPE s3, PROVIDER credential_chain,
+--                                          REGION getvariable('region'));
+-- and DuckDB will use the same environment, profile and instance credentials the
+-- AWS CLI would. Reading the archive needs GetObject and ListBucket and nothing
+-- else: the operator's own credential is PutObject-only, so an auditor is a
+-- separate identity with separate rights rather than a borrowed one.
+CREATE OR REPLACE SECRET kuberecord (
+    TYPE       s3,
+    PROVIDER   config,
+    KEY_ID     getvariable('key_id'),
+    SECRET     getvariable('secret'),
+    REGION     getvariable('region'),
+    ENDPOINT   getvariable('endpoint'),
+    URL_STYLE  getvariable('url_style'),
+    USE_SSL    getvariable('use_ssl')
+);
+
+-- The two globs. Records are partitioned by cluster, date and hour; the scope log
+-- by date alone and outside cluster_id=, which is why one glob cannot serve both
+-- (see docs/SCHEMA.md, "Physical mapping to S3 objects").
+SET VARIABLE records = getvariable('archive')
+    || '/format=jsonl-v1/cluster_id=' || getvariable('cluster') || '/**/*.jsonl.zst';
+SET VARIABLE scopes  = getvariable('archive') || '/format=jsonl-v1/scopes/**/*.jsonl.zst';
+```
+
+Three `read_json_auto` arguments recur below, and all three are load bearing:
+
+- `hive_partitioning = true` turns the `key=value` path segments into columns, so
+  `date` and `hour` are queryable and DuckDB can skip whole objects instead of
+  fetching them. This is the entire practical point of the key layout.
+- `map_inference_threshold = 0` forces `labels` to a `MAP(VARCHAR, VARCHAR)`.
+  Without it DuckDB infers a `STRUCT` from whichever label keys the sampled
+  objects happen to carry, so the same query against a different day can produce a
+  different schema — and `labels.app` compiles against one glob and fails against
+  the next.
+- `filename = true` adds the object key each row came from. It is how a scan
+  reports *which objects* answer a question, which is the only way to narrow the
+  next scan.
+
+`timestamp` is read as text, deliberately: it is an RFC 3339 instant with
+nanosecond precision, which no auto-detected type holds exactly. Cast it —
+`TIMESTAMP` truncates to microseconds and is what you want for reading, while
+`TIMESTAMP_NS` keeps all nine digits and is what you want when a nanosecond
+distinguishes two records.
+
+### A day of the archive
+
+*"What did this cluster do on the 20th?"* The first thing to run against a new
+archive, and the shape every other recipe is a variation on: one glob, one day.
+
+```sql duckdb
+SELECT
+    CAST(timestamp AS TIMESTAMP) AS ts,
+    event_type,
+    kind,
+    -- '' is a real value here, not a null: it is a cluster-scoped object.
+    coalesce(nullif(namespace, ''), '(cluster-scoped)') AS namespace,
+    name,
+    actors,
+    hour
+FROM read_json_auto(
+        getvariable('records'),
+        hive_partitioning       = true,
+        map_inference_threshold = 0)
+-- The partition predicate. DuckDB prunes objects on this before fetching any of
+-- them, so a year-deep archive costs one day's objects to read.
+WHERE date = CAST(getvariable('day') AS DATE)
+ORDER BY ts
+LIMIT 200;
+```
+
+### One object's timeline
+
+*"Show me everything this Deployment did."* The archive's answer to [Object
+Timeline](DASHBOARDS.md), and the recipe that shows most plainly what a
+`Writer`-only sink costs: there is no sort key on identity, so this is a scan of
+every object in the glob no matter how narrow the filter.
+
+```sql duckdb
+SELECT
+    CAST(timestamp AS TIMESTAMP_NS) AS ts,
+    event_type,
+    resource_version,
+    sha256,
+    -- Which of the two payloads this record carries. A Snapshot carries full
+    -- state, a Modified an RFC 6902 patch; the archive stores both as text.
+    length(data) AS data_bytes,
+    length(diff) AS diff_bytes,
+    actors
+FROM read_json_auto(
+        getvariable('records'),
+        hive_partitioning       = true,
+        map_inference_threshold = 0)
+-- "group" is quoted because GROUP is a reserved word. The logical record contract
+-- spells the field `group`, which ClickHouse's mapping spells `api_group` — the
+-- two backends map the same record, they do not share a column vocabulary.
+WHERE "group"  = getvariable('group')
+  AND kind      = getvariable('kind')
+  AND namespace = getvariable('namespace')
+  AND name      = getvariable('name')
+ORDER BY ts;
+```
+
+Narrow it with `AND date = CAST(getvariable('day') AS DATE)` whenever you can:
+the identity predicate above filters *rows*, and only the partition predicate
+filters *objects*.
+
+### Changes by actor
+
+*"Who has been touching this cluster?"* `actors` is an array per record, so the
+question is an unnest and a group — the archive's form of [Drift by
+Actor](DASHBOARDS.md).
+
+```sql duckdb
+SELECT
+    actor,
+    count(*)                                 AS records,
+    count(DISTINCT namespace || '/' || name) AS objects,
+    min(CAST(timestamp AS TIMESTAMP))        AS first_seen,
+    max(CAST(timestamp AS TIMESTAMP))        AS last_seen
+FROM read_json_auto(
+        getvariable('records'),
+        hive_partitioning       = true,
+        map_inference_threshold = 0),
+     -- One row per (record, actor) pair. A record with three field managers
+     -- counts once for each, which is the same convention groupUniqArrayArray
+     -- gives the ClickHouse recipes.
+     unnest(actors) AS a(actor)
+WHERE date BETWEEN CAST(getvariable('window_from') AS DATE)
+               AND CAST(getvariable('window_to')   AS DATE)
+GROUP BY actor
+ORDER BY records DESC, actor;
+```
+
+The same two honest limits as the ClickHouse version apply: `actors` records
+*ownership* harvested from `metadata.managedFields`, not authorship of a
+particular edit, and a manager name is self-declared. And one more here — a
+`Deleted` record carries no actors at all, so deletions never appear in this
+result.
+
+### Activity by namespace
+
+*"Where is the churn?"* The archive's [Namespace
+Activity](DASHBOARDS.md): a window, grouped by namespace and kind.
+
+```sql duckdb
+SELECT
+    coalesce(nullif(namespace, ''), '(cluster-scoped)') AS namespace,
+    kind,
+    count(*)             AS records,
+    count(DISTINCT name) AS objects,
+    -- Snapshot is a first sighting, Modified a change. On this backend the two
+    -- do not mean "created" and "updated": a restart re-snapshots everything in
+    -- scope, so a Snapshot count is churn plus restarts, not creations.
+    count(*) FILTER (WHERE event_type = 'Modified') AS changes,
+    max(CAST(timestamp AS TIMESTAMP))              AS last_activity
+FROM read_json_auto(
+        getvariable('records'),
+        hive_partitioning       = true,
+        map_inference_threshold = 0)
+WHERE date BETWEEN CAST(getvariable('window_from') AS DATE)
+               AND CAST(getvariable('window_to')   AS DATE)
+GROUP BY namespace, kind
+ORDER BY records DESC, namespace, kind;
+```
+
+### Which objects cover a time window
+
+*"Which objects do I actually have to read?"* This is what the Hive-style layout
+is **for**. Answer it first, and every subsequent question costs those objects
+instead of the archive.
+
+`glob()` answers it without reading a single byte of any object — the partitions
+are in the key, so the store's own listing is the index:
+
+```sql duckdb
+WITH objects AS (
+    SELECT
+        file AS object_key,
+        -- The partitions, read back out of the key. regexp_extract rather than
+        -- hive_partitioning because nothing here opens an object.
+        regexp_extract(file, 'date=(\d{4}-\d{2}-\d{2})', 1) AS date,
+        regexp_extract(file, 'hour=(\d{2})', 1)              AS hour
+    FROM glob(getvariable('records'))
+)
+SELECT object_key, date, hour
+FROM objects
+-- A lexicographic comparison on 'YYYY-MM-DDHH', which is sound only because the
+-- hour partition is zero-padded ('09', never '9') — that is why it is.
+WHERE date || hour BETWEEN strftime(CAST(getvariable('window_from') AS TIMESTAMP) - INTERVAL 1 HOUR,
+                                    '%Y-%m-%d%H')
+                       AND strftime(CAST(getvariable('window_to') AS TIMESTAMP), '%Y-%m-%d%H')
+ORDER BY object_key;
+```
+
+**The one-hour widening on the lower bound is not slack, it is correctness.** An
+object is filed under its **first** record's timestamp and keeps accepting records
+until it rotates, so a record stamped 10:00 can live in the `hour=09` object. Widen
+the lower bound by the sink's `spec.writer.maxObjectAge` (default 5 minutes,
+ceiling 1 hour) — an hour is safe for any legal configuration. Nothing widens the
+upper bound: an object never holds records from before its own first one.
+
+Once you know the objects, reading them is the same scan with the partition
+predicate spelled out — and this form reports what each object actually holds:
+
+```sql duckdb
+SELECT
+    filename                                               AS object_key,
+    count(*)                                               AS records,
+    min(CAST(timestamp AS TIMESTAMP))                      AS first_ts,
+    max(CAST(timestamp AS TIMESTAMP))                      AS last_ts,
+    count(DISTINCT namespace || '/' || kind || '/' || name) AS objects
+FROM read_json_auto(
+        getvariable('records'),
+        hive_partitioning       = true,
+        map_inference_threshold = 0,
+        filename                = true)
+-- Prunes objects, then filters rows: the date term picks the partitions, the
+-- timestamp term trims the records inside them that fall outside the window.
+WHERE date BETWEEN CAST(getvariable('window_from') AS DATE) - INTERVAL 1 DAY
+               AND CAST(getvariable('window_to')   AS DATE)
+  AND CAST(timestamp AS TIMESTAMP) BETWEEN CAST(getvariable('window_from') AS TIMESTAMP)
+                                       AND CAST(getvariable('window_to')   AS TIMESTAMP)
+GROUP BY object_key
+ORDER BY object_key;
+```
+
+### Was anybody watching?
+
+*"There are no records for this object after Tuesday — did nothing change, or was
+nobody looking?"* On this backend that question has an answer inside the bucket,
+and it is the scope log rather than the records that holds it.
+
+```sql duckdb
+SELECT
+    CAST(ts AS TIMESTAMP) AS ts,
+    action,
+    "group",
+    kind,
+    coalesce(nullif(namespace, ''), '(all namespaces)') AS namespace,
+    rule_ref
+FROM read_json_auto(getvariable('scopes'), hive_partitioning = true)
+WHERE cluster_id = getvariable('cluster')
+ORDER BY ts;
+```
+
+A scope whose last row is `Started` is **not** necessarily still being watched.
+This backend cannot reconcile its own epochs, so a process that died with scopes
+open leaves them open forever: read an unmatched `Started` as "watching began
+here, and this epoch's end is unrecorded". Note the shape difference too — the
+scope log's timestamp column is `ts`, not `timestamp`, and it has no `event_type`;
+it is a different line, not a variant of the record line.
+
+### Athena
+
+For an archive too large to pull through one DuckDB process, or one that other
+people need to query without credentials of their own. The table below reads the
+objects in place; **partition projection** means it needs no `MSCK REPAIR` and no
+crawler, because every partition is derivable from the key.
+
+```sql athena
+CREATE EXTERNAL TABLE kuberecord_records (
+    -- One column per field of the logical record contract, spelled exactly as the
+    -- JSON line spells it (docs/SCHEMA.md, "The record line"). `timestamp` and
+    -- `group` are reserved words: backticks here, double quotes in a SELECT.
+    -- `timestamp` stays a string because Athena's own timestamp type holds
+    -- milliseconds, not the nanoseconds the contract carries — read it with
+    -- from_iso8601_timestamp("timestamp").
+    `timestamp`        string,
+    `event_type`       string,
+    `group`            string,
+    `version`          string,
+    `kind`             string,
+    `namespace`        string,
+    `name`             string,
+    `uid`              string,
+    `resource_version` string,
+    `labels`           map<string, string>,
+    `actors`           array<string>,
+    `data`             string,
+    `diff`             string,
+    `sha256`           string
+)
+-- cluster_id is a partition and therefore not also a column: Hive forbids one
+-- name being both, and the key is the authority anyway — an object is refused if
+-- its records disagree about cluster_id, so every line under cluster_id=X carries
+-- exactly X.
+PARTITIONED BY (
+    `cluster_id` string,
+    `date`       string,
+    `hour`       string
+)
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+STORED AS TEXTFILE
+-- The format partition is inside LOCATION rather than being a column, which is
+-- what scopes this table to one version of the object contract: a future
+-- format=jsonl-v2 is a second table, not a schema change to this one.
+LOCATION 's3://kuberecord-archive/audit/format=jsonl-v1/'
+TBLPROPERTIES (
+    'projection.enabled'            = 'true',
+    -- injected: a cluster_id cannot be enumerated or generated, so every query
+    -- must supply one in its WHERE clause. That is the same discipline the
+    -- ClickHouse recipes follow for the same reason, enforced by the engine.
+    'projection.cluster_id.type'    = 'injected',
+    'projection.date.type'          = 'date',
+    'projection.date.format'        = 'yyyy-MM-dd',
+    -- Set the lower bound to when this archive started; NOW keeps the upper end
+    -- moving without a DDL change. A range wider than the data costs nothing but
+    -- empty prefix probes.
+    'projection.date.range'         = '2026-01-01,NOW',
+    'projection.date.interval'      = '1',
+    'projection.date.interval.unit' = 'DAYS',
+    -- digits = 2 is what makes the projection generate 'hour=09' rather than
+    -- 'hour=9', which is the only spelling the writer produces.
+    'projection.hour.type'          = 'integer',
+    'projection.hour.range'         = '0,23',
+    'projection.hour.digits'        = '2',
+    'storage.location.template'     = 's3://kuberecord-archive/audit/format=jsonl-v1/cluster_id=${cluster_id}/date=${date}/hour=${hour}'
+);
+```
+
+Then, with the same partition-first discipline as everywhere else:
+
+```sql athena
+SELECT from_iso8601_timestamp("timestamp") AS ts, event_type, kind, namespace, name, actors
+FROM kuberecord_records
+WHERE cluster_id = 'prod-eu-1'   -- required: cluster_id is an injected partition
+  AND "date"     = '2026-08-20'
+ORDER BY ts
+LIMIT 200;
+```
+
+Four things to check before trusting this table in your account:
+
+- **Athena engine v3.** ZSTD-compressed text is readable there; earlier engines
+  are not guaranteed to read it. Athena decides compression from the file
+  extension, which is why every object ends `.jsonl.zst`.
+- **The scope log needs its own table.** It sits outside `cluster_id=` and is
+  partitioned by `date` alone, so point a second table at
+  `.../format=jsonl-v1/scopes/` with `date` as its only projected partition and
+  the columns of the scope line rather than the record line.
+- **`data` and `diff` are strings holding JSON**, not structs. Read into them with
+  `json_extract_scalar(data, '$.spec.replicas')` rather than declaring a schema
+  for a Kubernetes object kuberecord does not own.
+- **This DDL is not executed in CI.** Its structure is asserted against the record
+  contract and the key layout on every push; that Athena accepts it rests on the
+  AWS documentation for [partition
+  projection](https://docs.aws.amazon.com/athena/latest/ug/partition-projection-supported-types.html)
+  and [compression
+  support](https://docs.aws.amazon.com/athena/latest/ug/compression-support-hive.html),
+  not on a passing test.
+
+### What none of these recipes need
+
+Three habits from the ClickHouse half of this page are unnecessary here, and
+knowing why is most of understanding the backend:
+
+- **No `FINAL`, and no dedup.** An object's key is the SHA-256 of its own
+  contents, so a retried upload overwrites rather than duplicating. There is
+  nothing to collapse and no unmerged-duplicate window to read around.
+- **No `Checkpoint` handling.** `S3Sink` has no `checkpointEvery`: the archive
+  holds `Snapshot`, `Modified` and (live-observed) `Deleted` records, and never a
+  `Checkpoint`. A `Snapshot` is the base a replay starts from, and after every
+  restart there is a fresh one.
+- **No reconstruction recipe.** Replaying diffs onto a base is identical to the
+  [ClickHouse procedure](SCHEMA.md#reconstructing-state-at-an-instant) — take the
+  last record with non-empty `data` at or before the instant, apply each later
+  `diff` in `timestamp` order — but the read that feeds it is a scan rather than a
+  seek, and the tee pattern exists so you do not have to do it here. If the same
+  objects also stream to a `ClickHouseSink`, reconstruct there and keep the
+  archive for what it is good at: being cheap, immutable, and still around in
+  seven years.

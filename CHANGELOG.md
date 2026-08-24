@@ -3,11 +3,11 @@
 All notable changes to kuberecord are recorded here. The format is
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-The project carries three version numbers that move independently — the
-operator's, the CRDs' (`v1alpha1`) and the ClickHouse schema's (`v1`, frozen) —
-and [`docs/RELEASING.md`](docs/RELEASING.md) is the policy for all three. The
-short version: the operator is pre-1.0, so while it is `v0.x` a **minor bump may
-break**, and every break is spelled out below.
+The project carries four version numbers that move independently — the operator's,
+the CRDs' (`v1alpha1`), the ClickHouse schema's (`v1`, frozen) and the S3 object
+format's (`jsonl-v1`, frozen) — and [`docs/RELEASING.md`](docs/RELEASING.md) is the
+policy for all four. The short version: the operator is pre-1.0, so while it is
+`v0.x` a **minor bump may break**, and every break is spelled out below.
 
 Every tagged release must have a section here. `hack/changelog-section.sh` reads
 it, the release workflow refuses to publish a tag that lacks one, and what it

@@ -105,9 +105,12 @@ in ClickHouse what the stand-in assumes.
 
 ## Integration tests — `make test-integration`
 
-Three suites run against real, dockerized backends (build tag `integration`) — a
+Four suites run against real, dockerized backends (build tag `integration`) — a
 ClickHouse and a MinIO, both in containers the target creates and always tears
-down:
+down. The whole target runs in CI on every push
+([`.github/workflows/integration.yml`](../.github/workflows/integration.yml)),
+which is what makes the published-query claims below promises rather than
+intentions:
 
 - `internal/sink/clickhouse` exercises the writer and reader paths against a real
   server;
@@ -116,6 +119,16 @@ down:
   against tables built from the shipped DDL alone. That is how "these queries
   only touch frozen-schema columns" stays a tested claim rather than a review
   convention.
+- The same package also executes every **DuckDB** recipe on that page against a
+  real archive in MinIO, through the `duckdb` CLI the Makefile fetches into `bin/`.
+  It builds the archive with the shipped `s3.Encode` rather than by driving the
+  live writer, because an object is filed under its first record's timestamp and
+  the fixture needs records in chosen date and hour partitions — a writer rotating
+  against the wall clock can only ever produce the current one, and the
+  partition-pruning recipe would then prove nothing about the layout. Rows are
+  required, not merely a successful run: a recipe that is valid but selects nothing
+  is indistinguishable from a lost archive. The Athena DDL on the page is checked
+  for structure only, in `make test`, and says so — there is no AWS in CI.
 - `internal/sink/s3/awsstore` writes through the real S3 `Writer` to MinIO and
   reads the objects back: that they land at the documented key layout, that the
   decompressed JSONL decodes to exactly the records enqueued, that a retried

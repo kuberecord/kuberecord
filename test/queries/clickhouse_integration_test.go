@@ -78,10 +78,15 @@ func TestPublishedQueriesRunAgainstFrozenSchemaIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("FromMarkdown: %v", err)
 			}
-			if len(library) == 0 {
-				t.Fatal("this document holds no SQL blocks; the check would pass vacuously")
+			// ClickHouse's own recipes only. The DuckDB recipes on the same page read
+			// an object store and are executed by
+			// TestPublishedDuckDBRecipesRunAgainstTheArchiveIntegration; handing one to
+			// ClickHouse would fail on read_json_auto and say nothing useful.
+			clickhouse := ByDialect(library, DialectClickHouse)
+			if len(clickhouse) == 0 {
+				t.Fatal("this document holds no ClickHouse SQL blocks; the check would pass vacuously")
 			}
-			for _, q := range library {
+			for _, q := range clickhouse {
 				t.Run(shortSource(q.Source), func(t *testing.T) {
 					params := Parameters(q.SQL)
 					for name := range params {
@@ -457,12 +462,6 @@ func seedDemoData(ctx context.Context, t *testing.T, conn driver.Conn) demoFixtu
 		"at":        windowEnd,
 		"t":         base.Add(10 * time.Minute).Format("2006-01-02 15:04:05.000"),
 	}}
-}
-
-// shortSource trims a source label down to something readable as a subtest name.
-func shortSource(source string) string {
-	trimmed := strings.TrimPrefix(source, repoPath()+"/")
-	return strings.ReplaceAll(trimmed, " ", "_")
 }
 
 func envOrDefault(key, def string) string {

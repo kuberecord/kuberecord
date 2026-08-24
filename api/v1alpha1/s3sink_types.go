@@ -191,10 +191,14 @@ type S3ObjectLockSpec struct {
 //     object *is* the batch and spec.rotation governs it. Having both would be
 //     two sets of controls over one decision, and an author would have to know
 //     which one won.
-//   - checkpointEvery bounds the cost of replaying diffs, and an S3Sink writes no
-//     diffs: it cannot read its own history, so every record it receives is a
-//     permanent Snapshot (D12). A cadence over a thing that never happens would
-//     read as a knob that does nothing.
+//   - checkpointEvery bounds how far a replay has to walk back to the last
+//     full-state record, and for this backend that walk is already bounded. A
+//     Writer-only sink cannot warm from its own history, so it re-snapshots
+//     everything in scope on every restart (D12) and no replay reaches further back
+//     than the current process's first sighting. A cadence on top of that would buy
+//     nothing. Diffs themselves are written as usual — an object changed while this
+//     process is watching produces a Modified carrying a patch, identically to the
+//     ClickHouse side (docs/TEE.md); it is the *first* sighting that differs.
 //
 // What the four shared knobs mean is identical to their ClickHouse twins, down to
 // the defaults, so an author who has tuned one sink has tuned both. That identity
@@ -404,9 +408,11 @@ type S3SinkSpec struct {
 	//
 	// It carries a strict subset of ClickHouse's knobs: batchMaxRows and batchMaxWait
 	// are absent because for S3 the object *is* the batch and spec.rotation
-	// governs it, and checkpointEvery is absent because a Writer-only sink emits
-	// no diffs to checkpoint (D12). See S3WriterSpec for the full reasoning — the
-	// omissions are deliberate, not pending.
+	// governs it, and checkpointEvery is absent because a Writer-only sink cannot
+	// warm from history — it re-snapshots on every restart, so a replay is already
+	// bounded by the current process and a cadence would add nothing (D12). See
+	// S3WriterSpec for the full reasoning — the omissions are deliberate, not
+	// pending.
 	// +optional
 	Writer S3WriterSpec `json:"writer,omitempty"`
 

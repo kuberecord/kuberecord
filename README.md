@@ -353,8 +353,8 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 
 | Page | What is in it |
 |---|---|
-| [`docs/SCHEMA.md`](docs/SCHEMA.md) | The frozen v1 schema, column by column: the `event_type` state machine, the RFC 6902 diff format, checkpoint rows and state reconstruction, redaction, the version-agnostic identity rule, delivery semantics. |
-| [`docs/QUERIES.md`](docs/QUERIES.md) | The query library. Incident windows, drift by actor, flap reports, state reconstruction, Events for an object, what a deleted object last contained — every statement executed against a real ClickHouse in CI. |
+| [`docs/SCHEMA.md`](docs/SCHEMA.md) | What is stored, in three parts: the backend-independent record contract (the `event_type` state machine, the RFC 6902 diff format, checkpoints and state reconstruction, redaction, the version-agnostic identity rule), then the **frozen v1 ClickHouse schema** column by column, then the **`jsonl-v1` S3 object format** and its key layout. |
+| [`docs/QUERIES.md`](docs/QUERIES.md) | The query library, for both backends. Incident windows, drift by actor, flap reports, state reconstruction, Events for an object, what a deleted object last contained — plus DuckDB recipes and an Athena table for the S3 archive. Every ClickHouse statement is executed against a real ClickHouse in CI, and every DuckDB recipe against a real object store. |
 | [`docs/RBAC.md`](docs/RBAC.md) | The aggregated-ClusterRole model, the no-self-escalation argument, granting a new kind in 30 seconds, and the honest read-flattening caveat. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured envelopes per scale profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — and how to reproduce them. |
 | [`docs/CRDS.md`](docs/CRDS.md) | Every field of the three custom resources, what each validation rejects and why, and every status condition they report. |

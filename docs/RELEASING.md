@@ -11,16 +11,19 @@ promises, plus the mechanics of cutting one.
 
 ## Versioning policy
 
-kuberecord carries **three version numbers, and they are deliberately
+kuberecord carries **four version numbers, and they are deliberately
 independent**. Conflating them is the mistake this section exists to prevent: an
 operator upgrade is not a schema migration, and a schema that is frozen does not
-mean an operator that cannot change.
+mean an operator that cannot change. The fourth is new in v0.2.0 — the S3 object
+format is its own contract on its own timeline (D15), because a storage format
+that outlives the operator by years cannot be versioned with it.
 
 | What | Version | What it promises |
 |---|---|---|
 | **The operator** (image, chart, `install.yaml`) | `v0.x.y` — semver, **pre-1.0** | A **minor bump may break**: flags, defaults, RBAC and behaviour are all fair game while the leading digit is `0`. Every break is spelled out in [`CHANGELOG.md`](../CHANGELOG.md). A **patch** bump is fixes only — no new flags, no new permissions, no behaviour change beyond the bug named in the notes. |
 | **The CRDs** | `kuberecord.io/v1alpha1` | Alpha in the Kubernetes sense, and the honest reading of it: a field may be removed, renamed or re-defaulted in an operator minor. There are **no conversion webhooks** (D4), so there is exactly one served and stored version and an incompatible change is a manual edit of your custom resources, guided by the changelog. |
-| **The ClickHouse schema** | `v1` — **frozen** | Within `v1` no column is renamed, retyped, repurposed or removed, and neither the engines nor the sort keys change. Changes are additive only. This is the strongest of the three promises, and it does not weaken when the operator's does: see [`SCHEMA.md`](SCHEMA.md#stability--versioning). |
+| **The ClickHouse schema** | `v1` — **frozen** | Within `v1` no column is renamed, retyped, repurposed or removed, and neither the engines nor the sort keys change. Changes are additive only. This is the strongest of the four promises, and it does not weaken when the operator's does: see [`SCHEMA.md`](SCHEMA.md#stability--versioning). |
+| **The S3 object format** | `jsonl-v1` — **frozen**, stamped into every key | Within `jsonl-v1` the line format, the field names, the key layout and the definition of the content hash do not change; fields may only be added, and a reader must tolerate ones it does not know. A change that cannot be expressed additively ships as a sibling `format=jsonl-v2/` partition rather than a rewrite — archived objects may be under Object Lock and legally immutable. See [`SCHEMA.md`](SCHEMA.md#versioning-the-object-format). |
 
 Two consequences worth stating outright:
 

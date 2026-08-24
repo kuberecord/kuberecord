@@ -77,17 +77,21 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots throwaway containers, waits for each to answer,
 # runs the tagged tests, and always tears them down.
 #
-# Three suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# Four suites run here. internal/sink/clickhouse exercises the ClickHouse writer
 # and reader paths. test/queries executes every query kuberecord publishes —
 # docs/QUERIES.md and the Grafana dashboards — against tables built from the
 # shipped DDL alone, which is how Task 3.2's "only frozen-schema columns"
 # criterion is asserted; it uses a database of its own, because `go test` runs
 # package binaries concurrently and two suites recreating resource_states in one
-# database would delete each other's fixtures. And internal/sink/s3/awsstore
-# writes through the real S3 Writer to MinIO and reads the objects back (Task
-# 6.6): key layout, decode fidelity, retry idempotency, both rotation triggers and
-# the Object Lock headers, none of which a fake store can vouch for. It creates a
-# bucket per test, so it needs no database-style isolation.
+# database would delete each other's fixtures. The same package also runs every
+# published *DuckDB* recipe against a real archive in MinIO through the duckdb CLI
+# (Task 7.2) — the read path an S3 archive has, since the sink itself has none
+# (D12) — and requires rows back, so a recipe that parses but selects nothing
+# fails. And internal/sink/s3/awsstore writes through the real S3 Writer to MinIO
+# and reads the objects back (Task 6.6): key layout, decode fidelity, retry
+# idempotency, both rotation triggers and the Object Lock headers, none of which a
+# fake store can vouch for. Both S3 suites create a bucket per test, so they need
+# no database-style isolation.
 #
 # Non-standard host ports throughout, so this never collides with a developer's
 # own ClickHouse on 9000/8123 or MinIO on 9000. ClickHouse's image default user is
@@ -108,7 +112,7 @@ MINIO_IT_USER ?= kuberecord
 MINIO_IT_PASSWORD ?= kuberecord
 
 .PHONY: test-integration
-test-integration: ## Run integration tests against a dockerized ClickHouse and MinIO.
+test-integration: duckdb ## Run integration tests against a dockerized ClickHouse and MinIO.
 	@echo "Starting ClickHouse container '$(CH_IT_CONTAINER)'..."
 	@$(CONTAINER_TOOL) rm -f $(CH_IT_CONTAINER) >/dev/null 2>&1 || true
 	@$(CONTAINER_TOOL) run -d --name $(CH_IT_CONTAINER) \
@@ -144,6 +148,7 @@ test-integration: ## Run integration tests against a dockerized ClickHouse and M
 	CH_TEST_ADDR=$(CH_IT_ADDR) CH_TEST_USER=$(CH_IT_USER) CH_TEST_PASSWORD=$(CH_IT_PASSWORD) \
 	S3_TEST_ENDPOINT=$(MINIO_IT_ENDPOINT) \
 	S3_TEST_ACCESS_KEY_ID=$(MINIO_IT_USER) S3_TEST_SECRET_ACCESS_KEY=$(MINIO_IT_PASSWORD) \
+	DUCKDB="$(DUCKDB)" \
 		go test -tags=integration ./internal/sink/... ./test/queries/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
@@ -812,6 +817,14 @@ KUBECONFORM ?= $(LOCALBIN)/kubeconform
 # installed from outside its own module. It is fetched from the release tarball
 # instead — see the promtool target.
 PROMTOOL ?= $(LOCALBIN)/promtool
+# duckdb is not a Go program at all. It is the read path an S3 archive has: the
+# recipes in docs/QUERIES.md are executed through this binary against a real
+# MinIO (Task 7.2), so the CLI is a test dependency rather than a build one and is
+# fetched from the upstream release like promtool. It is deliberately *not* a Go
+# module dependency: nothing kuberecord ships links DuckDB, and adding a CGO
+# database driver to go.mod so a documentation test could run would be paying for
+# the archive's read path in every operator image.
+DUCKDB ?= $(LOCALBIN)/duckdb
 
 ## Tool Versions
 #
@@ -838,6 +851,13 @@ KUBECONFORM_VERSION ?= v0.7.0
 # (the Go module version of the same release reads v0.313.2 — the repository never
 # adopted a /v3 module path — but no Go path is involved here).
 PROMTOOL_VERSION ?= 3.13.2
+# The DuckDB CLI release the published recipes are tested against. It is a floor,
+# not a ceiling: the recipes use `SET VARIABLE`/`getvariable()` (1.1.0 and later)
+# and `read_json_auto`'s hive_partitioning, filename and map_inference_threshold
+# parameters, so anything from this release forward runs them. Raising the pin is
+# a normal dependency bump; lowering it below 1.1 would silently stop the
+# parameter block from working.
+DUCKDB_VERSION ?= 1.5.5
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -906,6 +926,39 @@ $(PROMTOOL): $(LOCALBIN)
 	chmod +x "$(PROMTOOL)-$(PROMTOOL_VERSION)"; \
 	} ;\
 	ln -sf "$$(realpath "$(PROMTOOL)-$(PROMTOOL_VERSION)")" "$(PROMTOOL)"
+
+# duckdb is extracted from the official DuckDB release, choosing the single-file
+# `.gz` asset over the `.zip` one so the download needs nothing but gzip — `unzip`
+# is not universally present, and this target runs on developer machines as well
+# as in CI. The version-suffixed binary and the symlink follow go-install-tool's
+# convention, so switching DUCKDB_VERSION re-fetches rather than silently keeping
+# the old binary.
+#
+# `INSTALL httpfs` runs here rather than being left to the first test: reading an
+# s3:// URL needs that extension, DuckDB downloads it from extensions.duckdb.org
+# on demand, and a network failure at bootstrap is a clear message about a missing
+# prerequisite while the same failure mid-suite reads like a broken recipe. It is
+# idempotent and a no-op once the extension is cached under the user's home.
+#
+# GOOS is mapped rather than used directly: DuckDB spells Darwin "osx", and the
+# arch names (amd64/arm64) already agree.
+.PHONY: duckdb
+duckdb: $(DUCKDB) ## Download the DuckDB CLI locally if necessary (used by the published-recipe tests).
+$(DUCKDB): $(LOCALBIN)
+	@[ -f "$(DUCKDB)-$(DUCKDB_VERSION)" ] && \
+		[ "$$(readlink -- "$(DUCKDB)" 2>/dev/null)" = "$(DUCKDB)-$(DUCKDB_VERSION)" ] || { \
+	set -e; \
+	case "$$(go env GOOS)" in darwin) os=osx ;; *) os=$$(go env GOOS) ;; esac; \
+	arch=$$(go env GOARCH); \
+	url="https://github.com/duckdb/duckdb/releases/download/v$(DUCKDB_VERSION)/duckdb_cli-$$os-$$arch.gz"; \
+	echo "Downloading $$url"; \
+	curl -fsSL "$$url" | gzip -dc > "$(DUCKDB)-$(DUCKDB_VERSION)"; \
+	chmod +x "$(DUCKDB)-$(DUCKDB_VERSION)"; \
+	rm -f "$(DUCKDB)"; \
+	} ;\
+	ln -sf "$$(realpath "$(DUCKDB)-$(DUCKDB_VERSION)")" "$(DUCKDB)"
+	@echo "Installing the DuckDB httpfs extension (needed to read s3:// archives)..."
+	@"$(DUCKDB)" -c "INSTALL httpfs;" >/dev/null
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.

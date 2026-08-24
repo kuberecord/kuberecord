@@ -1,25 +1,490 @@
-# kuberecord ClickHouse Schema (v1)
+# kuberecord Storage Schema
 
-This document is the authoritative reference for the kuberecord ClickHouse
-schema. The DDL is shipped in-repo under
-[`deploy/clickhouse/schema/`](../deploy/clickhouse/schema/):
+This document is the authoritative reference for what kuberecord stores. It is in
+three parts, and the split is the architecture's rather than the document's:
 
-- [`001_resource_states.sql`](../deploy/clickhouse/schema/001_resource_states.sql) — the per-object change stream.
-- [`002_watch_scopes.sql`](../deploy/clickhouse/schema/002_watch_scopes.sql) — the watch-scope epoch log.
+- **[The logical record contract](#the-logical-record-contract)** — one `Record`
+  per observed state transition, backend-independent. This is the vocabulary every
+  backend adapts to (D9): the event-type state machine, the diff format,
+  checkpoints, redaction, and the version-agnostic identity rule.
+- **[Physical mapping to ClickHouse](#physical-mapping-to-clickhouse)** — how a
+  `Record` becomes a row in `resource_states`, and the **frozen `v1` schema** those
+  tables are. The DDL is shipped in-repo under
+  [`deploy/clickhouse/schema/`](../deploy/clickhouse/schema/):
+  [`001_resource_states.sql`](../deploy/clickhouse/schema/001_resource_states.sql) —
+  the per-object change stream, and
+  [`002_watch_scopes.sql`](../deploy/clickhouse/schema/002_watch_scopes.sql) — the
+  watch-scope epoch log.
+- **[Physical mapping to S3 objects](#physical-mapping-to-s3-objects)** — how a
+  batch of `Record`s becomes one zstd-compressed JSON Lines object, and the key it
+  is filed under. Its own versioned contract, `format=jsonl-v1` (D15), on its own
+  timeline.
 
 > **Schema v1 is frozen.** Because kuberecord had no users to keep compatibility
 > with, the schema got exactly one free redesign window, and that window is now
-> **closed**: as of Task 2.6 these two tables are a **public API** with an
-> additive-only change policy. Every column below is deliberate, and none of them
-> will change meaning, name, or type under `v1`.
-> See [Stability & Versioning](#stability--versioning) for what that guarantees
-> you and what it costs us.
+> **closed**: as of Task 2.6 the two ClickHouse tables are a **public API** with an
+> additive-only change policy. Every column of them is deliberate, and none will
+> change meaning, name, or type under `v1`.
+> See [Stability & Versioning](#stability--versioning) for what that guarantees you
+> and what it costs us.
+>
+> **That freeze is the ClickHouse mapping's**, and reorganising this document does
+> not touch it. The S3 object format is a separate contract with a separate
+> version, stamped into the object key as `format=jsonl-v1`, and is **not** covered
+> by it — see [Versioning the object format](#versioning-the-object-format).
 
-## Stability & Versioning
+Two properties of the three-part split are worth stating before either mapping.
+
+**The logical contract is what both backends implement; neither owns it.** A
+field's name in one mapping is not its name in the other — the record's `group` is
+`api_group` as a ClickHouse column and `group` as a JSON key — and nothing about
+one physical form constrains the other. A third backend is a third mapping section,
+not a change here.
+
+**Representational loss is documented, never silent** (D9). Where a backend cannot
+hold something the contract carries, or cannot produce something the contract
+allows, its mapping section says so in as many words. The S3 archive's absent
+deletions are the case that matters most, and they are stated in three places —
+here, on the `S3Sink`'s status as `HistoryUnavailable=True`, and on every rule
+naming it — because an archive cannot state them itself.
+
+---
+
+## The logical record contract
+
+Every backend receives the same value: one `Record` per observed state transition
+of one watched object, defined in
+[`internal/sink/record.go`](../internal/sink/record.go). It is a pure data type
+carrying no query, driver or column detail, and a backend's whole job is to map it
+onto something durable.
+
+| Field | Identity? | What it holds |
+|---|---|---|
+| `Timestamp` | — | The instant the event occurred, nanosecond precision, UTC. **Event time, not ingestion time** — see [`ts` ordering](#ts-ordering-event-time-not-ingestion-time), which is a property of the contract rather than of one mapping. |
+| `ClusterID` | ✅ | The cluster this operator instance serves. Explicit in both mappings; implicit in process (Invariant 7). |
+| `EventType` | — | `Added \| Modified \| Deleted \| Snapshot \| Checkpoint` — the [state machine](#event-type-state-machine). An **open** enum: a consumer branches on what it knows and passes the rest through. |
+| `APIGroup` | ✅ | API group; `""` is the core group, which is a value and not a wildcard. |
+| `APIVersion` | — | The version observed. Provenance only — [identity is version-agnostic](#identity-is-version-agnostic). |
+| `Kind` | ✅ | Object kind. |
+| `Namespace` | ✅ | Object namespace; `""` for a cluster-scoped object. |
+| `Name` | ✅ | Object name. |
+| `UID` | — | The Kubernetes UID of this *incarnation*, which is what tells a delete-and-recreate from an update. |
+| `ResourceVersion` | — | `metadata.resourceVersion` at observation. |
+| `Labels` | — | The object's labels at observation. |
+| `Actors` | — | Distinct, sorted field-manager names from `metadata.managedFields`. Always empty on a `Deleted` record: there is no live object left to inspect. |
+| `Data` | — | Full normalized (and [redacted](#redaction)) JSON of the object. Populated on `Added`, `Snapshot`, `Checkpoint`, and any `Modified` that fell back to full state. |
+| `Diff` | — | An RFC 6902 JSON Patch describing the change — see [Diff format](#diff-format). Populated on `Modified` and `Checkpoint`. |
+| `SHA256` | — | Hex SHA-256 of the normalized JSON, the basis of dedup and version gating. Empty on `Deleted`. |
+
+The identity column is the canonical key of Invariant 7:
+`(cluster_id, api_group, kind, namespace, name)`, version-agnostic, constructed by
+exactly one function in the codebase. Everything else is either provenance or
+payload.
+
+Nothing here is a promise about *storage*. How wide a column is, whether a field
+becomes a column or a JSON key, what a backend does when two records collide — all
+of that belongs to a mapping section. What follows in this part is the meaning of
+the values themselves, which is the same however they are stored.
+
+### Event-type state machine
+
+`event_type` is one of `Added | Modified | Deleted | Snapshot | Checkpoint`.
+
+- **`Added`** — the object was observed for the first time (a genuine cache
+  miss while the cache is trusted), or a reincarnation (same name, new UID)
+  supersedes a prior incarnation. Carries full `data`.
+- **`Modified`** — a subsequent observation whose content hash differs from the
+  last recorded state. Carries a `diff` against the prior state; falls back to
+  full `data` when a diff cannot be produced (see below).
+- **`Deleted`** — the object is gone (live delete, reincarnation close-out of
+  the old UID, or startup GC of a "zombie"). Empty `data`/`diff`/`sha256`. A
+  close-out recovered from history is dated from that incarnation's own last
+  event rather than from now — see [Deletion
+  semantics](#deletion-semantics--no-sentinels).
+- **`Snapshot`** — a cache miss observed *while the cache has not yet been warmed
+  from the sink's own history* (startup "SafeMode"). Tagged `Snapshot` rather than
+  `Added` so a slow or unavailable backend at startup cannot masquerade as a mass
+  duplicate-`Added` storm. Carries full `data`.
+- **`Checkpoint`** — a `Modified` in every semantic sense except its
+  `event_type` and its populated `data`: it carries the `diff` **and** the full
+  state, so a reader replaying an object's history never has to walk back
+  further than the last one. See [Checkpoint rows](#checkpoint-rows).
+
+Typical lifecycle for one object:
+
+```
+(first seen) --> Added --> Modified --> Modified --> ... --> Deleted
+                   ^                                            |
+                   +------------ (reincarnation, new UID) ------+
+```
+
+At startup before warm-up completes, first sightings are `Snapshot` instead of
+`Added`; once warm, normal `Added`/`Modified` resumes.
+
+**Which of these values a given backend can actually produce is a property of its
+mapping, not of this state machine.** A `ClickHouseSink` produces all five. An
+`S3Sink` never warms, so it never produces `Added` and never leaves the `Snapshot`
+state for a first sighting, and it has no checkpoint cadence to produce
+`Checkpoint` — see [What the archive does not
+contain](#what-the-archive-does-not-contain).
+
+### Kubernetes Events
+
+`v1/Event` and `events.k8s.io/v1/Event` are streamed in a **built-in Events
+mode**. Name either one in a rule's `resources:` and it applies; there is no
+switch, and no way to turn it off. Everything below is a property of the *kind*,
+so a query does not have to know which rule produced a row — it only has to know
+that `kind = 'Event'` in one of those two groups.
+
+An Event is append-only ephemera, not durable cluster state: the API server
+creates one, **updates it in place** to bump `count` when the same thing happens
+again, and lets it expire after roughly an hour. Three schema-visible
+consequences follow.
+
+**Every Event row carries full `data`, and `diff` is always empty.** The
+interesting row is the Event as it stood when its count changed, and a reader
+should be able to take a `count`, a `message` or an `involvedObject` straight off
+it. Hash dedup still runs, so a resync that re-delivers an unchanged Event writes
+nothing. `Checkpoint` rows therefore never appear for Events — there is no
+diff-only run for one to interrupt.
+
+**An Event's expiry is recorded as nothing at all.** There is no `Deleted` row
+for a `v1/Event` or an `events.k8s.io/v1/Event`, ever — not for TTL expiry, not
+for a `kubectl delete event`, and not as a reincarnation close-out when a newer
+Event takes over an older one's name. An Event vanishing is its retention window
+closing, not a change to the cluster, and recording it as a deletion would put
+one false deletion in the audit trail per Event the cluster ever emitted. The
+practical consequence for a query: **an Event's history simply stops**. Do not
+read "no `Deleted` row" as "still live" for `kind = 'Event'` the way you would
+for a Deployment; read the Event's own `lastTimestamp` (or
+`series.lastObservedTime`) out of `data` instead.
+
+**`Snapshot` does not appear either.** Snapshot hedges "genuinely new, or merely
+unseen by this process?", and for an Event the answer is always the former: a
+first sighting is `Added` even during warm-up. Warm-up still runs for an Events
+scope — it primes the dedup hashes so a restart does not re-record every Event
+still inside its TTL — but it never reconciles anything *away* from history, so
+it cannot manufacture the deletions the previous paragraph rules out.
+
+`watch_scopes` is unaffected: an Events scope writes ordinary `Started` and
+`Stopped` rows like any other, so "when was this cluster's Event stream being
+captured?" is answerable exactly as it is for every other kind.
+
+Two operational notes:
+
+- **Volume.** Events are typically the highest-cardinality, highest-churn kind in
+  a cluster. Enable them per namespace with a `StreamRule` before reaching for a
+  cluster-wide `ClusterStreamRule`, and size retention accordingly — this is why
+  the `events` watch preset does not ship enabled (see
+  [`docs/RBAC.md`](RBAC.md)).
+- **Warm-up cost.** Because Events never get a `Deleted` row, nothing tombstones
+  them in `resource_states`, so the warm-up query for an Events scope returns
+  every Event still in ClickHouse for that scope. A retention TTL on
+  `resource_states` (see [Suggested TTL](#suggested-ttl-optional-non-mandatory))
+  is what bounds both that query and the memory its result seeds.
+
+Query recipes for Events — including "everything that happened to object X around
+time T" — are in [`docs/QUERIES.md`](QUERIES.md).
+
+### Redaction
+
+Values can be scrubbed out of every object before it is stored. It happens in the
+pipeline, before a record reaches any backend, so it applies identically to both
+mappings — the same `SinkPolicy` type on either sink kind, deliberately, since a
+backend that could carry a weaker policy shape would make choosing that backend a
+way to opt out of the floor. Redaction is configured in two places, and the two are
+**additive**:
+
+- **`ClickHouseSink.spec.policy.redaction`** / **`S3Sink.spec.policy.redaction`** —
+  the sink owner's floor, applied to everything any rule streams to that sink.
+- **`StreamRule.spec.extraRedaction`** / **`ClusterStreamRule.spec.extraRedaction`**
+  — a rule's additions on top of that floor.
+
+A rule can add paths; nothing can take one away. Where two rules stream the same
+object to the same sink, the union of their paths applies — there is exactly one
+stored payload and one hash per object per sink, so honouring less than the union
+would let one rule's existence unredact another's stream.
+
+```yaml
+apiVersion: kuberecord.io/v1alpha1
+kind: ClickHouseSink
+metadata:
+  name: default
+spec:
+  policy:
+    redaction:
+    - fieldPath: data.password
+---
+apiVersion: kuberecord.io/v1alpha1
+kind: StreamRule
+metadata:
+  name: app-config
+  namespace: demo
+spec:
+  sink:
+    kind: ClickHouseSink
+    name: default
+  resources:
+  - group: ""
+    version: v1
+    kind: ConfigMap
+  extraRedaction:
+  - fieldPath: spec.template.spec.containers[*].env[*].value
+  - annotation: my.company.io/api-token
+```
+
+#### Where it happens, and why that is the whole point
+
+Values are scrubbed **after normalization and before hashing**. Everything
+downstream is therefore a function of the *redacted* content:
+
+| Field | Effect |
+|---|---|
+| `Data` | the redacted object |
+| `Diff` | computed between two already-redacted states, so a change to a scrubbed value produces no patch operation carrying it |
+| `SHA256` | the hash of the redacted object |
+
+The consequence worth stating plainly: two states of an object that differ
+**only** in a redacted value are indistinguishable to kuberecord. They hash
+identically, so the second one deduplicates and **no row is written at all**.
+That is deliberate. A design that redacted on the way out would leak the value
+through the diff, and one that hashed before redacting would leave the `sha256`
+column as a stable oracle to grind guessed values against.
+
+The flip side is equally deliberate: kuberecord cannot tell you *that* a redacted
+value changed. If you need change detection on a secretish field, redact its
+neighbours instead of it, or stream the object to a second sink under a different
+policy.
+
+#### Path syntax
+
+The grammar is deliberately tiny, and it is not JSONPath:
+
+| Form | Matches |
+|---|---|
+| `data.password` | dot-separated field names |
+| `spec.containers[*].env[*].value` | `[*]` iterates every element of an array |
+| `spec.args[*]` | a terminal wildcard replaces each element |
+| `annotation: my.company.io/api-token` | one annotation key, whatever characters it contains |
+
+Nothing whose match set depends on the object's contents — no filters, no
+recursive descent, no indices — is accepted, so what a policy redacts is
+readable off the policy. The syntax is validated at admission by the CRDs: a
+malformed path is rejected by the API server, not discovered at stream time.
+
+The `annotation:` shorthand exists because annotation keys contain dots and
+slashes: `kubectl.kubernetes.io/last-applied-configuration` written as a
+`fieldPath` would mean six nested maps that do not exist. Exactly one of
+`fieldPath` and `annotation` is set per entry.
+
+#### What a redacted value looks like
+
+The value is replaced by the literal string `[REDACTED]`; the structure around it
+is preserved. A reader can see that the field existed and was scrubbed, rather
+than being unable to tell a hidden field from an absent one. A path whose leaf is
+a map or an array replaces that whole subtree with the same string, and a path
+that matches nothing in a given object is a silent no-op — which is what lets one
+policy apply across a mixed resource list.
+
+#### Always on: `kubectl.kubernetes.io/last-applied-configuration`
+
+This annotation is scrubbed on **every** object, under **every** policy,
+including an entirely empty one. `kubectl apply` copies the complete submitted
+object into it, so it embeds a verbatim second copy of the very values a policy
+removes; leaving it alone would make every other rule cosmetic. It cannot be
+turned off.
+
+#### What redaction is not
+
+- **Not a Secrets unlock.** `v1/Secret` is denied in code (D8) and no redaction
+  policy admits one, however thoroughly it would scrub it.
+- **Not a substitute for query-side access control.** Everything not on a path is
+  stored verbatim, and the flattening caveat in [`docs/RBAC.md`](RBAC.md) still
+  applies: anyone who can query ClickHouse sees every object any rule streams.
+- **Not retroactive.** Rows written before a path was added keep whatever they
+  recorded. Adding a path changes the object's content and therefore its hash, so
+  the next event for each object writes a fresh, redacted row.
+
+### Diff format
+
+`Modified` rows store an **RFC 6902 JSON Patch** in the `diff` column, produced
+by [`wI2L/jsondiff`](https://github.com/wI2L/jsondiff) comparing the previous
+normalized JSON against the current one. Normalization strips volatile fields
+(`metadata.managedFields`, `metadata.resourceVersion`, `metadata.generation`)
+before hashing and diffing, so cosmetic churn does not generate rows.
+[Redaction](#redaction) runs in the same pass, on both sides, so a diff can never
+carry a value the policy scrubbed out of `data`.
+
+**Graceful degradation:** if no prior JSON baseline exists, or the diff/marshal
+fails, the operator writes the full current state to `data` and leaves `diff`
+empty — a full-state row is always correct, merely larger than a diff.
+
+**Kubernetes Events are never diffed** — every one of their rows is full state
+by design, not by degradation. See [Kubernetes Events](#kubernetes-events).
+
+### Checkpoint rows
+
+Diffs make the stream cheap to write and cheap to store, but they make a *read*
+unbounded: with `Modified` rows carrying diffs only, "what did this object look
+like at time T?" means replaying every diff back to the object's last full row —
+and for a Deployment that has been reconciled for a year, that is the whole
+year. A `Checkpoint` row is a `Modified` that also carries the full state, which
+caps that walk.
+
+Two independent triggers promote a `Modified` write to a `Checkpoint`:
+
+1. **Cadence** — every `spec.writer.checkpointEvery` consecutive diff-only
+   `Modified` rows for one object (default **50**; `0` disables checkpointing
+   for that sink entirely). This is what bounds replay: a reconstruction never
+   applies more than `checkpointEvery` patches.
+2. **Size** — a single write whose diff is *larger* than the object it
+   describes. Such a diff is pure loss: more bytes than the state itself, plus a
+   replay step on top. It fires regardless of how far the cadence has
+   progressed — but not when checkpointing is disabled.
+
+Both sides of the size comparison are **uncompressed** bytes of the diff and of
+the freshly serialized full object the pipeline already holds at diff time, so
+the check costs nothing. Neither the row's `data` *column* (empty on a
+`Modified`, which would make the trigger fire on every update) nor the
+operator's in-memory zstd-compressed baseline (which would over-trigger by the
+compression ratio) is ever an operand.
+
+Consequences for a consumer:
+
+- **`Checkpoint` is not a special case for aggregate reads.** It has the same
+  identity, `uid`, `sha256` and `labels` a `Modified` would have carried, so
+  `argMax(…, ts)` queries — including the operator's own warm-up read — are
+  unaffected. Only a *replay* treats it specially, as its base.
+- **A `Checkpoint`'s own `diff` must not be re-applied on top of its `data`.**
+  The two describe the same transition: `data` is the state *after* the diff.
+- **The cadence is per operator process, not per object lifetime.** The counter
+  behind trigger 1 lives in the operator's memory and resets on restart, which
+  costs nothing: a restarting operator starts from an empty (or history-warmed)
+  cache, so its first row for an object is a full-state `Added`/`Snapshot`
+  anyway, and the replay window re-baselines there. Nothing durable depends on
+  the counter (Invariant 6), and a reconstruction never needs to know what it
+  was — it reads the rows.
+
+#### Reconstructing state at an instant
+
+This is the official recipe. It is what
+`TestCheckpointStateReconstructionIntegration`
+(`internal/sink/clickhouse/checkpoint_integration_test.go`) executes and asserts
+byte-for-byte against the live object, so it stays true rather than merely
+documented.
+
+The **procedure** is logical — find the base, replay the patches, stop at a
+deletion — and the SQL below is the ClickHouse mapping's form of the read that
+feeds it. The same four steps apply to an S3 archive, over records read by a scan
+rather than a seek and with a `Snapshot` rather than an `Added` as the usual base;
+[`docs/QUERIES.md`](QUERIES.md#what-none-of-these-recipes-need) says why you should
+reconstruct on the ClickHouse side instead when both are available.
+
+**Step 1 — read the object's history up to the target instant.** `FINAL` is
+required, not optional: the write path is at-least-once, and replaying one
+object's patch twice is not idempotent (a `remove` op fails the second time, an
+`add` duplicates).
+
+```sql
+SELECT ts, event_type, data, diff
+FROM resource_states FINAL
+WHERE cluster_id = {cluster:String}
+  AND api_group  = {group:String}      -- '' for the core group
+  AND kind       = {kind:String}
+  AND namespace  = {namespace:String}  -- '' for cluster-scoped objects
+  AND name       = {name:String}
+  AND ts        <= {at:DateTime64(9, 'UTC')}
+ORDER BY ts;
+```
+
+**Step 2 — find the base.** Take the **last row with a non-empty `data`** (an
+`Added`, a `Snapshot`, a `Checkpoint`, or a `Modified` that fell back to full
+state). Its `data` is the starting document. If the result set holds no
+`data`-bearing row, history for this object begins before your retention window
+and the state at `T` is not reconstructible.
+
+Everything before the base row is irrelevant — that is the bound checkpointing
+buys you.
+
+**Step 3 — replay forward.** Apply the `diff` of every row *after* the base row,
+in `ts` order, as an RFC 6902 JSON Patch. Skip the base row's own `diff` (see
+above). Rows with an empty `diff` and non-empty `data` are full-state rows: they
+*replace* the document rather than patching it.
+
+**Step 4 — stop at a deletion.** If a `Deleted` row appears in the range, the
+object did not exist at `T` — for that `uid`. Treat a `Deleted` row as terminal
+for its `uid` regardless of `ts` ties (see [Deletion
+semantics](#deletion-semantics--no-sentinels)), and start again from the next
+`uid`'s first row if a successor was recreated under the same name.
+
+**Verifying a reconstruction.** The `sha256` of the row you finished on is the
+hex SHA-256 of the operator's normalized JSON for that state. Canonicalize your
+reconstructed document (re-serialize it with sorted object keys) and hash it:
+the two must match. That check is what turns "the replay ran without errors"
+into "the replay produced the right state".
+
+If the stream is [redacted](#redaction), both the replayed document and the hash
+describe the *redacted* object — consistently, since redaction happens before
+hashing. Comparing a reconstruction against a **live** object therefore means
+applying the same policy to the live copy first; `pipeline.ObjectHash` takes the
+policy as an argument for exactly this reason.
+
+The digest to check it against — no replay needed, which also answers "is this
+object's recorded state current?" on its own:
+
+```sql
+-- Latest recorded hash and last-known event for one object.
+SELECT argMax(event_type, ts) AS last_event, argMax(sha256, ts) AS sha256, max(ts) AS ts
+FROM resource_states
+WHERE cluster_id = {cluster:String} AND api_group = {group:String}
+  AND kind = {kind:String} AND namespace = {namespace:String} AND name = {name:String};
+```
+
+### Identity is version-agnostic
+
+> An object's identity is `(cluster_id, api_group, kind, namespace, name)` —
+> **version-agnostic** (`apps/v1` and a hypothetical `apps/v2` Deployment are
+> the same object).
+
+`api_version` is recorded for provenance but is **not** part of identity. This
+is why the warm-up/restore query filters on `api_group`, `kind`, and
+`cluster_id` (not `api_version`), and why the sort key omits `api_version`.
+Filtering on `api_group` — not `kind` alone — is what keeps two resources that
+share a Kind (e.g. `batch/v1` `Job` vs. a CRD `example.com/v1` `Job`) from
+cross-contaminating each other's history.
+
+---
+
+## Physical mapping to ClickHouse
+
+A `ClickHouseSink` maps one `Record` to one row of `resource_states`, and one
+watch-scope transition to one row of `watch_scopes`. This part is the frozen `v1`
+schema: the tables, their columns and types, their engines and sort keys, and the
+delivery semantics that follow from those choices.
+
+The vocabulary shifts slightly on the way in, and deliberately: the record's
+`APIGroup` and `APIVersion` are the `api_group` and `api_version` columns, which is
+what a ClickHouse consumer expects to read and not what the JSON line of the other
+mapping spells. Everything else keeps its name.
+
+Two things the record contract leaves open, this mapping closes:
+
+- **A `Record` says nothing about duplicates; `ReplacingMergeTree` does.** The write
+  path is at-least-once, and it is the sort key that makes a re-inserted row
+  collapse rather than double-count — see [Delivery
+  semantics](#delivery-semantics).
+- **A `Record` is a value; a row is a value at a version.** Reads that must be exact
+  use `FINAL`, for the same reason.
+
+### Stability & Versioning
 
 **Schema version: `v1` — frozen.** Consumers may build queries, dashboards, and
-downstream pipelines against everything in this document and expect it to keep
-working for the life of `v1`.
+downstream pipelines against everything in **this section** and expect it to keep
+working for the life of `v1`. The scope is the ClickHouse mapping: the two tables
+below, their columns, their engines and their sort keys. The [S3 object
+format](#physical-mapping-to-s3-objects) carries its own frozen contract with its
+own version (`format=jsonl-v1`) and is not covered by this one — and neither
+promise weakens the other.
 
 > One property to read before building an incremental pipeline: `ts` is **event
 > time, not ingestion time**, so rows can be inserted out of `ts` order and a
@@ -28,7 +493,7 @@ working for the life of `v1`.
 > such a row and the three ways to consume around it. Snapshot and reconstruction
 > reads are unaffected.
 
-### What the freeze covers
+#### What the freeze covers
 
 - The **table names** `resource_states` and `watch_scopes`.
 - The **name, ClickHouse type, and documented semantics** of every column in the
@@ -43,7 +508,7 @@ working for the life of `v1`.
 - The **deletion contract**: `event_type` alone carries deletion semantics, and
   no data column will ever regain a magic-string sentinel.
 
-### What the freeze deliberately does *not* cover
+#### What the freeze deliberately does *not* cover
 
 - **The set of `event_type` values is open.** `Added | Modified | Deleted |
   Snapshot | Checkpoint` are the values `v1` emits today; a future minor release
@@ -57,7 +522,7 @@ working for the life of `v1`.
   projections, materialized views, the database name. All of it is yours; the
   operator neither sets nor inspects it.
 
-### Additive-only change policy
+#### Additive-only change policy
 
 Any `v1` schema change must be **purely additive**, and must satisfy all of:
 
@@ -103,7 +568,7 @@ The first row is a **tested contract**, not an implementation accident:
 against a live ClickHouse — it adds columns to both tables, then asserts
 validation passes *and* a real insert and warm-up read still round-trip.
 
-### Breaking changes
+#### Breaking changes
 
 A change that cannot be expressed additively — a retyped column, a different
 sort key, a split table — does **not** happen to `v1`. It ships as a **new major
@@ -114,7 +579,7 @@ of the operator. An in-place incompatible `ALTER` is never performed by
 kuberecord and is never asked of an operator, because it would strand every query
 already written against `v1`.
 
-### Phase 3 fit check (the freeze gate)
+#### Phase 3 fit check (the freeze gate)
 
 Freezing was gated on confirming that the already-designed Phase 3 features fit
 `v1` as it stands. Both do, so `v1` is frozen with no columns added:
@@ -143,7 +608,7 @@ Freezing was gated on confirming that the already-designed Phase 3 features fit
 Both have since shipped, and both shipped with **no columns added** — see
 [Kubernetes Events](#kubernetes-events) and [Redaction](#redaction).
 
-## Applying the schema
+### Applying the schema
 
 Either apply the two `.sql` files yourself (e.g. `clickhouse-client --multiquery
 < 001_resource_states.sql`), or let the operator create them idempotently by
@@ -170,7 +635,7 @@ watches — see [status conditions](CRDS.md#status-conditions).
 
 ---
 
-## `resource_states`
+### `resource_states`
 
 One row per observed state transition of a watched object.
 
@@ -216,7 +681,7 @@ for a single object is physically contiguous and time-ordered — the exact
 access pattern of both the warm-up query and typical audit lookups. Monthly
 partitioning keeps merges and TTL drops cheap at scale.
 
-### Delivery semantics
+#### Delivery semantics
 
 The operator's write path is **at-least-once**, not exactly-once, at the row
 level. `driver.Batch.Send()` is a network operation with three outcomes: nothing
@@ -260,7 +725,7 @@ while the operator was down — and grouping per identity would hide it behind t
 successor's `argMax(uid, ts)`. The warm-up seeds the newest incarnation and closes
 out the others (see "Deletion semantics" below).
 
-#### `ts` ordering: event time, not ingestion time
+##### `ts` ordering: event time, not ingestion time
 
 **`ts` is the instant the event occurred, not the instant the row was inserted.**
 For an ordinary write the two are the same to within the pipeline's own latency:
@@ -335,7 +800,7 @@ explicitly so it does not read as a general caveat on the table:
   `watch_scopes`' `ts` column below). Warm-up and boot reconciliation are therefore
   unaffected.
 
-### Deletion semantics — no sentinels
+#### Deletion semantics — no sentinels
 
 Schema v1 removes the pre-v1 magic-string sentinels that the `sha256` and
 `data` columns used to carry for deletions. **`event_type` alone carries
@@ -373,7 +838,7 @@ Two consequences matter to a consumer:
 
 ---
 
-## `watch_scopes`
+### `watch_scopes`
 
 The watch-scope epoch log. With dynamic rules, "we stopped watching X" and "X was
 deleted" are different truths and must be recorded differently, or the audit trail
@@ -396,7 +861,7 @@ ENGINE = MergeTree
 ORDER BY (cluster_id, api_group, kind, namespace, ts)
 ```
 
-### Transition semantics
+#### Transition semantics
 
 Rows are **transitions of a `(sink, scope)` pair**, not of a rule and not of an
 informer:
@@ -413,7 +878,7 @@ Multi-rule attribution deliberately lives in the owning CR's status, not here: t
 is an append-only log, and a row naming one of several contributing rules could
 never be corrected.
 
-### Restarts, and epochs left open
+#### Restarts, and epochs left open
 
 A process exiting writes **no** `Stopped` row. Shutdown is not a rule going away,
 and recording one would put a spurious epoch boundary in the trail on every
@@ -426,7 +891,7 @@ restart. Two consequences follow:
    each that no rule wants any more (the rule was deleted while it was down). It
    writes **zero** `Deleted` rows for the objects those scopes covered.
 
-### Reading the log
+#### Reading the log
 
 Two queries drive the operator's own decisions, and both are useful to a consumer:
 
@@ -451,7 +916,7 @@ asynchronously, so a scope's *own* `Started` row may land at any moment while it
 warm-up is running. Anchoring the question to the instant the current epoch began
 is what keeps "was it watched **before** now?" from answering itself.
 
-### What a `Stopped` row means for `resource_states`
+#### What a `Stopped` row means for `resource_states`
 
 Nothing was deleted. The objects in the scope keep whatever last-known state
 `resource_states` holds for them, correctly dated to on or before the `Stopped`
@@ -460,355 +925,7 @@ last-known states as *as-of its `Stopped` row*, not as current.
 
 ---
 
-## Event-type state machine
-
-`event_type` is one of `Added | Modified | Deleted | Snapshot | Checkpoint`.
-
-- **`Added`** — the object was observed for the first time (a genuine cache
-  miss while the cache is trusted), or a reincarnation (same name, new UID)
-  supersedes a prior incarnation. Carries full `data`.
-- **`Modified`** — a subsequent observation whose content hash differs from the
-  last recorded state. Carries a `diff` against the prior state; falls back to
-  full `data` when a diff cannot be produced (see below).
-- **`Deleted`** — the object is gone (live delete, reincarnation close-out of
-  the old UID, or startup GC of a "zombie"). Empty `data`/`diff`/`sha256`. A
-  close-out recovered from history is dated from that incarnation's own last
-  event rather than from now — see "Deletion semantics" above.
-- **`Snapshot`** — a cache miss observed *while the cache has not yet been
-  warmed from ClickHouse history* (startup "SafeMode"). Tagged `Snapshot`
-  rather than `Added` so a slow/unavailable ClickHouse at startup can't
-  masquerade as a mass duplicate-`Added` storm. Carries full `data`.
-- **`Checkpoint`** — a `Modified` in every semantic sense except its
-  `event_type` and its populated `data`: it carries the `diff` **and** the full
-  state, so a reader replaying an object's history never has to walk back
-  further than the last one. See [Checkpoint rows](#checkpoint-rows).
-
-Typical lifecycle for one object:
-
-```
-(first seen) --> Added --> Modified --> Modified --> ... --> Deleted
-                   ^                                            |
-                   +------------ (reincarnation, new UID) ------+
-```
-
-At startup before warm-up completes, first sightings are `Snapshot` instead of
-`Added`; once warm, normal `Added`/`Modified` resumes.
-
-## Kubernetes Events
-
-`v1/Event` and `events.k8s.io/v1/Event` are streamed in a **built-in Events
-mode**. Name either one in a rule's `resources:` and it applies; there is no
-switch, and no way to turn it off. Everything below is a property of the *kind*,
-so a query does not have to know which rule produced a row — it only has to know
-that `kind = 'Event'` in one of those two groups.
-
-An Event is append-only ephemera, not durable cluster state: the API server
-creates one, **updates it in place** to bump `count` when the same thing happens
-again, and lets it expire after roughly an hour. Three schema-visible
-consequences follow.
-
-**Every Event row carries full `data`, and `diff` is always empty.** The
-interesting row is the Event as it stood when its count changed, and a reader
-should be able to take a `count`, a `message` or an `involvedObject` straight off
-it. Hash dedup still runs, so a resync that re-delivers an unchanged Event writes
-nothing. `Checkpoint` rows therefore never appear for Events — there is no
-diff-only run for one to interrupt.
-
-**An Event's expiry is recorded as nothing at all.** There is no `Deleted` row
-for a `v1/Event` or an `events.k8s.io/v1/Event`, ever — not for TTL expiry, not
-for a `kubectl delete event`, and not as a reincarnation close-out when a newer
-Event takes over an older one's name. An Event vanishing is its retention window
-closing, not a change to the cluster, and recording it as a deletion would put
-one false deletion in the audit trail per Event the cluster ever emitted. The
-practical consequence for a query: **an Event's history simply stops**. Do not
-read "no `Deleted` row" as "still live" for `kind = 'Event'` the way you would
-for a Deployment; read the Event's own `lastTimestamp` (or
-`series.lastObservedTime`) out of `data` instead.
-
-**`Snapshot` does not appear either.** Snapshot hedges "genuinely new, or merely
-unseen by this process?", and for an Event the answer is always the former: a
-first sighting is `Added` even during warm-up. Warm-up still runs for an Events
-scope — it primes the dedup hashes so a restart does not re-record every Event
-still inside its TTL — but it never reconciles anything *away* from history, so
-it cannot manufacture the deletions the previous paragraph rules out.
-
-`watch_scopes` is unaffected: an Events scope writes ordinary `Started` and
-`Stopped` rows like any other, so "when was this cluster's Event stream being
-captured?" is answerable exactly as it is for every other kind.
-
-Two operational notes:
-
-- **Volume.** Events are typically the highest-cardinality, highest-churn kind in
-  a cluster. Enable them per namespace with a `StreamRule` before reaching for a
-  cluster-wide `ClusterStreamRule`, and size retention accordingly — this is why
-  the `events` watch preset does not ship enabled (see
-  [`docs/RBAC.md`](RBAC.md)).
-- **Warm-up cost.** Because Events never get a `Deleted` row, nothing tombstones
-  them in `resource_states`, so the warm-up query for an Events scope returns
-  every Event still in ClickHouse for that scope. A retention TTL on
-  `resource_states` (see [Suggested TTL](#suggested-ttl-optional-non-mandatory))
-  is what bounds both that query and the memory its result seeds.
-
-Query recipes for Events — including "everything that happened to object X around
-time T" — are in [`docs/QUERIES.md`](QUERIES.md).
-
-## Redaction
-
-Values can be scrubbed out of every object before it is stored. Redaction is
-configured in two places, and the two are **additive**:
-
-- **`ClickHouseSink.spec.policy.redaction`** — the sink owner's floor, applied to
-  everything any rule streams to that sink.
-- **`StreamRule.spec.extraRedaction`** / **`ClusterStreamRule.spec.extraRedaction`**
-  — a rule's additions on top of that floor.
-
-A rule can add paths; nothing can take one away. Where two rules stream the same
-object to the same sink, the union of their paths applies — there is exactly one
-stored payload and one hash per object per sink, so honouring less than the union
-would let one rule's existence unredact another's stream.
-
-```yaml
-apiVersion: kuberecord.io/v1alpha1
-kind: ClickHouseSink
-metadata:
-  name: default
-spec:
-  policy:
-    redaction:
-    - fieldPath: data.password
----
-apiVersion: kuberecord.io/v1alpha1
-kind: StreamRule
-metadata:
-  name: app-config
-  namespace: demo
-spec:
-  sink:
-    kind: ClickHouseSink
-    name: default
-  resources:
-  - group: ""
-    version: v1
-    kind: ConfigMap
-  extraRedaction:
-  - fieldPath: spec.template.spec.containers[*].env[*].value
-  - annotation: my.company.io/api-token
-```
-
-### Where it happens, and why that is the whole point
-
-Values are scrubbed **after normalization and before hashing**. Everything
-downstream is therefore a function of the *redacted* content:
-
-| Column | Effect |
-|---|---|
-| `data` | the redacted object |
-| `diff` | computed between two already-redacted states, so a change to a scrubbed value produces no patch operation carrying it |
-| `sha256` | the hash of the redacted object |
-
-The consequence worth stating plainly: two states of an object that differ
-**only** in a redacted value are indistinguishable to kuberecord. They hash
-identically, so the second one deduplicates and **no row is written at all**.
-That is deliberate. A design that redacted on the way out would leak the value
-through the diff, and one that hashed before redacting would leave the `sha256`
-column as a stable oracle to grind guessed values against.
-
-The flip side is equally deliberate: kuberecord cannot tell you *that* a redacted
-value changed. If you need change detection on a secretish field, redact its
-neighbours instead of it, or stream the object to a second sink under a different
-policy.
-
-### Path syntax
-
-The grammar is deliberately tiny, and it is not JSONPath:
-
-| Form | Matches |
-|---|---|
-| `data.password` | dot-separated field names |
-| `spec.containers[*].env[*].value` | `[*]` iterates every element of an array |
-| `spec.args[*]` | a terminal wildcard replaces each element |
-| `annotation: my.company.io/api-token` | one annotation key, whatever characters it contains |
-
-Nothing whose match set depends on the object's contents — no filters, no
-recursive descent, no indices — is accepted, so what a policy redacts is
-readable off the policy. The syntax is validated at admission by the CRDs: a
-malformed path is rejected by the API server, not discovered at stream time.
-
-The `annotation:` shorthand exists because annotation keys contain dots and
-slashes: `kubectl.kubernetes.io/last-applied-configuration` written as a
-`fieldPath` would mean six nested maps that do not exist. Exactly one of
-`fieldPath` and `annotation` is set per entry.
-
-### What a redacted value looks like
-
-The value is replaced by the literal string `[REDACTED]`; the structure around it
-is preserved. A reader can see that the field existed and was scrubbed, rather
-than being unable to tell a hidden field from an absent one. A path whose leaf is
-a map or an array replaces that whole subtree with the same string, and a path
-that matches nothing in a given object is a silent no-op — which is what lets one
-policy apply across a mixed resource list.
-
-### Always on: `kubectl.kubernetes.io/last-applied-configuration`
-
-This annotation is scrubbed on **every** object, under **every** policy,
-including an entirely empty one. `kubectl apply` copies the complete submitted
-object into it, so it embeds a verbatim second copy of the very values a policy
-removes; leaving it alone would make every other rule cosmetic. It cannot be
-turned off.
-
-### What redaction is not
-
-- **Not a Secrets unlock.** `v1/Secret` is denied in code (D8) and no redaction
-  policy admits one, however thoroughly it would scrub it.
-- **Not a substitute for query-side access control.** Everything not on a path is
-  stored verbatim, and the flattening caveat in [`docs/RBAC.md`](RBAC.md) still
-  applies: anyone who can query ClickHouse sees every object any rule streams.
-- **Not retroactive.** Rows written before a path was added keep whatever they
-  recorded. Adding a path changes the object's content and therefore its hash, so
-  the next event for each object writes a fresh, redacted row.
-
-## Diff format
-
-`Modified` rows store an **RFC 6902 JSON Patch** in the `diff` column, produced
-by [`wI2L/jsondiff`](https://github.com/wI2L/jsondiff) comparing the previous
-normalized JSON against the current one. Normalization strips volatile fields
-(`metadata.managedFields`, `metadata.resourceVersion`, `metadata.generation`)
-before hashing and diffing, so cosmetic churn does not generate rows.
-[Redaction](#redaction) runs in the same pass, on both sides, so a diff can never
-carry a value the policy scrubbed out of `data`.
-
-**Graceful degradation:** if no prior JSON baseline exists, or the diff/marshal
-fails, the operator writes the full current state to `data` and leaves `diff`
-empty — a full-state row is always correct, merely larger than a diff.
-
-**Kubernetes Events are never diffed** — every one of their rows is full state
-by design, not by degradation. See [Kubernetes Events](#kubernetes-events).
-
-## Checkpoint rows
-
-Diffs make the stream cheap to write and cheap to store, but they make a *read*
-unbounded: with `Modified` rows carrying diffs only, "what did this object look
-like at time T?" means replaying every diff back to the object's last full row —
-and for a Deployment that has been reconciled for a year, that is the whole
-year. A `Checkpoint` row is a `Modified` that also carries the full state, which
-caps that walk.
-
-Two independent triggers promote a `Modified` write to a `Checkpoint`:
-
-1. **Cadence** — every `spec.writer.checkpointEvery` consecutive diff-only
-   `Modified` rows for one object (default **50**; `0` disables checkpointing
-   for that sink entirely). This is what bounds replay: a reconstruction never
-   applies more than `checkpointEvery` patches.
-2. **Size** — a single write whose diff is *larger* than the object it
-   describes. Such a diff is pure loss: more bytes than the state itself, plus a
-   replay step on top. It fires regardless of how far the cadence has
-   progressed — but not when checkpointing is disabled.
-
-Both sides of the size comparison are **uncompressed** bytes of the diff and of
-the freshly serialized full object the pipeline already holds at diff time, so
-the check costs nothing. Neither the row's `data` *column* (empty on a
-`Modified`, which would make the trigger fire on every update) nor the
-operator's in-memory zstd-compressed baseline (which would over-trigger by the
-compression ratio) is ever an operand.
-
-Consequences for a consumer:
-
-- **`Checkpoint` is not a special case for aggregate reads.** It has the same
-  identity, `uid`, `sha256` and `labels` a `Modified` would have carried, so
-  `argMax(…, ts)` queries — including the operator's own warm-up read — are
-  unaffected. Only a *replay* treats it specially, as its base.
-- **A `Checkpoint`'s own `diff` must not be re-applied on top of its `data`.**
-  The two describe the same transition: `data` is the state *after* the diff.
-- **The cadence is per operator process, not per object lifetime.** The counter
-  behind trigger 1 lives in the operator's memory and resets on restart, which
-  costs nothing: a restarting operator starts from an empty (or history-warmed)
-  cache, so its first row for an object is a full-state `Added`/`Snapshot`
-  anyway, and the replay window re-baselines there. Nothing durable depends on
-  the counter (Invariant 6), and a reconstruction never needs to know what it
-  was — it reads the rows.
-
-### Reconstructing state at an instant
-
-This is the official recipe. It is what
-`TestCheckpointStateReconstructionIntegration`
-(`internal/sink/clickhouse/checkpoint_integration_test.go`) executes and asserts
-byte-for-byte against the live object, so it stays true rather than merely
-documented.
-
-**Step 1 — read the object's history up to the target instant.** `FINAL` is
-required, not optional: the write path is at-least-once, and replaying one
-object's patch twice is not idempotent (a `remove` op fails the second time, an
-`add` duplicates).
-
-```sql
-SELECT ts, event_type, data, diff
-FROM resource_states FINAL
-WHERE cluster_id = {cluster:String}
-  AND api_group  = {group:String}      -- '' for the core group
-  AND kind       = {kind:String}
-  AND namespace  = {namespace:String}  -- '' for cluster-scoped objects
-  AND name       = {name:String}
-  AND ts        <= {at:DateTime64(9, 'UTC')}
-ORDER BY ts;
-```
-
-**Step 2 — find the base.** Take the **last row with a non-empty `data`** (an
-`Added`, a `Snapshot`, a `Checkpoint`, or a `Modified` that fell back to full
-state). Its `data` is the starting document. If the result set holds no
-`data`-bearing row, history for this object begins before your retention window
-and the state at `T` is not reconstructible.
-
-Everything before the base row is irrelevant — that is the bound checkpointing
-buys you.
-
-**Step 3 — replay forward.** Apply the `diff` of every row *after* the base row,
-in `ts` order, as an RFC 6902 JSON Patch. Skip the base row's own `diff` (see
-above). Rows with an empty `diff` and non-empty `data` are full-state rows: they
-*replace* the document rather than patching it.
-
-**Step 4 — stop at a deletion.** If a `Deleted` row appears in the range, the
-object did not exist at `T` — for that `uid`. Treat a `Deleted` row as terminal
-for its `uid` regardless of `ts` ties (see [Deletion
-semantics](#deletion-semantics--no-sentinels)), and start again from the next
-`uid`'s first row if a successor was recreated under the same name.
-
-**Verifying a reconstruction.** The `sha256` of the row you finished on is the
-hex SHA-256 of the operator's normalized JSON for that state. Canonicalize your
-reconstructed document (re-serialize it with sorted object keys) and hash it:
-the two must match. That check is what turns "the replay ran without errors"
-into "the replay produced the right state".
-
-If the stream is [redacted](#redaction), both the replayed document and the hash
-describe the *redacted* object — consistently, since redaction happens before
-hashing. Comparing a reconstruction against a **live** object therefore means
-applying the same policy to the live copy first; `pipeline.ObjectHash` takes the
-policy as an argument for exactly this reason.
-
-The digest to check it against — no replay needed, which also answers "is this
-object's recorded state current?" on its own:
-
-```sql
--- Latest recorded hash and last-known event for one object.
-SELECT argMax(event_type, ts) AS last_event, argMax(sha256, ts) AS sha256, max(ts) AS ts
-FROM resource_states
-WHERE cluster_id = {cluster:String} AND api_group = {group:String}
-  AND kind = {kind:String} AND namespace = {namespace:String} AND name = {name:String};
-```
-
-## Identity is version-agnostic
-
-> An object's identity is `(cluster_id, api_group, kind, namespace, name)` —
-> **version-agnostic** (`apps/v1` and a hypothetical `apps/v2` Deployment are
-> the same object).
-
-`api_version` is recorded for provenance but is **not** part of identity. This
-is why the warm-up/restore query filters on `api_group`, `kind`, and
-`cluster_id` (not `api_version`), and why the sort key omits `api_version`.
-Filtering on `api_group` — not `kind` alone — is what keeps two resources that
-share a Kind (e.g. `batch/v1` `Job` vs. a CRD `example.com/v1` `Job`) from
-cross-contaminating each other's history.
-
-## Suggested TTL (optional, non-mandatory)
+### Suggested TTL (optional, non-mandatory)
 
 kuberecord does **not** impose a retention policy — audit data is often kept
 indefinitely, and retention is a deployment decision. If you do want automatic
@@ -842,3 +959,203 @@ TTL toDateTime(ts) + INTERVAL 1 YEAR;
 This is a suggestion only; the operator neither sets nor requires a TTL, and
 schema validation ignores TTL clauses (it checks column names/types
 only).
+
+---
+
+## Physical mapping to S3 objects
+
+An `S3Sink` maps a *batch* of `Record`s to one object: JSON Lines, one record per
+line, zstd-compressed, filed under a key that carries its own partitions. This is
+the archive tier — cheap to write, cheap to keep for as long as a regulator asks,
+and expensive to interrogate, in that order of priority (D12).
+
+**This format is a versioned public contract of its own** (D15), on its own
+timeline and entirely separate from the frozen ClickHouse schema above. Its version
+is stamped into the object key rather than living only on the `S3Sink` CR, because a
+reader handed nothing but a bucket must still be able to tell which contract
+produced the bytes in front of them.
+
+Runnable recipes for reading all of this — DuckDB over the bucket with no
+infrastructure at all, and an Athena external table — are in
+[`docs/QUERIES.md`](QUERIES.md#the-s3-archive). Everything below is what those
+recipes are reading.
+
+### The record line
+
+One JSON object per line, terminated by `\n` **including the final line**, so a
+line-oriented reader needs no special case for the end of an object.
+
+The field names are the record's own — the logical contract's spelling, not
+ClickHouse's — in the record's declaration order, and **every field is always
+present**. Nothing is omitted when empty: an unmodified object's `diff` is
+present-and-empty rather than absent, and a cluster-scoped object's `namespace` is
+`""` rather than missing. That is what lets a reader treat every line in a glob of
+thousands of objects as one shape, and is why the DuckDB recipes need no
+`union_by_name`.
+
+| JSON key | From | Physical form |
+|---|---|---|
+| `timestamp` | `Timestamp` | RFC 3339 with nanoseconds, UTC (`2026-08-20T09:15:00.123456789Z`). A string: no JSON number holds it, and most query engines' timestamp types do not either — DuckDB and Athena both cast it on read. |
+| `cluster_id` | `ClusterID` | String. Also the `cluster_id=` key partition; an object whose records disagree on it is refused rather than written. |
+| `event_type` | `EventType` | String. See [what the archive does not contain](#what-the-archive-does-not-contain) for which values actually occur here. |
+| `group`, `version` | `APIGroup`, `APIVersion` | Strings. **Not** `api_group`/`api_version`: that is the ClickHouse mapping's vocabulary. |
+| `kind`, `namespace`, `name`, `uid`, `resource_version` | same | Strings. |
+| `labels` | `Labels` | A JSON object. Read it as a `MAP`, not an inferred `STRUCT` — see the caveat in the query recipes. |
+| `actors` | `Actors` | A JSON array of strings; `[]` on a `Deleted` record. |
+| `data`, `diff` | `Data`, `Diff` | Strings **holding** JSON, not nested JSON. The Kubernetes object is not kuberecord's to give a schema to, and embedding it as a structure would make every object in a mixed-kind archive widen the inferred schema. |
+| `sha256` | `SHA256` | Hex string; empty on `Deleted`. |
+
+Field names are added, never renamed or repurposed — the same additive-only
+discipline as the frozen schema, and for the same reason. A reader must tolerate a
+key it does not know, which the shipped decoder does.
+
+### The object key layout
+
+```text
+<prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<content-hash>.jsonl.zst
+```
+
+| Segment | Meaning |
+|---|---|
+| `<prefix>` | The sink's `spec.prefix`. An empty prefix is an ordinary configuration — a bucket dedicated to one archive — and contributes no segment rather than a leading `/`. |
+| `format=jsonl-v1` | The version of *this* contract. A future incompatible format is a sibling partition, not a rewrite (see [Versioning the object format](#versioning-the-object-format)). |
+| `cluster_id=<id>` | The cluster the records belong to. |
+| `date=<YYYY-MM-DD>`, `hour=<HH>` | The object's time partition, UTC. The hour is **zero-padded** (`09`, never `9`), which is what makes a lexicographic listing of the bucket also a chronological one. |
+| `<content-hash>` | Hex SHA-256 of the object's **uncompressed** payload. |
+| `.jsonl.zst` | Both halves are load bearing for readers: `.jsonl` says one JSON value per line, `.zst` says decompress first — Athena decides compression from the extension, and DuckDB's glob does too. |
+
+The `key=value` segments are Hive-style so that DuckDB's `hive_partitioning` and
+Athena's partition projection read the path as *columns*, which is what lets a
+time-window query skip objects it never has to fetch. Four consequences of the
+layout belong in every reader's mind:
+
+- **Partitioning is by cluster, date and hour only. Kind is deliberately absent.**
+  A batch mixes kinds by construction — one workqueue drains every watched GVK — so
+  a `kind=` segment would split one batch across as many objects as it has kinds,
+  fighting rotation and multiplying small files exactly when the cluster is busiest.
+- **An object may hold records from neighbouring hours.** Its partition comes from
+  its **first** record's timestamp, never from the wall clock at write time, and it
+  keeps accepting records until it rotates. So a record stamped 10:00 can live in
+  the `hour=09` object, and **a time-window scan must widen its partition range by
+  the sink's `spec.writer.maxObjectAge`** (default 5 minutes, ceiling 1 hour). The
+  upper bound needs no widening: an object never holds a record from before its own
+  first one.
+- **A retried upload is an overwrite, not a duplicate.** The same batch encodes to
+  the same payload and therefore the same key, so at-least-once delivery collapses
+  in the store itself. This is the archive's answer to `ReplacingMergeTree`, and it
+  is synchronous and exact where that one is eventual and best-effort — there is no
+  `FINAL` here because there is nothing to merge.
+- **The hash covers the uncompressed payload, deliberately.** A compressor's output
+  is not required to be bit-stable across library versions, so hashing the
+  compressed bytes would silently re-key every object the first time the compression
+  library changed its internals. The compression level, and the choice between a
+  streamed frame and a one-shot encode, are therefore **not** part of this contract;
+  the bytes on disk may differ between two operators writing identical records.
+
+Each object is exactly one zstd frame. A truncated or plaintext object is reported
+as an error rather than decoded to the records that happened to survive: a partially
+read object is indistinguishable from a short one, and calling that success would
+turn corruption into silent loss.
+
+### The scope log
+
+The archive's answer to `watch_scopes`, and the thing that keeps it honest about its
+own coverage. An S3 archive holds no deletions for the periods the operator was down,
+so "there are no records for this Deployment after Tuesday" is ambiguous on its own
+— it could mean nothing changed, or that nobody was watching. These objects
+disambiguate it from inside the bucket, with no operator and no ClickHouse to ask.
+
+```text
+<prefix>/format=jsonl-v1/scopes/date=<YYYY-MM-DD>/<content-hash>.jsonl.zst
+```
+
+| JSON key | Meaning |
+|---|---|
+| `ts` | The transition's instant. **Not** `timestamp`: this is a different line, not a variant of the record line. |
+| `cluster_id` | The cluster whose scope this is. |
+| `group`, `version`, `kind`, `namespace` | The scope's identity, spelled as the record line spells the same fields. `namespace` is `""` for an all-namespaces scope, which is a value and not a wildcard. |
+| `action` | `Started` when a `(sink, scope)` pair gains its first interested rule; `Stopped` when it loses its last. |
+| `rule_ref` | The rule that triggered it, as `"<kind>/<namespace>/<name>"`. |
+
+Two properties differ from the record objects, and both matter to a reader:
+
+- **The scope log is partitioned by date alone**, outside `cluster_id=`. It is small
+  enough that an hour partition would only produce near-empty prefixes. The
+  practical consequence: a glob of `format=jsonl-v1/**/*.jsonl.zst` matches records
+  **and** scope objects, whose lines have different shapes. A records query must
+  glob `format=jsonl-v1/cluster_id=*/**/*.jsonl.zst`, and a scope query
+  `format=jsonl-v1/scopes/**/*.jsonl.zst`.
+- **These transitions are recorded but never reconciled.** Boot reconciliation is a
+  `StateReader` operation and this backend implements none, so a process that dies
+  with scopes open leaves their `Started` objects with no matching `Stopped`,
+  permanently — the next process writes its own `Started` and never learns there was
+  an earlier one. Read an unmatched `Started` as "watching began here, and this
+  epoch's end is unrecorded", **not** as "still watching". Nothing in this backend
+  can close that gap; the [tee pattern](TEE.md) is what closes it, by keeping a
+  `ClickHouseSink` alongside that can read its own history.
+
+### The health-probe object
+
+```text
+<prefix>/.kuberecord-probe
+```
+
+One fixed key per sink, overwritten by every health probe, holding a fixed
+self-describing line. It sits **outside** `format=jsonl-v1/` on purpose: it is the
+one object under the prefix that is not audit data, and a reader globbing the
+archive must never be handed it. Two sinks sharing a bucket under different prefixes
+probe through different keys, so neither reads the other's health as its own.
+
+### What the archive does not contain
+
+This is the section to read before concluding anything from the archive's silence.
+An `S3Sink` is a `Writer`-only backend: it cannot read its own history, so three
+behaviours are off for it and their absence is visible in what the bucket holds.
+The full comparison against a `ClickHouseSink` is in [Hot and cold](TEE.md); the
+consequences *for the stored data* are:
+
+- **No `Added`, ever.** A first sighting is `Snapshot`, because "is this new, or
+  merely new to me?" is a question only history can answer. Permanently, and again
+  after every operator restart — a restart re-snapshots everything in scope, in
+  full.
+- **No `Checkpoint`, ever.** `S3Sink` has no `checkpointEvery`: there is no cadence
+  to interrupt. A `Snapshot` is the base a replay starts from, and after every
+  restart there is a fresh one.
+- **No `Deleted` record for a death the operator did not witness.** Zombie
+  collection and reincarnation close-outs both need history. An object deleted while
+  the operator was down leaves no trace at all — which is the one loss an archive
+  cannot report itself, because a bucket with no deletions in it looks exactly like
+  the archive of a cluster where nothing was deleted.
+- **No dedup engine — and no duplicates either.** See the content-hash key above.
+
+So the event types that actually occur in an archive are `Snapshot`, `Modified`
+(with a diff, or full state where a diff could not be produced) and `Deleted` for
+deaths observed live. Redaction, the diff format and the identity rule are unchanged
+from [the logical contract](#the-logical-record-contract): they happen before a
+record reaches any backend.
+
+### Versioning the object format
+
+`jsonl-v1` is a public contract with the same shape of promise the ClickHouse schema
+carries, on an independent timeline. Under `v1`:
+
+- **Frozen:** the line format (one JSON object per line, `\n`-terminated), the field
+  names and the always-present rule, the key layout and every segment's meaning, the
+  definition of the content hash (SHA-256 over the uncompressed payload), and the
+  `.jsonl.zst` suffix.
+- **Not covered:** the compression level and framing, how large an object is, which
+  records happen to share one, how many objects an hour produces, and the JSON
+  *inside* `data` and `diff` — that is the Kubernetes object as the API server
+  served it, which kuberecord does not own and cannot freeze.
+- **Additive only:** a new field may be appended to the line. Readers must tolerate
+  unknown keys, and the shipped decoder does, so an object written by a newer
+  operator stays readable by an older one minus the fields that did not exist yet.
+
+A change that cannot be expressed additively does **not** happen to `v1`. It ships
+as `format=jsonl-v2/`, written alongside — a sibling partition under the same
+prefix, with both readable and neither rewritten. That last part is not a
+convenience: archive objects may be under S3 Object Lock, in which case rewriting
+them is not merely undesirable but impossible, and a migration that assumed
+otherwise would strand the archive it was meant to upgrade. It is also why the
+version is a *path segment*: a bucket holding both formats is queryable one format
+at a time, by a reader that has to know nothing beyond the key.
