@@ -48,10 +48,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/plan"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/watch"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/plan"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/watch"
 )
 
 // Tests in this package run sequentially. No test here may call t.Parallel(), and

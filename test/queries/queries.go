@@ -58,7 +58,7 @@ import (
 	"sort"
 	"strings"
 
-	schemaddl "github.com/yelzhy/kuberecord/deploy/clickhouse/schema"
+	schemaddl "github.com/kuberecord/kuberecord/deploy/clickhouse/schema"
 )
 
 // Query is one published SQL statement together with a human-readable statement

@@ -27,8 +27,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // scopeRowRecorder captures the rows each watch_scopes batch was sent with, and can

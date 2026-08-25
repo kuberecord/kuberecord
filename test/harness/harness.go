@@ -48,7 +48,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kuberecord/test/utils"
+	"github.com/kuberecord/kuberecord/test/utils"
 )
 
 // Kubectl runs one kubectl invocation from the project root and returns its

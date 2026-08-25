@@ -24,7 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // TestPipelineMetricsRegistration builds an isolated PipelineMetrics on a fresh

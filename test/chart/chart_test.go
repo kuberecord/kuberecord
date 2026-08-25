@@ -334,7 +334,7 @@ func TestImageReference(t *testing.T) {
 			// An empty tag follows the chart's appVersion, so upgrading the chart
 			// moves the operator with it.
 			name: "tag defaults to appVersion",
-			want: "ghcr.io/yelzhy/kuberecord:" + chartAppVersion(t),
+			want: "ghcr.io/kuberecord/kuberecord:" + chartAppVersion(t),
 		},
 		{
 			name: "explicit repository and tag",
@@ -345,7 +345,7 @@ func TestImageReference(t *testing.T) {
 			// A digest pins by content, so it must win over any tag that is also set.
 			name: "digest wins over tag",
 			sets: []string{"image.tag=v9.9.9", "image.digest=" + digest},
-			want: "ghcr.io/yelzhy/kuberecord@" + digest,
+			want: "ghcr.io/kuberecord/kuberecord@" + digest,
 		},
 	}
 	for _, tc := range tests {

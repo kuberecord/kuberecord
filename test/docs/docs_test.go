@@ -42,7 +42,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/yaml"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
 )
 
 // repoPath resolves a repository-relative path from this test's own source

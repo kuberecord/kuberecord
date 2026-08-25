@@ -60,7 +60,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // minEnqueueTimeout is the smallest Harness.EnqueueTimeout the suite will accept.

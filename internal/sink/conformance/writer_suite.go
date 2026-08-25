@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // The subtest names, as constants because the non-vacuity tests address

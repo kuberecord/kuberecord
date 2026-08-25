@@ -63,9 +63,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/conformance"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/conformance"
 )
 
 // testSinkID labels the metrics a test writer reports, exactly as the sink

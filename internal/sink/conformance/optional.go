@@ -61,7 +61,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // ReadFault breaks the backend's next read part-way through: the read delivers

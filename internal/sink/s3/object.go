@@ -54,7 +54,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // objectFlushSlack is how much uncompressed input the builder writes between

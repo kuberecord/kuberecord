@@ -15,9 +15,9 @@ appVersion: "v0.2.0"
 # floor is 1.29 — the release where CEL validation cost budgets and
 # `x-kubernetes-validations` on all schema nodes are generally available.
 kubeVersion: ">= 1.29.0-0"
-home: https://github.com/yelzhy/kuberecord
+home: https://github.com/kuberecord/kuberecord
 sources:
-  - https://github.com/yelzhy/kuberecord
+  - https://github.com/kuberecord/kuberecord
 keywords:
   - kubernetes
   - audit

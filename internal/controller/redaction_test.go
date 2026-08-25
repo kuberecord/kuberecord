@@ -26,8 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
 )
 
 // TestCanonicalRedaction covers the control plane's half of Task 3.3: a sink's

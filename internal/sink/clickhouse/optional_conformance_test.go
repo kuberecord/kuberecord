@@ -61,8 +61,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/conformance"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/conformance"
 )
 
 // conformanceDatabase is the schema-introspection target the probe validates

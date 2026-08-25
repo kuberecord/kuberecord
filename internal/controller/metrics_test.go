@@ -26,7 +26,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
 )
 
 // ready builds the roll-up condition at the given status, which is what almost

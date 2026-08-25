@@ -16,7 +16,7 @@ limitations under the License.
 
 package pipeline
 
-import "github.com/yelzhy/kuberecord/internal/sink"
+import "github.com/kuberecord/kuberecord/internal/sink"
 
 // Key is one unit of work in the pipeline: "settle this object identity, for
 // this sink." It is the workqueue's item type, so it must stay a comparable

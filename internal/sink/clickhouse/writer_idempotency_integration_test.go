@@ -27,8 +27,8 @@ import (
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // TestLostAckReInsertConvergesIntegration guards the H2 idempotency fix (Task

@@ -7,7 +7,7 @@ domain: kuberecord.io
 layout:
 - go.kubebuilder.io/v4
 projectName: kuberecord
-repo: github.com/yelzhy/kuberecord
+repo: github.com/kuberecord/kuberecord
 resources:
 - controller: true
   core: true
@@ -20,27 +20,27 @@ resources:
     namespaced: false
   domain: kuberecord.io
   kind: ClickHouseSink
-  path: github.com/yelzhy/kuberecord/api/v1alpha1
+  path: github.com/kuberecord/kuberecord/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: false
   domain: kuberecord.io
   kind: S3Sink
-  path: github.com/yelzhy/kuberecord/api/v1alpha1
+  path: github.com/kuberecord/kuberecord/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: true
   domain: kuberecord.io
   kind: StreamRule
-  path: github.com/yelzhy/kuberecord/api/v1alpha1
+  path: github.com/kuberecord/kuberecord/api/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
     namespaced: false
   domain: kuberecord.io
   kind: ClusterStreamRule
-  path: github.com/yelzhy/kuberecord/api/v1alpha1
+  path: github.com/kuberecord/kuberecord/api/v1alpha1
   version: v1alpha1
 version: "3"

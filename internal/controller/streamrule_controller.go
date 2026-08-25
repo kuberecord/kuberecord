@@ -40,10 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/plan"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/watch"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/plan"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/watch"
 )
 
 // defaultRuleResyncPeriod is how often a rule is reconciled even when nothing

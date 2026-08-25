@@ -31,9 +31,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/plan"
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/plan"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // eventTypeDeleted is the row type these tests assert on most, in both

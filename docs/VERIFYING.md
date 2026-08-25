@@ -15,6 +15,7 @@ is where that limit is spelled out.
 
 - [What a release publishes, and what backs it](#what-a-release-publishes-and-what-backs-it)
 - [Prerequisites](#prerequisites)
+- [Which identity verifies which release](#which-identity-verifies-which-release)
 - [The image signature](#the-image-signature)
 - [The build provenance](#the-build-provenance)
 - [The checksums](#the-checksums)
@@ -27,7 +28,7 @@ is where that limit is spelled out.
 
 | Asset | Evidence |
 |---|---|
-| `ghcr.io/yelzhy/kuberecord:vX.Y.Z` | A keyless **cosign signature** over the manifest list *and* over each per-platform manifest, plus a **SLSA build provenance** attestation stored both against this repository and beside the image in the registry. |
+| `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | A keyless **cosign signature** over the manifest list *and* over each per-platform manifest, plus a **SLSA build provenance** attestation stored both against this repository and beside the image in the registry. |
 | `install.yaml` | Its `sha256` in `checksums.txt`, and a **SLSA build provenance** attestation naming that digest. |
 | `kuberecord-X.Y.Z.tgz` | The same. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | The same, and it is itself the inventory of the image. |
@@ -58,13 +59,56 @@ The commands below are also wired up as make targets, which is how CI runs them
 against every release before the Release page exists — see
 [`DEVELOPMENT.md`](DEVELOPMENT.md#releasing--make-release-dry-run).
 
-## The image signature
+## Which identity verifies which release
+
+This repository moved from the personal account `yelzhy` to the `kuberecord`
+organization after v0.2.0 was published. **Two identities are therefore correct,
+and which one to pin depends on the tag you are verifying:**
+
+| Tag | `--certificate-identity` / `--repo` | Image |
+|---|---|---|
+| `v0.1.0` | *none* — predates signing, `checksums.txt` only | `ghcr.io/yelzhy/kuberecord:v0.1.0` |
+| `v0.2.0` | `https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0` | `ghcr.io/yelzhy/kuberecord:v0.2.0` |
+| `v0.2.1` and later | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/vX.Y.Z` | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` |
+
+**The old identity is not a mistake, and it is not evidence of anything wrong
+with those releases.** A keyless signature binds to the Fulcio certificate that
+was issued to the release workflow at the moment it ran, and that certificate
+names the repository as it was then. It is already in Rekor, the public
+append-only transparency log — which is precisely the property that makes it
+worth anything. A certificate in the log cannot be reissued, rewritten or
+retargeted, so a release signed before the transfer verifies against the old
+identity permanently, and would verify against the new one only if someone had
+forged it. Pinning the new identity against `v0.2.0` is the command being wrong,
+not the release.
+
+The same split applies to the SLSA provenance: attestations for `v0.2.0` were
+recorded against the `yelzhy/kuberecord` repository, so `--repo yelzhy/kuberecord`
+and `--signer-workflow yelzhy/kuberecord/.github/workflows/release.yml` are what
+verify them.
+
+The commands in the rest of this page are written for the current identity. To
+verify `v0.2.0`, substitute both halves — the identity *and* the image path, since
+GHCR packages did not move with the repository:
 
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0 \
   ghcr.io/yelzhy/kuberecord:v0.2.0
+
+gh attestation verify oci://ghcr.io/yelzhy/kuberecord:v0.2.0 \
+  --repo yelzhy/kuberecord \
+  --signer-workflow yelzhy/kuberecord/.github/workflows/release.yml
+```
+
+## The image signature
+
+```sh
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
+  ghcr.io/kuberecord/kuberecord:v0.2.1
 ```
 
 Both flags are load-bearing, and cosign refuses a keyless verification without
@@ -86,8 +130,8 @@ repository name cannot match in the middle of the string:
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/yelzhy/kuberecord/\.github/workflows/release\.yml@refs/tags/' \
-  ghcr.io/yelzhy/kuberecord:v0.2.0
+  --certificate-identity-regexp '^https://github\.com/kuberecord/kuberecord/\.github/workflows/release\.yml@refs/tags/' \
+  ghcr.io/kuberecord/kuberecord:v0.2.1
 ```
 
 cosign prints the checks it performed — that the claims match, that the
@@ -102,13 +146,13 @@ per architecture:
 
 ```sh
 # The multi-arch index's own digest: the hash of its manifest bytes.
-digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/yelzhy/kuberecord:v0.2.0 \
+digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.2.1 \
   | sha256sum | cut -d' ' -f1)"
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0 \
-  "ghcr.io/yelzhy/kuberecord@$digest"
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
+  "ghcr.io/kuberecord/kuberecord@$digest"
 ```
 
 ## The build provenance
@@ -118,9 +162,9 @@ this?" but "what built this, from which source, on which runner?". It is a
 [SLSA](https://slsa.dev/) statement generated by GitHub, and `gh` verifies it:
 
 ```sh
-gh attestation verify oci://ghcr.io/yelzhy/kuberecord:v0.2.0 \
-  --repo yelzhy/kuberecord \
-  --signer-workflow yelzhy/kuberecord/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.2.1 \
+  --repo kuberecord/kuberecord \
+  --signer-workflow kuberecord/kuberecord/.github/workflows/release.yml
 ```
 
 `--signer-workflow` is the provenance equivalent of `--certificate-identity`:
@@ -132,20 +176,20 @@ proves is that the bytes on your disk are the bytes that workflow produced:
 
 ```sh
 gh attestation verify install.yaml \
-  --repo yelzhy/kuberecord \
-  --signer-workflow yelzhy/kuberecord/.github/workflows/release.yml
+  --repo kuberecord/kuberecord \
+  --signer-workflow kuberecord/kuberecord/.github/workflows/release.yml
 
-gh attestation verify kuberecord-0.2.0.tgz --repo yelzhy/kuberecord
-gh attestation verify kuberecord-0.2.0-sbom.spdx.json --repo yelzhy/kuberecord
+gh attestation verify kuberecord-0.2.1.tgz --repo kuberecord/kuberecord
+gh attestation verify kuberecord-0.2.1-sbom.spdx.json --repo kuberecord/kuberecord
 ```
 
 To verify somewhere without network access, fetch the bundles first and carry
 them with the artifacts:
 
 ```sh
-gh attestation download oci://ghcr.io/yelzhy/kuberecord:v0.2.0 --repo yelzhy/kuberecord
-gh attestation verify oci://ghcr.io/yelzhy/kuberecord:v0.2.0 \
-  --repo yelzhy/kuberecord --bundle <the downloaded .jsonl>
+gh attestation download oci://ghcr.io/kuberecord/kuberecord:v0.2.1 --repo kuberecord/kuberecord
+gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.2.1 \
+  --repo kuberecord/kuberecord --bundle <the downloaded .jsonl>
 ```
 
 The image's attestation is also pushed into the registry next to the image, so
@@ -186,8 +230,8 @@ imply a difference that is not there.
 Read it, or hand it to a scanner (`grype` is a separate install):
 
 ```sh
-syft convert kuberecord-0.2.0-sbom.spdx.json -o table
-grype sbom:./kuberecord-0.2.0-sbom.spdx.json
+syft convert kuberecord-0.2.1-sbom.spdx.json -o table
+grype sbom:./kuberecord-0.2.1-sbom.spdx.json
 ```
 
 ## Pinning what you verified
@@ -196,7 +240,7 @@ Verifying a tag and then deploying that tag leaves a gap: a tag is a mutable
 pointer. Resolve it once, verify the digest, and deploy the digest.
 
 ```sh
-digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/yelzhy/kuberecord:v0.2.0 \
+digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.2.1 \
   | sha256sum | cut -d' ' -f1)"
 ```
 
@@ -263,6 +307,7 @@ A failure is a reason to stop, not a reason to reach for
 | Symptom | Usual cause |
 |---|---|
 | `no matching CertificateIdentity found … expected SAN value X, got Y` | The identity in the command is not the one that signed. Usefully, cosign prints the value it *did* find as `got` — that string is what to pin, and most often the difference is the tag at the end of it. |
+| `no matching CertificateIdentity found` on `v0.2.0`, where `got` names `yelzhy/kuberecord` | Expected. That release was signed before the repository moved to the `kuberecord` organization, and its certificate is immutable — see [Which identity verifies which release](#which-identity-verifies-which-release). Pin the old identity for that tag. |
 | `no signatures found` | The image predates v0.2.0, or it was mirrored by a tool that copies manifests without their signatures. |
 | `gh attestation verify` finds no attestation | The same two causes, plus: `--repo` names the repository the attestation was recorded against, which is not necessarily the registry namespace. |
 | A checksum mismatch | Re-download before concluding anything; a truncated download is far more likely than a tampered asset. Then verify the provenance, which does not depend on `checksums.txt` being honest. |

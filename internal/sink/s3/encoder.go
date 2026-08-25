@@ -42,7 +42,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // The object key layout, spelled once. Every segment below is part of the

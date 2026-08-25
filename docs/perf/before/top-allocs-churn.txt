@@ -17,7 +17,7 @@ Showing top 25 nodes out of 224
     5.72MB  2.31% 51.31%     5.72MB  2.31%  golang.org/x/net/http2.init.func3
     5.56MB  2.24% 53.56%     5.56MB  2.24%  reflect.unsafe_New
     5.32MB  2.15% 55.70%     5.32MB  2.15%  golang.org/x/net/http2.init.func2
-    5.28MB  2.13% 57.83%    50.39MB 20.33%  github.com/yelzhy/kuberecord/internal/pipeline.(*Pipeline).processUpsert
+    5.28MB  2.13% 57.83%    50.39MB 20.33%  github.com/kuberecord/kuberecord/internal/pipeline.(*Pipeline).processUpsert
     5.28MB  2.13% 59.96%     5.28MB  2.13%  encoding/json.unquote (inline)
     5.24MB  2.11% 62.08%     5.24MB  2.11%  k8s.io/apimachinery/pkg/runtime.DeepCopyJSONValue
     4.10MB  1.66% 63.73%    13.42MB  5.42%  k8s.io/client-go/rest.(*Request).URL

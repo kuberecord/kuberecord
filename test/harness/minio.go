@@ -27,8 +27,8 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/s3"
 )
 
 // This file is how a suite reads an S3 archive: it runs `mc` inside the MinIO pod

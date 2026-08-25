@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // testScopeEvent builds one transition over a fixed scope, dated from the corpus

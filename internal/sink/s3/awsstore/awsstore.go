@@ -47,8 +47,8 @@ import (
 	awss3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	kbs3 "github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	kbs3 "github.com/kuberecord/kuberecord/internal/sink/s3"
 )
 
 // putObjectAPI is the whole of the SDK surface this package calls.

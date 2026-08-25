@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 func TestParseAthenaDDL(t *testing.T) {

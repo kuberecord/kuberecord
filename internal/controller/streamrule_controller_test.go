@@ -30,9 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/watch"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/watch"
 )
 
 // auditLabel is the namespace label key the selector tests select on. Its *value* is

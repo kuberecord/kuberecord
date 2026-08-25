@@ -35,8 +35,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/ptr"
 
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // clickHouseSink builds the identity of a named ClickHouseSink — the only sink

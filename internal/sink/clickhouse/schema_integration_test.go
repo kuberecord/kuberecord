@@ -26,7 +26,7 @@ import (
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // TestSchemaRoundTripIntegration proves a real ClickHouse round-trip on the

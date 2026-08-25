@@ -48,15 +48,15 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/controller"
-	"github.com/yelzhy/kuberecord/internal/pipeline"
-	"github.com/yelzhy/kuberecord/internal/plan"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/clickhouse"
-	"github.com/yelzhy/kuberecord/internal/sink/s3"
-	"github.com/yelzhy/kuberecord/internal/sink/s3/awsstore"
-	"github.com/yelzhy/kuberecord/internal/watch"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/controller"
+	"github.com/kuberecord/kuberecord/internal/pipeline"
+	"github.com/kuberecord/kuberecord/internal/plan"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/clickhouse"
+	"github.com/kuberecord/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink/s3/awsstore"
+	"github.com/kuberecord/kuberecord/internal/watch"
 	// +kubebuilder:scaffold:imports
 )
 

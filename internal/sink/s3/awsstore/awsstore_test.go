@@ -30,8 +30,8 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	kbs3 "github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	kbs3 "github.com/kuberecord/kuberecord/internal/sink/s3"
 )
 
 // hermeticEnv detaches a test from whatever AWS configuration the machine running

@@ -19,7 +19,7 @@ helm install kuberecord deploy/charts/kuberecord \
 ```
 
 The chart is packaged and attached to every tagged
-[release](https://github.com/yelzhy/kuberecord/releases) alongside a
+[release](https://github.com/kuberecord/kuberecord/releases) alongside a
 `checksums.txt`, so a `kuberecord-X.Y.Z.tgz` can be installed directly without a
 checkout. There is no chart repository. The chart is **not** versioned
 independently of the operator: `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
@@ -82,7 +82,7 @@ durable store (Invariant 6).
 
 | Value | Type | Default | Description |
 |---|---|---|---|
-| `image.repository` | string | `ghcr.io/yelzhy/kuberecord` | Operator image repository. |
+| `image.repository` | string | `ghcr.io/kuberecord/kuberecord` | Operator image repository. |
 | `image.tag` | string | `""` | Image tag. Empty follows the chart's `appVersion`, so upgrading the chart moves the operator with it. |
 | `image.digest` | string | `""` | Image digest (`sha256:…`). Set, it wins over `image.tag` — a digest pins by content, a tag only by name. |
 | `image.pullPolicy` | string | `IfNotPresent` | Container image pull policy. |

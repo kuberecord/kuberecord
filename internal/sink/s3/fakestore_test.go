@@ -24,8 +24,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/conformance"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/conformance"
 )
 
 // fakeStore is the observable object store every test in this package drives. It

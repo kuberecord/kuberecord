@@ -471,7 +471,7 @@ docker-buildx: ## Build (and, unless BUILDX_OUTPUT is empty, push) the manager i
 # IMAGE_REPO is the one place the published registry is named. Both install
 # artifacts derive the image they pin from it, so a release cannot push to one
 # registry and hand out manifests naming another.
-IMAGE_REPO ?= ghcr.io/yelzhy/kuberecord
+IMAGE_REPO ?= ghcr.io/kuberecord/kuberecord
 INSTALLER_IMG ?= $(IMAGE_REPO):v$(VERSION)
 
 # INSTALLER_OUT is where the manifest is written. The default is the committed

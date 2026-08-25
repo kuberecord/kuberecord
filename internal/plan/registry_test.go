@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 const (
@@ -581,7 +581,7 @@ func isAllowedImport(path string) bool {
 	// internal/sink, exactly — for sink.ID (see TestPackageImportsRemainMinimal).
 	// Not a prefix match: internal/sink/clickhouse is a driver, and the whole point
 	// of this budget is that this package can never reach one.
-	return path == "github.com/yelzhy/kuberecord/internal/sink"
+	return path == "github.com/kuberecord/kuberecord/internal/sink"
 }
 
 // TestRulesForSink covers the accessor the sink runtime uses to name a vanished
