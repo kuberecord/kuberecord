@@ -902,6 +902,12 @@ func publishedPages(t *testing.T) []string {
 	pages := []string{
 		"README.md",
 		"CHANGELOG.md",
+		// The community files are followed exactly like a docs/ page: both send a
+		// reader onward into docs/, and a contributor or a security reporter
+		// following a link that no longer resolves is the reader least likely to
+		// try a second time.
+		"CONTRIBUTING.md",
+		"SECURITY.md",
 		"examples/quickstart/README.md",
 		"examples/tee/README.md",
 		"deploy/charts/kuberecord/README.md",
