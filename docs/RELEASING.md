@@ -60,7 +60,7 @@ publishes:
 
 | Artifact | Notes |
 |---|---|
-| `ghcr.io/yelzhy/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
+| `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
 | `install.yaml` | `kubectl apply -f` it: CRDs, RBAC and the manager, with the image above pinned exactly. For a non-prerelease tag it is byte-identical to the committed [`dist/install.yaml`](../dist/install.yaml) — the artifact you download is the file that was reviewed. |
 | `kuberecord-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | An SPDX 2.3 SBOM of the published image, produced by syft from the pushed `linux/amd64` manifest by digest. One document, because every platform is the same static binary in the same base image. |
@@ -88,7 +88,7 @@ harder than a tag, resolve the digest once and use it — the chart takes
 ```sh
 # A digest is the hash of the manifest bytes, so this is exact by construction.
 # macOS: shasum -a 256. With crane installed it is one word: `crane digest <ref>`.
-docker buildx imagetools inspect --raw ghcr.io/yelzhy/kuberecord:v0.1.0 | sha256sum
+docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:vX.Y.Z | sha256sum
 ```
 
 (Not `--format '{{.Manifest.Digest}}'`: on at least one shipped buildx — Docker

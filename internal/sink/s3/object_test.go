@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // buildObject runs a batch of records through the accumulating builder exactly as

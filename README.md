@@ -91,7 +91,7 @@ From a fresh clone to rows you can query, on a laptop, in under ten minutes.
 You need Docker, [kind] and `kubectl`.
 
 ```sh
-git clone https://github.com/yelzhy/kuberecord && cd kuberecord
+git clone https://github.com/kuberecord/kuberecord && cd kuberecord
 make quickstart
 ```
 
@@ -300,11 +300,11 @@ kubectl apply -f dist/install.yaml
 make deploy IMG=<some-registry>/kuberecord:tag
 ```
 
-Both artifacts are also attached to every [release](https://github.com/yelzhy/kuberecord/releases),
+Both artifacts are also attached to every [release](https://github.com/kuberecord/kuberecord/releases),
 with checksums, if you would rather install a tag than a checkout:
 
 ```sh
-kubectl apply -f https://github.com/yelzhy/kuberecord/releases/download/v0.2.0/install.yaml
+kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.2.0/install.yaml
 ```
 
 From v0.2.0 the image is signed with cosign, the image and every attached asset
@@ -314,9 +314,15 @@ you run an operator that will watch your whole cluster:
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0 \
-  ghcr.io/yelzhy/kuberecord:v0.2.0
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
+  ghcr.io/kuberecord/kuberecord:v0.2.1
 ```
+
+The identity above is the one to pin from **v0.2.1** onward. `v0.1.0` and `v0.2.0`
+were released before this repository moved to the `kuberecord` organization, so
+they verify against the old identity and their images stay at the old registry
+path — see
+[`docs/VERIFYING.md`](docs/VERIFYING.md#which-identity-verifies-which-release).
 
 [`docs/VERIFYING.md`](docs/VERIFYING.md) has the rest — provenance, the SBOM,
 checksums, and what a signature on the operator does *not* say about the records

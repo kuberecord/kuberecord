@@ -63,9 +63,9 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	kbs3 "github.com/yelzhy/kuberecord/internal/sink/s3"
-	"github.com/yelzhy/kuberecord/internal/sink/s3/awsstore"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	kbs3 "github.com/kuberecord/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink/s3/awsstore"
 )
 
 // The MinIO service `make test-integration` stands up, announced the same way it

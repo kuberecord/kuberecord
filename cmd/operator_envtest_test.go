@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
 )
 
 // TestOperatorBootsIdleWithNoCRs is Task 1.10's central acceptance criterion:

@@ -43,8 +43,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	kbs3 "github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	kbs3 "github.com/kuberecord/kuberecord/internal/sink/s3"
 )
 
 // itTimeout bounds one test's dealings with the store. It is generous because a

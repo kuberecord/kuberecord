@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // This file is the ClickHouse backend's side of the multi-sink runtime (Task

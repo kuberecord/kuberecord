@@ -30,9 +30,9 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/test/harness"
-	"github.com/yelzhy/kuberecord/test/utils"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/test/harness"
+	"github.com/kuberecord/kuberecord/test/utils"
 )
 
 // Identities of everything the suite installs. The operator-side names are the

@@ -31,8 +31,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/conformance"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/conformance"
 )
 
 // TestProbeWritesRatherThanReads is the reason this probe exists in the shape it

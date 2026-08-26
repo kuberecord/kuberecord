@@ -26,9 +26,9 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/controller"
-	"github.com/yelzhy/kuberecord/test/harness"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/controller"
+	"github.com/kuberecord/kuberecord/test/harness"
 )
 
 // The Phase 6 gate: an S3Sink and a StreamRule streaming a Deployment's lifecycle

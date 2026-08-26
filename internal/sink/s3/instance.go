@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // This file is the S3 backend's side of the multi-sink runtime: which halves of

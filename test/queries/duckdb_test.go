@@ -25,8 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	kbs3 "github.com/yelzhy/kuberecord/internal/sink/s3"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	kbs3 "github.com/kuberecord/kuberecord/internal/sink/s3"
 )
 
 // This file is the half of the S3 recipes' coverage that needs no object store,

@@ -39,8 +39,8 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/internal/sink/conformance"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink/conformance"
 )
 
 // The rotation tests' shared tuning. A single worker is what makes them

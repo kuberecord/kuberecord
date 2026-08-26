@@ -98,9 +98,9 @@ linters:
           files:
             - "**/internal/sink/conformance/**"
           deny:
-            - pkg: github.com/yelzhy/kuberecord/internal/pipeline
+            - pkg: github.com/kuberecord/kuberecord/internal/pipeline
               desc: "the conformance suite must depend only on the sink contract; internal/sink cannot import internal/pipeline (Task 5.1)"
-            - pkg: github.com/yelzhy/kuberecord/internal/sink/clickhouse
+            - pkg: github.com/kuberecord/kuberecord/internal/sink/clickhouse
               desc: "the conformance suite must name no backend: it is the contract every backend is measured against (Task 5.1)"
             - pkg: github.com/ClickHouse/clickhouse-go/v2
               desc: "the conformance suite must name no backend: it is the contract every backend is measured against (Task 5.1)"

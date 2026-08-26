@@ -16,7 +16,44 @@ than a summary of them.
 
 ## [Unreleased]
 
-Nothing yet.
+## [0.2.1] - 2026-08-26
+
+### Changed
+
+- **The repository moved to the `kuberecord` GitHub organization.** A pure
+  namespace rename: no behaviour, schema, CRD field, CEL rule, default, metric,
+  condition reason or object layout changed with it.
+
+  | Surface | Before | After |
+  |---|---|---|
+  | Go module | `github.com/yelzhy/kuberecord` | `github.com/kuberecord/kuberecord` |
+  | Container image | `ghcr.io/yelzhy/kuberecord` | `ghcr.io/kuberecord/kuberecord` |
+  | Repository | `github.com/yelzhy/kuberecord` | `github.com/kuberecord/kuberecord` |
+
+  **The module path change is why this has to become a release rather than a
+  commit.** A tag's `go.mod` declares the module it is, so
+  `go get github.com/kuberecord/kuberecord@v0.2.0` cannot work — that tag's
+  `go.mod` says `github.com/yelzhy/kuberecord`. v0.2.1 is the first tag reachable
+  under the new path, and it is the rename and nothing else.
+
+  Two things deliberately do **not** move, and neither is a defect:
+
+  - **Images published before the transfer stay at `ghcr.io/yelzhy/kuberecord`.**
+    A GHCR package belongs to the account that published it and does not follow a
+    repository transfer, so `v0.1.0` and `v0.2.0` remain pullable at the old path
+    and only at the old path. Nothing was re-pushed, so nothing was re-signed.
+  - **Verifying `v0.2.0` uses the old cosign identity.** A keyless signature binds
+    to a Fulcio certificate naming the repository as it was when the workflow ran,
+    and that certificate is already in the public transparency log — it cannot be
+    reissued against the new name. `v0.1.0` and `v0.2.0` therefore verify against
+    `https://github.com/yelzhy/kuberecord/...` permanently, `v0.2.1` and later
+    against `https://github.com/kuberecord/kuberecord/...`. Both identities, and
+    why the old one is correct rather than suspicious, are in
+    [`docs/VERIFYING.md`](docs/VERIFYING.md#which-identity-verifies-which-release).
+
+  Anyone running from a checkout needs `go mod edit -replace` only if they had
+  pinned the old path; a `git remote set-url` is otherwise the whole migration,
+  and GitHub redirects the old repository URL either way.
 
 ## [0.2.0] - 2026-08-24
 
@@ -901,6 +938,7 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/yelzhy/kuberecord/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/yelzhy/kuberecord/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/yelzhy/kuberecord/releases/tag/v0.1.0
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/kuberecord/kuberecord/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/kuberecord/kuberecord/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/kuberecord/kuberecord/releases/tag/v0.1.0

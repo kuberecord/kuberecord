@@ -31,11 +31,11 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive,staticcheck
 	"github.com/onsi/gomega/types"
 
-	"github.com/yelzhy/kuberecord/api/v1alpha1"
-	"github.com/yelzhy/kuberecord/internal/controller"
-	"github.com/yelzhy/kuberecord/internal/sink"
-	"github.com/yelzhy/kuberecord/test/harness"
-	"github.com/yelzhy/kuberecord/test/utils"
+	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/controller"
+	"github.com/kuberecord/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/test/harness"
+	"github.com/kuberecord/kuberecord/test/utils"
 )
 
 // The Phase 7 gate for the tee pattern (Task 7.1): the published example,

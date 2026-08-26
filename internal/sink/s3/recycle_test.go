@@ -40,7 +40,7 @@ import (
 
 	"go.uber.org/goleak"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // rotationSinkID is the identity the sink under test runs as. The kind is spelled

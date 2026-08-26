@@ -13,6 +13,8 @@ name: Observability
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions: {}

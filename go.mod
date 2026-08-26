@@ -1,4 +1,4 @@
-module github.com/yelzhy/kuberecord
+module github.com/kuberecord/kuberecord
 
 go 1.25.7
 

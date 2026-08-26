@@ -19,7 +19,7 @@ package harness
 import (
 	"testing"
 
-	"github.com/yelzhy/kuberecord/internal/sink"
+	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
 // The S3 read layer's two pure decisions, tested without a cluster: which records

@@ -8,16 +8,16 @@ type: application
 # version is the chart's own version; appVersion is the operator release it
 # installs by default (values.yaml leaves image.tag empty so it follows this
 # field). Both must move together with the Makefile's VERSION.
-version: 0.2.0
-appVersion: "v0.2.0"
+version: 0.2.1
+appVersion: "v0.2.1"
 # The chart installs no webhooks and no cert-manager (D4): validation is entirely
 # CRD structural schemas plus CEL (x-kubernetes-validations), which is why the
 # floor is 1.29 — the release where CEL validation cost budgets and
 # `x-kubernetes-validations` on all schema nodes are generally available.
 kubeVersion: ">= 1.29.0-0"
-home: https://github.com/yelzhy/kuberecord
+home: https://github.com/kuberecord/kuberecord
 sources:
-  - https://github.com/yelzhy/kuberecord
+  - https://github.com/kuberecord/kuberecord
 keywords:
   - kubernetes
   - audit

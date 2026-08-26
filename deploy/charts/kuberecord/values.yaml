@@ -7,7 +7,7 @@
 # -- Operator image. tag defaults to the chart's appVersion; digest, when set,
 # wins over tag so an install can be pinned by content rather than by name.
 image:
-  repository: ghcr.io/yelzhy/kuberecord
+  repository: ghcr.io/kuberecord/kuberecord
   tag: ""
   digest: ""
   pullPolicy: IfNotPresent

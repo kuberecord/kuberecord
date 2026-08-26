@@ -9,7 +9,7 @@ image:
   # Pinned by digest rather than tag, so the digest branch of the image helper is
   # exercised by a real render. The digest is a well-formed placeholder; nothing
   # in lint or kubeconform pulls it.
-  repository: ghcr.io/yelzhy/kuberecord
+  repository: ghcr.io/kuberecord/kuberecord
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: Always
 
