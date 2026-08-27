@@ -61,6 +61,7 @@ publishes:
 | Artifact | Notes |
 |---|---|
 | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
+| `oci://ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` | The same packaged chart as the `.tgz` below, in the registry. Note the tag has no `v` — a Helm chart version is semver, and the chart's is `X.Y.Z`. From v0.3.0 onward (Task 8.1). |
 | `install.yaml` | `kubectl apply -f` it: CRDs, RBAC and the manager, with the image above pinned exactly. For a non-prerelease tag it is byte-identical to the committed [`dist/install.yaml`](../dist/install.yaml) — the artifact you download is the file that was reviewed. |
 | `kuberecord-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | An SPDX 2.3 SBOM of the published image, produced by syft from the pushed `linux/amd64` manifest by digest. One document, because every platform is the same static binary in the same base image. |
@@ -72,6 +73,7 @@ And, from v0.2.0 onward, the evidence for all of it (Task 7.4):
 | Evidence | Notes |
 |---|---|
 | A **cosign signature** on the image | Keyless: no key exists, so none can leak. The signature is bound to a Fulcio certificate naming this workflow at this tag, and `--recursive` means the manifest list *and* each per-platform manifest carry one. |
+| A **cosign signature** on the chart | The same identity, over the chart's OCI manifest. Not `--recursive`: a chart is one manifest, so there is nothing under it. From v0.3.0. |
 | **SLSA build provenance** for the image | Recorded against this repository *and* pushed into the registry beside the image, so verification need not depend on this repository's API. Carrying either across a mirror takes a referrers-aware copy — see [`VERIFYING.md`](VERIFYING.md#the-build-provenance). |
 | **SLSA build provenance** for every attached asset | Generated from `checksums.txt` itself, so what is checksummed and what is attested are the same set by construction. |
 
@@ -79,6 +81,36 @@ The verification commands, and — just as important — what they do and do not
 prove, are [`VERIFYING.md`](VERIFYING.md). The release job runs them against what
 it just published, before the Release page that advertises them exists: a
 signature that does not verify fails the release rather than shipping.
+
+### Why the chart is published twice
+
+The registry copy is the primary one, and the release asset is kept because
+removing it would break every install command already written down.
+
+The asset URL is the reason there are two. It is
+`github.com/kuberecord/kuberecord/releases/download/…`, and for anyone who wrote
+it down before the move to the organization it is the old path, served by a
+GitHub redirect. That redirect survives a rename — but it is destroyed
+permanently, and irrecoverably, the moment anyone creates a repository named
+`kuberecord` under the old account. It is the one consequence of the migration
+that cannot be undone afterwards. A registry reference has no such dependency.
+
+Both copies are **the same bytes**, and that is enforced by construction rather
+than by care: the release pushes the archive `make release-artifacts` produced,
+never a second packaging of it. `helm package` stamps the current time into every
+tar header, so packaging twice yields two archives with two digests for one
+version — and `checksums.txt` would then describe only one of them. Pushing the
+packaged file makes the registry artifact's layer digest exactly the `sha256`
+that `checksums.txt` lists, so the checksums and the SLSA attestation cover the
+chart however it was fetched.
+
+That is also why the push happens in the job that builds the artifacts, and why
+that job carries `packages: write` — a permission the release workflow otherwise
+keeps confined to the image job.
+
+The chart is pushed **before** the GitHub Release is created, for the same reason
+the image is: the Release page tells a reader to `helm install oci://…`, and a
+page that says so before the artifact exists hands its first readers a 404.
 
 **There is no floating `latest` tag**, for images or for artifacts. What a cluster
 runs is decided by the tag somebody chose, not by whatever moved last. To pin
@@ -133,7 +165,8 @@ Everything below happens on a branch, in one commit, reviewed like any other.
    stranger runs it, against what is now public:
 
    ```sh
-   make release-verify RELEASE_VERSION=v0.2.0   # or the commands in VERIFYING.md
+   make release-verify RELEASE_VERSION=v0.2.0         # the image
+   make release-chart-verify RELEASE_VERSION=v0.2.0   # the chart in the registry
    ```
 
    [`VERIFYING.md`](VERIFYING.md) is what you are pointing anyone who asks at, so
@@ -143,7 +176,8 @@ Everything below happens on a branch, in one commit, reviewed like any other.
 
 `make release-dry-run` is the whole sequence with nothing published: the notes,
 both install artifacts, the SBOM, their checksums, `verify-packaging` over each
-install path, and the full multi-arch image build with no registry to push to.
+install path, the full multi-arch image build with no registry to push to, and
+the chart push against a throwaway registry.
 
 Two of the supply-chain steps cannot be rehearsed, because performing them *is*
 publishing: a signature writes to a registry and to a public transparency log,
@@ -153,6 +187,14 @@ against a real image, it computes every attestation subject, and it prints the
 signing and verification commands it is deliberately not running. What that
 leaves unproven is stated in
 [`VERIFYING.md`](VERIFYING.md#a-rehearsal-proves-less-than-a-release).
+
+The chart push is the exception, and it is genuinely exercised rather than
+printed: `make release-chart-rehearse` stands up a throwaway OCI registry on this
+machine, performs a real `helm push` of the real packaged chart into it, checks
+that the digest it reports still parses, and destroys the registry again. A push
+to a registry nobody can reach is not a publication, so a rehearsal is free to do
+it — and it catches the failures that would otherwise wait for a tag: a
+malformed reference, a flag that moved, an archive that was never packaged.
 
 ```sh
 # Rehearse the committed version.
@@ -178,16 +220,21 @@ make release-artifacts RELEASE_VERSION=v0.2.0        # install.yaml + chart + ch
 make release-image RELEASE_VERSION=v0.2.0 BUILDX_OUTPUT=   # build every platform, push nothing
 make release-sbom-local RELEASE_VERSION=v0.2.0       # a local image, described by syft
 make release-checksums RELEASE_VERSION=v0.2.0        # re-hash whatever is in dist/release/
+make release-chart-rehearse RELEASE_VERSION=v0.2.0   # a real chart push, to a throwaway registry
 make release-rehearse-publishing                     # print the steps a rehearsal must not run
 ```
 
-The three that only make sense against something published, and that the workflow
+Those that only make sense against something published, and that the workflow
 runs for real, need cosign (and syft, and `gh` for the provenance half):
 
 ```sh
 make release-image-digest RELEASE_VERSION=v0.2.0     # what the push actually produced
 make release-sign RELEASE_VERSION=v0.2.0             # keyless, so it needs an OIDC identity
 make release-verify RELEASE_VERSION=v0.2.0           # the commands VERIFYING.md publishes
+make release-chart-login                             # CHART_REGISTRY_USER/_TOKEN from the environment
+make release-chart-push RELEASE_VERSION=v0.2.0       # the packaged chart, into the registry
+make release-chart-sign RELEASE_VERSION=v0.2.0       # over the digest the push reported
+make release-chart-verify RELEASE_VERSION=v0.2.0     # the chart command VERIFYING.md publishes
 ```
 
 ## What the gate refuses

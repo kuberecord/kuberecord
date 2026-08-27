@@ -554,6 +554,13 @@ func TestReleaseWorkflow(t *testing.T) {
 		{"chart attached", "dist/release/kuberecord-*.tgz", "the packaged chart is an artifact of the release"},
 		{"gate precedes publishing", "needs: [gate, image]", "publishing is not undoable, so ordering is the safeguard"},
 		{"image needs the gate", "needs: gate", "an image pushed under a rejected tag cannot be unpushed"},
+		// Task 8.1. The chart is published to a registry as well as attached, so
+		// that installing it does not depend on a GitHub redirect that a repository
+		// name under the old account would destroy.
+		{"the chart is pushed", "make release-chart-push", "the release-asset URL is the dependency this removes"},
+		{"the chart is signed", "make release-chart-sign", "an unsigned chart is an unsigned operator by another route"},
+		{"the chart verifies itself", "make release-chart-verify", "a signature that does not verify must fail the release"},
+		{"the chart push is rehearsed", "make release-chart-rehearse", "a push is the step with something to get wrong"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,6 +674,11 @@ func parseReleaseWorkflow(t *testing.T) releaseWorkflow {
 
 const releaseWorkflowPath = ".github/workflows/release.yml"
 
+// permWrite is the only level any of the grants below may be held at. A scope
+// present at `read` would satisfy a bare presence check while being unable to do
+// the thing the job needs, which is the confusing half of a permissions bug.
+const permWrite = "write"
+
 // oidcJobs are the jobs allowed to mint an OIDC token, and why each one needs to.
 //
 // Keyless signing and attestation both need `id-token: write`, and the two halves
@@ -678,6 +690,22 @@ const releaseWorkflowPath = ".github/workflows/release.yml"
 var oidcJobs = map[string]string{
 	"image":   "signs the image and attests it, and the digest exists nowhere earlier",
 	"publish": "attests the artifacts it just built, which exist nowhere earlier",
+}
+
+// registryWriteJobs are the jobs allowed to write to the package registry, and
+// why each one must.
+//
+// The publish job is here since Task 8.1, and its entry is the one worth reading
+// twice, because it costs something. `helm package` stamps the current time into
+// every tar header, so packaging a chart twice produces two archives with two
+// digests; the only way the registry artifact and the `.tgz` on the Release page
+// are the same bytes is for the job that packaged it to push it. The price is
+// that the two publishing jobs are no longer symmetric — this one can now write
+// to the registry. What survives, and what this map exists to keep, is that the
+// image job still cannot publish a Release.
+var registryWriteJobs = map[string]string{
+	"image":   "pushes the multi-arch image, which is what a release is for",
+	"publish": "pushes the chart archive it packaged, which no other job holds",
 }
 
 // TestReleaseWorkflowPermissions is the deny-by-default posture, asserted rather
@@ -705,6 +733,12 @@ func TestReleaseWorkflowPermissions(t *testing.T) {
 			}
 			perms := *job.Permissions
 
+			if _, mayWrite := registryWriteJobs[name]; !mayWrite && perms["packages"] != "" {
+				t.Errorf("job %q is granted packages: %s. Only %v push to the registry, and "+
+					"widening that set is a decision to make on purpose", name, perms["packages"],
+					sortedKeys(registryWriteJobs))
+			}
+
 			_, mayHaveOIDC := oidcJobs[name]
 			for _, scope := range []string{"id-token", "attestations"} {
 				if perms[scope] == "" {
@@ -716,11 +750,11 @@ func TestReleaseWorkflowPermissions(t *testing.T) {
 						sortedKeys(oidcJobs))
 				}
 			}
-			if mayHaveOIDC && perms["id-token"] != "write" {
+			if mayHaveOIDC && perms["id-token"] != permWrite {
 				t.Errorf("job %q no longer has id-token: write, so it cannot sign or attest "+
 					"(it %s)", name, oidcJobs[name])
 			}
-			if mayHaveOIDC && perms["attestations"] != "write" {
+			if mayHaveOIDC && perms["attestations"] != permWrite {
 				t.Errorf("job %q no longer has attestations: write, so provenance cannot be "+
 					"recorded", name)
 			}
@@ -734,6 +768,17 @@ func TestReleaseWorkflowPermissions(t *testing.T) {
 	if !ok {
 		t.Fatal("release.yml no longer has a gate job")
 	}
+	for name, why := range registryWriteJobs {
+		job, ok := wf.Jobs[name]
+		if !ok {
+			t.Errorf("release.yml no longer has a %q job, which %s", name, why)
+			continue
+		}
+		if (*job.Permissions)["packages"] != permWrite {
+			t.Errorf("job %q no longer has packages: write, so it cannot push (it %s)", name, why)
+		}
+	}
+
 	if want := map[string]string{"contents": "read"}; !mapsEqual(*gate.Permissions, want) {
 		t.Errorf("the gate job is granted %v, not %v. It decides whether a release happens; "+
 			"it must not be able to make one", *gate.Permissions, want)
@@ -769,6 +814,18 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "docker login") },
 			"a rehearsal that authenticates to the registry could push",
+		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-login") },
+			"a rehearsal that authenticates to the chart registry could push",
+		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-push") },
+			"a chart in a public registry cannot be unpublished",
+		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-sign") },
+			"a signature is a registry write and a public transparency-log entry",
 		},
 	}
 
@@ -841,6 +898,9 @@ func TestSupplyChainTargetsExist(t *testing.T) {
 		"release-image-digest:", "release-sbom:", "release-sbom-local:",
 		"release-sign:", "release-verify:", "release-checksums:",
 		"release-rehearse-publishing:",
+		// Task 8.1's four, which break the same way.
+		"release-chart-login:", "release-chart-push:", "release-chart-sign:",
+		"release-chart-verify:", "release-chart-rehearse:",
 	} {
 		if !strings.Contains(makefile, "\n"+target) {
 			t.Errorf("the Makefile no longer defines %s", strings.TrimSuffix(target, ":"))
@@ -861,6 +921,84 @@ func TestSupplyChainTargetsExist(t *testing.T) {
 				"binary it could not read, and the result is a valid, useless document", want)
 		}
 	}
+
+	// The chart signature is over a digest for the same reason the image's is.
+	if !strings.Contains(makefile, `"$(COSIGN)" sign --yes "$(CHART_OCI_REF)@$(release-chart-subject)"`) {
+		t.Error("release-chart-sign no longer signs CHART_OCI_REF@<digest>; signing a tag is " +
+			"weaker than what docs/VERIFYING.md documents, because a tag can be moved afterwards")
+	}
+}
+
+// TestReleasePushesTheChartItPackaged is the one property in Task 8.1 that
+// nothing else would catch, and it is invisible by inspection.
+//
+// `helm package` writes time.Now() into every tar header, so packaging the same
+// unchanged chart twice produces two archives with two different sha256 sums. If
+// the release ever repackages instead of pushing the archive release-artifacts
+// already wrote, the registry artifact and the `.tgz` on the Release page become
+// different bytes for one version — and checksums.txt, which is also the
+// attestation's subject list, would then describe only one of them. Every claim
+// this repository makes about verifying the chart depends on there being one
+// answer.
+func TestReleasePushesTheChartItPackaged(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	// The pushed file is the one release-artifacts produced, named from the same
+	// variables rather than re-derived.
+	if !strings.Contains(makefile, "RELEASE_CHART_TGZ = $(RELEASE_DIR)/$(CHART_RELEASE)-$(RELEASE_CHART_VERSION).tgz") {
+		t.Error("RELEASE_CHART_TGZ no longer names the archive release-artifacts writes into " +
+			"RELEASE_DIR, so the push and the release asset can now be different files")
+	}
+
+	push := makeRecipe(t, makefile, "release-chart-push")
+	if strings.Contains(push, "helm) package") || strings.Contains(push, `HELM)" package`) {
+		t.Error("release-chart-push packages the chart itself. It must push $(RELEASE_CHART_TGZ), " +
+			"the archive release-artifacts already wrote: helm package stamps the current time " +
+			"into every tar header, so a second packaging publishes different bytes under the " +
+			"same version and checksums.txt stops covering one of them")
+	}
+	if !strings.Contains(push, "$(RELEASE_CHART_TGZ)") {
+		t.Error("release-chart-push no longer pushes $(RELEASE_CHART_TGZ)")
+	}
+
+	// A stale digest from an earlier run is what release-chart-sign would read,
+	// and it would sign an artifact from a previous release with nothing looking
+	// wrong — the same reasoning that already removes the image's digest file.
+	if !strings.Contains(makefile, `"$(RELEASE_CHART_DIGEST_FILE)"`) {
+		t.Error("RELEASE_CHART_DIGEST_FILE is no longer referenced")
+	}
+	artifacts := makeRecipe(t, makefile, "release-artifacts")
+	if !strings.Contains(artifacts, "$(RELEASE_CHART_DIGEST_FILE)") {
+		t.Error("release-artifacts no longer removes the recorded chart digest. A digest left " +
+			"behind by an earlier run is what release-chart-sign reads, so it would sign a " +
+			"chart from a previous release")
+	}
+}
+
+// makeRecipe returns the recipe lines of one target: everything from the target
+// line to the first line that is neither indented nor blank. Enough to ask what a
+// single target does without parsing make.
+func makeRecipe(t *testing.T, makefile, target string) string {
+	t.Helper()
+	lines := strings.Split(makefile, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, target+":") {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("the Makefile no longer defines %s", target)
+	}
+	var recipe []string
+	for _, line := range lines[start:] {
+		if line != "" && !strings.HasPrefix(line, "\t") && !strings.HasPrefix(line, " ") {
+			break
+		}
+		recipe = append(recipe, line)
+	}
+	return strings.Join(recipe, "\n")
 }
 
 // verifyingPageClaims is what "Verifying a release" has to keep saying.
@@ -884,6 +1022,10 @@ var verifyingPageClaims = []struct {
 	{"does not sign", "a signed operator is not a signed audit trail"},
 	{"transparency log", "keyless signing trades a key for two public services"},
 	{"rehearsal", "a green rehearsal cannot prove a signature verifies"},
+	// The chart is a second signed artifact (Task 8.1), and the two ways of
+	// getting it have to be stated as one thing, not two.
+	{"ghcr.io/kuberecord/charts/kuberecord", "the chart's reference, which is the address and the whole address"},
+	{"helm pull", "a reader who cannot fetch the chart cannot check it"},
 }
 
 // TestVerifyingPageCoversItsSubject is the positive half of the pair: a page that
@@ -959,6 +1101,100 @@ func TestDocumentedSigningIdentityAgreesWithTheMakefile(t *testing.T) {
 	if _, err := os.Stat(repoPath(releaseWorkflowPath)); err != nil {
 		t.Errorf("the documented identity names %s, which does not exist: %v",
 			releaseWorkflowPath, err)
+	}
+}
+
+// TestChartOCIReferenceAgreesWithTheMakefile is the anti-drift check for Task
+// 8.1's published address, and it is the same class of failure as the signing
+// identity's: the reference is a string a reader copies into `helm install`, and
+// a page naming a registry path nothing was pushed to fails for everyone while
+// every structural check still passes.
+//
+// The Makefile derives the chart's namespace from IMAGE_REPO so the registry is
+// named once. This asserts the derivation still produces what the documentation
+// publishes, and that the documentation publishes it everywhere it claims to.
+func TestChartOCIReferenceAgreesWithTheMakefile(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	if !strings.Contains(makefile, "CHART_OCI_NAMESPACE ?= $(patsubst %/,%,$(dir $(IMAGE_REPO)))/charts") {
+		t.Error("the chart's registry namespace is no longer derived from IMAGE_REPO, so the " +
+			"registry can now be named in two places and a fork can publish under somebody " +
+			"else's name")
+	}
+
+	// IMAGE_REPO is ghcr.io/<owner>/kuberecord; the chart lands beside it under
+	// charts/, and helm push appends the chart's own name.
+	image := regexp.MustCompile(`(?m)^IMAGE_REPO \?= (\S+)`).FindStringSubmatch(makefile)
+	if image == nil {
+		t.Fatal("the Makefile no longer defines IMAGE_REPO")
+	}
+	slash := strings.LastIndex(image[1], "/")
+	if slash < 0 {
+		t.Fatalf("IMAGE_REPO is %q, which names no registry namespace to put the chart beside", image[1])
+	}
+	wantRef := image[1][:slash] + "/charts/kuberecord"
+
+	// Every page that tells a reader where the chart is has to say the same thing.
+	for _, page := range []string{
+		"README.md",
+		"docs/VERIFYING.md",
+		"docs/RELEASING.md",
+		"deploy/charts/kuberecord/README.md",
+	} {
+		if !strings.Contains(readFile(t, page), wantRef) {
+			t.Errorf("%s does not name %q. That string is what a reader passes to "+
+				"`helm install`; if it is wrong, the install fails for everyone", page, wantRef)
+		}
+	}
+
+	// The chart's tag is semver without the `v` while the signing identity keeps
+	// it, which is the single easiest thing to get wrong about this reference.
+	// Every page that shows the install has to warn about it, because a reader who
+	// copies the `v` across gets `manifest unknown` and no explanation.
+	// Any of these phrasings says it; the point is that the page says it at all.
+	prefixWarnings := []string{"no `v`", "without a `v`", "drops the `v`"}
+	for _, page := range []string{"README.md", "docs/VERIFYING.md", "deploy/charts/kuberecord/README.md"} {
+		content := readFile(t, page)
+		if !slices.ContainsFunc(prefixWarnings, func(w string) bool { return strings.Contains(content, w) }) {
+			t.Errorf("%s shows the chart reference without warning that its tag drops the `v` "+
+				"the operator tag and the signing identity both carry", page)
+		}
+	}
+}
+
+// TestOCIInstallPathIsSmoked keeps Task 8.1's acceptance criterion wired up: the
+// OCI reference is a distribution channel, and the only way to know a chart
+// installs from one is to install it from one.
+func TestOCIInstallPathIsSmoked(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	for _, target := range []string{
+		"test-e2e-helm-oci:", "deploy-e2e-helm-oci:", "undeploy-e2e-helm-oci:",
+		"local-registry-up:", "local-registry-down:",
+	} {
+		if !strings.Contains(makefile, "\n"+target) {
+			t.Errorf("the Makefile no longer defines %s", strings.TrimSuffix(target, ":"))
+		}
+	}
+
+	// The registry the smoke and the rehearsal both push to decides what a chart
+	// push is talking to. A floating tag there is a third party choosing that.
+	if !regexp.MustCompile(`LOCAL_REGISTRY_IMAGE \?= \S+@sha256:[0-9a-f]{64}`).MatchString(makefile) {
+		t.Error("LOCAL_REGISTRY_IMAGE is not pinned to a digest")
+	}
+
+	// The install must name the registry, not the directory that was packaged: an
+	// install that read the chart off local disk would prove nothing about the
+	// push it just performed.
+	deploy := makeRecipe(t, makefile, "deploy-e2e-helm-oci")
+	if !strings.Contains(deploy, "oci://$(LOCAL_REGISTRY_HOST)/charts/$(CHART_RELEASE)") {
+		t.Error("deploy-e2e-helm-oci no longer installs from the OCI reference it pushed to, " +
+			"so it tests packaging rather than distribution")
+	}
+
+	workflow := readFile(t, ".github/workflows/install-paths.yml")
+	if !strings.Contains(workflow, "make test-e2e-helm-oci") {
+		t.Error("install-paths.yml no longer runs the OCI install smoke, so the chart's " +
+			"published distribution channel is untested until somebody tags")
 	}
 }
 

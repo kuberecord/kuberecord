@@ -103,6 +103,11 @@ kubectl delete clusterstreamrules.kuberecord.io --all
 #    because Helm installs `crds/` and never upgrades it: a plain `helm upgrade`
 #    would leave the v0.1.0 schema serving, and step 5 would have its `sink` block
 #    pruned straight back off again. (Same caveat as the chart's own README.)
+#    <chart> is the chart, however you reach it: the OCI reference
+#    `oci://ghcr.io/kuberecord/charts/kuberecord` with `--version X.Y.Z`
+#    (published from v0.3.0), a downloaded `kuberecord-X.Y.Z.tgz`, or a checkout's
+#    deploy/charts/kuberecord. `helm pull … --untar` gets you the crds/ directory
+#    from the first of those.
 kubectl apply -f <chart>/crds/
 helm upgrade kuberecord <chart> -n kuberecord-system --reuse-values
 #   or: kubectl apply -f dist/install.yaml   (carries the CRDs itself)

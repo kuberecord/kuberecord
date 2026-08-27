@@ -14,17 +14,40 @@ either one unmodified (`make test-e2e-helm`, `make test-e2e-installer`).
 ## Install
 
 ```sh
+helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
+  --version 0.3.0 \
+  --namespace kuberecord-system --create-namespace
+```
+
+The chart is published to the registry as an OCI artifact from **v0.3.0** onward.
+There is no classic chart repository and no `helm repo add` — an OCI reference is
+the whole address, and helm has needed no extra configuration to install from one
+since v3.8.
+
+**The `--version` is not optional here, and it takes no `v`.** A Helm chart
+version is plain semver, so the artifact's tag is `0.3.0` where the operator's is
+`v0.3.0`. The two always agree otherwise: the chart is **not** versioned
+independently of the operator — `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
+both equal to the operator release it installs — see
+[`docs/RELEASING.md`](../../../docs/RELEASING.md).
+
+Two other ways to get the same chart:
+
+```sh
+# The release asset. Attached to every tagged release alongside a checksums.txt,
+# and byte-identical to the artifact above — the release pushes the file it
+# packaged, so both carry the one sha256 that checksums.txt lists.
+helm install kuberecord ./kuberecord-0.3.0.tgz \
+  --namespace kuberecord-system --create-namespace
+
+# This directory, which is what you want when you are changing the chart.
 helm install kuberecord deploy/charts/kuberecord \
   --namespace kuberecord-system --create-namespace
 ```
 
-The chart is packaged and attached to every tagged
-[release](https://github.com/kuberecord/kuberecord/releases) alongside a
-`checksums.txt`, so a `kuberecord-X.Y.Z.tgz` can be installed directly without a
-checkout. There is no chart repository. The chart is **not** versioned
-independently of the operator: `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
-both equal to the operator release it installs — see
-[`docs/RELEASING.md`](../../../docs/RELEASING.md).
+The chart in the registry is signed with cosign, and pinning by digest is
+supported — [`docs/VERIFYING.md`](../../../docs/VERIFYING.md#the-chart-signature)
+has both commands.
 
 Use the release name `kuberecord`: it matches the chart name, so every object
 comes out named exactly as the kustomize install names it
@@ -67,8 +90,14 @@ upgrades or deletes them, so a chart upgrade that ships changed CRDs needs one
 explicit step first:
 
 ```sh
-kubectl apply -f deploy/charts/kuberecord/crds/
-helm upgrade kuberecord deploy/charts/kuberecord --namespace kuberecord-system
+# The CRDs are inside the chart, so pull it once and apply them from the archive
+# rather than from whatever checkout happens to be to hand — the CRDs you install
+# must be the ones the version you are upgrading to ships.
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0 --untar
+kubectl apply -f kuberecord/crds/
+
+helm upgrade kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
+  --version 0.3.0 --namespace kuberecord-system
 ```
 
 `helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —

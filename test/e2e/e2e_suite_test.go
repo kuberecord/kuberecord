@@ -204,16 +204,24 @@ const (
 // The install paths the suite can bring the operator up through. Which one runs
 // is chosen by E2E_INSTALL; the scenarios never learn which it was.
 //
-// All three produce the same object names — that is a property asserted
+// All of them produce the same object names — that is a property asserted
 // independently by test/chart, and the reason the Phase 1 scenarios below are
 // literally unmodified across them (Task 2.4). What each path proves is
 // different: kustomize is the development install, helm is the chart a user
-// installs from, and installer is the single committed dist/install.yaml.
+// installs from a checkout, installer is the single committed dist/install.yaml,
+// and helm-oci is that same chart packaged, pushed to a registry and installed
+// back out of it by reference — the distribution channel a release publishes
+// (Task 8.1), which is the one thing rendering the chart locally cannot exercise.
 const (
 	installKustomize = "kustomize"
 	installHelm      = "helm"
+	installHelmOCI   = "helm-oci"
 	installInstaller = "installer"
 )
+
+// installModes is the set E2E_INSTALL is checked against, and the order the
+// failure message lists them in.
+var installModes = []string{installKustomize, installHelm, installHelmOCI, installInstaller}
 
 var (
 	// managerImage is the manager image built and side-loaded for this run. It
@@ -305,8 +313,8 @@ func resolveInstallMode() {
 	if requested == "" {
 		requested = installKustomize
 	}
-	Expect(requested).To(BeElementOf(installKustomize, installHelm, installInstaller),
-		"E2E_INSTALL must be one of kustomize, helm or installer")
+	Expect(requested).To(BeElementOf(installModes),
+		"E2E_INSTALL must be one of %s", strings.Join(installModes, ", "))
 	installMode = requested
 	_, _ = fmt.Fprintf(GinkgoWriter, "installing the operator via %q\n", installMode)
 }
@@ -319,6 +327,8 @@ func deployTarget() string {
 	switch installMode {
 	case installHelm:
 		return "deploy-e2e-helm"
+	case installHelmOCI:
+		return "deploy-e2e-helm-oci"
 	case installInstaller:
 		return "deploy-e2e-installer"
 	default:
@@ -330,6 +340,8 @@ func undeployTarget() string {
 	switch installMode {
 	case installHelm:
 		return "undeploy-e2e-helm"
+	case installHelmOCI:
+		return "undeploy-e2e-helm-oci"
 	case installInstaller:
 		return "undeploy-e2e-installer"
 	default:

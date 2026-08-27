@@ -175,18 +175,26 @@ because self-healing without a restart is the property being tested. Override th
 Go test timeout with `E2E_TIMEOUT` and the cluster name with `KIND_CLUSTER`.
 
 The suite is install-path agnostic: `E2E_INSTALL=kustomize|helm|installer` chooses
-*how* the operator gets onto the cluster and changes nothing else, because all
-three paths produce the same object names.
+*how* the operator gets onto the cluster and changes nothing else, because every
+path produces the same object names.
 
 ```sh
 make test-e2e-helm       # the happy path against `helm install deploy/charts/kuberecord`
+make test-e2e-helm-oci   # the same, installed from an OCI reference a release publishes
 make test-e2e-installer  # the happy path against `kubectl apply -f dist/install.yaml`
 ```
 
-Both focus the lifecycle scenario (that is the packaging claim being tested, and
+Each focuses the lifecycle scenario (that is the packaging claim being tested, and
 it keeps each smoke to one scenario); `E2E_FOCUS=` runs the whole suite against
 the chosen path. Each gets its own Kind cluster, because `helm install` refuses
 to adopt objects another install path already owns.
+
+The two Helm smokes differ only in where the chart comes from, and that is the
+point of having both: the first tests the rendering, the second tests the
+distribution channel — packaged, pushed to a registry and installed back out of it
+by reference. It runs against a throwaway registry on your machine rather than
+ghcr.io, so it exercises the chart in your working tree instead of the last
+release's.
 
 ## Chaos tests — `make test-chaos`
 
@@ -252,7 +260,9 @@ make release-notes RELEASE_VERSION=v0.2.0         # the gate, on its own
 The dry run writes `dist/release/` (git-ignored): the notes extracted from
 `CHANGELOG.md`, `install.yaml`, the packaged chart, an SBOM and `checksums.txt` —
 and it builds the image for every supported platform without a registry to push
-to. `test/release` covers the extractor and the wiring under `make test`.
+to. It also performs a real `helm push` of that packaged chart into a throwaway
+registry it starts and destroys, which is the one supply-chain step a rehearsal
+can exercise rather than print. `test/release` covers the extractor and the wiring under `make test`.
 [`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
 cutting one.
 
@@ -292,7 +302,7 @@ finds out what each became.
 | `test.yml` | `make test` |
 | `lint.yml` | `make lint-config` and `make lint` |
 | `test-e2e.yml` | `make test-e2e` |
-| `install-paths.yml` | `make verify-packaging`, the chart tests, a `dist/install.yaml` staleness check, and the Helm and installer smokes on Kind |
+| `install-paths.yml` | `make verify-packaging`, the chart tests, a `dist/install.yaml` staleness check, and three smokes on Kind: the chart from a checkout, the chart from an OCI reference, and the installer |
 | `observability.yml` | `make verify-observability` |
 | `quickstart.yml` | `make quickstart` with `QUICKSTART_BUDGET_SECONDS=600` — the ten-minute claim, tested |
 | `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, its cosign signature, SBOM and provenance, then the artifacts, their provenance and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed, signed, attested or published |

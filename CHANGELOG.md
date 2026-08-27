@@ -16,6 +16,23 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- The Helm chart is published as an OCI artifact at
+  `oci://ghcr.io/kuberecord/charts/kuberecord`, signed with the same keyless
+  cosign identity as the image. `helm install
+  oci://ghcr.io/kuberecord/charts/kuberecord --version X.Y.Z` needs no checkout,
+  no download and no `helm repo add`. The chart's tag carries no `v`: a Helm
+  chart version is plain semver, so `--version 0.3.0` installs operator `v0.3.0`.
+  This is **additive** — the `kuberecord-X.Y.Z.tgz` release asset is still
+  attached to every release, and it is byte-identical to the artifact in the
+  registry, so `checksums.txt` and the SLSA attestation cover the chart however
+  it was fetched. See [`docs/VERIFYING.md`](docs/VERIFYING.md#the-chart-signature).
+- A third install-path smoke, `make test-e2e-helm-oci`, runs the acceptance happy
+  path against a chart packaged, pushed to a registry and installed back out of it
+  by reference — the distribution channel a release publishes, rather than the
+  rendering the other Helm smoke already covers.
+
 ## [0.2.1] - 2026-08-26
 
 ### Changed

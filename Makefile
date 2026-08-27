@@ -289,11 +289,20 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 # install path with E2E_FOCUS= (empty).
 SMOKE_FOCUS ?= streams a Deployment
 HELM_KIND_CLUSTER ?= kuberecord-test-e2e-helm
+HELM_OCI_KIND_CLUSTER ?= kuberecord-test-e2e-helm-oci
 INSTALLER_KIND_CLUSTER ?= kuberecord-test-e2e-installer
 
 .PHONY: test-e2e-helm
 test-e2e-helm: ## Run the e2e smoke against a `helm install` of deploy/charts/kuberecord.
 	$(MAKE) test-e2e E2E_INSTALL=helm E2E_FOCUS="$(SMOKE_FOCUS)" KIND_CLUSTER=$(HELM_KIND_CLUSTER)
+
+# The same smoke, installed from an OCI reference instead of from the checkout
+# (Task 8.1). Its own cluster for the reason the other two have theirs: `helm
+# install` will not adopt objects it does not own, and the two Helm smokes install
+# the same release name.
+.PHONY: test-e2e-helm-oci
+test-e2e-helm-oci: ## Run the e2e smoke against a `helm install` of the chart pushed to an OCI registry.
+	$(MAKE) test-e2e E2E_INSTALL=helm-oci E2E_FOCUS="$(SMOKE_FOCUS)" KIND_CLUSTER=$(HELM_OCI_KIND_CLUSTER)
 
 .PHONY: test-e2e-installer
 test-e2e-installer: ## Run the e2e smoke against `kubectl apply -f dist/install.yaml`.
@@ -504,6 +513,70 @@ CHART_DIR ?= deploy/charts/kuberecord
 CHART_RELEASE ?= kuberecord
 CHART_NAMESPACE ?= kuberecord-system
 
+# Where the chart is published as an OCI artifact (Task 8.1), derived from
+# IMAGE_REPO so the registry keeps being named in exactly one place: a fork that
+# moves IMAGE_REPO moves its chart with it rather than pushing somebody else's
+# name. `ghcr.io/kuberecord/kuberecord` therefore yields the namespace
+# `ghcr.io/kuberecord/charts`, into which `helm push` writes the chart under its
+# own name — the published reference is CHART_OCI_REF below.
+#
+# This is additive to the `.tgz` a release attaches. It exists because the
+# release-asset URL depends on GitHub's redirect from this repository's
+# pre-migration path, and that redirect is destroyed for good if a repository
+# named `kuberecord` is ever created under the old account. A registry reference
+# depends on nothing but the registry.
+CHART_OCI_NAMESPACE ?= $(patsubst %/,%,$(dir $(IMAGE_REPO)))/charts
+CHART_OCI_REPO ?= oci://$(CHART_OCI_NAMESPACE)
+# The reference a signature, a verification or a `helm install` names. `helm
+# push` takes the namespace and appends the chart's own name; everything else
+# takes the full path, and cosign takes it without the oci:// scheme.
+CHART_OCI_REF ?= $(CHART_OCI_NAMESPACE)/$(CHART_RELEASE)
+# Passed to every helm command that talks to a registry. Empty against ghcr.io;
+# `--plain-http` against the throwaway registry the rehearsal and the OCI install
+# smoke run, which speaks HTTP and has no certificate to present.
+HELM_REGISTRY_FLAGS ?=
+
+# A throwaway OCI registry on the host, used by two callers that both need a real
+# registry and neither of which may publish to a real one: the release
+# rehearsal's chart push, and the install smoke that installs from an OCI
+# reference on Kind. It is a container rather than a service so `make` owns its
+# lifecycle in both cases, including on a maintainer's laptop.
+#
+# Pinned by digest like every action in .github/workflows: a registry that
+# decides what a chart push is talking to is not a place for a floating tag.
+# 5001 rather than 5000, which macOS hands to AirPlay Receiver by default.
+LOCAL_REGISTRY_IMAGE ?= registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+LOCAL_REGISTRY_NAME ?= kuberecord-oci-registry
+LOCAL_REGISTRY_PORT ?= 5001
+LOCAL_REGISTRY_HOST ?= localhost:$(LOCAL_REGISTRY_PORT)
+
+.PHONY: local-registry-up
+local-registry-up: ## Start the throwaway OCI registry the chart push rehearsal and the OCI smoke use.
+	@# Recreated rather than reused: a registry left behind by a failed run may
+	@# already hold this version of the chart, and a push that silently resolved to
+	@# an artifact from a previous run is exactly the failure these callers exist to
+	@# catch. Removal is unconditional, so a container in any state is replaced.
+	@$(CONTAINER_TOOL) rm -f "$(LOCAL_REGISTRY_NAME)" >/dev/null 2>&1 || true
+	$(CONTAINER_TOOL) run -d --name "$(LOCAL_REGISTRY_NAME)" \
+		-p $(LOCAL_REGISTRY_PORT):5000 $(LOCAL_REGISTRY_IMAGE) >/dev/null
+	@# The container is up before the registry inside it is listening, and a push
+	@# into that gap fails with a connection error that reads like a broken command.
+	@set -e; \
+	for _ in $$(seq 1 30); do \
+		if curl -fsS "http://$(LOCAL_REGISTRY_HOST)/v2/" >/dev/null 2>&1; then \
+			echo "registry: $(LOCAL_REGISTRY_HOST) is serving."; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "registry: $(LOCAL_REGISTRY_HOST) did not start within 30s."; \
+	$(CONTAINER_TOOL) logs "$(LOCAL_REGISTRY_NAME)" 2>&1 | tail -20; \
+	exit 1
+
+.PHONY: local-registry-down
+local-registry-down: ## Remove the throwaway OCI registry.
+	@$(CONTAINER_TOOL) rm -f "$(LOCAL_REGISTRY_NAME)" >/dev/null 2>&1 || true
+
 # The Kubernetes version rendered manifests are validated against. Derived from
 # the same k8s.io/api version envtest is pinned to, so "the pinned Kubernetes
 # version" means one thing across the whole repo. kubeconform wants a full
@@ -654,6 +727,20 @@ COSIGN_IDENTITY ?= https://github.com/$(GITHUB_REPO)/$(RELEASE_WORKFLOW)@refs/ta
 RELEASE_DIGEST_FILE ?= $(RELEASE_DIR)/image-digest.txt
 RELEASE_IMAGE_NAME_FILE ?= $(RELEASE_DIR)/image-name.txt
 
+# The pushed chart's manifest digest, recorded by release-chart-push for the same
+# reason the image's is: what gets signed is a digest, and re-resolving the tag
+# between the push and the signature is a window in which the tag could have
+# moved. The file also stands in for "the push happened" — release-chart-sign
+# refuses to run without it.
+RELEASE_CHART_DIGEST_FILE ?= $(RELEASE_DIR)/chart-digest.txt
+# The packaged chart release-artifacts wrote. It is pushed rather than rebuilt,
+# and that is not an optimisation: `helm package` stamps the current time into
+# every tar header, so packaging the same chart twice produces two different
+# archives. Pushing the file that was packaged is what makes the OCI artifact's
+# layer byte-identical to the `.tgz` on the Release page — one sha256, listed
+# once in checksums.txt, covering both ways of getting the chart.
+RELEASE_CHART_TGZ = $(RELEASE_DIR)/$(CHART_RELEASE)-$(RELEASE_CHART_VERSION).tgz
+
 # The SBOM is one document for one platform. Every platform in PLATFORMS is the
 # same statically linked binary built from the same go.mod into the same
 # distroless/static base, so the package set does not differ between them — only
@@ -737,7 +824,8 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	@# release-sign would otherwise read, and they would then describe and sign an
 	@# image from a previous run without anything looking wrong.
 	rm -f "$(RELEASE_DIR)/install.yaml" "$(RELEASE_DIR)"/*.tgz "$(RELEASE_DIR)/checksums.txt" \
-		"$(RELEASE_SBOM)" "$(RELEASE_DIGEST_FILE)" "$(RELEASE_IMAGE_NAME_FILE)"
+		"$(RELEASE_SBOM)" "$(RELEASE_DIGEST_FILE)" "$(RELEASE_IMAGE_NAME_FILE)" \
+		"$(RELEASE_CHART_DIGEST_FILE)"
 	$(MAKE) build-installer INSTALLER_IMG=$(RELEASE_IMAGE) INSTALLER_OUT=$(RELEASE_DIR)/install.yaml
 	@# The manifest people apply is the manifest that was validated, rather than a
 	@# sibling of it built from the same sources.
@@ -950,6 +1038,147 @@ release-verify: ## Verify the published signature and provenance the way a user 
 		echo "  See docs/VERIFYING.md for the command."; \
 	fi
 
+# Authenticating to the chart registry. It is a target rather than a line of YAML
+# so the workflow keeps being a thin caller of commands a maintainer can run, and
+# so the location of the bootstrapped helm binary stays a Makefile concern.
+#
+# The token arrives in the environment and is fed through stdin, never as an
+# argument: arguments are visible to every process on the machine, and a release
+# token that leaks is a token that can push over a published chart.
+CHART_REGISTRY_HOST ?= $(firstword $(subst /, ,$(CHART_OCI_NAMESPACE)))
+
+.PHONY: release-chart-login
+release-chart-login: helm ## Authenticate to CHART_REGISTRY_HOST (CHART_REGISTRY_USER/CHART_REGISTRY_TOKEN from the environment).
+	@set -e; \
+	if [ -z "$$CHART_REGISTRY_TOKEN" ]; then \
+		echo "release: CHART_REGISTRY_TOKEN is not set, so there is nothing to authenticate with."; \
+		echo "  CI passes the workflow's GITHUB_TOKEN; a maintainer pushing by hand needs a"; \
+		echo "  personal access token with write:packages."; \
+		exit 1; \
+	fi; \
+	if [ -z "$$CHART_REGISTRY_USER" ]; then \
+		echo "release: CHART_REGISTRY_USER is not set; $(CHART_REGISTRY_HOST) needs a username"; \
+		echo "  alongside the token."; \
+		exit 1; \
+	fi; \
+	printf '%s' "$$CHART_REGISTRY_TOKEN" | "$(HELM)" registry login "$(CHART_REGISTRY_HOST)" \
+		--username "$$CHART_REGISTRY_USER" --password-stdin
+
+# The chart, as an OCI artifact (Task 8.1). The `.tgz` on the Release page keeps
+# being attached; this is a second way to get the same bytes, and it is the one
+# that does not route through a GitHub redirect that a repository rename could
+# take away.
+#
+# The digest is read out of `helm push`'s own report rather than resolved
+# afterwards from the tag, and helm writes that report to *stderr* with nothing on
+# stdout — hence the redirect. It is validated the same way release-image-digest
+# validates its own: the empty string hashes and formats perfectly well, and a
+# signature over a digest nobody checked is the failure worth refusing early.
+#
+# The output is captured rather than streamed, because the digest is in it, and
+# `set -e` is lifted around that capture on purpose: an aborting assignment would
+# take the shell down before anything is printed, and a failed push whose error
+# nobody sees is the least useful failure there is — the registry's message is the
+# whole diagnosis.
+.PHONY: release-chart-push
+release-chart-push: helm ## Push the packaged chart to CHART_OCI_REPO and record its digest.
+	@set -e; \
+	if [ ! -f "$(RELEASE_CHART_TGZ)" ]; then \
+		echo "release: $(RELEASE_CHART_TGZ) does not exist; run release-artifacts first."; \
+		echo "  The chart is pushed, never repackaged here: helm package stamps the"; \
+		echo "  current time into every tar header, so a second packaging of the same"; \
+		echo "  chart would put different bytes in the registry than on the Release page."; \
+		exit 1; \
+	fi; \
+	mkdir -p "$(RELEASE_DIR)"; \
+	echo "+ $(HELM) push $(RELEASE_CHART_TGZ) $(CHART_OCI_REPO) $(HELM_REGISTRY_FLAGS)"; \
+	set +e; \
+	out="$$("$(HELM)" push "$(RELEASE_CHART_TGZ)" "$(CHART_OCI_REPO)" $(HELM_REGISTRY_FLAGS) 2>&1)"; \
+	status=$$?; \
+	set -e; \
+	printf '%s\n' "$$out" | sed 's/^/    /'; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "release: helm push failed (exit $$status); no digest was recorded, so nothing"; \
+		echo "  downstream can sign or verify a chart that was not published."; \
+		exit "$$status"; \
+	fi; \
+	digest="$$(printf '%s\n' "$$out" | sed -n 's/^Digest: *//p' | head -1)"; \
+	case "$$digest" in sha256:*) ;; *) \
+		echo "release: helm push reported no sha256 digest for the chart."; \
+		echo "  Its output is parsed for one; if the wording moved, this is where to look."; \
+		exit 1 ;; \
+	esac; \
+	if [ "$${#digest}" -ne 71 ]; then \
+		echo "release: \"$$digest\" is not 64 hex characters long; refusing to sign a truncated digest."; \
+		exit 1; \
+	fi; \
+	printf '%s\n' "$$digest" > "$(RELEASE_CHART_DIGEST_FILE)"; \
+	echo "release: $(CHART_OCI_REF):$(RELEASE_CHART_VERSION) is $(CHART_OCI_REF)@$$digest"
+
+# release-chart-subject is the digest-qualified reference the signature and the
+# verification below both name, read back from the file rather than re-derived.
+release-chart-subject = $$(cat "$(RELEASE_CHART_DIGEST_FILE)")
+
+# No --recursive, unlike the image: a chart is one manifest, not an index, so
+# there is nothing underneath it to leave unsigned.
+.PHONY: release-chart-sign
+release-chart-sign: ## Sign the pushed chart with cosign (keyless/OIDC).
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_CHART_DIGEST_FILE)" ]; then \
+		echo "release: $(RELEASE_CHART_DIGEST_FILE) does not exist; run release-chart-push first."; \
+		echo "  Signing a tag rather than a digest is refused: a tag can be moved afterwards."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(COSIGN)" sign --yes "$(CHART_OCI_REF)@$(release-chart-subject)"
+
+# The chart's half of what release-verify does for the image, and it exists for
+# the same reason: docs/VERIFYING.md publishes a command, and a command nobody
+# runs against what was just published is a promise, not a check.
+.PHONY: release-chart-verify
+release-chart-verify: ## Verify the published chart signature the way a user would.
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_CHART_DIGEST_FILE)" ]; then \
+		echo "release: $(RELEASE_CHART_DIGEST_FILE) does not exist; there is no pushed chart to verify."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(COSIGN)" verify \
+		--certificate-oidc-issuer "$(COSIGN_ISSUER)" \
+		--certificate-identity "$(COSIGN_IDENTITY)" \
+		"$(CHART_OCI_REF)@$(release-chart-subject)" > /dev/null
+	@echo "release: the signature on $(CHART_OCI_REF)@$(release-chart-subject) is valid,"
+	@echo "  and it was made by $(COSIGN_IDENTITY)"
+
+# The chart push, rehearsed. Signing and attesting cannot be rehearsed — doing
+# them *is* publishing — but a push can be, against a registry that is not a
+# publication: a throwaway one on this machine, thrown away again afterwards.
+#
+# That makes this the one supply-chain step a rehearsal exercises for real rather
+# than prints. What it proves is the half that actually breaks: that the chart
+# exists to be pushed, that the reference and the flags are well-formed, and that
+# `helm push`'s report still parses into a digest. What it cannot prove is that
+# ghcr.io accepts the push — no rehearsal can, without pushing there.
+#
+# The digest recorded belongs to the throwaway registry, so it is removed again:
+# leaving it behind is how a later release-chart-sign would sign a digest from a
+# registry that no longer exists.
+.PHONY: release-chart-rehearse
+release-chart-rehearse: helm ## Push the packaged chart to a throwaway local registry; publish nothing.
+	@echo "release: rehearsing the chart push against $(LOCAL_REGISTRY_HOST) — nothing is published."
+	$(MAKE) local-registry-up
+	@set -e; \
+	status=0; \
+	$(MAKE) --no-print-directory release-chart-push \
+		CHART_OCI_NAMESPACE=$(LOCAL_REGISTRY_HOST)/charts \
+		HELM_REGISTRY_FLAGS=--plain-http || status=$$?; \
+	rm -f "$(RELEASE_CHART_DIGEST_FILE)"; \
+	$(MAKE) --no-print-directory local-registry-down; \
+	if [ "$$status" -ne 0 ]; then exit "$$status"; fi; \
+	echo "release: the chart pushed and its digest parsed. Nothing reached $(CHART_OCI_REF)."
+
 # What a rehearsal must not do, printed instead of done. Signing writes to a
 # registry and to a public transparency log, and attesting writes a record to
 # GitHub; all three are publications, so a rehearsal that performed them would not
@@ -961,6 +1190,13 @@ release-rehearse-publishing: ## Print, without running, the publishing steps a r
 	@echo "release: a rehearsal stops short of publishing. A real run would execute:"
 	@echo
 	@$(MAKE) --dry-run --no-print-directory release-sign release-verify \
+		RELEASE_VERSION="$(RELEASE_VERSION)" | sed 's/^/    /'
+	@echo
+	@# The chart push itself *is* rehearsed (release-chart-rehearse), against a
+	@# throwaway registry. Its signature is not, for the same reason the image's is
+	@# not, and against the real reference rather than the rehearsal's.
+	@echo "  ...and, over the chart pushed to $(CHART_OCI_REF):"
+	@$(MAKE) --dry-run --no-print-directory release-chart-sign release-chart-verify \
 		RELEASE_VERSION="$(RELEASE_VERSION)" | sed 's/^/    /'
 	@echo
 	@echo "  ...and, from the workflow rather than from make, the two"
@@ -977,12 +1213,15 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	$(MAKE) release-sbom-local
 	$(MAKE) release-checksums
 	@echo
+	$(MAKE) release-chart-rehearse
+	@echo
 	$(MAKE) release-rehearse-publishing
 	@echo
 	@echo "release: dry run for $(RELEASE_VERSION) complete. Nothing was pushed or published."
 	@echo "  image      $(RELEASE_IMAGE) (built for $(PLATFORMS), discarded)"
 	@echo "  notes      $(RELEASE_NOTES)"
-	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_DIR)/kuberecord-$(RELEASE_CHART_VERSION).tgz, $(RELEASE_DIR)/checksums.txt"
+	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_CHART_TGZ), $(RELEASE_DIR)/checksums.txt"
+	@echo "  chart      $(CHART_OCI_REF):$(RELEASE_CHART_VERSION) (pushed to a throwaway registry, discarded)"
 	@echo "  sbom       $(RELEASE_SBOM)"
 	@echo "  unsigned   a rehearsal signs nothing and attests nothing; see docs/VERIFYING.md"
 
@@ -1037,13 +1276,16 @@ E2E_HELM_VALUES ?= test/e2e/manifests/helm-values.yaml
 # hand the suite's ClickHouse fixture an identical credential.
 E2E_CH_PASSWORD ?= changeme
 
-.PHONY: deploy-e2e-helm
-deploy-e2e-helm: helm helm-sync ## Install the operator with the Helm chart, e2e values. Used by test-e2e.
+.PHONY: e2e-helm-prereqs
+e2e-helm-prereqs: ## Create the namespace, its Pod Security label and the credentials Secret a Helm install expects.
 	"$(KUBECTL)" create namespace $(CHART_NAMESPACE) --dry-run=client -o yaml | "$(KUBECTL)" apply -f -
 	"$(KUBECTL)" label namespace $(CHART_NAMESPACE) pod-security.kubernetes.io/enforce=restricted --overwrite
 	"$(KUBECTL)" create secret generic kuberecord-clickhouse-credentials \
 		--namespace $(CHART_NAMESPACE) --from-literal=password=$(E2E_CH_PASSWORD) \
 		--dry-run=client -o yaml | "$(KUBECTL)" apply -f -
+
+.PHONY: deploy-e2e-helm
+deploy-e2e-helm: helm helm-sync e2e-helm-prereqs ## Install the operator with the Helm chart, e2e values. Used by test-e2e.
 	"$(HELM)" upgrade --install $(CHART_RELEASE) "$(CHART_DIR)" \
 		--namespace $(CHART_NAMESPACE) --values $(E2E_HELM_VALUES) --wait --timeout 5m
 
@@ -1054,6 +1296,46 @@ undeploy-e2e-helm: helm ## Remove the Helm-installed controller. Used by test-e2
 	@# documentation of the uninstall path.
 	-"$(HELM)" uninstall $(CHART_RELEASE) --namespace $(CHART_NAMESPACE) --wait
 	-"$(KUBECTL)" delete namespace $(CHART_NAMESPACE) --ignore-not-found=true
+
+# The OCI install path the e2e suite smokes (E2E_INSTALL=helm-oci), and the only
+# one whose subject is the *distribution channel* rather than the rendering: the
+# chart is packaged, pushed to a registry and installed back out of it by
+# reference, which is the sequence a release performs and a user consumes.
+#
+# It runs against a throwaway registry on this machine rather than against
+# ghcr.io, and that is the point: this must exercise the chart in the working tree
+# on every pull request, and no chart has been published for a commit that has not
+# been released. Only helm talks to the registry — the manager image is still
+# side-loaded into Kind — so nothing in the cluster needs to reach it.
+#
+# --plain-http throughout: the throwaway registry speaks HTTP and has no
+# certificate. The published path needs no such flag, which is why it is a
+# variable rather than baked into the recipes.
+E2E_OCI_DIR ?= dist/e2e-oci
+
+.PHONY: deploy-e2e-helm-oci
+deploy-e2e-helm-oci: helm helm-sync local-registry-up e2e-helm-prereqs ## Package, push and install the chart from a local OCI registry. Used by test-e2e.
+	@# Packaged into its own directory so a release rehearsal's dist/release/ is
+	@# never what gets pushed here, and emptied first so a stale archive from an
+	@# earlier run cannot be the one installed.
+	rm -rf "$(E2E_OCI_DIR)"
+	mkdir -p "$(E2E_OCI_DIR)"
+	"$(HELM)" package "$(CHART_DIR)" --destination "$(E2E_OCI_DIR)"
+	"$(HELM)" push "$(E2E_OCI_DIR)"/$(CHART_RELEASE)-*.tgz \
+		oci://$(LOCAL_REGISTRY_HOST)/charts --plain-http
+	@# By reference and by version, not from the directory that was just packaged:
+	@# an install that read the chart off local disk would prove nothing about the
+	@# registry it was pushed to.
+	"$(HELM)" upgrade --install $(CHART_RELEASE) \
+		oci://$(LOCAL_REGISTRY_HOST)/charts/$(CHART_RELEASE) --version $(VERSION) --plain-http \
+		--namespace $(CHART_NAMESPACE) --values $(E2E_HELM_VALUES) --wait --timeout 5m
+
+.PHONY: undeploy-e2e-helm-oci
+undeploy-e2e-helm-oci: helm ## Remove the OCI-installed controller and the local registry. Used by test-e2e.
+	-"$(HELM)" uninstall $(CHART_RELEASE) --namespace $(CHART_NAMESPACE) --wait
+	-"$(KUBECTL)" delete namespace $(CHART_NAMESPACE) --ignore-not-found=true
+	rm -rf "$(E2E_OCI_DIR)"
+	$(MAKE) local-registry-down
 
 # The single-file install path the e2e suite smokes (E2E_INSTALL=installer):
 # exactly what a user gets from `kubectl apply -f dist/install.yaml`, built here
