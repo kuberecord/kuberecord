@@ -288,8 +288,9 @@ permissions, the same container arguments. `test/chart` asserts that equivalence
 object by object, and the acceptance suite runs against each of them unmodified.
 
 ```sh
-# Helm
-helm install kuberecord deploy/charts/kuberecord \
+# Helm, from the chart registry — no checkout, no download
+helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
+  --version 0.3.0 \
   --namespace kuberecord-system --create-namespace \
   --set clusterID=prod-eu-west-1
 
@@ -300,22 +301,41 @@ kubectl apply -f dist/install.yaml
 make deploy IMG=<some-registry>/kuberecord:tag
 ```
 
+The chart's tag carries no `v` — a Helm chart version is plain semver — and it
+tracks the operator release exactly, so `--version 0.3.0` installs `v0.3.0`. It is
+published from v0.3.0 onward; earlier tags ship the chart as a release asset only.
+
 Both artifacts are also attached to every [release](https://github.com/kuberecord/kuberecord/releases),
-with checksums, if you would rather install a tag than a checkout:
+with checksums, if you would rather download a tag than pull one:
 
 ```sh
 kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.2.0/install.yaml
 ```
 
+And the chart in this repository installs directly, which is what a contributor
+working on it does:
+
+```sh
+helm install kuberecord deploy/charts/kuberecord \
+  --namespace kuberecord-system --create-namespace
+```
+
 From v0.2.0 the image is signed with cosign, the image and every attached asset
 carry SLSA build provenance, and an SBOM ships beside them — worth checking before
-you run an operator that will watch your whole cluster:
+you run an operator that will watch your whole cluster. From v0.3.0 the chart in
+the registry is signed too, under the same identity:
 
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
   ghcr.io/kuberecord/kuberecord:v0.2.1
+
+# The chart. The identity keeps the `v`; the artifact's tag does not.
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  ghcr.io/kuberecord/charts/kuberecord:0.3.0
 ```
 
 The identity above is the one to pin from **v0.2.1** onward. `v0.1.0` and `v0.2.0`

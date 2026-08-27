@@ -1,17 +1,26 @@
 # Tag-triggered releases (Task 3.5). Strangers install tags, not `main`.
 #
 # Pushing `vX.Y.Z` publishes a multi-arch image at
-# ghcr.io/<owner>/kuberecord:vX.Y.Z, a GitHub Release whose body is that version's
-# CHANGELOG.md section, and the install artifacts plus their checksums and an SBOM
-# attached to it. Since Task 7.4 it also publishes the evidence: the image carries
-# a keyless cosign signature, and the image and every attached asset carry SLSA
-# build provenance. `workflow_dispatch` runs the identical sequence with nothing
-# pushed and nothing published, which is what makes a rehearsal meaningful.
+# ghcr.io/<owner>/kuberecord:vX.Y.Z, the Helm chart at
+# oci://ghcr.io/<owner>/charts/kuberecord:X.Y.Z, a GitHub Release whose body is
+# that version's CHANGELOG.md section, and the install artifacts plus their
+# checksums and an SBOM attached to it. Since Task 7.4 it also publishes the
+# evidence: the image and the chart each carry a keyless cosign signature, and the
+# image and every attached asset carry SLSA build provenance. `workflow_dispatch`
+# runs the identical sequence with nothing pushed to a public registry and nothing
+# published, which is what makes a rehearsal meaningful.
+#
+# The chart is published two ways on purpose (Task 8.1). The `.tgz` on the Release
+# page reaches a reader through a GitHub redirect from this repository's
+# pre-migration path, and that redirect disappears permanently the day anyone
+# creates a repository of the same name under the old account. The registry
+# reference depends on no such thing.
 #
 # A signature and an attestation are themselves publications — a registry write, a
 # public transparency-log entry, a record against this repository — so a rehearsal
 # cannot perform them and still be a rehearsal. It goes as far as it can: it builds
-# a real SBOM from a locally built image, computes every attestation subject, and
+# a real SBOM from a locally built image, computes every attestation subject,
+# performs a real `helm push` against a throwaway registry on the runner, and
 # prints the signing and verification commands it is deliberately not running.
 # docs/VERIFYING.md is the reader-facing half of all of this.
 #
@@ -242,11 +251,22 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The chart is pushed to ghcr.io from here, and it has to be pushed from
+      # here: `helm package` stamps the current time into every tar header, so the
+      # only way the registry artifact and the `.tgz` on the Release page are the
+      # same bytes is for the job that packaged it to be the job that pushes it.
+      # Anything else publishes two archives with two digests for one version, and
+      # checksums.txt would then describe only one of them.
+      #
+      # That does cost something, and it is worth naming rather than leaving
+      # implied: this job can now write to the registry, so the split below is no
+      # longer symmetric. What survives is the half that matters most — the image
+      # job still cannot publish a Release, so a compromised build step cannot
+      # announce itself.
+      packages: write
       # The second job that needs OIDC, and for the other half of the release: an
       # attestation names a digest, the artifacts below are built here, and they
-      # exist nowhere earlier. Splitting it this way keeps each job unable to do
-      # the other's damage — this one cannot push an image, and the image job
-      # cannot publish a Release.
+      # exist nowhere earlier.
       id-token: write
       attestations: write
     steps:
@@ -261,6 +281,16 @@ jobs:
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
+
+      # The chart is signed here for the same reason the image is signed in the
+      # job above: the signature is over a digest, and the digest does not exist
+      # until the push. Same pin as the image job — what signed a release is part
+      # of the release, and two cosign versions across one tag would be invisible
+      # in the artifacts.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
 
       - name: Build the release artifacts
         run: make release-artifacts RELEASE_VERSION="$RELEASE_VERSION"
@@ -317,6 +347,46 @@ jobs:
             dist/release/RELEASE_NOTES.md
           if-no-files-found: error
 
+      # The chart as an OCI artifact (Task 8.1), pushed before the Release page
+      # that advertises it exists. The ordering is the same argument as the
+      # image's: the page tells a reader to `helm install oci://…`, and a page
+      # that says so before the artifact is there hands its first readers a 404.
+      #
+      # What is pushed is the archive `make release-artifacts` produced above, not
+      # a fresh packaging of the same chart — see the Makefile. The consequence is
+      # worth knowing while reading this: the layer inside the registry artifact
+      # is byte-for-byte the `.tgz` attached below, so the checksums and the
+      # artifact attestation already cover both ways of getting the chart.
+      - name: Log in to ghcr.io for the chart push
+        if: env.DRY_RUN == 'false'
+        env:
+          CHART_REGISTRY_USER: ${{ github.actor }}
+          CHART_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make release-chart-login
+
+      - name: Push the chart to the registry
+        if: env.DRY_RUN == 'false'
+        run: make release-chart-push RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Sign the chart
+        if: env.DRY_RUN == 'false'
+        run: make release-chart-sign RELEASE_VERSION="$RELEASE_VERSION"
+
+      # The published verification command, run against what was just pushed —
+      # the chart's half of what the image job does, and what keeps the chart
+      # section of docs/VERIFYING.md from being a promise nobody checks.
+      - name: Verify the chart signature
+        if: env.DRY_RUN == 'false'
+        run: make release-chart-verify RELEASE_VERSION="$RELEASE_VERSION"
+
+      # A rehearsal cannot push to ghcr.io — that is a publication — but it can
+      # push, and a push is the step with something to get wrong. It runs against
+      # a throwaway registry on the runner, which exercises the reference, the
+      # flags and the digest parse and reaches nothing outside this job.
+      - name: Rehearse the chart push against a throwaway registry
+        if: env.DRY_RUN == 'true'
+        run: make release-chart-rehearse RELEASE_VERSION="$RELEASE_VERSION"
+
       - name: Publish the GitHub Release
         if: env.DRY_RUN == 'false'
         env:
@@ -344,13 +414,19 @@ jobs:
             if [ "$DRY_RUN" = "true" ]; then
               echo "## Dry run for $RELEASE_VERSION — nothing pushed, nothing published"
               echo
-              echo "The artifacts are attached to this workflow run."
+              echo "The artifacts are attached to this workflow run. The chart push was"
+              echo "rehearsed against a throwaway registry and reached no public one."
             else
               echo "## Released $RELEASE_VERSION"
               echo
               # Read the image back out of the manifest rather than restating it:
               # what the release actually pins is what install.yaml says it pins.
               echo "Image: \`$(grep -o 'image: [^ ]*kuberecord:[^ ]*' dist/release/install.yaml | head -1 | cut -d' ' -f2)\`"
+              echo
+              # The chart's digest, read from what the push reported rather than
+              # re-resolved — the same digest that was signed.
+              echo "Chart: \`oci://ghcr.io/kuberecord/charts/kuberecord:${RELEASE_VERSION#v}\`"
+              echo "(\`$(cat dist/release/chart-digest.txt)\`)"
               echo
               echo "Signed, attested and described. How to check any of that:"
               echo "https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"

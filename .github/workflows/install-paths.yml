@@ -1,12 +1,17 @@
-# The two supported install paths (Task 2.4): the Helm chart and the versioned
+# The supported install paths (Task 2.4): the Helm chart — from a checkout and
+# from the OCI reference a release publishes (Task 8.1) — and the versioned
 # single-file dist/install.yaml.
 #
-# Three jobs, cheapest first. The verify job needs no cluster and catches almost
+# Four jobs, cheapest first. The verify job needs no cluster and catches almost
 # everything — a chart that does not lint, a rendering the pinned Kubernetes
 # version would reject, a preset toggle that adds the wrong object, a committed
-# install manifest that no longer matches its sources. The two smoke jobs then
+# install manifest that no longer matches its sources. The three smoke jobs then
 # prove the thing lint cannot: that each path installs an operator that actually
 # streams, by running the Phase 1 happy path against it on a real Kind cluster.
+#
+# The two Helm jobs differ only in where the chart comes from, and that is the
+# whole point of having both: one tests the rendering, the other tests the
+# distribution channel — packaged, pushed, and installed back out by reference.
 name: Install Paths
 
 on:
@@ -76,6 +81,40 @@ jobs:
 
       - name: Run the e2e happy path against a Helm install
         run: make test-e2e-helm
+
+  # The third install path (Task 8.1): the chart consumed the way a release
+  # publishes it, as an OCI artifact rather than as a directory in a checkout.
+  #
+  # It pushes to a throwaway registry on the runner rather than pulling from
+  # ghcr.io, and that is deliberate: this job has to be able to fail on a pull
+  # request that breaks the chart, and no chart has been published for a commit
+  # that has not been released. Pulling the last release's chart would test the
+  # last release. Only helm talks to the registry — the manager image is still
+  # side-loaded into Kind — so nothing in the cluster needs to reach it.
+  smoke-helm-oci:
+    permissions:
+      contents: read
+    name: helm install from an OCI reference on Kind
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Run the e2e happy path against a chart installed from OCI
+        run: make test-e2e-helm-oci
 
   smoke-installer:
     permissions:

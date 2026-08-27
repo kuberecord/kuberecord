@@ -2,10 +2,10 @@
 
 A project whose subject is tamper-evident audit has to be checkable itself.
 Everything a tag publishes therefore carries evidence of where it came from: the
-image is signed, the image and every attached asset carry build provenance, and
-the image ships with an SBOM. This page is how to check each of those, and — in
-the last section, which matters as much as the commands — what checking them does
-and does not tell you.
+image and the Helm chart are signed, the image and every attached asset carry
+build provenance, and the image ships with an SBOM. This page is how to check each
+of those, and — in the last section, which matters as much as the commands — what
+checking them does and does not tell you.
 
 One sentence before the details: **these signatures say that this exact release
 workflow, in this repository, at this tag, produced these exact bytes.** They say
@@ -17,6 +17,7 @@ is where that limit is spelled out.
 - [Prerequisites](#prerequisites)
 - [Which identity verifies which release](#which-identity-verifies-which-release)
 - [The image signature](#the-image-signature)
+- [The chart signature](#the-chart-signature)
 - [The build provenance](#the-build-provenance)
 - [The checksums](#the-checksums)
 - [The SBOM](#the-sbom)
@@ -29,14 +30,29 @@ is where that limit is spelled out.
 | Asset | Evidence |
 |---|---|
 | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | A keyless **cosign signature** over the manifest list *and* over each per-platform manifest, plus a **SLSA build provenance** attestation stored both against this repository and beside the image in the registry. |
+| `oci://ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` | A keyless **cosign signature** over its manifest. Its layer is byte-for-byte the `.tgz` below, so that row's provenance covers this one too. |
 | `install.yaml` | Its `sha256` in `checksums.txt`, and a **SLSA build provenance** attestation naming that digest. |
 | `kuberecord-X.Y.Z.tgz` | The same. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | The same, and it is itself the inventory of the image. |
 | `checksums.txt` | The provenance attestation's subject list *is* this file's contents, so the two cannot disagree. |
 
-Releases from **v0.2.0** onward carry all of it. `v0.1.0` predates this work and
-has `checksums.txt` only — there is no signature to find, and its absence is not
-a failure to investigate.
+Releases from **v0.2.0** onward carry all of it except the chart in the registry,
+which starts at **v0.3.0** — before that the chart shipped only as a release
+asset. `v0.1.0` predates the whole scheme and has `checksums.txt` only. In both
+cases the absence of a signature is expected, not a failure to investigate.
+
+**The chart is published twice, and both copies are the same bytes.** The
+registry artifact's single layer is the exact archive attached to the Release
+page — the release pushes the file it packaged rather than packaging a second
+time, which matters because `helm package` stamps the current time into every tar
+header and would otherwise produce two archives with two digests for one version.
+So `checksums.txt` and the artifact attestation describe the chart however you
+obtained it:
+
+```sh
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0
+sha256sum kuberecord-0.3.0.tgz     # the same line checksums.txt carries
+```
 
 ## Prerequisites
 
@@ -54,6 +70,9 @@ gh auth login                   # provenance is fetched through the GitHub API
   `https://slsa.dev/provenance/v1` predicate type by default — the one these
   attestations carry.
 - `sha256sum` (GNU) or `shasum` (macOS) for the checksums.
+- **helm v3.8 or newer** to pull the chart from the registry at all; the digest
+  pinning below wants v3.13 or newer, which is where OCI references by digest
+  landed.
 
 The commands below are also wired up as make targets, which is how CI runs them
 against every release before the Release page exists — see
@@ -65,11 +84,12 @@ This repository moved from the personal account `yelzhy` to the `kuberecord`
 organization after v0.2.0 was published. **Two identities are therefore correct,
 and which one to pin depends on the tag you are verifying:**
 
-| Tag | `--certificate-identity` / `--repo` | Image |
-|---|---|---|
-| `v0.1.0` | *none* — predates signing, `checksums.txt` only | `ghcr.io/yelzhy/kuberecord:v0.1.0` |
-| `v0.2.0` | `https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0` | `ghcr.io/yelzhy/kuberecord:v0.2.0` |
-| `v0.2.1` and later | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/vX.Y.Z` | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` |
+| Tag | `--certificate-identity` / `--repo` | Image | Chart |
+|---|---|---|---|
+| `v0.1.0` | *none* — predates signing, `checksums.txt` only | `ghcr.io/yelzhy/kuberecord:v0.1.0` | release asset only |
+| `v0.2.0` | `https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0` | `ghcr.io/yelzhy/kuberecord:v0.2.0` | release asset only |
+| `v0.2.1` | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1` | `ghcr.io/kuberecord/kuberecord:v0.2.1` | release asset only |
+| `v0.3.0` and later | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/vX.Y.Z` | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | `ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` |
 
 **The old identity is not a mistake, and it is not evidence of anything wrong
 with those releases.** A keyless signature binds to the Fulcio certificate that
@@ -86,6 +106,12 @@ The same split applies to the SLSA provenance: attestations for `v0.2.0` were
 recorded against the `yelzhy/kuberecord` repository, so `--repo yelzhy/kuberecord`
 and `--signer-workflow yelzhy/kuberecord/.github/workflows/release.yml` are what
 verify them.
+
+The chart's OCI reference is not split, because it has only ever had one home:
+publishing the chart to a registry started at `v0.3.0`, after the move. What it
+*is* split on is existence — there is nothing at
+`ghcr.io/kuberecord/charts/kuberecord` for any earlier tag, and the `.tgz` on those
+Releases is the whole of what was published.
 
 The commands in the rest of this page are written for the current identity. To
 verify `v0.2.0`, substitute both halves — the identity *and* the image path, since
@@ -154,6 +180,49 @@ cosign verify \
   --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
   "ghcr.io/kuberecord/kuberecord@$digest"
 ```
+
+## The chart signature
+
+The chart is an OCI artifact in the same registry, signed by the same workflow
+under the same identity:
+
+```sh
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  ghcr.io/kuberecord/charts/kuberecord:0.3.0
+```
+
+**Note the two version strings, which differ by one character on purpose.** A
+Helm chart version is semver without a `v`, so the artifact's tag is `0.3.0` —
+while the tag the workflow ran on, and therefore the certificate identity it was
+issued, is `v0.3.0`. Copying the `v` into the reference asks the registry for an
+artifact that does not exist; dropping it from the identity asks cosign for a
+signature nobody made.
+
+No `--recursive` here, unlike the image: a chart is a single manifest, not a
+manifest list, so there is nothing underneath it that could be left unsigned.
+
+To pin what you verified, resolve the digest first and install that — the same
+argument as for the image, since a chart tag is just as mutable:
+
+```sh
+digest="$(helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0 2>&1 \
+  | sed -n 's/^Digest: *//p')"
+
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  "ghcr.io/kuberecord/charts/kuberecord@$digest"
+
+helm install kuberecord "oci://ghcr.io/kuberecord/charts/kuberecord@$digest" \
+  --namespace kuberecord-system --create-namespace
+```
+
+`helm pull` and `helm push` both report the digest on **stderr**, which is why it
+is redirected above. It is the manifest digest — the same string cosign signs, and
+not the same as the `sha256` of the `.tgz` those commands write to disk. That one
+is the artifact's *layer*, and it is what `checksums.txt` lists.
 
 ## The build provenance
 
@@ -295,9 +364,12 @@ permanent.
 The `workflow_dispatch` rehearsal path runs the whole release with nothing
 published, which necessarily means it signs nothing and attests nothing — those
 are publications. A green rehearsal proves the steps are wired up, the SBOM scan
-finds a real image, and the subject list is complete. It cannot prove a signature
-verifies. Only the tag does that, which is why the release job verifies its own
-signature before the Release page that advertises it exists.
+finds a real image, the subject list is complete, and the chart push works: that
+last one is a real `helm push` of the real packaged chart, into a throwaway
+registry on the runner that is destroyed afterwards. It cannot prove a signature
+verifies, and it cannot prove ghcr.io accepts the push. Only the tag does that,
+which is why the release job verifies its own image and chart signatures before
+the Release page that advertises them exists.
 
 ## When verification fails
 
@@ -309,6 +381,8 @@ A failure is a reason to stop, not a reason to reach for
 | `no matching CertificateIdentity found … expected SAN value X, got Y` | The identity in the command is not the one that signed. Usefully, cosign prints the value it *did* find as `got` — that string is what to pin, and most often the difference is the tag at the end of it. |
 | `no matching CertificateIdentity found` on `v0.2.0`, where `got` names `yelzhy/kuberecord` | Expected. That release was signed before the repository moved to the `kuberecord` organization, and its certificate is immutable — see [Which identity verifies which release](#which-identity-verifies-which-release). Pin the old identity for that tag. |
 | `no signatures found` | The image predates v0.2.0, or it was mirrored by a tool that copies manifests without their signatures. |
+| `no signatures found` on the **chart**, or the registry reports no such artifact | Chart signing — and the chart in the registry at all — starts at `v0.3.0`. For anything earlier the `.tgz` on the Release page is the whole of what was published. |
+| `manifest unknown` for a chart tag that should exist | Almost always the leading `v`. The chart's tag is `0.3.0`; only the certificate identity carries `v0.3.0`, because that is the git tag the workflow ran on. |
 | `gh attestation verify` finds no attestation | The same two causes, plus: `--repo` names the repository the attestation was recorded against, which is not necessarily the registry namespace. |
 | A checksum mismatch | Re-download before concluding anything; a truncated download is far more likely than a tampered asset. Then verify the provenance, which does not depend on `checksums.txt` being honest. |
 | Verification of a *tag* passes but a digest fails | You are verifying a different image than you resolved. Resolve the digest once and use it in both places. |
