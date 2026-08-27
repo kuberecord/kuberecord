@@ -433,6 +433,16 @@ make test-chaos           # the failure-mode suite: outages, SIGKILL, saturation
 make quickstart           # the evaluation path above
 ```
 
+## Contributing
+
+Issues and pull requests are welcome.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers the setup, the development loop and
+what a reviewable change looks like here; participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+Security vulnerabilities go to [`SECURITY.md`](SECURITY.md) — privately, never to
+a public issue.
+
 ## License
 
 Copyright 2026.
