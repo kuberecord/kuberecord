@@ -141,6 +141,30 @@ type PipelineMetrics struct {
 	//     DropReasonEphemeralDelete). Unlike the first, a steady rate here is the
 	//     healthy state wherever Events are streamed.
 	dropped *prometheus.CounterVec
+
+	// diffRefusals counts changes recorded as full state because the patch that
+	// described them could not be recorded, by reason.
+	//
+	// It is deliberately *not* a fallback counter over the whole ladder. A missing
+	// baseline and an undecompressable one are still logged at Error and are
+	// anomalies; a refusal is a decision the pipeline makes on purpose, and the
+	// two would be unreadable summed into one series. Naming it for the refusal is
+	// also what makes a zero honest: it means "nothing was refused", not "no diff
+	// ever fell back".
+	//
+	// It is a counter rather than only a log line for the same reason
+	// DropReasonEphemeralDelete is: this is an event with a *healthy* nonzero
+	// rate, which fires on every change to an affected object for that object's
+	// whole lifetime, and Task 9.5 moved its log line from Error to Info precisely
+	// because a permanent stream of ERROR from a healthy system erodes the log
+	// stream and trips alerting built on error rate. That demotion would otherwise
+	// leave the phenomenon observable only by log scraping, so the counter is what
+	// keeps "does this cluster hit it, and how often?" answerable from /metrics.
+	//
+	// The object it happened to is *not* a label. Identity is on the log line (see
+	// Process), where it costs nothing; as a label it would be unbounded
+	// cardinality on a series a busy object ticks continuously.
+	diffRefusals *prometheus.CounterVec
 }
 
 // DropReasonScopeStopped labels a work item discarded because its watch scope
@@ -157,6 +181,18 @@ const DropReasonScopeStopped = "scope_stopped"
 // churn the operator is absorbing. A rate of zero on a scope that is streaming
 // Events, on the other hand, means expiries are not being observed at all.
 const DropReasonEphemeralDelete = "ephemeral_delete"
+
+// DiffRefusalReasonEmptyInteriorToken labels a change recorded as full state
+// because the patch describing it reached a member through an empty JSON Pointer
+// reference token — a pointer the read plane's patch library resolves to the
+// wrong node, so the diff is declined rather than written (see
+// errEmptyInteriorToken).
+//
+// A nonzero rate is not a fault. It means a watched object carries a map key that
+// is the empty string, which only a custom resource with
+// x-kubernetes-preserve-unknown-fields can hold; its rows are larger than they
+// would otherwise be, and nothing else about them differs.
+const DiffRefusalReasonEmptyInteriorToken = "empty_interior_token"
 
 // NewPipelineMetrics constructs every collector and registers it on reg.
 // Registration uses MustRegister, so passing a registry that already holds
@@ -231,6 +267,12 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 			Name:      "dropped_total",
 			Help:      "Count of pipeline work items deliberately discarded, by reason.",
 		}, []string{"reason"}),
+		diffRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "pipeline",
+			Name:      "diff_refusals_total",
+			Help:      "Count of changes recorded as full state because the patch describing them could not be recorded, by reason.",
+		}, []string{"reason"}),
 	}
 
 	// The write-outcome series are materialized per sink instead, by ForSink: the
@@ -238,10 +280,13 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 	// known until a sink exists, and seeding a placeholder here would publish a
 	// series for a sink nobody configured.
 	//
-	// The drop reasons still seed here: that set is a fixed enum with no sink
-	// dimension, so the series exists (at 0) before the first drop ever happens.
+	// The drop and refusal reasons still seed here: both sets are fixed enums with
+	// no sink dimension, so each series exists (at 0) before the first drop or
+	// refusal ever happens — which is what makes a rate() over them well-defined
+	// on a cluster that has never hit one.
 	m.dropped.WithLabelValues(DropReasonScopeStopped)
 	m.dropped.WithLabelValues(DropReasonEphemeralDelete)
+	m.diffRefusals.WithLabelValues(DiffRefusalReasonEmptyInteriorToken)
 
 	reg.MustRegister(
 		m.writeQueueDepth,
@@ -256,6 +301,7 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		m.hashcacheEntries,
 		m.safeMode,
 		m.dropped,
+		m.diffRefusals,
 	)
 	return m
 }

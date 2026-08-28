@@ -688,17 +688,44 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				log.Error(decodeErr, "⚠️ Failed to decompress cached baseline, falling back to full state")
 				switchToFullState()
 			} else if patchBytes, err := ComputeDiff(baseline, norm.JSON); err != nil {
-				// Not expected to be reachable today — cachedEntry.JSON and
+				// ComputeDiff fails in two materially different ways, and this one
+				// rung guards both.
+				//
+				// The first is a *designed refusal*: errEmptyInteriorToken, returned
+				// for a patch the read plane's consumer library would apply to the
+				// wrong node. It is reachable on purpose — it fires on every change
+				// to an object that addresses a member through an empty map key,
+				// which a custom resource with x-kubernetes-preserve-unknown-fields
+				// really can hold — and writing full state here is the point of the
+				// refusal rather than a contingency it fell into. See
+				// errEmptyInteriorToken for why such a patch must never be recorded.
+				//
+				// The second is a comparison or a marshalling failure, and *that* is
+				// not expected to be reachable today — cachedEntry.JSON and
 				// norm.JSON are always the product of a prior successful
 				// json.Marshal — but a silently-discarded error here would
-				// otherwise write neither a diff nor the full state,
-				// corrupting this row's audit value with no log signal.
+				// otherwise write neither a diff nor the full state, corrupting
+				// this row's audit value with no log signal.
 				//
 				// Comparison and marshalling are one rung rather than two because
 				// ComputeDiff is one definition of the patch format; which half of
 				// it failed is in the wrapped error, which is what a reader of this
 				// line needs and the only thing the two rungs used to add.
-				log.Error(err, "⚠️ Failed to produce the JSON diff, falling back to full state")
+				//
+				// Either way the row written is a full-state row, which is always a
+				// valid representation of the change and merely larger than a diff
+				// would have been: this rung degrades a row's size, never its
+				// fidelity. That is what makes the severity split below a real
+				// distinction rather than a cosmetic one — the refusal is a decision
+				// an operator should be able to recognize, not a fault to alert on.
+				if errors.Is(err, errEmptyInteriorToken) {
+					p.metrics.diffRefusals.WithLabelValues(DiffRefusalReasonEmptyInteriorToken).Inc()
+					log.Info("🧾 Recording full state instead of a diff: this object addresses a member through "+
+						"an empty map key, which the read plane's patch library would resolve to the wrong node",
+						"reason", err)
+				} else {
+					log.Error(err, "⚠️ Failed to produce the JSON diff, falling back to full state")
+				}
 				switchToFullState()
 			} else if reason, due := checkpointDue(checkpointEveryFor(writer),
 				cachedEntry.ModifiedSinceCheckpoint+1, patchBytes, norm.JSON); due {
