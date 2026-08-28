@@ -18,24 +18,11 @@ package clickhouse
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch/v5"
-
 	"github.com/kuberecord/kuberecord/internal/query"
 )
-
-// replayRow is one row of an incarnation's history, as the reconstruction reads
-// it.
-type replayRow struct {
-	ts        time.Time
-	eventType string
-	data      string
-	diff      string
-	sha256    string
-}
 
 // StateAt reconstructs what an object looked like at an instant.
 //
@@ -88,19 +75,13 @@ func (e *Engine) StateAt(
 	}
 
 	for _, row := range history {
-		if row.eventType == query.EventDeleted {
+		if row.EventType == query.EventDeleted {
 			return nil, fmt.Errorf("incarnation %s of %s was deleted at %s, so it did not exist at %s: %w",
-				uid, describeRef(ref), formatInstant(row.ts), formatInstant(at), query.ErrObjectNotFound)
+				uid, describeRef(ref), formatInstant(row.TS), formatInstant(at), query.ErrObjectNotFound)
 		}
 	}
 
-	base := -1
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].data != "" {
-			base = i
-			break
-		}
-	}
+	base := query.BaseRow(history)
 	if base < 0 {
 		// A different fact from absence, and the message has to say which. History
 		// holds rows for this object but nothing to start a replay from, which means
@@ -114,14 +95,14 @@ func (e *Engine) StateAt(
 			uid, describeRef(ref), formatInstant(at), query.ErrObjectNotFound)
 	}
 
-	return replay(history, base)
+	return query.Replay(history, base)
 }
 
 // replayHistory runs step 1: one incarnation's rows up to the instant, oldest
 // first.
 func (e *Engine) replayHistory(
 	ctx context.Context, ref query.ObjectRef, at time.Time, uid string,
-) (history []replayRow, err error) {
+) (history []query.ReplayRow, err error) {
 	stmt := replayStatement(ref, at, uid)
 	rows, err := e.conn.Query(ctx, stmt.SQL, stmt.Args...)
 	if err != nil {
@@ -130,8 +111,8 @@ func (e *Engine) replayHistory(
 	defer closeAfter(rows, &err)
 
 	for rows.Next() {
-		var row replayRow
-		if scanErr := rows.Scan(&row.ts, &row.eventType, &row.data, &row.diff, &row.sha256); scanErr != nil {
+		var row query.ReplayRow
+		if scanErr := rows.Scan(&row.TS, &row.EventType, &row.Data, &row.Diff, &row.SHA256); scanErr != nil {
 			return nil, fmt.Errorf("decoding a history row of %s: %w", describeRef(ref), scanErr)
 		}
 		history = append(history, row)
@@ -144,60 +125,6 @@ func (e *Engine) replayHistory(
 		return nil, fmt.Errorf("streaming the history of %s: %w", describeRef(ref), rowsErr)
 	}
 	return history, nil
-}
-
-// replay runs steps 2 and 3: the base document, then every subsequent patch.
-//
-// The base row's own diff is skipped, and that is the trap docs/SCHEMA.md names
-// explicitly. A Checkpoint carries both a diff and the state that diff produced;
-// applying it on top of that state would produce a document the object was never
-// in. The failure is quiet for a replace op — a value set twice looks like a value
-// set once — which is why it is called out here rather than left to be inferred
-// from the loop starting at base+1.
-//
-// A later full-state row *replaces* the document rather than patching it. That is
-// the Modified-that-fell-back-to-full-state case, and treating it as a patch
-// source would skip the row's content entirely.
-func replay(history []replayRow, base int) (*query.Reconstruction, error) {
-	state := []byte(history[base].data)
-	applied := 0
-	last := history[base]
-
-	for _, row := range history[base+1:] {
-		switch {
-		case row.data != "":
-			state = []byte(row.data)
-		case row.diff != "":
-			patch, err := jsonpatch.DecodePatch([]byte(row.diff))
-			if err != nil {
-				return nil, fmt.Errorf("decoding the patch recorded at %s: %w", formatInstant(row.ts), err)
-			}
-			next, err := patch.Apply(state)
-			if err != nil {
-				return nil, fmt.Errorf("applying the patch recorded at %s: %w", formatInstant(row.ts), err)
-			}
-			state = next
-			applied++
-		}
-		last = row
-	}
-
-	var object map[string]any
-	if err := json.Unmarshal(state, &object); err != nil {
-		return nil, fmt.Errorf("decoding the state reconstructed for %s: %w", formatInstant(last.ts), err)
-	}
-
-	return &query.Reconstruction{
-		Object:         object,
-		BaseTS:         history[base].ts,
-		BaseEvent:      history[base].eventType,
-		PatchesApplied: applied,
-		// The digest of the row the replay finished on, not of the base. It is what
-		// turns "the replay ran without errors" into "the replay produced the state
-		// that was recorded": canonicalize the object, hash it, and the two must
-		// match. A mismatch is a chain-of-custody finding, not a rounding error.
-		SHA256: last.sha256,
-	}, nil
 }
 
 // formatInstant renders a timestamp for an error message at the precision the

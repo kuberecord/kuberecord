@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,19 @@ func TestNoOperatorPackagesInTransitiveDeps(t *testing.T) {
 	}
 }
 
+// patchLibrary is the one third-party dependency the contract itself carries.
+//
+// Replay is the single definition of the reconstruction procedure, so the
+// contract owns the application of an RFC 6902 patch rather than delegating it to
+// each backend. That has to be one library: two backends applying patches with
+// two implementations would be two readings of the same spec, differing on
+// pointer escaping and on the null-versus-absent distinction, and the divergence
+// would show up as a reconstruction that is plausible and wrong rather than as an
+// error. The cost is this allowance, and it is deliberately spelled as one exact
+// path — a second entry here is the review conversation this shape exists to
+// force.
+const patchLibrary = "github.com/evanphx/json-patch/v5"
+
 // TestDirectImportsAreStdlibOnly holds the tighter budget: what this package
 // itself is allowed to write down.
 //
@@ -75,11 +89,29 @@ func TestDirectImportsAreStdlibOnly(t *testing.T) {
 			// the same test the go command itself applies.
 		case path == "k8s.io/apimachinery" ||
 			strings.HasPrefix(path, "k8s.io/apimachinery/"):
+		case path == patchLibrary:
 		default:
 			t.Errorf("internal/query imports %q: the read-plane contract may import "+
 				"only the standard library, plus k8s.io/apimachinery where a "+
-				"Kubernetes type is genuinely needed", path)
+				"Kubernetes type is genuinely needed and %s for the patch application "+
+				"the reconstruction procedure owns", path, patchLibrary)
 		}
+	}
+}
+
+// TestThePatchLibraryIsActuallyImported keeps the allowance above from outliving
+// its reason.
+//
+// An exception nobody uses is an exception nobody re-argues, and this one exists
+// only for as long as the contract itself applies patches. If Replay moved out or
+// changed library, the allowance would silently keep the door open for the next
+// import that wanted it.
+func TestThePatchLibraryIsActuallyImported(t *testing.T) {
+	imports := goList(t, "-f", `{{range .Imports}}{{println .}}{{end}}`, ".")
+	if !slices.Contains(imports, patchLibrary) {
+		t.Errorf("internal/query no longer imports %s, so the allowance in "+
+			"TestDirectImportsAreStdlibOnly is now an open door rather than a stated "+
+			"exception: remove it with the import", patchLibrary)
 	}
 }
 

@@ -323,6 +323,57 @@ func TestProcessCorruptBaselineFallsBackToFullState(t *testing.T) {
 	})
 }
 
+// TestProcessUnapplicablePointerFallsBackToFullState is the guard's product
+// behaviour: a change the read plane could not reconstruct from a diff is
+// recorded as full state instead, never as a diff and never dropped.
+//
+// The object is one a custom resource with x-kubernetes-preserve-unknown-fields
+// can really hold — a member whose key is the empty string, with something under
+// it — and the pointer to that something walks through an empty reference token.
+// See errEmptyInteriorToken for why such a patch must not reach the diff column.
+func TestProcessUnapplicablePointerFallsBackToFullState(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("empty-key")
+	h.warm(key)
+
+	withNested := func(resourceVersion, value string) *unstructured.Unstructured {
+		pod := newPod(key.Name, "uid-1", resourceVersion, "busybox:1")
+		spec, ok := pod.Object["spec"].(map[string]any)
+		if !ok {
+			t.Fatalf("newPod no longer carries a spec object, so this fixture cannot plant a key in it")
+		}
+		spec[""] = map[string]any{"nested": value}
+		return pod
+	}
+
+	h.lister.set(key, withNested("1", "before"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	h.lister.set(key, withNested("2", "after"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(changed): %v", err)
+	}
+
+	records := h.writer.recorded()
+	if len(records) != 2 || records[1].EventType != eventModified {
+		t.Fatalf("expected a %s record, got %v", eventModified, h.writer.eventTypes())
+	}
+	if records[1].Diff != "" {
+		t.Errorf("a diff reached the sink whose pointer the read plane cannot apply: %q\n"+
+			"Reconstructing from it would silently produce a document the object was never in",
+			records[1].Diff)
+	}
+	if records[1].Data == "" {
+		t.Error("the change was recorded with neither a diff nor full state, so the row carries no " +
+			"state at all: refusing the diff must degrade to full state, never to nothing")
+	}
+	if errs := h.logs.loggedErrors(); len(errs) == 0 {
+		t.Error("the refusal must be logged at Error level, never swallowed (Invariant 5)")
+	}
+}
+
 // corruptBaseline truncates the compressed diff baseline stored for key so a
 // later decodeBaseline fails, simulating an in-memory corruption. It leaves Hash
 // untouched so callers can independently control whether the dedup

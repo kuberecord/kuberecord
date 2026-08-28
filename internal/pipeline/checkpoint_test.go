@@ -18,12 +18,10 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"slices"
 	"strconv"
 	"testing"
 
-	"github.com/wI2L/jsondiff"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/kuberecord/kuberecord/internal/sink"
@@ -388,9 +386,10 @@ func TestProcessCheckpointCounterResetsAfterRestart(t *testing.T) {
 
 // assertDiffSize states a size-trigger fixture's premise: whether the patch
 // between two states really is larger than the newer state's own normalized JSON.
-// It reproduces the comparison the pipeline makes, from the same two normalized
-// documents, so a fixture that stops being oversized (or accidentally becomes so)
-// is reported as a broken fixture rather than as a broken trigger.
+// It makes the comparison through the same two functions the pipeline uses, from
+// the same two normalized documents, so a fixture that stops being oversized (or
+// accidentally becomes so) is reported as a broken fixture rather than as a
+// broken trigger.
 func assertDiffSize(t *testing.T, before, after *unstructured.Unstructured, wantOversized bool) {
 	t.Helper()
 	beforeJSON, err := NormalizedJSON(before, nil)
@@ -401,13 +400,9 @@ func assertDiffSize(t *testing.T, before, after *unstructured.Unstructured, want
 	if err != nil {
 		t.Fatalf("NormalizedJSON(after): %v", err)
 	}
-	patch, err := jsondiff.CompareJSON(beforeJSON, afterJSON)
+	patchBytes, err := ComputeDiff(beforeJSON, afterJSON)
 	if err != nil {
-		t.Fatalf("CompareJSON: %v", err)
-	}
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		t.Fatalf("marshalling patch: %v", err)
+		t.Fatalf("ComputeDiff: %v", err)
 	}
 	if oversized := len(patchBytes) > len(afterJSON); oversized != wantOversized {
 		t.Fatalf("fixture: diff is %d bytes and the new full state is %d (oversized = %v, want %v)",
