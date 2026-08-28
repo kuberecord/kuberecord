@@ -21,7 +21,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -250,6 +254,102 @@ func NormalizedJSON(obj *unstructured.Unstructured, policy *RedactionPolicy) ([]
 		return nil, err
 	}
 	return norm.JSON, nil
+}
+
+// ComputeDiff produces the RFC 6902 patch that goes in a row's diff column: the
+// change from before to after, as this project defines that change.
+//
+// It exists so the patch format has a single definition rather than two. The
+// format is not "RFC 6902" in the abstract — it is whatever wI2L/jsondiff emits
+// under the options this function passes, and those options are load-bearing.
+// Passing jsondiff.Factorize() here would start emitting move and copy ops;
+// jsondiff.Invertible() would interleave test ops; jsondiff.Rationalize() would
+// change which shape of edit is chosen for a nested replacement. A caller that
+// reached for jsondiff itself would be choosing one of those readings by
+// omission, and the row it produced would still look like a valid patch.
+//
+// The comparison and the marshalling are one step because both are part of the
+// format. The bytes are what is recorded and what a reconstruction later applies,
+// so a test that marshalled the patch itself would be verifying half of the
+// producer against the whole of the consumer.
+//
+// A patch the read path cannot apply is never returned. That is what
+// errEmptyInteriorToken is for, and the caller's job is only to fall back to
+// writing full state, which is always correct and merely larger.
+//
+// The two libraries either side of the diff column are held to one reading of
+// RFC 6902 by TestProducedPatchesApplyThroughTheConsumer, which is the only test
+// that pairs them; see patch_roundtrip_test.go.
+func ComputeDiff(before, after []byte) ([]byte, error) {
+	patch, err := jsondiff.CompareJSON(before, after)
+	if err != nil {
+		return nil, fmt.Errorf("comparing the normalized JSON: %w", err)
+	}
+	for _, op := range patch {
+		// From is checked alongside Path even though only move and copy carry one
+		// and this function emits neither: an empty From is not an interior token,
+		// so the check costs nothing today and does not become a hole on the day
+		// somebody turns factorization on.
+		if hasEmptyInteriorToken(op.Path) || hasEmptyInteriorToken(op.From) {
+			return nil, fmt.Errorf("the %s operation addressing %q: %w",
+				op.Type, op.Path, errEmptyInteriorToken)
+		}
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling the JSON patch: %w", err)
+	}
+	return patchBytes, nil
+}
+
+// errEmptyInteriorToken reports a patch this project must not record: one that
+// reaches a member *through* a key that is the empty string.
+//
+// RFC 6901 spells such a key as an empty reference token, so a pointer to
+// `{"":{"k":1}}` reads `//k`. The producer emits that correctly. The consumer —
+// github.com/evanphx/json-patch/v5, which the read plane applies patches with —
+// reads an empty token as "this document itself" rather than as "the member
+// whose name is the empty string" (partialDoc.get), and so walks into the wrong
+// node. A replace or a remove then fails loudly, which would be survivable; an
+// add succeeds and changes nothing, which is not. A reconstruction over such a
+// patch is a document the object was never in, presented under a header
+// asserting it was rebuilt from N patches, and nothing in the output would give
+// it away.
+//
+// So the row is never written in that form. The diff is refused here and the
+// caller records full state instead — the same fallback every other
+// diff-production failure takes, and the reason that ladder exists.
+//
+// An empty key in a *terminal* position is fine and is deliberately still
+// diffed: both libraries agree there, and refusing it too would trade an
+// unreachable class of bug for a real loss of compression.
+//
+// Reachability is narrow but real: built-in Kubernetes types validate their map
+// keys as qualified names, but a custom resource with
+// x-kubernetes-preserve-unknown-fields carries arbitrary JSON.
+// TestTheConsumerStillCannotApplyAnEmptyInteriorToken pins the upstream
+// behaviour, so if it is ever fixed this guard can be lifted rather than
+// outliving its reason.
+var errEmptyInteriorToken = errors.New(
+	"its JSON Pointer reaches a member through an empty reference token, which the read plane's " +
+		"patch library resolves to the wrong node")
+
+// hasEmptyInteriorToken reports whether a JSON Pointer walks through an empty
+// reference token on its way to the one it addresses.
+//
+// The last token is excluded because it is looked up directly rather than walked
+// through, and that is the case both libraries agree on. Tokens are inspected in
+// their escaped form, which is sound: no escape sequence encodes to nothing, so
+// an empty escaped token is an empty key.
+func hasEmptyInteriorToken(pointer string) bool {
+	tokens := strings.Split(pointer, "/")
+	if len(tokens) < 3 {
+		// "" addresses the whole document and "/x" addresses one token directly;
+		// neither walks through anything. tokens[0] is the text before the leading
+		// slash, which is not a token at all.
+		return false
+	}
+	return slices.Contains(tokens[1:len(tokens)-1], "")
 }
 
 // CheckpointPolicy is the optional half of a sink.Writer that declares how often
@@ -587,16 +687,45 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				// (never dropped) rather than silently mis-recorded.
 				log.Error(decodeErr, "⚠️ Failed to decompress cached baseline, falling back to full state")
 				switchToFullState()
-			} else if patch, err := jsondiff.CompareJSON(baseline, norm.JSON); err != nil {
-				// Not expected to be reachable today — cachedEntry.JSON and
+			} else if patchBytes, err := ComputeDiff(baseline, norm.JSON); err != nil {
+				// ComputeDiff fails in two materially different ways, and this one
+				// rung guards both.
+				//
+				// The first is a *designed refusal*: errEmptyInteriorToken, returned
+				// for a patch the read plane's consumer library would apply to the
+				// wrong node. It is reachable on purpose — it fires on every change
+				// to an object that addresses a member through an empty map key,
+				// which a custom resource with x-kubernetes-preserve-unknown-fields
+				// really can hold — and writing full state here is the point of the
+				// refusal rather than a contingency it fell into. See
+				// errEmptyInteriorToken for why such a patch must never be recorded.
+				//
+				// The second is a comparison or a marshalling failure, and *that* is
+				// not expected to be reachable today — cachedEntry.JSON and
 				// norm.JSON are always the product of a prior successful
 				// json.Marshal — but a silently-discarded error here would
-				// otherwise write neither a diff nor the full state,
-				// corrupting this row's audit value with no log signal.
-				log.Error(err, "⚠️ Failed to compute JSON diff, falling back to full state")
-				switchToFullState()
-			} else if patchBytes, err := json.Marshal(patch); err != nil {
-				log.Error(err, "⚠️ Failed to marshal JSON diff, falling back to full state")
+				// otherwise write neither a diff nor the full state, corrupting
+				// this row's audit value with no log signal.
+				//
+				// Comparison and marshalling are one rung rather than two because
+				// ComputeDiff is one definition of the patch format; which half of
+				// it failed is in the wrapped error, which is what a reader of this
+				// line needs and the only thing the two rungs used to add.
+				//
+				// Either way the row written is a full-state row, which is always a
+				// valid representation of the change and merely larger than a diff
+				// would have been: this rung degrades a row's size, never its
+				// fidelity. That is what makes the severity split below a real
+				// distinction rather than a cosmetic one — the refusal is a decision
+				// an operator should be able to recognize, not a fault to alert on.
+				if errors.Is(err, errEmptyInteriorToken) {
+					p.metrics.diffRefusals.WithLabelValues(DiffRefusalReasonEmptyInteriorToken).Inc()
+					log.Info("🧾 Recording full state instead of a diff: this object addresses a member through "+
+						"an empty map key, which the read plane's patch library would resolve to the wrong node",
+						"reason", err)
+				} else {
+					log.Error(err, "⚠️ Failed to produce the JSON diff, falling back to full state")
+				}
 				switchToFullState()
 			} else if reason, due := checkpointDue(checkpointEveryFor(writer),
 				cachedEntry.ModifiedSinceCheckpoint+1, patchBytes, norm.JSON); due {

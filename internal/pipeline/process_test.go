@@ -323,6 +323,260 @@ func TestProcessCorruptBaselineFallsBackToFullState(t *testing.T) {
 	})
 }
 
+// TestProcessUnapplicablePointerFallsBackToFullState is the guard's product
+// behaviour: a change the read plane could not reconstruct from a diff is
+// recorded as full state instead, never as a diff and never dropped.
+//
+// The object is one a custom resource with x-kubernetes-preserve-unknown-fields
+// can really hold — a member whose key is the empty string, with something under
+// it — and the pointer to that something walks through an empty reference token.
+// See errEmptyInteriorToken for why such a patch must not reach the diff column.
+func TestProcessUnapplicablePointerFallsBackToFullState(t *testing.T) {
+	h := newHarness(t)
+	key := podKey("empty-key")
+	h.warm(key)
+
+	withNested := func(resourceVersion, value string) *unstructured.Unstructured {
+		pod := newPod(key.Name, "uid-1", resourceVersion, "busybox:1")
+		spec, ok := pod.Object["spec"].(map[string]any)
+		if !ok {
+			t.Fatalf("newPod no longer carries a spec object, so this fixture cannot plant a key in it")
+		}
+		spec[""] = map[string]any{"nested": value}
+		return pod
+	}
+
+	h.lister.set(key, withNested("1", "before"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	h.lister.set(key, withNested("2", "after"))
+	if err := h.pipeline.Process(h.ctx, key); err != nil {
+		t.Fatalf("Process(changed): %v", err)
+	}
+
+	records := h.writer.recorded()
+	if len(records) != 2 || records[1].EventType != eventModified {
+		t.Fatalf("expected a %s record, got %v", eventModified, h.writer.eventTypes())
+	}
+	if records[1].Diff != "" {
+		t.Errorf("a diff reached the sink whose pointer the read plane cannot apply: %q\n"+
+			"Reconstructing from it would silently produce a document the object was never in",
+			records[1].Diff)
+	}
+	if records[1].Data == "" {
+		t.Error("the change was recorded with neither a diff nor full state, so the row carries no " +
+			"state at all: refusing the diff must degrade to full state, never to nothing")
+	}
+	// The refusal is announced, but as a decision rather than as a fault: it is
+	// correct, expected, and recurs for the lifetime of an object like this one
+	// (Task 9.5). What must never happen is silence — see
+	// TestProcessDiffFallbackSeverityMatchesTheFailureMode for the full split.
+	if errs := h.logs.loggedErrors(); len(errs) != 0 {
+		t.Errorf("the refusal was logged at Error level: %v\n"+
+			"It is a designed outcome for this class of object, so an operator would see a permanent "+
+			"stream of ERROR from a healthy system", errs)
+	}
+	if !slices.ContainsFunc(h.logs.infoLines(), isRefusalLine) {
+		t.Errorf("the refusal was never logged, so it is invisible to an operator asking why this "+
+			"object writes full state (Invariant 4); got %q", h.logs.infoLines())
+	}
+}
+
+// isRefusalLine reports whether an Info message is the diff-refusal announcement.
+// It matches on the outcome rather than on the whole sentence, so rewording the
+// explanation does not silently turn every assertion below into a tautology.
+func isRefusalLine(msg string) bool {
+	return strings.Contains(msg, "full state instead of a diff")
+}
+
+// TestProcessDiffFallbackSeverityMatchesTheFailureMode pins the Task 9.5 split:
+// ComputeDiff has two failure modes behind one rung of the fallback ladder, and
+// they are not the same kind of event.
+//
+// The refusal is a decision. It fires on every change to an object carrying an
+// empty interior map key, forever, and logging it at Error would hand an operator
+// a permanent stream of ERROR from a healthy system — noise that erodes the log
+// stream and trips alerting built on error rate. A comparison failure is a fault
+// and stays at Error.
+//
+// This test is what stops a later "tidy the logging" change from restoring the
+// noise, or from quietly demoting the fault along with it. Both modes are driven
+// through the real branch — one by an object that really carries such a key, the
+// other by a baseline ComputeDiff really cannot parse — because a test that
+// injected the sentinel would prove only that errors.Is works.
+func TestProcessDiffFallbackSeverityMatchesTheFailureMode(t *testing.T) {
+	// withEmptyInteriorKey builds the object a custom resource with
+	// x-kubernetes-preserve-unknown-fields can hold: a member named "", with
+	// something under it, so the pointer to that something walks through an empty
+	// reference token.
+	withEmptyInteriorKey := func(t *testing.T, name, resourceVersion, value string) *unstructured.Unstructured {
+		t.Helper()
+		pod := newPod(name, "uid-1", resourceVersion, "busybox:1")
+		spec, ok := pod.Object["spec"].(map[string]any)
+		if !ok {
+			t.Fatalf("newPod no longer carries a spec object, so this fixture cannot plant a key in it")
+		}
+		spec[""] = map[string]any{"nested": value}
+		return pod
+	}
+
+	tests := []struct {
+		name string
+		// before and after are the two states Process observes. Between them,
+		// sabotage may plant something in the cache that the second call trips
+		// over.
+		before, after func(t *testing.T, name string) *unstructured.Unstructured
+		sabotage      func(t *testing.T, h *testHarness, key Key)
+		// wantFault distinguishes the modes: a fault is logged at Error, a
+		// decision at Info.
+		wantFault bool
+		// wantRefusals is the expected reading of the refusal counter afterwards,
+		// so the metric cannot silently stop counting the thing it is named for.
+		wantRefusals float64
+	}{
+		{
+			name: "a designed refusal is recorded as a decision",
+			before: func(t *testing.T, name string) *unstructured.Unstructured {
+				return withEmptyInteriorKey(t, name, "1", "before")
+			},
+			after: func(t *testing.T, name string) *unstructured.Unstructured {
+				return withEmptyInteriorKey(t, name, "2", "after")
+			},
+			wantRefusals: 1,
+		},
+		{
+			name: "an unparseable baseline is still a fault",
+			before: func(_ *testing.T, name string) *unstructured.Unstructured {
+				return newPod(name, "uid-1", "1", "busybox:1")
+			},
+			after: func(_ *testing.T, name string) *unstructured.Unstructured {
+				return newPod(name, "uid-1", "2", "busybox:2")
+			},
+			// An uncompressed baseline is the graceful degradation a compression
+			// failure takes (see entryEncoding), so bytes planted this way decode
+			// back verbatim and reach ComputeDiff intact — where the comparison,
+			// not the decode, is what rejects them. That is the rung under test.
+			sabotage: func(t *testing.T, h *testHarness, key Key) {
+				st, ok := h.pipeline.sinks.lookup(testSink)
+				if !ok {
+					t.Fatalf("no pipeline state for %s", testSink)
+				}
+				plantRawBaseline(&st.cache, key.cacheKey(), []byte("{ not json"))
+			},
+			wantFault: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			key := podKey("diff-fallback")
+			h.warm(key)
+
+			h.lister.set(key, tc.before(t, key.Name))
+			if err := h.pipeline.Process(h.ctx, key); err != nil {
+				t.Fatalf("Process: %v", err)
+			}
+			if tc.sabotage != nil {
+				tc.sabotage(t, h, key)
+			}
+
+			after := tc.after(t, key.Name)
+			h.lister.set(key, after)
+			if err := h.pipeline.Process(h.ctx, key); err != nil {
+				t.Fatalf("Process(changed): %v", err)
+			}
+
+			// Both modes degrade identically: a full-state row, which is a valid
+			// representation of the change and merely larger than a diff. The
+			// severity is the only thing that differs.
+			records := h.writer.recorded()
+			if len(records) != 2 {
+				t.Fatalf("expected two records, got %v", h.writer.eventTypes())
+			}
+			record := records[1]
+			if record.EventType != eventModified {
+				t.Errorf("event_type = %q, want %q", record.EventType, eventModified)
+			}
+			if record.Data == "" {
+				t.Error("the change was recorded with neither a diff nor full state, so the row carries " +
+					"no state at all: the fallback must degrade to full state, never to nothing")
+			}
+			if record.Diff != "" {
+				t.Errorf("a diff was recorded even though ComputeDiff refused to produce one: %q", record.Diff)
+			}
+			// The hash is computed over the normalized JSON and never over the
+			// patch, so declining the patch must leave it untouched — this is what
+			// keeps an acceptance suite's live recompute comparable to the row.
+			wantHash, err := ObjectHash(after, nil)
+			if err != nil {
+				t.Fatalf("ObjectHash: %v", err)
+			}
+			if record.SHA256 != wantHash {
+				t.Errorf("sha256 = %q, want the normalized JSON's hash %q", record.SHA256, wantHash)
+			}
+
+			errs := h.logs.loggedErrors()
+			refusals := slices.DeleteFunc(slices.Clone(h.logs.infoEntries()), func(entry infoLine) bool {
+				return !isRefusalLine(entry.msg)
+			})
+
+			if tc.wantFault {
+				if len(errs) != 1 {
+					t.Fatalf("a fault must be logged at Error exactly once, got %d: %v", len(errs), errs)
+				}
+				if errors.Is(errs[0], errEmptyInteriorToken) {
+					t.Error("a designed refusal reached the Error branch")
+				}
+				// Named so the case cannot quietly start passing off a different
+				// rung of the ladder: a planted baseline that failed to *decode*
+				// would also log one Error, and would prove nothing about this
+				// branch.
+				if !strings.Contains(errs[0].Error(), "comparing the normalized JSON") {
+					t.Errorf("the fault came from another rung, not from ComputeDiff's comparison: %v", errs[0])
+				}
+				if len(refusals) != 0 {
+					t.Errorf("a fault was announced as a refusal decision: %v", refusals)
+				}
+				return
+			}
+
+			if len(errs) != 0 {
+				t.Errorf("the refusal was logged at Error: %v", errs)
+			}
+			if len(refusals) != 1 {
+				t.Fatalf("expected exactly one refusal line at Info, got %d: %q",
+					len(refusals), h.logs.infoLines())
+			}
+			// The wording is load-bearing, not cosmetic: an operator reading a line
+			// that says "failed" reasonably files a bug against a system doing
+			// exactly what it was designed to do.
+			for _, forbidden := range []string{"failed", "error", "⚠️"} {
+				if strings.Contains(strings.ToLower(refusals[0].msg), forbidden) {
+					t.Errorf("the refusal line reads as a failure (%q appears in %q)", forbidden, refusals[0].msg)
+				}
+			}
+			// Which operation and which pointer triggered the refusal is the only
+			// field-level detail an operator gets; losing it would be swallowing
+			// the error in all but name (Invariant 4).
+			if !slices.ContainsFunc(refusals[0].kvs, func(value any) bool {
+				err, isErr := value.(error)
+				return isErr && errors.Is(err, errEmptyInteriorToken)
+			}) {
+				t.Errorf("the refusal line dropped the wrapped error, so nothing says which operation "+
+					"and which pointer caused it; got %v", refusals[0].kvs)
+			}
+
+			if got := testutil.ToFloat64(h.pipeline.metrics.diffRefusals.WithLabelValues(
+				DiffRefusalReasonEmptyInteriorToken)); got != tc.wantRefusals {
+				t.Errorf("%s = %v, want %v", "kuberecord_pipeline_diff_refusals_total", got, tc.wantRefusals)
+			}
+		})
+	}
+}
+
 // corruptBaseline truncates the compressed diff baseline stored for key so a
 // later decodeBaseline fails, simulating an in-memory corruption. It leaves Hash
 // untouched so callers can independently control whether the dedup
@@ -334,6 +588,20 @@ func corruptBaseline(hc *hashCache, key string) {
 	if len(entry.JSON) > 1 {
 		entry.JSON = entry.JSON[:len(entry.JSON)/2]
 	}
+	hc.data[key] = entry
+}
+
+// plantRawBaseline replaces the diff baseline stored for key with raw, marked
+// uncompressed so decodeBaseline hands it back untouched. It is how a test
+// reaches *past* the decode rung of the fallback ladder to the comparison one:
+// bytes that decode perfectly and are still not JSON. Hash is left alone so the
+// dedup short-circuit behaves exactly as it does in production.
+func plantRawBaseline(hc *hashCache, key string, raw []byte) {
+	hc.mu.Lock()
+	defer hc.mu.Unlock()
+	entry := hc.data[key]
+	entry.JSON = raw
+	entry.Encoding = encodingRaw
 	hc.data[key] = entry
 }
 

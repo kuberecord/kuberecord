@@ -22,8 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/wI2L/jsondiff"
 )
 
 // corpusObject is one realistic normalized-JSON baseline loaded from
@@ -87,17 +85,14 @@ func loadCorpus(t testing.TB) []corpusObject {
 	return corpus
 }
 
-// diffBytes reproduces the reconciler's exact diff production: CompareJSON on
-// the baseline, then json.Marshal of the resulting patch.
+// diffBytes is the reconciler's exact diff production, because it is the same
+// function: reproducing it here would make this test's fidelity claim true of a
+// copy of the producer rather than of the producer (see ComputeDiff).
 func diffBytes(t testing.TB, baseline, current []byte) []byte {
 	t.Helper()
-	patch, err := jsondiff.CompareJSON(baseline, current)
+	out, err := ComputeDiff(baseline, current)
 	if err != nil {
-		t.Fatalf("CompareJSON: %v", err)
-	}
-	out, err := json.Marshal(patch)
-	if err != nil {
-		t.Fatalf("marshalling patch: %v", err)
+		t.Fatalf("ComputeDiff: %v", err)
 	}
 	return out
 }

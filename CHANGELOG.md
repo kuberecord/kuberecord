@@ -33,6 +33,38 @@ than a summary of them.
   by reference — the distribution channel a release publishes, rather than the
   rendering the other Helm smoke already covers.
 
+### Fixed
+
+- **A change to an object carrying a map key that is the empty string is now
+  recorded as full state instead of as a diff.** The two RFC 6902 implementations
+  either side of the `diff` column disagreed about RFC 6901's *empty reference
+  token*, which is how a member named `""` is spelled in a JSON Pointer: a
+  pointer into `{"": {"k": 1}}` reads `//k`. The writer emitted that correctly.
+  The reader resolved the empty token to the enclosing document rather than to
+  the member whose name is the empty string, and so walked into the wrong node.
+
+  A `replace` or a `remove` over such a pointer failed loudly, which is
+  survivable. An **`add` succeeded and changed nothing**, which is not: a
+  reconstruction could come back as a document the object was never in, under a
+  header asserting it had been rebuilt from N patches, with nothing in the
+  output to give it away.
+
+  The writer now declines to record a diff whose pointer walks *through* an
+  empty token, and writes the full state instead — the same degradation every
+  other diff-production failure already takes, and the reason that fallback
+  exists. Rows are larger for the affected objects; fidelity is unchanged. An
+  empty key in the *final* position of a pointer is untouched and still diffed,
+  because both implementations agree there. See
+  [`docs/SCHEMA.md`](docs/SCHEMA.md#diff-format).
+
+  **No schema change, and nothing to do on upgrade.** Reachability is narrow:
+  the built-in Kubernetes types validate their map keys as qualified names, so
+  only a custom resource with `x-kubernetes-preserve-unknown-fields` can hold
+  such a key. Rows written *before* this release are not repaired — a
+  reconstruction at an instant those rows cover is still missing the change one
+  of them recorded, until a later full-state row (a `Checkpoint`, or this
+  fallback itself) becomes the base a replay starts from.
+
 ## [0.2.1] - 2026-08-26
 
 ### Changed

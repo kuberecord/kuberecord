@@ -77,8 +77,14 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots throwaway containers, waits for each to answer,
 # runs the tagged tests, and always tears them down.
 #
-# Four suites run here. internal/sink/clickhouse exercises the ClickHouse writer
-# and reader paths. test/queries executes every query kuberecord publishes —
+# Five suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# and reader paths, and internal/query/clickhouse runs the whole read-plane
+# conformance suite against the real engine (Task 9.3) — the half a stand-in
+# connection cannot prove, since no fake executes SQL: that FINAL really collapses
+# an unmerged duplicate, that a DateTime64(9) bound compares at nanosecond
+# precision, that JSONExtractString reaches into both Event spellings. Like
+# test/queries it works in a database of its own, for the same reason.
+# test/queries executes every query kuberecord publishes —
 # docs/QUERIES.md and the Grafana dashboards — against tables built from the
 # shipped DDL alone, which is how Task 3.2's "only frozen-schema columns"
 # criterion is asserted; it uses a database of its own, because `go test` runs
@@ -149,7 +155,7 @@ test-integration: duckdb ## Run integration tests against a dockerized ClickHous
 	S3_TEST_ENDPOINT=$(MINIO_IT_ENDPOINT) \
 	S3_TEST_ACCESS_KEY_ID=$(MINIO_IT_USER) S3_TEST_SECRET_ACCESS_KEY=$(MINIO_IT_PASSWORD) \
 	DUCKDB="$(DUCKDB)" \
-		go test -tags=integration ./internal/sink/... ./test/queries/... -run Integration -v
+		go test -tags=integration ./internal/sink/... ./internal/query/... ./test/queries/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
 # against a throwaway dockerized ClickHouse plus an in-process envtest apiserver.

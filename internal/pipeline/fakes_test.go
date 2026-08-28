@@ -333,23 +333,36 @@ func (w *fakeWriter) awaitRecords(t *testing.T, n int) []sink.Record {
 // only assertable by counting. Filtering to level 0 is what makes the count mean
 // "lines an operator sees at the default verbosity", so a V(1) line demoted from
 // Info still reads as silence here.
+//
+// Info entries keep their key/value pairs as well as their message, because one
+// requirement is about a log line's *payload*: the diff refusal is logged at Info
+// and must still carry the wrapped error naming the operation and the pointer
+// that triggered it (Invariant 4, Task 9.5). A sink that kept only the message
+// would let that detail be dropped without a test noticing.
 type recordingLogSink struct {
 	mu     sync.Mutex
 	errors []error
-	infos  []string
+	infos  []infoLine
+}
+
+// infoLine is one captured level-0 Info call: what was said, and what was said
+// alongside it.
+type infoLine struct {
+	msg string
+	kvs []any
 }
 
 func (s *recordingLogSink) Init(logr.RuntimeInfo)          {}
 func (s *recordingLogSink) Enabled(int) bool               { return true }
 func (s *recordingLogSink) WithValues(...any) logr.LogSink { return s }
 func (s *recordingLogSink) WithName(string) logr.LogSink   { return s }
-func (s *recordingLogSink) Info(level int, msg string, _ ...any) {
+func (s *recordingLogSink) Info(level int, msg string, keysAndValues ...any) {
 	if level != 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.infos = append(s.infos, msg)
+	s.infos = append(s.infos, infoLine{msg: msg, kvs: slices.Clone(keysAndValues)})
 }
 func (s *recordingLogSink) Error(err error, _ string, _ ...any) {
 	s.mu.Lock()
@@ -377,6 +390,18 @@ func (s *recordingLogSink) countOf(target error) int {
 // infoLines returns the captured level-0 Info messages, in order, so a test can
 // assert on how many times something was said as well as that it was.
 func (s *recordingLogSink) infoLines() []string {
+	entries := s.infoEntries()
+	msgs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		msgs = append(msgs, entry.msg)
+	}
+	return msgs
+}
+
+// infoEntries returns the captured level-0 Info calls in full, message and
+// key/value pairs together, for the assertions that are about what a line
+// carries rather than about how often it was said.
+func (s *recordingLogSink) infoEntries() []infoLine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.infos)

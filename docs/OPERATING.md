@@ -65,7 +65,32 @@ nothing.
 | `kuberecord_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
 | `kuberecord_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. Pinned at 1 forever on a `Writer`-only sink — see below. |
 | `kuberecord_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
+| `kuberecord_pipeline_diff_refusals_total` | counter | `reason` | Changes recorded as full state because the patch describing them could not be recorded: `empty_interior_token` (the object addresses a member through a map key that is the empty string — see below). Not a fault. |
 | `kuberecord_rules` | gauge | `condition`, `status` | How many rules hold each condition at each status. |
+
+### `diff_refusals_total` is not an error rate
+
+A row's `diff` column holds an RFC 6902 patch, and the two implementations either
+side of that column disagree about one pointer shape: a member reached *through* a
+key that is the empty string, which RFC 6901 spells as an empty reference token
+(`//k` points into `{"": {"k": 1}}`). The reader resolves that token to the
+enclosing document instead, so the operator declines to write such a patch and
+records the object's full state instead.
+
+`kuberecord_pipeline_diff_refusals_total{reason="empty_interior_token"}` counts
+those decisions. **A nonzero value is not a failure, and its log line is at `INFO`
+for that reason** — the refusal is correct, and it recurs on every change to an
+affected object for as long as that object exists, so an error-rate alert built
+over it would fire forever on a healthy system.
+
+What it does tell you is *cost*: the affected objects write a full copy of
+themselves on every change rather than a patch, so a steadily climbing counter is
+a storage and ingest signal, not a health one. Only a custom resource with
+`x-kubernetes-preserve-unknown-fields` can carry such a key. The metric does not
+name the object — that would be unbounded cardinality — so to find it, grep the
+operator log for `full state instead of a diff`; each line carries the sink,
+group, kind, namespace and name, plus the operation and pointer that triggered the
+refusal.
 
 ### `safe_mode` on a `Writer`-only sink
 

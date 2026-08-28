@@ -39,7 +39,8 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	// used; touch one apiece so they appear in Gather like the others. ForSink does
 	// that for the whole write path in one call (which is also how production
 	// reaches them), leaving only the two pipeline-owned label sets. The
-	// pipeline_dropped_total series is already seeded by the constructor.
+	// pipeline_dropped_total and pipeline_diff_refusals_total series are already
+	// seeded by the constructor.
 	m.ForSink(clickHouseSink("default"))
 	m.hashcacheEntries.WithLabelValues(clickHouseSink("default").String())
 	m.safeMode.WithLabelValues(clickHouseSink("default").String(), "apps", "Deployment", "demo")
@@ -55,18 +56,19 @@ func TestPipelineMetricsRegistration(t *testing.T) {
 	}
 
 	want := map[string]dto.MetricType{
-		"kuberecord_write_batch_rows":           dto.MetricType_HISTOGRAM,
-		"kuberecord_write_queue_depth":          dto.MetricType_GAUGE,
-		"kuberecord_write_queue_capacity":       dto.MetricType_GAUGE,
-		"kuberecord_writes_total":               dto.MetricType_COUNTER,
-		"kuberecord_write_latency_seconds":      dto.MetricType_HISTOGRAM,
-		"kuberecord_write_retry_attempts_total": dto.MetricType_COUNTER,
-		"kuberecord_enqueue_block_seconds":      dto.MetricType_HISTOGRAM,
-		"kuberecord_enqueue_timeouts_total":     dto.MetricType_COUNTER,
-		"kuberecord_dedup_skips_total":          dto.MetricType_COUNTER,
-		"kuberecord_hashcache_entries":          dto.MetricType_GAUGE,
-		"kuberecord_safe_mode":                  dto.MetricType_GAUGE,
-		"kuberecord_pipeline_dropped_total":     dto.MetricType_COUNTER,
+		"kuberecord_write_batch_rows":             dto.MetricType_HISTOGRAM,
+		"kuberecord_write_queue_depth":            dto.MetricType_GAUGE,
+		"kuberecord_write_queue_capacity":         dto.MetricType_GAUGE,
+		"kuberecord_writes_total":                 dto.MetricType_COUNTER,
+		"kuberecord_write_latency_seconds":        dto.MetricType_HISTOGRAM,
+		"kuberecord_write_retry_attempts_total":   dto.MetricType_COUNTER,
+		"kuberecord_enqueue_block_seconds":        dto.MetricType_HISTOGRAM,
+		"kuberecord_enqueue_timeouts_total":       dto.MetricType_COUNTER,
+		"kuberecord_dedup_skips_total":            dto.MetricType_COUNTER,
+		"kuberecord_hashcache_entries":            dto.MetricType_GAUGE,
+		"kuberecord_safe_mode":                    dto.MetricType_GAUGE,
+		"kuberecord_pipeline_dropped_total":       dto.MetricType_COUNTER,
+		"kuberecord_pipeline_diff_refusals_total": dto.MetricType_COUNTER,
 	}
 
 	for name, wantType := range want {

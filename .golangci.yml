@@ -38,22 +38,34 @@ linters:
   settings:
     depguard:
       rules:
-        # Task 0.5 acceptance criterion: the code that hands records to a sink
-        # must depend on the generic sink contract (internal/sink), never on the
-        # ClickHouse driver directly. Task 1.5 moved that code out of
-        # internal/controller (per-GVK reconcilers) and into internal/pipeline
-        # (workqueue + workers), so the guarantee is enforced on both paths: the
-        # pipeline today, and the control-plane reconcilers that Task 1.7 puts
-        # back under internal/controller — which per Invariant 1 must never dial
-        # ClickHouse at all. Source and test files alike.
-        data-plane-no-clickhouse:
+        # Task 0.5 established this as a denylist over the data and control
+        # planes: the code that hands records to a sink must depend on the
+        # generic sink contract (internal/sink), never on the ClickHouse driver
+        # directly, and per Invariant 1 a reconciler must never dial ClickHouse
+        # at all. Task 9.3 turns it into what it was always trying to be — a
+        # confinement. Two packages hold the driver, one per plane, and the rule
+        # now says so by listing everything under internal/ and excepting them,
+        # rather than by naming the three directories somebody happened to think
+        # of. A new internal package can no longer acquire the driver silently.
+        #
+        # `!` entries are exceptions, and each one is load-bearing:
+        # internal/sink/clickhouse is the write path (Task 0.5) and
+        # internal/query/clickhouse is the read path (Task 9.3). Nothing else is
+        # excepted, and adding a third exception is the review conversation this
+        # shape exists to force.
+        #
+        # The scope is internal/ deliberately. test/queries and test/loadgen dial
+        # a real dockerized server on purpose — that is what an integration
+        # harness is — and denying the driver there would be denying those suites
+        # their subject. Source and test files alike within internal/.
+        clickhouse-driver-is-confined:
           files:
-            - "**/internal/pipeline/**"
-            - "**/internal/controller/**"
-            - "**/internal/watch/**"
+            - "**/internal/**"
+            - "!**/internal/sink/clickhouse/**"
+            - "!**/internal/query/clickhouse/**"
           deny:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
-              desc: "the data plane and control plane must depend on internal/sink, not the ClickHouse driver (Task 0.5)"
+              desc: "the ClickHouse driver belongs to internal/sink/clickhouse (the write path, Task 0.5) and internal/query/clickhouse (the read path, Task 9.3) alone; everything else speaks internal/sink or internal/query"
 
         # Task 6.4: the object-store client is confined to the one package that
         # exists to hold it (internal/sink/s3/awsstore). The control plane and the
@@ -86,6 +98,31 @@ linters:
               desc: "smithy-go is the AWS SDK's error and transport substrate (smithy.APIError, smithy.OperationError); it belongs to internal/sink/s3/awsstore for exactly the reason the SDK itself does — a Prober that classified NoSuchBucket by unwrapping smithy types would put SDK types back into the package whose purpose is to be SDK-free (Task 6.4)"
             - pkg: github.com/aws/aws-sdk-go
               desc: "kuberecord is aws-sdk-go-v2 only: a v1 import would be both an isolation break and a dependency regression, so v1 is a tombstone here rather than an omission (Task 6.7)"
+
+        # Task 9.2 acceptance criterion: the query conformance suite is built
+        # around the read-plane contract in internal/query, not around any
+        # backend's implementation of it. internal/sink is denied for a reason
+        # distinct from the rest: it is not merely the write path, it has a read
+        # half of its own, and a suite able to see it would be tempted to measure
+        # a query backend against the operator's own reader — two contracts with
+        # opposite pressures, one of which sits on the hot path's dependency
+        # graph (D16). The query backends are listed as tombstones ahead of
+        # existing (Tasks 9.3 and 10.2), because a suite that quietly certified
+        # one backend against another's behaviour would gate nothing (D11).
+        query-conformance-suite-is-backend-agnostic:
+          files:
+            - "**/internal/query/conformance/**"
+          deny:
+            - pkg: github.com/kuberecord/kuberecord/internal/sink
+              desc: "the query conformance suite must depend only on the read-plane contract; the sink's own reader serves the operator's warm-up and GC needs and is a different contract (D16, Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/pipeline
+              desc: "the query conformance suite is a client of the frozen schema, not of the operator's runtime (D20, Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/query/clickhouse
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/query/objectsource
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
+            - pkg: github.com/ClickHouse/clickhouse-go/v2
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
 
         # Task 5.1 acceptance criterion: the Writer conformance suite is built
         # around the contract in internal/sink, not around any backend's
