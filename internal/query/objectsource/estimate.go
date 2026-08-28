@@ -48,6 +48,13 @@ import (
 // the partitions that will really be listed rather than the ones that were asked
 // for. An estimate that quietly described a smaller scan than the one about to
 // happen would be worse than none, because it would be believed.
+//
+// It is an upper bound in one direction only, and deliberately so: a reverse-limited
+// timeline stops as soon as its answer is settled and may read a fraction of these
+// partitions (see Engine.scanNewestFirst). Erring on the high side is the safe half of
+// that — a caller warned about a scan that then finished early has lost nothing, while
+// one told a 90-day scan was cheap because a *different* query would have short-
+// circuited it has been told something false about the query it actually asked.
 func (e *Engine) EstimateScan(
 	ctx context.Context, clusterID string, from, to time.Time,
 ) (query.ScanEstimate, error) {
@@ -62,9 +69,20 @@ func (e *Engine) EstimateScan(
 	measured := make([]partitionSize, len(prefixes))
 	errs := make([]error, len(prefixes))
 
-	waitAll(e.concurrency, len(prefixes), func(i int) {
+	cancelled := waitAll(ctx, e.concurrency, len(prefixes), func(i int) {
 		measured[i], errs[i] = e.measure(ctx, prefixes[i])
 	})
+	if cancelled != nil {
+		// An interrupted estimate must not come back as a small one. Every prefix whose
+		// listing never ran left a zero in its slot with no error beside it, so a
+		// cancellation reported as success would be an estimate of *nothing* — handed to
+		// a caller in the act of deciding whether the scan is affordable (Invariant 4).
+		//
+		// It is reported ahead of the per-prefix failures for the reason listObjectKeys
+		// gives: under a cancellation those are whichever listings were in flight.
+		return query.ScanEstimate{}, fmt.Errorf("estimating a scan of cluster %q: %w",
+			clusterID, abandoned(cancelled))
+	}
 	for _, err := range errs {
 		if err != nil {
 			// An unreadable listing is reported rather than estimated around. A zero

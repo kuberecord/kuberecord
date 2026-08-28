@@ -108,8 +108,30 @@ func joinSegments(segments ...string) string {
 // isObjectKey reports whether a listed key names an object of this format.
 func isObjectKey(key string) bool { return strings.HasSuffix(key, objectSuffix) }
 
+// partition is one prefix to list, and the instant the window it covers opens.
+//
+// The start travels beside the prefix rather than being parsed back out of it,
+// because a reader that re-derived it would be a second, quieter account of the key
+// layout — and the two would agree right up until somebody changed one of them.
+//
+// It exists for the newest-first walk a reverse-limited timeline performs. That walk
+// has to say what a partition it has *not* read could still hold, and the answer is
+// bounded by this field: every record in a partition below this one is older than
+// this one's start plus one object span, for the same reason partitionPrefixes
+// widens downward and not upward.
+type partition struct {
+	prefix string
+	start  time.Time
+}
+
 // partitionPrefixes returns the prefixes to list in order to read [from, to],
-// oldest first.
+// oldest first. See partitionSpans, which it is the prefix-only view of.
+func partitionPrefixes(root string, from, to time.Time, span time.Duration) []string {
+	return prefixesOf(partitionSpans(root, from, to, span))
+}
+
+// partitionSpans returns the partitions covering [from, to], oldest first, each with
+// the instant its own window opens.
 //
 // # Why the range is widened downward and not upward
 //
@@ -136,24 +158,36 @@ func isObjectKey(key string) bool { return strings.HasSuffix(key, objectSuffix) 
 // date prefix or a set of hour prefixes, never both. Overlapping prefixes would
 // list an object twice and render a change twice, which for an audit timeline is a
 // claim the cluster did something twice.
-func partitionPrefixes(root string, from, to time.Time, span time.Duration) []string {
+//
+// They are also *contiguous and ascending*: each partition's window ends exactly
+// where the next one's begins. That is what makes the newest-first walk's stopping
+// rule provable rather than plausible — see Engine.answerIsSettled, which turns
+// "everything below here is older" into an inequality using nothing but this
+// ordering and span.
+func partitionSpans(root string, from, to time.Time, span time.Duration) []partition {
 	start := hourStart(from.Add(-span))
 	end := hourStart(to)
 
-	var prefixes []string
+	var spans []partition
 	for cur := start; !cur.After(end); {
 		day := dayStart(cur)
 		lastHourOfDay := day.Add((hoursPerDay - 1) * time.Hour)
 		if cur.Equal(day) && !lastHourOfDay.After(end) {
-			prefixes = append(prefixes, root+dateSegment+day.Format(dateLayout)+"/")
+			spans = append(spans, partition{
+				prefix: root + dateSegment + day.Format(dateLayout) + "/",
+				start:  day,
+			})
 			cur = day.AddDate(0, 0, 1)
 			continue
 		}
-		prefixes = append(prefixes,
-			root+dateSegment+cur.Format(dateLayout)+"/"+hourSegment+cur.Format(hourLayout)+"/")
+		spans = append(spans, partition{
+			prefix: root + dateSegment + cur.Format(dateLayout) + "/" +
+				hourSegment + cur.Format(hourLayout) + "/",
+			start: cur,
+		})
 		cur = cur.Add(time.Hour)
 	}
-	return prefixes
+	return spans
 }
 
 // hourStart and dayStart truncate an instant to its UTC hour and UTC day.

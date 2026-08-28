@@ -17,6 +17,7 @@ limitations under the License.
 package objectsource
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -299,4 +300,99 @@ func instantsOf(changes []query.Change) []string {
 		out = append(out, formatInstant(c.TS))
 	}
 	return out
+}
+
+// TestACancelledScanStopsFetchingAndReportsIt: a scan whose caller has stopped
+// waiting stops asking the archive for objects, and says that it did.
+//
+// Both halves are the property, and the second is the one that matters more.
+//
+// A cancelled scan used to finish quickly by accident: every remaining key was still
+// queued, and each of those units performed one Open that failed immediately. The
+// answer was correct and the drain was sub-second even over a hundred thousand keys —
+// but Task 11.6 turns a SIGINT at a terminal into this cancellation, and a tool that
+// keeps issuing requests after Ctrl-C reads as unresponsive however fast it finishes.
+//
+// The reporting is the half that is a correctness property. A scan abandoned part way
+// through has read part of a window, and returning that quietly would render as
+// "nothing else changed" for a period nobody looked at — the failure Invariant 4
+// names, and worse here than a slow answer, because the reader cannot tell.
+//
+// It runs under -race in CI: the cancellation is observed from the fetch goroutines
+// while the scheduling loop is reading the same context.
+func TestACancelledScanStopsFetchingAndReportsIt(t *testing.T) {
+	t.Parallel()
+
+	const (
+		objects     = 240
+		limit       = 4
+		cancelAfter = 8
+	)
+	engine, spy := engineOver(t, manyChanges(objects), Options{Prefix: "audit", Concurrency: limit})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	spy.onOpen(func(opened int) {
+		if opened >= cancelAfter {
+			cancel()
+		}
+	})
+
+	changes, err := drainCtx(t, ctx, engine, wholeWindow(testRef()))
+
+	if err == nil {
+		t.Fatal("an abandoned scan reported success. It read a fraction of the window, so what it " +
+			"returned is short by an unstated amount and reads as \"nothing else changed\" for a " +
+			"period nobody looked at (Invariant 4)")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Err = %v, want it to wrap context.Canceled so a caller can tell an interrupted "+
+			"query from a broken archive and choose its exit code accordingly", err)
+	}
+	if opened := len(spy.opened()); opened > objects/4 {
+		t.Errorf("the scan fetched %d of %d objects after being cancelled on the %dth. It has to stop "+
+			"scheduling rather than queue one doomed Open per remaining key: the answer is the same "+
+			"either way, but a tool that keeps asking the archive for objects after Ctrl-C is a tool "+
+			"that ignored it", opened, objects, cancelAfter)
+	}
+	// The concurrency cap makes this deterministic rather than hopeful: the fetch for
+	// the fifth key cannot start until one of the first four has returned, which
+	// happens only after its object was decoded and its body released. So by the
+	// cancelAfter-th Open, several objects have certainly been folded in.
+	if len(changes) == 0 {
+		t.Errorf("the scan delivered nothing, having read %d objects before it was cancelled. What was "+
+			"read reaches the caller and the cancellation is reported beside it — discarding it would "+
+			"answer a question with nothing at all, having held the rows that answered it",
+			len(spy.opened()))
+	}
+	if !slices.IsSortedFunc(changes, byChangeTS) {
+		t.Errorf("an abandoned scan's partial result is still in ts order: %v", instantsOf(changes))
+	}
+}
+
+// TestACancelledEstimateIsNotACheapOne: an interrupted scan estimate is a failure, not
+// a small number.
+//
+// This is the same rule as above at the one call site where getting it wrong is worst.
+// Every prefix whose listing never ran leaves a zero in its slot with no error beside
+// it, so an estimate that ignored the cancellation would come back as a handful of
+// objects and no bytes — handed to a caller in the act of deciding whether the scan is
+// affordable, which would then take an hour.
+func TestACancelledEstimateIsNotACheapOne(t *testing.T) {
+	t.Parallel()
+
+	engine, _ := engineOver(t, manyChanges(4), Options{Prefix: "audit"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	estimate, err := engine.EstimateScan(ctx, testRef().ClusterID,
+		testEpoch().Add(-time.Minute), testEpoch().Add(time.Hour))
+	if err == nil {
+		t.Fatalf("an interrupted estimate reported %+v and no error; a cheap-looking estimate of a "+
+			"window nobody listed is worse than none, because it is believed", estimate)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Err = %v, want it to wrap context.Canceled", err)
+	}
 }

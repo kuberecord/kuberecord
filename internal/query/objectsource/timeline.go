@@ -57,11 +57,24 @@ type correlatedEvent struct {
 }
 
 // timelineAccumulator is what one object contributed to a scan. One per object,
-// touched only by the goroutine decoding it (see scanObjects).
+// touched only by the goroutine decoding it (see fetchObjects).
 type timelineAccumulator struct {
 	changes []query.Change
 	marks   []incarnationMark
 	events  []correlatedEvent
+}
+
+// merge folds one accumulator into another, which is what a scan's fold does with
+// each object as its group is released.
+//
+// It is a method rather than three appends at each call site because there are now
+// two scan orders — forward, and the newest-first walk — and a fold that forgot one
+// of the three fields in one of them would produce a timeline missing its commentary
+// or, worse, resolving the wrong incarnation, in exactly one query shape.
+func (a *timelineAccumulator) merge(other *timelineAccumulator) {
+	a.changes = append(a.changes, other.changes...)
+	a.marks = append(a.marks, other.marks...)
+	a.events = append(a.events, other.events...)
 }
 
 // recordScan is the per-line decision a timeline or incarnation scan makes.
@@ -167,10 +180,13 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 // one in hour=10, and emitting per partition would produce a timeline that is
 // almost in order. "Almost" puts an effect before its cause.
 //
-// The limit is applied last, and it bounds only the *answer*. Nothing about it
-// bounds the work: there is no index to stop reading early against, which is
-// exactly what Capabilities.PointQuery being false declares. A caller that wants
-// the cost bounded bounds the window.
+// The limit is applied last, and it bounds only the *answer*. It does not bound the
+// work in general: there is no index to seek against, which is exactly what
+// Capabilities.PointQuery being false declares. There is one shape where it can bound
+// the reading too — a reverse-limited query, which is the flagship command's own —
+// and scanNewestFirst is that path. Everything from the sort down is deliberately the
+// same code either way, because the two must produce the same answer and the cheapest
+// guarantee of that is that they share the assembly rather than agree about it.
 func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]query.Change, error) {
 	scan := recordScan{
 		ref: q.Ref, from: q.From, to: q.To, retain: true, events: q.IncludeEvents,
@@ -180,17 +196,14 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 		},
 	}
 
-	var (
-		changes []query.Change
-		marks   []incarnationMark
-		events  []correlatedEvent
-	)
-	failure := scanPartitions(ctx, e, e.recordPrefixes(q.Ref.ClusterID, q.From, q.To), scan.decode,
-		func(acc *timelineAccumulator) {
-			changes = append(changes, acc.changes...)
-			marks = append(marks, acc.marks...)
-			events = append(events, acc.events...)
-		})
+	var collected timelineAccumulator
+	var failure error
+	if reverseLimited(q) {
+		failure = e.scanNewestFirst(ctx, q, scan, &collected)
+	} else {
+		failure = scanPartitions(ctx, e, e.recordPrefixes(q.Ref.ClusterID, q.From, q.To),
+			scan.decode, collected.merge)
+	}
 	if failure != nil {
 		// Wrapped, not returned instead of the answer: whatever was read is delivered
 		// and Err then says the result is short. A partial audit timeline that looks
@@ -198,6 +211,7 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 		failure = fmt.Errorf("reading the timeline of %s: %w", describeRef(q.Ref), failure)
 	}
 
+	changes, marks, events := collected.changes, collected.marks, collected.events
 	slices.SortStableFunc(changes, byChangeTS)
 	slices.SortStableFunc(marks, func(a, b incarnationMark) int { return a.ts.Compare(b.ts) })
 
@@ -223,6 +237,204 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 		changes = changes[:q.Limit]
 	}
 	return changes, failure
+}
+
+// reverseLimited reports whether a query asks for the newest N changes, which is the
+// one shape whose reading a limit can bound.
+//
+// Reverse without a limit still wants the whole window, and a limit without Reverse
+// wants the *oldest* N — which the forward scan already reaches first. Only the pair
+// names a suffix of the window, and only a suffix is provable without an index.
+func reverseLimited(q query.TimelineQuery) bool { return q.Reverse && q.Limit > 0 }
+
+// scanNewestFirst reads a reverse-limited query's window newest partition first and
+// stops as soon as the answer it holds is settled.
+//
+// # Why this exists
+//
+// Task 11.3's flagship default is a hundred changes, newest first. Read forwards, that
+// costs every partition in the window and discards almost all of it — a ninety-day
+// question reads ninety days to render an afternoon. There is no index to seek with,
+// but there is an *order*: partitions are contiguous and ascending (partitionSpans),
+// so a walk from the newest end can reach a point where nothing left could matter.
+//
+// # The stopping rule, which is the same one the backward state walk uses
+//
+// An object's partition comes from its first record and it accepts records for at most
+// one object span afterwards, so every record in a partition is newer than that
+// partition's own start and older than its end plus a span. Partitions are contiguous,
+// so once the walk has read down to the partition beginning at lo, every partition it
+// has *not* read ends at or before lo — and therefore holds nothing at or after
+// lo+span. That instant is the ceiling, and it is the identical inequality
+// baseIsSettled applies to a reconstruction; it is written the other way round here
+// only because this walk is bounded by a count rather than by a base row.
+//
+// The walk may stop when it holds at least Limit answer rows at or above the ceiling.
+// Every unread row is *strictly* below it, so every unread row sorts strictly before
+// all of them: the newest Limit of the full window and the newest Limit of what has
+// been read are the same rows, in the same order. See answerIsSettled, which also
+// settles the incarnation before the count is trusted.
+//
+// # Why the steps widen
+//
+// The first step reads one partition, because the common case — a busy object, a
+// hundred changes wanted — is answered by the newest one. Each step that fails to
+// settle doubles, up to the concurrency cap. A narrow first step is what makes the
+// best case a single partition instead of a cap's worth; the doubling is what stops a
+// sparse ninety-day archive from paying one round trip per partition to discover it
+// has nothing to say.
+//
+// # What a failure does
+//
+// A per-object failure does not stop the walk and does not disqualify the short
+// circuit, because an unreadable object in a partition the ceiling has excluded could
+// not have held an answer row in the first place — the answer is complete whether or
+// not that object was readable. The consequence, stated plainly: a failure living in a
+// partition this walk proved irrelevant is not reported, where a full scan would have
+// reported it. Nothing is missing from the answer, which is what Invariant 4 is about.
+//
+// A *listing* failure or a cancellation stops the walk where the forward scan would
+// also have stopped, and what was read is still delivered.
+func (e *Engine) scanNewestFirst(
+	ctx context.Context, q query.TimelineQuery, scan recordScan, into *timelineAccumulator,
+) error {
+	spans := e.recordPartitions(q.Ref.ClusterID, q.From, q.To)
+
+	// One bucket per step, newest step first. They are kept apart rather than folded
+	// as they arrive because the assembly downstream is order-sensitive: a stable sort
+	// keeps same-nanosecond rows in the order they were accumulated, and that order has
+	// to be the forward scan's — ascending by partition, then by key — or two rows
+	// recorded at the same instant would come back in a different order from the same
+	// query asked without a limit.
+	var steps []timelineWalkStep
+
+	end := len(spans)
+	for width := 1; end > 0; width = min(width*2, e.concurrency) {
+		start := max(0, end-width)
+		var step timelineWalkStep
+		failure, abort := scanOneGroup(ctx, e, prefixesOf(spans[start:end]), scan.decode, step.acc.merge)
+		step.failure = failure
+		steps = append(steps, step)
+		end = start
+		if abort || e.answerIsSettled(q, steps, spans[start].start) {
+			break
+		}
+	}
+
+	// Back into ascending partition order. Each step already holds its own partitions
+	// ascending, and the steps cover contiguous ranges, so reversing the steps restores
+	// exactly the order a forward scan would have folded in — whatever widths the walk
+	// happened to use.
+	slices.Reverse(steps)
+
+	var failure error
+	for i := range steps {
+		into.merge(&steps[i].acc)
+		if steps[i].failure != nil && failure == nil {
+			// First in ascending partition order, which is the forward scan's own rule.
+			// An archive must be described the same way every time it is read, and the
+			// order the walk visited its partitions in is not a property of the archive.
+			failure = steps[i].failure
+		}
+	}
+	return failure
+}
+
+// timelineWalkStep is one step of the newest-first walk: what its partitions held, and
+// what went wrong reading them.
+type timelineWalkStep struct {
+	acc     timelineAccumulator
+	failure error
+}
+
+// answerIsSettled reports whether a newest-first walk that has read down to the
+// partition beginning at lo may stop.
+//
+// Two things have to be settled, and the incarnation is the one that is easy to miss.
+// resolveIncarnation picks the UID owning the newest *mark* in the window, before any
+// predicate is applied, and a walk that stopped while an unread partition could still
+// hold a newer mark would resolve it from a partial view — answering with one
+// incarnation's history under a name that had since been reused, which is the splice
+// Invariant 7 forbids. So: the short circuit does not merely avoid the question, it
+// answers it. A mark at or above the ceiling cannot be outranked by anything unread,
+// because everything unread is strictly below the ceiling, so the UID chosen here is
+// provably the UID a full scan would have chosen. When no mark reaches the ceiling the
+// walk simply keeps going.
+//
+// The count that follows is of *answer* rows, not of collected ones: the incarnation
+// filter and the commentary merge both change how many rows a limit will find, and a
+// walk that counted raw changes would stop early on a query whose filter excludes most
+// of them. Predicates need no attention here — recordScan.keep applied them at decode
+// time, so a collected change has already survived them.
+func (e *Engine) answerIsSettled(q query.TimelineQuery, steps []timelineWalkStep, lo time.Time) bool {
+	ceiling := lo.Add(e.objectSpan)
+
+	var uid string
+	switch {
+	case q.UID != "":
+		uid = q.UID
+	case q.AllIncarnations:
+		uid = ""
+	default:
+		newest, found := newestMark(steps)
+		if !found || newest.ts.Before(ceiling) {
+			return false
+		}
+		uid = newest.uid
+	}
+
+	rows := 0
+	for i := range steps {
+		for _, change := range steps[i].acc.changes {
+			if (uid == "" || change.UID == uid) && !change.TS.Before(ceiling) {
+				rows++
+			}
+		}
+		if !q.IncludeEvents {
+			continue
+		}
+		for _, event := range steps[i].acc.events {
+			// The same narrowing mergeCommentary performs: commentary is pinned to the
+			// resolved incarnation, and left alone when the timeline spans every one.
+			if (uid == "" || event.subjectUID == uid) && !event.change.TS.Before(ceiling) {
+				rows++
+			}
+		}
+	}
+	return rows >= q.Limit
+}
+
+// newestMark returns the mark a full scan's resolveIncarnation would land on, given
+// only the steps read so far.
+//
+// The tie-break is the reason this is not a plain maximum. resolveIncarnation sorts
+// marks by ts with a *stable* sort and takes the last, so among marks recorded at the
+// same nanosecond it takes the one accumulated last — which is the one from the latest
+// partition, then the latest key. Walking the steps in ascending partition order and
+// preferring the later of two equals reproduces that exactly. Taking a strict maximum
+// instead would pick the earliest of the tied marks and could resolve a different
+// incarnation from the one the same query answers without a limit.
+func newestMark(steps []timelineWalkStep) (incarnationMark, bool) {
+	var newest incarnationMark
+	found := false
+	for i := len(steps) - 1; i >= 0; i-- {
+		for _, mark := range steps[i].acc.marks {
+			if !found || !mark.ts.Before(newest.ts) {
+				newest, found = mark, true
+			}
+		}
+	}
+	return newest, found
+}
+
+// prefixesOf is the prefix-only view of a run of partitions, which is what a scan
+// takes.
+func prefixesOf(spans []partition) []string {
+	prefixes := make([]string, len(spans))
+	for i := range spans {
+		prefixes[i] = spans[i].prefix
+	}
+	return prefixes
 }
 
 // resolveIncarnation decides which incarnation a timeline is about, and reports
@@ -353,6 +565,12 @@ func spansOf(marks []incarnationMark) []query.Incarnation {
 // records resolves to.
 func (e *Engine) recordPrefixes(clusterID string, from, to time.Time) []string {
 	return partitionPrefixes(recordsRoot(e.prefix, clusterID), from, to, e.objectSpan)
+}
+
+// recordPartitions is recordPrefixes with each partition's own window start beside it,
+// which is what a walk that reasons about the partitions it has *not* read needs.
+func (e *Engine) recordPartitions(clusterID string, from, to time.Time) []partition {
+	return partitionSpans(recordsRoot(e.prefix, clusterID), from, to, e.objectSpan)
 }
 
 // byChangeTS orders changes by the instant they were recorded, to the nanosecond.

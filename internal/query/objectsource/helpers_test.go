@@ -266,7 +266,17 @@ func drain(t *testing.T, engine *Engine, q query.TimelineQuery) []query.Change {
 func drainWithErr(t *testing.T, engine *Engine, q query.TimelineQuery) ([]query.Change, error) {
 	t.Helper()
 
-	it, err := engine.Timeline(context.Background(), q)
+	return drainCtx(t, context.Background(), engine, q)
+}
+
+// drainCtx is drainWithErr under a context the test controls, for the assertions about
+// a scan its caller stopped waiting for.
+func drainCtx(
+	t *testing.T, ctx context.Context, engine *Engine, q query.TimelineQuery,
+) ([]query.Change, error) {
+	t.Helper()
+
+	it, err := engine.Timeline(ctx, q)
 	if err != nil {
 		t.Fatalf("Timeline: %v", err)
 	}

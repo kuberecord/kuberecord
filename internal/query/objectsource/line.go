@@ -287,6 +287,30 @@ func decodeScopeFrame(body io.Reader, visit func(*scopeLine) error) error {
 // for throughput on one large stream would multiply its window by that cap, and
 // the point of the cap is that peak memory is a constant a person can reason
 // about rather than a function of the archive's size.
+//
+// # Why json.Decoder and not bufio.Scanner
+//
+// This is JSON Lines, so a line scanner reads like the obvious tool and it is the
+// wrong one. bufio.Scanner refuses any token longer than bufio.MaxScanTokenSize —
+// 64 KiB by default — and a record here is routinely larger than that. A ConfigMap
+// with a real data map, or a custom resource carrying
+// x-kubernetes-preserve-unknown-fields, is past that limit well before it approaches
+// the megabyte an etcd value may hold — and the state is then escaped into the line's
+// data field, which only makes it longer.
+//
+// The two failure modes are unequal and both are bad. Scan returns false and Err
+// reports bufio.ErrTooLong, which at least fails loudly — or, where the error is not
+// checked, the line is truncated at the buffer boundary and what comes back is a
+// partial object that JSON may well accept, decoding into a change nothing in the
+// output admits is incomplete. That is the shape Invariant 4 exists to forbid, and
+// no fixture would catch it unless one is written for it (see
+// TestAnOversizedRecordSurvivesTheDecoder).
+//
+// json.Decoder has no per-value ceiling: it grows its buffer to whatever the value
+// needs and reads values back to back out of one stream, which is exactly the JSONL
+// shape. The bufio.NewReader below is a read-ahead buffer for the magic-byte peek and
+// for the decompressor beneath it — it is not a tokenizer, and raising a limit on it
+// is not the fix for anything.
 func streamFrame(body io.Reader, decode func(*json.Decoder) error) error {
 	buffered := bufio.NewReader(body)
 	head, err := buffered.Peek(len(zstdMagic))
