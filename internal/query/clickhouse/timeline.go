@@ -73,7 +73,7 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 	var it query.ChangeIterator = &rowIterator{rows: rows}
 	if clientSide {
 		it = &filterIterator{inner: it, keep: func(c query.Change) bool {
-			return matchesFieldPaths(c, q.FieldPaths)
+			return query.MatchesFieldPaths(c, q.FieldPaths)
 		}}
 	}
 	if q.IncludeEvents {

@@ -282,7 +282,7 @@ func TestActorPredicatesArePushedDownAndExcludeWins(t *testing.T) {
 // TestFieldPathsAreNotPushedDown: the one predicate applied to rows already read
 // leaves no trace in the statement.
 //
-// See matchesFieldPaths for why. The assertion is here so that an attempt to push
+// See actorConditions for why. The assertion is here so that an attempt to push
 // it down has to come with a deliberate edit to this test, rather than arriving as
 // a second implementation of RFC 6901 that only the conformance agreement property
 // would catch disagreeing with the first.

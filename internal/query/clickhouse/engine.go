@@ -47,11 +47,11 @@ limitations under the License.
 // read against the (cluster_id, api_group, kind, namespace, name, ts) sort key
 // however large the table has grown.
 //
-// Field-path predicates are applied to rows already read, and that is a
-// considered exception rather than an omission — see matchesFieldPaths, which
-// says why the SQL form would be brittle and why the scan is identical either
-// way. The conformance suite's agreement property is what proves the two paths
-// cannot disagree about the answer.
+// Field-path predicates are applied to rows already read, through the contract's
+// own query.MatchesFieldPaths, and that is a considered exception rather than an
+// omission — see timelineStatement on why the SQL form would be brittle and why
+// the scan is identical either way. The conformance suite's agreement property is
+// what proves the two paths cannot disagree about the answer.
 package clickhouse
 
 import (

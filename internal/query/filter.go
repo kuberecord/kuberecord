@@ -14,43 +14,57 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package clickhouse
+package query
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
-
-	"github.com/kuberecord/kuberecord/internal/query"
 )
+
+// The predicates of [TimelineQuery], as applied to a change already read.
+//
+// They live in the contract for the same reason [Replay] does. A backend that
+// cannot push a predicate into its storage has to evaluate it here, and a second
+// evaluation of the same rule is a second reading of it: the field-path filter
+// alone has to unescape RFC 6901 in the mandated order, convert to the dotted
+// grammar, prefix-match it, and keep a row that carries no patch at all. Each of
+// those steps is somewhere two backends could disagree about which rows a filter
+// keeps — and the contract requires them not to, because two engines answering
+// one question differently would have an engineer comparing two stores conclude
+// that one of them lost rows.
+//
+// A backend that *can* push a predicate down is expected to, and to keep the two
+// forms in agreement; the conformance suite's agreement property is what proves
+// it. What these functions guarantee is that the client-side reading has exactly
+// one definition to disagree with.
+
+// MatchesActors reports whether a change survives the actor predicates.
+//
+// The documented order is applied: Actors narrows, and ExcludeActors then wins on
+// conflict, so an actor named in both lists excludes the change. That is the
+// narrower, safer reading when a caller has contradicted itself.
+//
+// Note what a non-empty include list necessarily does to a deletion: a deletion
+// records no actors, so it can never satisfy one. That is arithmetic rather than
+// policy, but it is surprising enough that a caller applying an actor filter
+// should say so in its output rather than let the deletion vanish unremarked.
+func MatchesActors(c Change, include, exclude []string) bool {
+	held := func(names []string) bool {
+		return slices.ContainsFunc(c.Actors, func(a string) bool { return slices.Contains(names, a) })
+	}
+	if len(include) > 0 && !held(include) {
+		return false
+	}
+	return !held(exclude)
+}
 
 // patchOp is the part of an RFC 6902 operation a field-path filter reads.
 type patchOp struct {
 	Path string `json:"path"`
 }
 
-// matchesFieldPaths reports whether a change touches one of the requested paths.
-//
-// # Why this is not SQL
-//
-// Every other predicate this backend applies is pushed into WHERE. This one is
-// applied to rows already read, and the reason is that pushing it down would buy
-// nothing and cost correctness.
-//
-// It would buy nothing because the diff column is returned on every row of a
-// timeline regardless: the caller renders it. So the same bytes are read off disk
-// either way, and a server-side form would only transfer fewer rows over the
-// wire — a saving on the smaller of the two costs, in the one query shape whose
-// result set a limit is already there to bound.
-//
-// It would cost correctness because the SQL form is a reimplementation of RFC
-// 6901 in a query language: each operation's path has to be unescaped (~1 before
-// ~0, in that order, or a path containing a literal tilde is silently mangled),
-// converted to the dotted grammar, and prefix-matched — and a row carrying no
-// patch at all has to survive the filter anyway. Every one of those steps is a
-// place for a subtle disagreement with the client-side reading, and a
-// disagreement between two backends about which rows a filter keeps is exactly
-// the failure the conformance suite's agreement property exists to catch. Having
-// one implementation is how it cannot happen.
+// MatchesFieldPaths reports whether a change touches one of the requested paths.
 //
 // # Why a row with no patch is kept
 //
@@ -62,12 +76,12 @@ type patchOp struct {
 // An undecodable patch is kept for a related reason. Dropping a row because its
 // diff would not parse turns a rendering problem into a missing entry in an audit
 // timeline — the one outcome worse than showing a row the filter did not ask for.
-func matchesFieldPaths(change query.Change, paths []string) bool {
-	if len(paths) == 0 || change.Diff == "" {
+func MatchesFieldPaths(c Change, paths []string) bool {
+	if len(paths) == 0 || c.Diff == "" {
 		return true
 	}
 	var ops []patchOp
-	if err := json.Unmarshal([]byte(change.Diff), &ops); err != nil {
+	if err := json.Unmarshal([]byte(c.Diff), &ops); err != nil {
 		return true
 	}
 	for _, op := range ops {

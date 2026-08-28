@@ -4,7 +4,7 @@ Runnable SQL against both of kuberecord's storage backends
 ([`docs/SCHEMA.md`](SCHEMA.md)). The recipes up to [Reading Event history
 correctly](#reading-event-history-correctly) read a `ClickHouseSink`'s tables; the
 ones under [The S3 archive](#the-s3-archive) read an `S3Sink`'s objects with
-DuckDB.
+DuckDB — the same objects [the CLI reads](#what-the-cli-reads) without it.
 
 Every ClickHouse query here uses only frozen columns, so it keeps working across
 operator upgrades — and that is a tested claim rather than an intention: `make
@@ -516,6 +516,61 @@ selects nothing fails. The **Athena** DDL is checked for structure only — that
 names every field of the record contract exactly once and projects the partitions
 the writer actually produces. There is no AWS account in CI, so nothing executes
 it.
+
+### What the CLI reads
+
+`kubectl kuberecord` answers `timeline`, `diff`, `get --at` and `scopes` from these
+same objects, with no DuckDB and no database anywhere: the query backend in
+`internal/query/objectsource` is the read path, and it is **pure Go — no cgo, no
+embedded engine** (D18), because that is what keeps the plugin a static
+cross-compile. DuckDB is not being replaced by it. The CLI answers *narrow*
+questions — one object, one window, one instant — and the recipes on this page are
+what wide analytics still want.
+
+It reads the contract documented once in
+[`docs/SCHEMA.md`](SCHEMA.md#physical-mapping-to-s3-objects): the same key layout,
+the same line fields, the same single zstd frame per object. Nothing about the
+format is restated here. What follows is what a *reader* of it has to do, because
+every one of these is a way to be quietly wrong, and a recipe on this page can be
+wrong the same way:
+
+- **It prunes to the window, and widens downward.** Only the `date=`/`hour=`
+  prefixes the window touches are listed — a fully covered day as one `date=`
+  prefix, a partial day hour by hour. The lower bound is then widened by the
+  sink's `maxObjectAge`, because an object's partition comes from its *first*
+  record and a change stamped 08:05 can live in the `hour=07` object. The CLI
+  defaults that widening to the CR's ceiling of **1h**, which is correct against
+  any legally configured sink; the upper bound is not widened, since an object
+  never holds a record from before its own first one.
+- **It never reads the scope log by accident, and never skips it either.** Records
+  under `cluster_id=`, epochs under `scopes/`, as above. The scope log is read
+  *whole* rather than clipped to the window, because pairing an epoch needs the
+  `Started` that may predate it — a scope opened last year and still open covers
+  this morning, and a clipped read would report "nobody was watching" about it.
+- **It resolves the incarnation before applying any filter.** The identity is
+  version-agnostic, and a `(namespace, name)` pair may span several UIDs
+  (Invariant 7). Which incarnation a default query is about is decided from every
+  change in the window, *then* the actor and field-path predicates narrow it —
+  the other order lets a filter promote a deleted object's history into the living
+  object's timeline.
+- **It reconstructs by walking back, bounded.** `get --at` names an instant rather
+  than a window, so the reader walks partitions backwards until it holds a
+  full-state row to replay from, continuing one object span past it. The walk has a
+  limit (30 days by default); exhausting it is reported as exhausting it, never as
+  the object being absent.
+
+And it declares what it cannot do, rather than presenting the archive as
+equivalent to a database:
+
+| Capability | Value | What the CLI does about it |
+|---|---|---|
+| `deletions` | `false` | A timeline that simply stops carries an explicit notice: the object may have been deleted without the deletion ever being recorded (D12). No `Deleted` row is ever synthesized to close the gap. |
+| `server_side_filter` | `false` | Predicates are applied to lines already decoded. The *result* is identical to a pushdown backend's — the conformance suite pins that — but a limit does not bound the work. |
+| `point_query` | `false` | A single-object question costs the partitions its window lands in, so the CLI renders a scan estimate (object count and stored bytes, from the listing alone) before it starts. |
+| `time_bound_required` | `true` | An unbounded query is refused up front, naming the flag that fixes it, rather than started and never finished. |
+
+The one exception to that last row is `scopes`, which needs no window for the
+reason above.
 
 ### Parameters (DuckDB)
 
