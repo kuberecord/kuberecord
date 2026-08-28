@@ -67,35 +67,53 @@ linters:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
               desc: "the ClickHouse driver belongs to internal/sink/clickhouse (the write path, Task 0.5) and internal/query/clickhouse (the read path, Task 9.3) alone; everything else speaks internal/sink or internal/query"
 
-        # Task 6.4: the object-store client is confined to the one package that
-        # exists to hold it (internal/sink/s3/awsstore). The control plane and the
-        # data plane must not reach an SDK — Invariant 1 is what says a reconciler
-        # cannot dial a backend, and the S3 reconciler's configuration builder is
-        # injected from the wiring precisely so that this stays a property of the
-        # import graph rather than of the control flow. internal/sink/s3 itself is
-        # listed because the write path is tested against a stand-in object store,
-        # not a mocked HTTP client, and an SDK import there would quietly make that
-        # untrue (see internal/sink/s3/client.go).
+        # Task 6.4 confined the object-store client to the one package that
+        # existed to hold it. Task 10.1 gives it the shape Task 9.3 already gave
+        # the ClickHouse rule, and for the same two reasons.
+        #
+        # The first is that a second package now legitimately holds the SDK, and
+        # an enumerated list of denied directories cannot express "two packages,
+        # and no third". It denies the packages somebody thought of; a new
+        # internal package acquires the SDK by being new. Listing everything under
+        # internal/ and excepting the two, by name, makes the exceptions the thing
+        # under review — which is the conversation this rule exists to force.
+        #
+        # The second is why there are two. The write path's store
+        # (internal/sink/s3/awsstore) needs PutObject and nothing else, and
+        # internal/sink/s3/client.go states that as the permission set an operator
+        # has to grant a sink: no LIST, no GET, no DELETE. Reading an archive back
+        # needs precisely the two the sink is documented not to have, and it is
+        # done by a different consumer — the CLI, running as an engineer with
+        # their own credential — so the read source lives in its own package
+        # (internal/query/objectsource/awssource, Task 10.1). Folding it into
+        # awsstore would have put a LIST/GET client in the operator's binary and
+        # dragged internal/sink and internal/sink/s3, with controller-runtime and
+        # backoff behind them, into the link graph of every CLI invocation.
+        #
+        # Everything else still speaks an interface: the write path through
+        # s3.ObjectStore, the read plane through objectsource.ObjectSource. Both
+        # of those packages are inside the deny scope and neither is excepted,
+        # which is what keeps the claim their doc comments make — that they are
+        # tested against a stand-in rather than a mocked HTTP client — literally
+        # true. Invariant 1 is the reason the control and data planes are covered
+        # too: a reconciler must never dial a backend, and the S3 reconciler's
+        # configuration builder is injected from the wiring precisely so that this
+        # stays a property of the import graph rather than of the control flow.
+        #
+        # The scope is internal/ deliberately. test/queries dials a real dockerized
+        # MinIO with the SDK on purpose — that is what an integration harness is —
+        # and denying the SDK there would be denying that suite its subject. Source
+        # and test files alike within internal/.
         object-store-client-is-confined:
           files:
-            - "**/internal/pipeline/**"
-            - "**/internal/controller/**"
-            - "**/internal/watch/**"
-            - "**/internal/sink/*.go"
-            - "**/internal/sink/clickhouse/**"
-            - "**/internal/sink/conformance/**"
-            # Non-recursive on purpose — `*.go`, never `**`. That single character
-            # *is* the confinement boundary: the glob covers internal/sink/s3's own
-            # files and deliberately does not descend into internal/sink/s3/awsstore,
-            # which is the one package allowed to hold the SDK. Widening it to `/**`
-            # would deny the SDK inside the package whose entire purpose is to
-            # contain it, so the rule cannot simply be made "stricter" here.
-            - "**/internal/sink/s3/*.go"
+            - "**/internal/**"
+            - "!**/internal/sink/s3/awsstore/**"
+            - "!**/internal/query/objectsource/awssource/**"
           deny:
             - pkg: github.com/aws/aws-sdk-go-v2
-              desc: "the AWS SDK belongs to internal/sink/s3/awsstore alone; everything else speaks the s3.ObjectStore interface (Task 6.4)"
+              desc: "the AWS SDK belongs to internal/sink/s3/awsstore (the write path's object store, Task 6.4) and internal/query/objectsource/awssource (the read path's object source, Task 10.1) alone; everything else speaks the s3.ObjectStore or objectsource.ObjectSource interface"
             - pkg: github.com/aws/smithy-go
-              desc: "smithy-go is the AWS SDK's error and transport substrate (smithy.APIError, smithy.OperationError); it belongs to internal/sink/s3/awsstore for exactly the reason the SDK itself does — a Prober that classified NoSuchBucket by unwrapping smithy types would put SDK types back into the package whose purpose is to be SDK-free (Task 6.4)"
+              desc: "smithy-go is the AWS SDK's error and transport substrate (smithy.APIError, smithy.OperationError); it belongs to the same two packages the SDK itself does — a Prober that classified NoSuchBucket by unwrapping smithy types, or a query engine that classified NoSuchKey that way, would put SDK types back into the packages whose purpose is to be SDK-free (Tasks 6.4 and 10.1)"
             - pkg: github.com/aws/aws-sdk-go
               desc: "kuberecord is aws-sdk-go-v2 only: a v1 import would be both an isolation break and a dependency regression, so v1 is a tombstone here rather than an omission (Task 6.7)"
 

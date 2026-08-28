@@ -211,8 +211,17 @@ func windowConditions(c *conditions, from, to time.Time) {
 // gives it the documented last word — a change made by an actor named in both
 // lists is dropped, the narrower reading when a caller has contradicted itself.
 //
-// Field-path predicates are deliberately absent; see matchesFieldPaths for why
-// they are applied to rows already read.
+// Field-path predicates are deliberately absent. Pushing them down would buy
+// nothing and cost correctness: the diff column is returned on every row of a
+// timeline regardless, so the same bytes are read off disk either way, while the
+// SQL form would be a reimplementation of RFC 6901 in a query language — each
+// operation's path unescaped (~1 before ~0, in that order, or a path holding a
+// literal tilde is silently mangled), converted to the dotted grammar and
+// prefix-matched, with a row carrying no patch surviving anyway. Every one of
+// those steps is a place to disagree with the client-side reading, and a
+// disagreement between two backends about which rows a filter keeps is exactly
+// what the conformance suite's agreement property exists to catch. So the
+// contract owns the one reading: query.MatchesFieldPaths.
 func actorConditions(c *conditions, include, exclude []string) {
 	if len(include) > 0 {
 		c.add("hasAny(actors, ?)", include)

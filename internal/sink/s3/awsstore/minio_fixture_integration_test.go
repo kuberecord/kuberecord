@@ -29,11 +29,15 @@ limitations under the License.
 // client cmd/main.go builds, and the assertions in
 // writer_minio_integration_test.go drive the same s3.Writer the operator runs.
 //
-// The read side (LIST, GET, HEAD) is SDK usage that exists only for the tests.
+// The read side (LIST, GET, HEAD) is SDK usage that exists only for these tests.
 // That asymmetry is the point of D12 restated as code: kuberecord's S3 credential
 // needs PutObject and nothing else, so anything that reads the archive back —
-// this fixture, the documented DuckDB recipes, an auditor — is a separate
-// consumer with separate rights, not a capability of the sink.
+// this fixture, the documented DuckDB recipes, the CLI's own object source in
+// internal/query/objectsource/awssource, an auditor — is a separate consumer with
+// separate rights, not a capability of the sink. The CLI's source is why that
+// package is the second one excepted from object-store-client-is-confined: it is
+// a different consumer, so it is a different package, and neither reaches the
+// other.
 package awsstore
 
 import (

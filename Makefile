@@ -77,7 +77,7 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots throwaway containers, waits for each to answer,
 # runs the tagged tests, and always tears them down.
 #
-# Five suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# Six suites run here. internal/sink/clickhouse exercises the ClickHouse writer
 # and reader paths, and internal/query/clickhouse runs the whole read-plane
 # conformance suite against the real engine (Task 9.3) — the half a stand-in
 # connection cannot prove, since no fake executes SQL: that FINAL really collapses
@@ -91,13 +91,17 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # package binaries concurrently and two suites recreating resource_states in one
 # database would delete each other's fixtures. The same package also runs every
 # published *DuckDB* recipe against a real archive in MinIO through the duckdb CLI
-# (Task 7.2) — the read path an S3 archive has, since the sink itself has none
+# (Task 7.2) — a read path an S3 archive has, since the sink itself has none
 # (D12) — and requires rows back, so a recipe that parses but selects nothing
-# fails. And internal/sink/s3/awsstore writes through the real S3 Writer to MinIO
+# fails. internal/sink/s3/awsstore writes through the real S3 Writer to MinIO
 # and reads the objects back (Task 6.6): key layout, decode fidelity, retry
 # idempotency, both rotation triggers and the Object Lock headers, none of which a
-# fake store can vouch for. Both S3 suites create a bucket per test, so they need
-# no database-style isolation.
+# fake store can vouch for. And internal/query/objectsource/awssource runs the
+# shipped read source against the same MinIO (Task 10.1), for the one thing no
+# fake can establish: that a directory and a bucket answer a listing identically.
+# Everything above that seam is tested against a directory, so the day the two
+# diverge is the day those tests stop saying anything about a bucket. The three S3
+# suites create a bucket per test, so they need no database-style isolation.
 #
 # Non-standard host ports throughout, so this never collides with a developer's
 # own ClickHouse on 9000/8123 or MinIO on 9000. ClickHouse's image default user is
