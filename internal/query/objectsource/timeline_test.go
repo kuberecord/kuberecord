@@ -425,6 +425,97 @@ func TestNewEngineNormalizesOptions(t *testing.T) {
 	}
 }
 
+// TestNewEngineRefusesANegativeObjectSpan: an option that cannot have been meant is
+// named at the constructor rather than obeyed.
+//
+// The coercion this replaces sent a negative span to zero, and the direction is the
+// whole finding. Zero is the *tightest* ceiling this engine has — it is what
+// NoObjectSpan buys for an archive that has earned it — so rounding an invalid value
+// there let the newest-first walk stop one partition early and return a timeline
+// missing its newest rows, through a validation path rather than through the
+// algorithm. That is the failure the walk was written to make impossible, and it is
+// the one a reader is least likely to check for, because coercing towards zero reads
+// as caution.
+//
+// NoObjectSpan is negative too and is accepted, which is not an exception to the rule
+// so much as the reason the rule can be strict: the deliberate case has a spelling, so
+// every other negative duration is a bug in the caller and can be said so.
+func TestNewEngineRefusesANegativeObjectSpan(t *testing.T) {
+	t.Parallel()
+
+	local, err := NewLocal(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening a source: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := local.Close(); closeErr != nil {
+			t.Errorf("closing the fixture source: %v", closeErr)
+		}
+	})
+
+	refused := []struct {
+		name string
+		span time.Duration
+	}{
+		{name: "a whole negative hour", span: -time.Hour},
+		{name: "a negative writer configuration", span: -5 * time.Minute},
+		// Adjacent to the sentinel on purpose: "negative" is not a synonym for
+		// NoObjectSpan, and a caller one nanosecond away from it has still not said
+		// what NoObjectSpan says.
+		{name: "one nanosecond past the sentinel", span: 2 * NoObjectSpan},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			engine, err := NewEngine(local, Options{ObjectSpan: tc.span})
+			if err == nil {
+				if closeErr := engine.Close(); closeErr != nil {
+					t.Errorf("closing the engine that should not have been built: %v", closeErr)
+				}
+				t.Fatalf("NewEngine accepted an ObjectSpan of %s. A negative span is not a tighter "+
+					"archive: it trims hours off the bottom of every window and pushes the "+
+					"newest-first walk's ceiling below the partition it has just read, so the "+
+					"timeline comes back plausible and short", tc.span)
+			}
+			// Named, not merely refused: the caller has to be able to find the field
+			// and the value without reading this package.
+			if !containsAll(err.Error(), "ObjectSpan", tc.span.String(), "NoObjectSpan") {
+				t.Errorf("the refusal of %s reads %q; it must name the field, the value supplied and "+
+					"the way to say \"no spill\" deliberately", tc.span, err)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name     string
+		span     time.Duration
+		wantSpan time.Duration
+	}{
+		{name: "the sentinel is the one negative that means something", span: NoObjectSpan, wantSpan: 0},
+		{name: "unset is unset", span: 0, wantSpan: DefaultObjectSpan},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			engine, err := NewEngine(local, Options{ObjectSpan: tc.span})
+			if err != nil {
+				t.Fatalf("NewEngine(%s): %v", tc.span, err)
+			}
+			t.Cleanup(func() {
+				if closeErr := engine.Close(); closeErr != nil {
+					t.Errorf("closing the engine: %v", closeErr)
+				}
+			})
+			if engine.objectSpan != tc.wantSpan {
+				t.Errorf("an ObjectSpan of %s resolved to %s, want %s",
+					tc.span, engine.objectSpan, tc.wantSpan)
+			}
+		})
+	}
+}
+
 // TestCapabilitiesAreTheTruthfulReducedSet states the declaration in a test as well
 // as in the engine, so that changing one without the other fails here rather than
 // misleading a reader of the output.

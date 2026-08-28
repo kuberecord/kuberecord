@@ -43,6 +43,10 @@ limitations under the License.
 // single object holding pre-sorted lines would have let it pass. And it gives a
 // suite a way to break one object out of many: the object holding the nth change
 // is addressable, which is what an injected mid-stream failure needs.
+//
+// WriteObjectAt is the deliberate exception to both of those rules — one object, as
+// many records as the caller names, in a partition the caller chooses — and it exists
+// because the shape it writes is one no derivation can produce. See its own comment.
 package archivetest
 
 import (
@@ -211,9 +215,85 @@ func WriteDir(dir, prefix string, history conformance.History) (*Layout, error) 
 	}, prefix, history)
 }
 
+// WriteObjectAt writes one object into the partition of at, holding every row it is
+// given, whatever those rows are stamped.
+//
+// It exists for the one archive shape a derived key cannot express, and that shape is
+// not a curiosity: an object's partition comes from its *first* record and it keeps
+// accepting records until it rotates, so an object filed under hour=17 legitimately
+// carries a record stamped 18:30. docs/SCHEMA.md warns every reader about it, the
+// engine widens its partition range downward because of it, and the newest-first
+// walk's ceiling is the same widening applied in the other direction. A fixture that
+// could not produce one could not test any of that.
+//
+// Write is still the way to seed a history. This is the deliberate exception beside
+// it rather than a second way to do the same thing: Write chooses the partition from
+// the record, which is right for every fixture that is not about this, and here the
+// caller chooses it and the rows are free to disagree.
+//
+// name is the key's last segment, before the suffix. A real archive puts a content
+// hash there and nothing reading the format interprets it, so a fixture is free to
+// spell out what the object is for — which is what a failure message wants to say.
+func WriteObjectAt(put Put, prefix, name string, at time.Time, rows []conformance.Row) error {
+	if put == nil {
+		return fmt.Errorf("archivetest: a Put is required to write an archive")
+	}
+	if len(rows) == 0 {
+		return fmt.Errorf("archivetest: WriteObjectAt needs at least one row: an empty object is a " +
+			"frame a reader is entitled to reject, not a partition holding nothing")
+	}
+
+	var payload []byte
+	for _, row := range rows {
+		if row.Change.EventType == query.EventDeleted {
+			// The same rule Write applies, refused here instead of dropped: a caller
+			// naming its rows one by one has said which object it wants, and silently
+			// writing a shorter one would be a fixture that is not what it says it is.
+			return fmt.Errorf("archivetest: WriteObjectAt was given a %s row; this archive tier is "+
+				"written by a Writer that never receives a deletion (D12), so no operator could "+
+				"produce this object", query.EventDeleted)
+		}
+		line, err := marshalLine(recordLineOf(row))
+		if err != nil {
+			return err
+		}
+		payload = append(payload, line...)
+	}
+
+	// The partition comes from at and the cluster from the rows, which is the one
+	// place those two can disagree — and the disagreement is the point.
+	key := joinSegments(prefix, formatPartition, clusterSegment+rows[0].Ref.ClusterID,
+		dateSegment+at.UTC().Format(dateLayout),
+		hourSegment+at.UTC().Format(hourLayout),
+		name+objectSuffix)
+	if err := put(key, compress(payload)); err != nil {
+		return fmt.Errorf("archivetest: write %q: %w", key, err)
+	}
+	return nil
+}
+
 // encodeRecord renders one change as its own object.
 func encodeRecord(prefix string, row conformance.Row) (key string, body []byte, err error) {
-	line := recordLine{
+	payload, err := marshalLine(recordLineOf(row))
+	if err != nil {
+		return "", nil, err
+	}
+	hash := contentHash(payload)
+	key = joinSegments(prefix, formatPartition, clusterSegment+row.Ref.ClusterID,
+		dateSegment+row.Change.TS.UTC().Format(dateLayout),
+		hourSegment+row.Change.TS.UTC().Format(hourLayout),
+		hash+objectSuffix)
+	return key, compress(payload), nil
+}
+
+// recordLineOf projects a suite row onto the physical line.
+//
+// Shared by the two writers so that an object placed by hand and an object placed by
+// the derivation hold the *same* line for the same row. A fixture whose two paths
+// disagreed about a field would make the property under test depend on which writer
+// happened to seed it.
+func recordLineOf(row conformance.Row) recordLine {
+	return recordLine{
 		Timestamp:       row.Change.TS,
 		ClusterID:       row.Ref.ClusterID,
 		EventType:       row.Change.EventType,
@@ -230,16 +310,6 @@ func encodeRecord(prefix string, row conformance.Row) (key string, body []byte, 
 		Diff:            row.Change.Diff,
 		SHA256:          row.Change.SHA256,
 	}
-	payload, err := marshalLine(line)
-	if err != nil {
-		return "", nil, err
-	}
-	hash := contentHash(payload)
-	key = joinSegments(prefix, formatPartition, clusterSegment+row.Ref.ClusterID,
-		dateSegment+row.Change.TS.UTC().Format(dateLayout),
-		hourSegment+row.Change.TS.UTC().Format(hourLayout),
-		hash+objectSuffix)
-	return key, compress(payload), nil
 }
 
 // encodeScope renders one transition as its own object, under the date-only

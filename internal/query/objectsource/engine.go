@@ -92,6 +92,22 @@ const (
 	// NoObjectSpan disables the widening. It is spelled out because "no widening"
 	// is a claim about how the archive was written, not a default anybody should
 	// arrive at by leaving a field zero.
+	//
+	// What it asserts: every record in this archive lives in the partition its own
+	// timestamp names, because the writer that produced it rotated an object before
+	// it could outlive its own hour. That is a fact about a deployment rather than a
+	// preference, and it is the only way to give this engine the tight ceiling an
+	// archive that has earned one deserves — lo exactly, instead of lo plus a span.
+	//
+	// What breaks when the assertion is false: both of this engine's stopping rules
+	// stop one partition early, and neither of them says so. The newest-first walk
+	// (answerIsSettled) settles while an older object is still holding a record above
+	// its ceiling, and returns a timeline missing its newest rows. The backward state
+	// walk (baseIsSettled) settles one day early and replays from a base that an
+	// unread object supersedes. Both answers come back plausible, correctly ordered,
+	// and short — which is the failure those two rules exist to make impossible. It is
+	// not a knob for buying back a partition; pass it only when the writer's rotation
+	// says it is true.
 	NoObjectSpan = -time.Nanosecond
 
 	// DefaultConcurrency is how many objects are fetched at once.
@@ -127,8 +143,15 @@ type Options struct {
 	Concurrency int
 
 	// ObjectSpan is how far past its own partition an object may carry records —
-	// the writer's maxObjectAge. Zero selects DefaultObjectSpan; a negative value
-	// (NoObjectSpan) disables the widening.
+	// the writer's maxObjectAge.
+	//
+	// Zero means *unset*, and selects DefaultObjectSpan. It deliberately does not
+	// mean "no spill". A bare time.Duration cannot tell an operator who meant zero
+	// from a caller who left the field alone, and only one of those two readings is
+	// safe to guess at — so the guess is the safe one and the deliberate case gets
+	// its own spelling, NoObjectSpan, where what it claims and what it costs when the
+	// claim is wrong are written out. Any other negative value is refused by
+	// NewEngine rather than rounded towards either meaning; see resolveObjectSpan.
 	//
 	// A caller that can read the sink's configuration should pass its actual value:
 	// it is the difference between listing one extra partition and listing an
@@ -182,26 +205,61 @@ func NewEngine(src ObjectSource, opts Options) (*Engine, error) {
 			"archive lives belongs to the caller, so there is nothing for this package to open")
 	}
 
+	span, err := resolveObjectSpan(opts.ObjectSpan)
+	if err != nil {
+		return nil, err
+	}
+
 	e := &Engine{
 		src:           src,
 		prefix:        opts.Prefix,
 		concurrency:   opts.Concurrency,
-		objectSpan:    opts.ObjectSpan,
+		objectSpan:    span,
 		stateLookback: opts.StateLookback,
 	}
 	if e.concurrency <= 0 {
 		e.concurrency = DefaultConcurrency
 	}
-	switch {
-	case e.objectSpan == 0:
-		e.objectSpan = DefaultObjectSpan
-	case e.objectSpan < 0:
-		e.objectSpan = 0
-	}
 	if e.stateLookback <= 0 {
 		e.stateLookback = DefaultStateLookback
 	}
 	return e, nil
+}
+
+// resolveObjectSpan turns the option into the widening the engine will use, and
+// refuses the one value that cannot have been meant.
+//
+// Three cases, and the third is why this is a function with a comment rather than
+// three lines in the constructor. Zero is unset and takes the default, which is
+// correct against any legally configured archive. NoObjectSpan is the deliberate
+// claim that this archive's objects never carry records past their own partition,
+// and resolves to a widening of nothing.
+//
+// Any other negative duration is rejected, and the *direction* of the alternative is
+// the reason. Coercing it to zero — which is what this used to do — reads as caution
+// and is the opposite of it: zero is the tightest ceiling this engine has, so an
+// invalid option bought a walk that stops earlier than the archive permits, and a
+// timeline missing its newest rows (see NoObjectSpan). Coercing it to the default
+// would at least be safe, but it would be silent. This is a programmer-supplied
+// option on a constructor and not operator-supplied configuration, so a negative
+// duration is a bug rather than a preference — and the useful thing to do with a bug
+// is to name it, at the call site holding it, before it has answered anything.
+func resolveObjectSpan(span time.Duration) (time.Duration, error) {
+	switch {
+	case span == 0:
+		return DefaultObjectSpan, nil
+	case span == NoObjectSpan:
+		return 0, nil
+	case span < 0:
+		return 0, fmt.Errorf("objectsource query engine: Options.ObjectSpan is %s; a negative span is "+
+			"not a tighter archive, it is an unrepresentable one — it would trim hours off the bottom "+
+			"of every window and push the newest-first walk's ceiling below the partition it has just "+
+			"read, so a timeline would come back plausible and short. Pass NoObjectSpan to declare "+
+			"that this archive's objects never carry records past their own partition, or the "+
+			"writer's maxObjectAge to say how far they do", span)
+	default:
+		return span, nil
+	}
 }
 
 // Capabilities reports what this engine can answer. No round trip, no failure, and

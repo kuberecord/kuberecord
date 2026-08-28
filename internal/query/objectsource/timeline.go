@@ -284,6 +284,15 @@ func reverseLimited(q query.TimelineQuery) bool { return q.Reverse && q.Limit > 
 // sparse ninety-day archive from paying one round trip per partition to discover it
 // has nothing to say.
 //
+// How narrow that best case really is depends on the span, and it is worth being
+// exact about. The ceiling is the newest read partition's start plus one object span,
+// so against an archive whose span is as wide as a partition — the default, an hour,
+// over hour partitions — the ceiling sits at that partition's own end, and only a
+// straddling record can settle the walk on its first step. The realistic floor there
+// is two steps and three partitions; one step is what an archive that has declared
+// NoObjectSpan gets. Both are bounded by the schedule rather than by the window,
+// which is the property that matters, and both are pinned in schedule_test.go.
+//
 // # What a failure does
 //
 // A per-object failure does not stop the walk and does not disqualify the short

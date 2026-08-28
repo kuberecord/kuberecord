@@ -55,6 +55,11 @@ type spySource struct {
 	// they were performed.
 	prefixes []string
 	keys     []string
+	// listsAtOpen records, for every Open, how many prefixes had been listed when it
+	// began. It is what makes the newest-first walk's *step schedule* observable at
+	// this seam rather than only its total — see roundWidths in schedule_test.go for
+	// how a sequence of widths is read back out of it.
+	listsAtOpen []int
 	// open is how many objects are open right now, and peak is the most that were
 	// ever open at once — the concurrency cap, observed rather than assumed.
 	open, peak int
@@ -135,6 +140,7 @@ func (s *spySource) List(ctx context.Context, prefix string) ObjectIterator {
 func (s *spySource) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	s.mu.Lock()
 	s.keys = append(s.keys, key)
+	s.listsAtOpen = append(s.listsAtOpen, len(s.prefixes))
 	refusal, refused := s.refuse[key]
 	gate, probe, opened := s.gateAt, s.probe, len(s.keys)
 	if !refused {
@@ -186,6 +192,14 @@ func (s *spySource) opened() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.keys)
+}
+
+// listCounts returns, for every object the engine opened, how many prefixes it had
+// listed by then — in Open order.
+func (s *spySource) listCounts() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.listsAtOpen)
 }
 
 // peakOpen returns the most objects that were open at the same moment.
