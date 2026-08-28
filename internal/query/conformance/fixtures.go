@@ -44,14 +44,27 @@ import (
 // own spacing rather than on whatever the clock happened to be doing.
 var suiteEpoch = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
-// The cluster and the identities every fixture uses.
+// FixtureClusterID is the cluster every fixture records its history under, and
+// the value a harness must stamp on whatever its backend stores a cluster
+// identity in.
+//
+// It is exported for one reason, and the reason is a hole a harness cannot
+// otherwise fill: ScopeTransition carries no cluster of its own, and the coverage
+// fixture seeds scopes without a single Row beside them, so there is nothing a
+// backend could infer the cluster from. A ScopeQuery still arrives asking about
+// this one. Without this constant a harness would either hardcode the literal —
+// duplicating it once per backend, to fail obscurely the day it changed — or
+// store its scope log outside the identity its engine really filters on, which
+// would quietly excuse the very predicate the coverage properties exist to check.
+const FixtureClusterID = "conformance"
+
+// The identities every fixture uses.
 const (
-	fixtureCluster = "conformance"
-	fixtureGroup   = "apps"
-	fixtureKind    = "Deployment"
-	fixtureNS      = "default"
-	fixtureName    = "checkout"
-	fixtureAPIVer  = "apps/v1"
+	fixtureGroup  = "apps"
+	fixtureKind   = "Deployment"
+	fixtureNS     = "default"
+	fixtureName   = "checkout"
+	fixtureAPIVer = "apps/v1"
 
 	// uidA and uidB are two incarnations under one (namespace, name). They are the
 	// whole of the property most likely to be got wrong: a name may be reused, and
@@ -69,7 +82,7 @@ const (
 // fixtureRef is the object every fixture records history for.
 func fixtureRef() query.ObjectRef {
 	return query.ObjectRef{
-		ClusterID: fixtureCluster,
+		ClusterID: FixtureClusterID,
 		APIGroup:  fixtureGroup,
 		Kind:      fixtureKind,
 		Namespace: fixtureNS,

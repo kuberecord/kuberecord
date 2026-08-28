@@ -47,7 +47,7 @@ const (
 // scopeQuery builds a bounded coverage query.
 func scopeQuery(group, kind, namespace string) query.ScopeQuery {
 	return query.ScopeQuery{
-		ClusterID: fixtureCluster,
+		ClusterID: FixtureClusterID,
 		APIGroup:  group,
 		Kind:      kind,
 		Namespace: namespace,

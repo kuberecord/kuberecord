@@ -38,22 +38,34 @@ linters:
   settings:
     depguard:
       rules:
-        # Task 0.5 acceptance criterion: the code that hands records to a sink
-        # must depend on the generic sink contract (internal/sink), never on the
-        # ClickHouse driver directly. Task 1.5 moved that code out of
-        # internal/controller (per-GVK reconcilers) and into internal/pipeline
-        # (workqueue + workers), so the guarantee is enforced on both paths: the
-        # pipeline today, and the control-plane reconcilers that Task 1.7 puts
-        # back under internal/controller — which per Invariant 1 must never dial
-        # ClickHouse at all. Source and test files alike.
-        data-plane-no-clickhouse:
+        # Task 0.5 established this as a denylist over the data and control
+        # planes: the code that hands records to a sink must depend on the
+        # generic sink contract (internal/sink), never on the ClickHouse driver
+        # directly, and per Invariant 1 a reconciler must never dial ClickHouse
+        # at all. Task 9.3 turns it into what it was always trying to be — a
+        # confinement. Two packages hold the driver, one per plane, and the rule
+        # now says so by listing everything under internal/ and excepting them,
+        # rather than by naming the three directories somebody happened to think
+        # of. A new internal package can no longer acquire the driver silently.
+        #
+        # `!` entries are exceptions, and each one is load-bearing:
+        # internal/sink/clickhouse is the write path (Task 0.5) and
+        # internal/query/clickhouse is the read path (Task 9.3). Nothing else is
+        # excepted, and adding a third exception is the review conversation this
+        # shape exists to force.
+        #
+        # The scope is internal/ deliberately. test/queries and test/loadgen dial
+        # a real dockerized server on purpose — that is what an integration
+        # harness is — and denying the driver there would be denying those suites
+        # their subject. Source and test files alike within internal/.
+        clickhouse-driver-is-confined:
           files:
-            - "**/internal/pipeline/**"
-            - "**/internal/controller/**"
-            - "**/internal/watch/**"
+            - "**/internal/**"
+            - "!**/internal/sink/clickhouse/**"
+            - "!**/internal/query/clickhouse/**"
           deny:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
-              desc: "the data plane and control plane must depend on internal/sink, not the ClickHouse driver (Task 0.5)"
+              desc: "the ClickHouse driver belongs to internal/sink/clickhouse (the write path, Task 0.5) and internal/query/clickhouse (the read path, Task 9.3) alone; everything else speaks internal/sink or internal/query"
 
         # Task 6.4: the object-store client is confined to the one package that
         # exists to hold it (internal/sink/s3/awsstore). The control plane and the
