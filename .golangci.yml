@@ -87,6 +87,31 @@ linters:
             - pkg: github.com/aws/aws-sdk-go
               desc: "kuberecord is aws-sdk-go-v2 only: a v1 import would be both an isolation break and a dependency regression, so v1 is a tombstone here rather than an omission (Task 6.7)"
 
+        # Task 9.2 acceptance criterion: the query conformance suite is built
+        # around the read-plane contract in internal/query, not around any
+        # backend's implementation of it. internal/sink is denied for a reason
+        # distinct from the rest: it is not merely the write path, it has a read
+        # half of its own, and a suite able to see it would be tempted to measure
+        # a query backend against the operator's own reader — two contracts with
+        # opposite pressures, one of which sits on the hot path's dependency
+        # graph (D16). The query backends are listed as tombstones ahead of
+        # existing (Tasks 9.3 and 10.2), because a suite that quietly certified
+        # one backend against another's behaviour would gate nothing (D11).
+        query-conformance-suite-is-backend-agnostic:
+          files:
+            - "**/internal/query/conformance/**"
+          deny:
+            - pkg: github.com/kuberecord/kuberecord/internal/sink
+              desc: "the query conformance suite must depend only on the read-plane contract; the sink's own reader serves the operator's warm-up and GC needs and is a different contract (D16, Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/pipeline
+              desc: "the query conformance suite is a client of the frozen schema, not of the operator's runtime (D20, Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/query/clickhouse
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
+            - pkg: github.com/kuberecord/kuberecord/internal/query/objectsource
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
+            - pkg: github.com/ClickHouse/clickhouse-go/v2
+              desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
+
         # Task 5.1 acceptance criterion: the Writer conformance suite is built
         # around the contract in internal/sink, not around any backend's
         # implementation of it. internal/pipeline is denied because it imports
