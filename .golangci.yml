@@ -142,6 +142,53 @@ linters:
             - pkg: github.com/ClickHouse/clickhouse-go/v2
               desc: "the query conformance suite must name no backend: it is the contract every query backend is measured against (Task 9.2)"
 
+        # Task 11.1 acceptance criterion, and D20 in enforceable form: the
+        # command-line client is a client of the frozen schema, not of the
+        # operator's runtime.
+        #
+        # The scope is the CLI's two directories rather than a global denylist,
+        # because these packages are exactly where the temptation lives. A
+        # `timeline` command that wanted to know how a rule resolves a kind, or
+        # what the pipeline considers a checkpoint, has an operator package one
+        # import away that answers it — and the answer would be right, once.
+        # After that, every refactor of the write path is a release of the CLI,
+        # and the CLI drags controller-runtime into the link graph of a binary
+        # whose only contact with an API server is discovery and kubeconfig.
+        # Task 12.1 needs that binary to cross-compile, cgo-free, to six
+        # platforms from one `make` (D18); a dependency on the operator's
+        # runtime is how that quietly stops being true.
+        #
+        # internal/sink is denied for a reason distinct from the other three. It
+        # is not merely the write path: it has a read half of its own, and a
+        # command able to see it would be tempted to answer an analyst's
+        # question through the operator's warm-up reader — two contracts with
+        # opposite pressures, one of which sits on the hot path's dependency
+        # graph (D16). It is the same reason the query conformance suite denies
+        # it, and it is why the read plane in internal/query — which the CLI is
+        # supposed to depend on — is deliberately absent from this list.
+        #
+        # Both directories are listed because the boundary has to hold where the
+        # artifact is produced, not only where the logic lives:
+        # cmd/kubectl-kuberecord could acquire an import of its own, and its
+        # closure is what ships. deps_test.go in each of them walks the whole
+        # transitive closure, which is the half this rule cannot see — a
+        # boundary is lost through an innocent helper package added later far
+        # more often than through a direct import somebody would have questioned
+        # in review.
+        cli-is-a-client-of-the-schema:
+          files:
+            - "**/internal/cli/**"
+            - "**/cmd/kubectl-kuberecord/**"
+          deny:
+            - pkg: github.com/kuberecord/kuberecord/internal/pipeline
+              desc: "the CLI is a client of the frozen schema, not of the operator's runtime: it reads recorded history through internal/query and must not depend on the code that wrote it (D20, Task 11.1)"
+            - pkg: github.com/kuberecord/kuberecord/internal/watch
+              desc: "the CLI is a client of the frozen schema, not of the operator's runtime; where it needs the data plane's kind-resolution logic it carries a copy naming internal/watch/resolver.go as the source, because the import itself is the coupling (D20, Task 11.1)"
+            - pkg: github.com/kuberecord/kuberecord/internal/controller
+              desc: "the CLI is a client of the frozen schema, not of the operator's runtime: it never reconciles anything, and an import here would put controller-runtime into the link graph of every CLI invocation (D20, Task 11.1)"
+            - pkg: github.com/kuberecord/kuberecord/internal/sink
+              desc: "the sink contract is the write path and its own read half serves the operator's warm-up and GC needs; an analyst query answered through it would be the wrong contract, on the hot path's dependency graph (D16, D20, Task 11.1)"
+
         # Task 5.1 acceptance criterion: the Writer conformance suite is built
         # around the contract in internal/sink, not around any backend's
         # implementation of it. internal/pipeline is denied because it imports
