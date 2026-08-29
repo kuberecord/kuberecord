@@ -73,6 +73,16 @@ type Error struct {
 	// Err is the underlying failure, preserved for errors.Is/As by callers and
 	// for the message printed to stderr.
 	Err error
+
+	// Quiet suppresses the "error: …" line Run would otherwise print.
+	//
+	// It exists for `diff --exit-code`, whose exit 1 means "changes found" and
+	// not "something went wrong": git prints nothing for it, a script branches on
+	// it, and an `error:` line would tell a human reading the same output that a
+	// successful query had failed. The explanation still reaches them — as a
+	// notice beside the document, where every other qualification of an answer
+	// goes — so what is suppressed is the misleading word, not the information.
+	Quiet bool
 }
 
 func (e *Error) Error() string { return e.Err.Error() }

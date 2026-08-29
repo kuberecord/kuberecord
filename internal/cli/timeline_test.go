@@ -51,7 +51,7 @@ import (
 // updateGolden rewrites the files instead of comparing against them.
 //
 //	go test ./internal/cli/ -run Timeline -update
-var updateGolden = flag.Bool("update", false, "rewrite the timeline golden files")
+var updateGolden = flag.Bool("update", false, "rewrite the golden files")
 
 // The stream markers inside a golden file.
 const (
@@ -205,8 +205,20 @@ func runTimeline(
 // assertGolden compares both streams against the checked-in file.
 func assertGolden(t *testing.T, name, stdout, stderr string) {
 	t.Helper()
+	assertGoldenIn(t, "timeline", name, stdout, stderr)
+}
 
-	path := filepath.Join("testdata", "timeline", name+".golden")
+// assertGoldenIn is assertGolden for a named command's directory.
+//
+// The directory is a parameter rather than a constant because `diff` and `get`
+// have golden files of their own and the harness is the same one: two copies of
+// this would be two places for the -update path to drift from the compare path,
+// and a golden test whose two halves disagree is a test that passes after
+// rewriting the thing it was meant to pin.
+func assertGoldenIn(t *testing.T, command, name, stdout, stderr string) {
+	t.Helper()
+
+	path := filepath.Join("testdata", command, name+".golden")
 	got := stdoutMarker + stdout + stderrMarker + stderr
 
 	if *updateGolden {
@@ -221,7 +233,7 @@ func assertGolden(t *testing.T, name, stdout, stderr string) {
 
 	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading %s (run `go test ./internal/cli/ -run Timeline -update` to create it): %v", path, err)
+		t.Fatalf("reading %s (run `go test ./internal/cli/ -update` to create it): %v", path, err)
 	}
 	if got != string(want) {
 		t.Errorf("the rendering of %s changed.\n--- want ---\n%s\n--- got ---\n%s", name, want, got)

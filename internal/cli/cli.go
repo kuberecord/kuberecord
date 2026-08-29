@@ -56,6 +56,7 @@ limitations under the License.
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -95,6 +96,13 @@ func Run(args []string, streams genericiooptions.IOStreams) int {
 	}
 
 	code := ExitCodeFor(err)
+
+	// A quiet failure has already said everything it has to say, beside the
+	// document it qualifies. See Error.Quiet.
+	var coded *Error
+	if errors.As(err, &coded) && coded.Quiet {
+		return code
+	}
 
 	// Built as one string and written once. Two writes would let another
 	// writer's line land between the message and the usage block that explains

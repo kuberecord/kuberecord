@@ -14,6 +14,8 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 **how it is configured**.
 
 - [`timeline`](#timeline)
+- [`diff`](#diff)
+- [`get --at`](#get---at)
 - [Where the data comes from](#where-the-data-comes-from)
 - [The cluster identity](#the-cluster-identity)
 - [The configuration file](#the-configuration-file)
@@ -162,6 +164,175 @@ $ kuberecord timeline Deployment.apps/checkout -n payments --source ~/archives/k
 ```
 
 Without `-n`, an address resolved this way is read as cluster-scoped.
+
+## `diff`
+
+The detail view, once `timeline` has named a suspect. It asks the backend the
+same question `timeline` asks — same window, same incarnation, same coverage
+consultation — and spends the whole page on the answer instead of one column of
+it.
+
+```console
+$ kuberecord diff deploy/checkout -n payments --since 2h
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
+  ~ spec.replicas
+      - 3
+      + 5
+  + spec.paused
+      + true
+  - spec.minReadySeconds
+      - 10
+
+2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+  ~ spec.template.spec.containers[0].resources.limits.memory
+      - 2Gi
+      + 512Mi
+```
+
+`+` is green, `-` is red, `~` is yellow.
+
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--since` | Only changes at or after this point: a duration (`6h`, `90m`, `3d`, `2w`) or an instant (`2026-08-20`, `2026-08-20T14:00:00Z`). |
+| `--until` | Only changes at or before this point, in the same forms. |
+| `--limit` | Examine at most this many changes, newest first. Default 100; zero means no limit. |
+| `--reverse` | Oldest first. It reorders the blocks; it does not select different ones. |
+| `--uid` | Pin the diff to one incarnation. |
+| `--field` | Only changes touching one of these paths, matched by prefix, with every hunk of those changes. |
+| `--full` | Print every operation and every value in full. |
+| `--exit-code` | `0` when there are no changes, `1` when there are, as `git diff` does. |
+
+### The old value is reconstructed, not stored
+
+A recorded patch is RFC 6902, which carries the *new* value and nothing else. The
+value on the left of each hunk comes from replaying the object's state up to that
+change — one reconstruction per incarnation, not one per row. Where that replay
+could not run, the hunk says `- (prior value not established)` rather than
+leaving the field looking as though it had no value before, and a notice on
+stderr says why.
+
+This is why `--field` narrows what is *shown* rather than what is fetched. A path
+predicate pushed into the query would make the returned rows a non-consecutive
+slice of history, and replaying only those patches would report values the object
+never held. So the query goes out unfiltered, the replay runs over everything it
+needs, and a notice reports how many changes were examined — `--limit` bounds the
+changes examined, not the ones shown.
+
+### Redacted values are marked
+
+A value that reads `[REDACTED]` is what is **stored**: redaction happens on the
+way in, before hashing, so nothing downstream can tell it from a ConfigMap whose
+value genuinely is that string. `diff` renders it dim and marks it:
+
+```
+  ~ data.password
+      - [REDACTED]  (redacted by policy)
+      + [REDACTED]  (redacted by policy)
+```
+
+See [`docs/SCHEMA.md`](SCHEMA.md#redaction) for what follows from that — in
+particular that two states differing *only* in a redacted value produce one row,
+not two.
+
+### Nothing fills the terminal
+
+A value over 200 characters is cut with `…(N more bytes, --full)`, and a change
+touching more than 20 fields shows the first 20 and counts the rest. A fat
+PodTemplate or a CRD carrying a large OpenAPI schema is exactly the case this
+exists for. `--full` prints everything.
+
+### `--exit-code`
+
+`git diff`'s contract: `0` for no changes, `1` for changes found. Nothing prints
+`error:` for it — the exit code is a finding, not a failure, and the notice
+beside the document says so.
+
+Exit `3` still outranks it. A script told "no changes" when nothing was ever
+watching has been given the one answer [Invariant 9](#an-empty-result-is-never-presented-on-its-own)
+exists to prevent, so a scope nobody watched is reported as such whatever
+`--exit-code` asked for.
+
+## `get --at`
+
+What did this look like before?
+
+```console
+$ kuberecord get deploy/checkout -n payments --at 2h
+# Reconstructed state — NOT A DEPLOYABLE MANIFEST.
+#
+# object:          apps/Deployment payments/checkout
+# cluster:         prod-eu-1
+# uid:             7c9e6679-7425-40de-944b-e07fc1f90ae7
+# at:              2026-08-28T13:00:00Z
+# base row:        2026-08-28T14:05:02Z (Checkpoint)
+# patches applied: 0
+#
+# This is what kuberecord recorded, not what the API server held. Do not
+# `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and
+# metadata.generation were stripped at capture, and every field a redaction
+# policy covers carries the sentinel [REDACTED] in place of its value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: payments
+...
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--at` | The instant to reconstruct for: a duration or an instant, as `--since` takes. Defaults to now, which is the newest recorded state. |
+| `--uid` | Pin the reconstruction to one incarnation. Empty means the newest incarnation alive at `--at`, never a blend of two. |
+| `--verify` | Re-hash the reconstruction and compare it against the digest recorded for it. |
+
+`-o` is `yaml` (the default) or `json`. There is nothing for the tabular formats
+to lay out — a reconstructed object is a document, not a row.
+
+### The header is not a courtesy
+
+What comes out looks exactly like a manifest, and the obvious next thing to do
+with it is `kubectl apply -f`. That would be wrong in three ways at once, none of
+them visible in the document: volatile metadata was stripped before the state was
+recorded, redacted fields carry a sentinel instead of their values, and the
+document describes a past somebody deliberately moved the object out of. So the
+header is mandatory and says so in those words. JSON has no comment syntax, so
+for `-o json` the identical block goes to **stderr** and stdout stays something
+`jq` can read.
+
+The provenance in it is not diagnostics. A state assembled from a base an hour
+old and two patches deserves more confidence than one assembled from a base three
+months old and four hundred, and `base row` and `patches applied` are what let a
+reader judge which they have.
+
+### `--verify`
+
+Every row carries the SHA-256 of the state it recorded. `--verify` canonicalizes
+the reconstruction — re-serializing it with sorted object keys, the procedure
+[`docs/SCHEMA.md`](SCHEMA.md) specifies — hashes it, and compares:
+
+```console
+$ kuberecord get deploy/checkout -n payments --at 2h --verify
+! verified: the reconstructed state hashes to 9f2b…, which is the digest recorded for it
+```
+
+A mismatch exits `1` and names both digests. It means the archive and the replay
+disagree about what this object looked like, which is a chain-of-custody finding
+and not a rounding error. A row carrying no digest is reported as unverifiable
+rather than passed: reporting success there would be inventing an assurance
+nobody gave.
+
+`--verify` is an assertion rather than an annotation — the document is written
+only if the check holds. `kuberecord get … --verify > object.yaml` is how this
+flag gets used, and a disputed reconstruction is the last thing that should land
+in that file.
 
 ## Where the data comes from
 
@@ -421,10 +592,14 @@ exactly that shape.
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success. |
-| `1` | Runtime error: a well-formed request that could not be carried out. |
+| `0` | Success. For `diff --exit-code`, additionally "no changes". |
+| `1` | Runtime error: a well-formed request that could not be carried out. For `diff --exit-code`, additionally "changes found", which is a finding rather than a failure and prints no `error:` line. |
 | `2` | Usage error: an unknown flag, a malformed object address, a bad value. |
 | `3` | No coverage: nothing was ever watching the requested scope — which is a different fact from "nothing changed", and is reported as one. |
+
+`diff --exit-code` is the one place `0` and `1` carry a second meaning, which is
+why it is opt-in: it overloads codes that otherwise only mean success and failure.
+Code `3` outranks it either way.
 
 Code `3` is the one worth scripting against. Every other tool in this space
 collapses "your query matched nothing" and "nothing was ever recorded here" into a

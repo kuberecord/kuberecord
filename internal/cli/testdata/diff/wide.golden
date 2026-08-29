@@ -1,0 +1,29 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+2026-08-28T14:09:40.900000000Z  Modified  rv 1004  unknown
+  ~ metadata.annotations.deployment.kubernetes.io/revision
+      - 1
+      + 2
+
+2026-08-28T14:05:02.117000000Z  Modified  rv 1003  kube-controller-manager
+  ~ spec.replicas
+      - 3
+      + 5
+  + spec.paused
+      + true
+  - spec.minReadySeconds
+      - 10
+
+2026-08-28T14:03:11.482000000Z  Modified  rv 1002  kubectl-client-side-apply
+  ~ spec.template.spec.containers[0].resources.limits.memory
+      - 2Gi
+      + 512Mi
+
+2026-08-28T14:02:58.001000000Z  Added  rv 1001  kubectl-client-side-apply
+  full state recorded
+=== stderr ===

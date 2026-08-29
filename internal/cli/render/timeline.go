@@ -156,6 +156,42 @@ func (d TimelineDocument) showUID(opts Options) bool {
 	return len(d.Incarnations) > 0 || opts.Wide
 }
 
+// header is the block of facts every document in this package opens with.
+//
+// It is a separate type rather than renderHeader taking a TimelineDocument
+// because `diff` opens with the same block and must not open with a *nearly* the
+// same one: the five facts a reader needs before the first row means anything are
+// the same five whatever shape the rows take, and two renderings of them would
+// eventually disagree about whether coverage was stated.
+func (d TimelineDocument) header() documentHeader {
+	return documentHeader{
+		Kind:         d.Kind,
+		Object:       d.Object,
+		Cluster:      d.Cluster,
+		UID:          d.UID,
+		Incarnations: d.Incarnations,
+		Coverage:     d.Coverage,
+	}
+}
+
+// documentHeader is the identity block shared by every rendered document.
+type documentHeader struct {
+	// Kind is the object's group and kind, "apps/Deployment", or the bare kind
+	// for the core group.
+	Kind string
+	// Object is "namespace/name", or the bare name for a cluster-scoped kind.
+	Object string
+	// Cluster is the kuberecord cluster identity (D21).
+	Cluster string
+	// UID is the incarnation being shown, empty when none could be named.
+	UID string
+	// Incarnations holds every UID in the window, listed in place of UID when a
+	// command is showing all of them.
+	Incarnations []string
+	// Coverage is the pre-rendered coverage summary.
+	Coverage string
+}
+
 // WriteTimeline writes the document to out and its notices to errOut.
 //
 // Both writes are checked. The document's is the command's whole answer, so a
@@ -202,7 +238,7 @@ func renderTimeline(doc TimelineDocument, opts Options) string {
 	p := palette{enabled: opts.Color}
 
 	var built strings.Builder
-	built.WriteString(renderHeader(doc, p))
+	built.WriteString(renderHeader(doc.header(), p))
 	if len(doc.Rows) == 0 {
 		// No table, not an empty one. Why the result is empty is on stderr, where
 		// every other qualification of the document is; a header row with nothing
@@ -217,7 +253,7 @@ func renderTimeline(doc TimelineDocument, opts Options) string {
 // renderHeader renders the five facts a reader needs before the first row means
 // anything: which kind, which object, which cluster, which incarnation, and
 // whether anything was watching.
-func renderHeader(doc TimelineDocument, p palette) string {
+func renderHeader(doc documentHeader, p palette) string {
 	type field struct{ label, value string }
 
 	fields := []field{
@@ -257,7 +293,7 @@ func renderHeader(doc TimelineDocument, p palette) string {
 //
 // They are listed in full rather than abbreviated because the header is where a
 // reader goes to get a UID to paste into --uid, and a prefix is not a UID.
-func renderIncarnations(doc TimelineDocument, indent int) string {
+func renderIncarnations(doc documentHeader, indent int) string {
 	var built strings.Builder
 	for i, uid := range doc.Incarnations {
 		if i > 0 {

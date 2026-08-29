@@ -1,0 +1,40 @@
+=== stdout ===
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "checkout",
+    "namespace": "payments",
+    "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+  },
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [
+          {
+            "image": "registry.example/checkout:1.4.2",
+            "name": "checkout"
+          },
+          {
+            "image": "registry.example/envoy:1.29",
+            "name": "envoy"
+          }
+        ]
+      }
+    }
+  }
+}
+=== stderr ===
+# Reconstructed state — NOT A DEPLOYABLE MANIFEST.
+#
+# object:          apps/Deployment payments/checkout
+# cluster:         prod-eu-1
+# uid:             7c9e6679-7425-40de-944b-e07fc1f90ae7
+# at:              2026-08-28T15:00:00Z
+# base row:        2026-08-28T14:05:02Z (Checkpoint)
+# patches applied: 0
+#
+# This is what kuberecord recorded, not what the API server held. Do not
+# `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and
+# metadata.generation were stripped at capture, and every field a redaction
+# policy covers carries the sentinel [REDACTED] in place of its value.

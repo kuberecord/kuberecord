@@ -180,16 +180,12 @@ func runTimelineCommand(
 	}
 
 	now := time.Now()
-	from, to, err := timelineWindow(local, now)
+	from, to, err := parseWindow(local.since, local.until, now)
 	if err != nil {
 		return err
 	}
 
-	resolver, err := NewBackendResolver(flags, streams, invokedAs)
-	if err != nil {
-		return err
-	}
-	backend, err := resolver.Resolve(ctx)
+	backend, ref, err := resolveObject(ctx, flags, streams, invokedAs, arg)
 	if err != nil {
 		return err
 	}
@@ -199,17 +195,8 @@ func runTimelineCommand(
 		err = errors.Join(err, backend.Close())
 	}()
 
-	resolved, err := resolveTimelineAddress(flags, streams, arg)
-	if err != nil {
-		return err
-	}
-	namespace, err := timelineNamespace(flags, streams, resolved)
-	if err != nil {
-		return err
-	}
-
 	request := TimelineRequest{
-		Ref:             resolved.ObjectRef(backend.ClusterID, namespace),
+		Ref:             ref,
 		From:            from,
 		To:              to,
 		Now:             now,
@@ -225,6 +212,82 @@ func runTimelineCommand(
 	return RunTimeline(ctx, backend, request, streams, timelineRenderOptions(flags, local, streams))
 }
 
+// resolveObject opens the backend and turns an address into the canonical
+// identity the read plane answers questions about.
+//
+// It is the half of every object command that is not about the question being
+// asked: which backend, which cluster identity, which kind the address names,
+// which namespace the question is in. Sharing it is what keeps `timeline`, `diff`
+// and `get` reading the same object for the same address — three copies of this
+// sequence would be three chances for one of them to resolve a short name
+// differently, and a command that quietly reads a different object's history is
+// the worst defect this CLI could ship.
+//
+// The backend is opened before the address is resolved so that the resolution
+// notice on stderr — which sink, which cluster identity — precedes anything said
+// about the object. The caller owns the returned backend and must Close it; on
+// failure this closes it, so a caller only has one path to think about.
+func resolveObject(
+	ctx context.Context, flags *GlobalFlags, streams genericiooptions.IOStreams,
+	invokedAs string, arg ResourceArg,
+) (*Backend, query.ObjectRef, error) {
+	resolver, err := NewBackendResolver(flags, streams, invokedAs)
+	if err != nil {
+		return nil, query.ObjectRef{}, err
+	}
+	backend, err := resolver.Resolve(ctx)
+	if err != nil {
+		return nil, query.ObjectRef{}, err
+	}
+
+	ref, err := objectRefFor(flags, streams, backend, arg)
+	if err != nil {
+		return nil, query.ObjectRef{}, errors.Join(err, backend.Close())
+	}
+	return backend, ref, nil
+}
+
+// objectRefFor resolves the address against the opened backend's cluster
+// identity.
+func objectRefFor(
+	flags *GlobalFlags, streams genericiooptions.IOStreams, backend *Backend, arg ResourceArg,
+) (query.ObjectRef, error) {
+	resolved, err := resolveObjectAddress(flags, streams, arg)
+	if err != nil {
+		return query.ObjectRef{}, err
+	}
+	namespace, err := objectNamespace(flags, streams, resolved)
+	if err != nil {
+		return query.ObjectRef{}, err
+	}
+	return resolved.ObjectRef(backend.ClusterID, namespace), nil
+}
+
+// parseWindow reads a pair of --since/--until values against one instant.
+//
+// now is threaded through rather than read here so that both ends of one window
+// are computed against the same instant: a --since and a --until evaluated a
+// microsecond apart would produce a window whose width depended on how fast the
+// process started.
+func parseWindow(since, until string, now time.Time) (from, to time.Time, err error) {
+	if since != "" {
+		if from, err = ParseInstant(since, now); err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	if until != "" {
+		if to, err = ParseInstant(until, now); err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	if !from.IsZero() && !to.IsZero() && to.Before(from) {
+		return time.Time{}, time.Time{}, UsageErrorf(
+			"the window ends before it starts: --since resolves to %s and --until to %s",
+			render.FormatInstant(from), render.FormatInstant(to))
+	}
+	return from, to, nil
+}
+
 // requireTableFormat refuses the formats this command does not yet render.
 //
 // Refusing by name rather than rendering a table regardless is the same choice
@@ -238,26 +301,6 @@ func requireTableFormat(format OutputFormat) error {
 	}
 	return UsageErrorf("timeline renders %s or %s, not %s: the structured formats carry the versioned "+
 		"%s envelope and are not wired to this command yet", OutputTable, OutputWide, format, ConfigAPIVersion)
-}
-
-// timelineWindow reads --since and --until against one instant.
-func timelineWindow(local *timelineFlags, now time.Time) (from, to time.Time, err error) {
-	if local.since != "" {
-		if from, err = ParseInstant(local.since, now); err != nil {
-			return time.Time{}, time.Time{}, err
-		}
-	}
-	if local.until != "" {
-		if to, err = ParseInstant(local.until, now); err != nil {
-			return time.Time{}, time.Time{}, err
-		}
-	}
-	if !from.IsZero() && !to.IsZero() && to.Before(from) {
-		return time.Time{}, time.Time{}, UsageErrorf(
-			"the window ends before it starts: --since resolves to %s and --until to %s",
-			render.FormatInstant(from), render.FormatInstant(to))
-	}
-	return from, to, nil
 }
 
 // normalizeFieldPaths accepts the display spelling of a path as well as the
@@ -289,8 +332,11 @@ func timelineRenderOptions(
 	}
 }
 
-// resolveTimelineAddress maps the address onto a kind, through the cluster when
+// resolveObjectAddress maps the address onto a kind, through the cluster when
 // one can be reached and offline when one cannot.
+//
+// It is shared by every command that names an object, which is why neither it nor
+// objectNamespace is spelled after the command that arrived first.
 //
 // The offline path exists because an archive on a laptop is a supported way to
 // read history (D18, and docs/CLI.md's evaluation mode), and the cluster the
@@ -300,7 +346,7 @@ func timelineRenderOptions(
 // pluralize `deployments`, because doing either without the server's own
 // discovery data would be a guess — and a guess here silently reads a different
 // object's history.
-func resolveTimelineAddress(
+func resolveObjectAddress(
 	flags *GlobalFlags, streams genericiooptions.IOStreams, arg ResourceArg,
 ) (ResolvedResource, error) {
 	reach, err := clusterResolution(flags, arg)
@@ -368,14 +414,14 @@ func describeGroupKind(gvk schema.GroupVersionKind) string {
 	return gvk.Kind + "." + gvk.Group
 }
 
-// timelineNamespace resolves the namespace the question is asked in, and says so
+// objectNamespace resolves the namespace the question is asked in, and says so
 // when the answer is discarded.
 //
 // A cluster-scoped kind has no namespace in the recorded history, so a --namespace
 // given for one is dropped. It is announced rather than dropped quietly: the user
 // narrowed their question and the tool widened it back, and a result that did not
 // obey a flag has to say which flag it did not obey.
-func timelineNamespace(
+func objectNamespace(
 	flags *GlobalFlags, streams genericiooptions.IOStreams, resolved ResolvedResource,
 ) (string, error) {
 	namespace, err := flags.Namespace()
@@ -441,6 +487,19 @@ type TimelineRequest struct {
 	ExcludeActors []string
 	FieldPaths    []string
 
+	// DisplayFieldPaths narrows the *rendered* rows without narrowing the query.
+	//
+	// It exists for `diff`, whose entire output is the value each operation
+	// destroyed. Pushing a path predicate into the query would make the returned
+	// rows a non-consecutive slice of history, which switches the prior-value
+	// replay off (see filtered) and leaves every hunk with its "+" half and no
+	// "-" half — the command's whole point, removed by one of its own flags. So
+	// the query stays unfiltered, the replay runs over the consecutive run it
+	// needs, and the narrowing happens here afterwards. The cost is that the
+	// backend reads rows nobody will see, which is stated in a notice rather than
+	// absorbed silently.
+	DisplayFieldPaths []string
+
 	// Limit caps the changes rendered; zero means no cap.
 	Limit int
 
@@ -466,61 +525,33 @@ func (r TimelineRequest) filtered() bool {
 
 // RunTimeline answers one timeline request against an opened backend and renders
 // the result.
+//
+// The gathering is shared with `diff` (see gather.go) and the layout is not: the
+// two commands ask the backend the identical question, and the whole of their
+// difference is how the answer is laid out.
 func RunTimeline(
 	ctx context.Context, backend *Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
-	capabilities := backend.Engine.Capabilities()
-	document := render.TimelineDocument{
-		Kind:    describeKind(request.Ref),
-		Object:  describeObject(request.Ref),
-		Cluster: request.Ref.ClusterID,
-	}
-
-	from, to, windowNotice := timelineBounds(request, capabilities)
-	document.Notices = appendNotice(document.Notices, windowNotice)
-
-	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
-	document.Notices = append(document.Notices, selectionNotices...)
-	document.UID = selection.uid
-	document.Incarnations = selection.listed
-
-	changes, err := collectChanges(ctx, backend.Engine, request.timelineQuery(selection, from, to))
+	gathered, err := gatherChanges(ctx, backend, request)
 	if err != nil {
-		return timelineQueryError(request, err)
-	}
-	document.Rows = decodeRows(changes)
-	if request.AllIncarnations && len(document.Incarnations) == 0 {
-		// The listing failed, and a table that may span several incarnations must
-		// still carry the column that tells them apart (Invariant 7). The rows
-		// themselves are the fallback source of the identities.
-		document.Incarnations = distinctUIDs(document.Rows)
-	}
-	if document.UID == "" {
-		// The incarnation could not be listed, so the header takes the identity
-		// from the rows themselves rather than leaving the field blank.
-		document.UID = firstObjectUID(document.Rows)
+		return err
 	}
 
-	document.Notices = append(document.Notices, priorValueNotices(ctx, backend.Engine, request, document.Rows)...)
-	if request.Reverse {
-		slices.Reverse(document.Rows)
+	document := render.TimelineDocument{
+		Kind:         describeKind(request.Ref),
+		Object:       describeObject(request.Ref),
+		Cluster:      request.Ref.ClusterID,
+		UID:          gathered.UID,
+		Incarnations: gathered.Incarnations,
+		Coverage:     gathered.Coverage,
+		Rows:         gathered.Rows,
+		Notices:      gathered.Notices,
 	}
-
-	intervals, coverageErr := backend.Engine.Coverage(ctx, request.scopeQuery(from, to))
-	if coverageErr != nil && !errors.Is(coverageErr, query.ErrCapabilityUnsupported) {
-		return RuntimeErrorf("reading the watch scopes that cover %s: %w", describeObject(request.Ref), coverageErr)
-	}
-	document.Coverage = coverageSummary(intervals, coverageErr)
-	document.Notices = appendNotice(document.Notices, deletionsNotice(capabilities, document.Rows))
-
-	emptyNotices, emptyErr := explainEmpty(request, from, to, document.Rows, intervals, coverageErr)
-	document.Notices = append(document.Notices, emptyNotices...)
-
 	if writeErr := render.WriteTimeline(streams.Out, streams.ErrOut, document, opts); writeErr != nil {
 		return RuntimeErrorf("%w", writeErr)
 	}
-	return emptyErr
+	return gathered.Empty
 }
 
 // timelineBounds completes the window a backend insists on, and says so.

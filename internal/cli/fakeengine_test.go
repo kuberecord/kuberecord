@@ -19,6 +19,7 @@ package cli_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -52,6 +53,16 @@ type fakeEngine struct {
 	incarnations []query.Incarnation
 	intervals    []query.ScopeInterval
 	state        string
+
+	// replay makes StateAt reconstruct from changes through query.Replay instead
+	// of handing back the fixed document in state.
+	//
+	// It exists so that a test of `get` exercises the reconstruction procedure
+	// rather than a stand-in for it. The rule that a Checkpoint's own diff must
+	// not be applied over the state that diff already produced lives in
+	// query.Replay, and a fake that returned a document of its own would assert
+	// the fake's arithmetic and certify nothing about the rule.
+	replay bool
 
 	// The failures a test injects, to drive the degradation paths that no
 	// shipped backend currently takes.
@@ -122,10 +133,13 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 // needs; a fake that indexed by instant would be asserting the anchor arithmetic
 // twice, once here and once in the test that exists for it.
 func (f *fakeEngine) StateAt(
-	_ context.Context, _ query.ObjectRef, at time.Time, _ string,
+	_ context.Context, _ query.ObjectRef, at time.Time, uid string,
 ) (*query.Reconstruction, error) {
 	if f.stateErr != nil {
 		return nil, f.stateErr
+	}
+	if f.replay {
+		return f.replayState(at, uid)
 	}
 	if f.state == "" {
 		return nil, query.ErrObjectNotFound
@@ -135,6 +149,57 @@ func (f *fakeEngine) StateAt(
 		return nil, err
 	}
 	return &query.Reconstruction{Object: object, BaseTS: at, BaseEvent: query.EventAdded}, nil
+}
+
+// replayState reconstructs from the fixture's own history, through the contract's
+// reconstruction procedure.
+//
+// It follows the procedure docs/SCHEMA.md specifies as far as a rendering test
+// needs: rows at or before the instant, one incarnation, a deletion terminal for
+// its uid, the newest full-state row as the base, and query.Replay for the rest.
+// What it deliberately does not do is decide anything query.Replay decides.
+func (f *fakeEngine) replayState(at time.Time, uid string) (*query.Reconstruction, error) {
+	if uid == "" {
+		uid = newestUIDAt(f.changes, at)
+	}
+
+	history := make([]query.ReplayRow, 0, len(f.changes))
+	for _, change := range f.changes {
+		switch {
+		case change.TS.After(at), change.UID != uid:
+			continue
+		case change.EventType == query.EventDeleted:
+			// Terminal for its incarnation: everything before it describes an
+			// object that no longer existed at the instant asked about.
+			history = nil
+			continue
+		}
+		history = append(history, query.ReplayRow{
+			TS: change.TS, EventType: change.EventType,
+			Data: change.Data, Diff: change.Diff, SHA256: change.SHA256,
+		})
+	}
+	if len(history) == 0 {
+		return nil, query.ErrObjectNotFound
+	}
+	base := query.BaseRow(history)
+	if base < 0 {
+		return nil, fmt.Errorf("no full-state row survives before %s: %w",
+			at.UTC().Format(time.RFC3339Nano), query.ErrObjectNotFound)
+	}
+	return query.Replay(history, base)
+}
+
+// newestUIDAt is the incarnation StateAt picks when none was pinned: the newest
+// one alive at the instant, never a blend of two.
+func newestUIDAt(changes []query.Change, at time.Time) string {
+	uid := ""
+	for _, change := range changes {
+		if !change.TS.After(at) {
+			uid = change.UID
+		}
+	}
+	return uid
 }
 
 func (f *fakeEngine) Coverage(_ context.Context, _ query.ScopeQuery) ([]query.ScopeInterval, error) {

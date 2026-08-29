@@ -182,6 +182,8 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 	// package-level global two concurrently-built roots would share.
 	root.AddCommand(
 		newTimelineCommand(flags, streams, invokedAs),
+		newDiffCommand(flags, streams, invokedAs),
+		newGetCommand(flags, streams, invokedAs),
 		newConfigCommand(flags, streams, invokedAs),
 	)
 
