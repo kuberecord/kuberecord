@@ -225,6 +225,7 @@ func TestGlobalFlagSurface(t *testing.T) {
 		{cli.FlagSink, ""},
 		{cli.FlagSource, ""},
 		{cli.FlagProfile, ""},
+		{cli.FlagOperatorNamespace, ""},
 		{cli.FlagVerbosity, "v"},
 	}
 

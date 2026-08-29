@@ -71,6 +71,10 @@ const (
 	fakeSpanColumns   = "uid, min(ts) AS first_seen, max(ts) AS last_seen, " +
 		"countIf(event_type = 'Deleted') AS deletions"
 	fakeScopeColumns = "api_group, kind, namespace, action, rule_ref, ts"
+
+	// fakeClusterIDColumn is the cluster-identity probe, which both tables answer
+	// and which is the only read in this package with no WHERE clause at all.
+	fakeClusterIDColumn = "DISTINCT cluster_id"
 )
 
 // fakeEventGroups is the both-spellings predicate, likewise spelled out here.
@@ -295,8 +299,18 @@ func parseStatement(sqlText string, args []any) (parsedStatement, error) {
 			parsed.tail = append(parsed.tail, line)
 		}
 	}
-	if !found.selectLine || !found.fromLine || !found.whereLine {
-		return parsed, fmt.Errorf("stand-in: %q lacks a SELECT, a FROM or a WHERE", sqlText)
+	if !found.selectLine || !found.fromLine {
+		return parsed, fmt.Errorf("stand-in: %q lacks a SELECT or a FROM", sqlText)
+	}
+	// A missing WHERE is admitted for one projection and refused for every other,
+	// by name. The cluster-identity probe genuinely has nothing to filter by — it
+	// is the question asked when the caller cannot yet name a cluster — while for
+	// any other read a vanished WHERE is a predicate list that came out empty by
+	// accident, and evaluating that as "match everything" is precisely the silent
+	// widening this stand-in exists to catch.
+	if !found.whereLine && parsed.projection != fakeClusterIDColumn {
+		return parsed, fmt.Errorf("stand-in: %q lacks a WHERE, and only the cluster-identity probe "+
+			"may read without one", sqlText)
 	}
 	return parsed, nil
 }
@@ -337,6 +351,8 @@ func (s *fakeStore) evaluateStates(p parsedStatement) (driver.Rows, error) {
 		return projectNewestUID(p, rows)
 	case fakeSpanColumns:
 		return projectSpans(p, rows)
+	case fakeClusterIDColumn:
+		return projectClusterIDs(p, clusterIDsOf(rows))
 	}
 	return nil, fmt.Errorf("stand-in: no read of %s projects %q: %s",
 		tableResourceStates, p.projection, collapse(p.sql))
@@ -538,6 +554,37 @@ func projectNewestUID(p parsedStatement, rows []stateRow) (driver.Rows, error) {
 	return newFakeRows(out, nil), nil
 }
 
+// clusterIDsOf reads the cluster column off a set of record rows.
+func clusterIDsOf(rows []stateRow) []string {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.clusterID)
+	}
+	return ids
+}
+
+// projectClusterIDs answers the cluster-identity probe over either table.
+//
+// It applies the DISTINCT the projection asks for and the ordering the tail asks
+// for, rather than assuming either: the engine's contract promises a sorted,
+// duplicate-free list, and a stand-in that sorted unbidden would let a statement
+// that had lost its ORDER BY keep passing.
+func projectClusterIDs(p parsedStatement, ids []string) (driver.Rows, error) {
+	if !slices.Equal(p.tail, []string{"ORDER BY cluster_id"}) {
+		return nil, fmt.Errorf("stand-in: the cluster-identity probe must arrive sorted, and this one "+
+			"ends %q: %s", strings.Join(p.tail, " / "), collapse(p.sql))
+	}
+	distinct := slices.Clone(ids)
+	slices.Sort(distinct)
+	distinct = slices.Compact(distinct)
+
+	out := make([][]any, 0, len(distinct))
+	for _, id := range distinct {
+		out = append(out, []any{id})
+	}
+	return newFakeRows(out, nil), nil
+}
+
 // projectSpans answers the per-incarnation aggregate.
 func projectSpans(p parsedStatement, rows []stateRow) (driver.Rows, error) {
 	if !slices.Equal(p.tail, []string{"GROUP BY uid", "ORDER BY first_seen"}) {
@@ -588,6 +635,16 @@ func (s *fakeStore) evaluateScopes(p parsedStatement) (driver.Rows, error) {
 	if p.final {
 		return nil, fmt.Errorf("stand-in: %s is a plain MergeTree with nothing to collapse, so FINAL on "+
 			"it is a cost with no return: %s", tableWatchScopes, collapse(p.sql))
+	}
+	if p.projection == fakeClusterIDColumn {
+		s.mu.Lock()
+		stored := slices.Clone(s.scopes)
+		s.mu.Unlock()
+		ids := make([]string, 0, len(stored))
+		for _, row := range stored {
+			ids = append(ids, row.clusterID)
+		}
+		return projectClusterIDs(p, ids)
 	}
 	if p.projection != fakeScopeColumns {
 		return nil, fmt.Errorf("stand-in: no read of %s projects %q: %s",

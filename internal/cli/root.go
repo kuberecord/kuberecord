@@ -17,6 +17,7 @@ limitations under the License.
 package cli
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -140,14 +141,14 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 			return ApplyVerbosity(flags.Verbosity)
 		},
 
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				// Reached only while the tree has no subcommands; once it does,
-				// cobra reports an unknown one itself and the flag-error path
-				// codes it. Either way a stray argument is a usage error, never
-				// a silently ignored one.
-				return UsageErrorf("unknown command %q for %q", args[0], invokedAs)
-			}
+		// A stray argument is a usage error, and it is classified here rather than
+		// left to cobra. Cobra's own "unknown command" is a plain error, which
+		// ExitCodeFor reads as a runtime failure — so without this, a typo would
+		// exit 1 and a wrapper script told to retry on 1 and stop on 2 would retry
+		// a misspelling forever.
+		Args: rejectUnknownSubcommand,
+
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Bare invocation is a request for help, not a failure: kubectl
 			// behaves this way, and exiting non-zero for it would break the
 			// habit of typing a command name to remember its flags.
@@ -175,5 +176,32 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 
 	flags.AddFlags(root.PersistentFlags())
 
+	// The configuration subtree is the only command this task adds, and it is added
+	// here rather than by the caller so that both binaries — and every test that
+	// builds a root — get the same tree. Commands that query a backend arrive in
+	// Task 11.3 and later, constructed with the same flags value.
+	root.AddCommand(newConfigCommand(flags, streams, invokedAs))
+
 	return root, flags
+}
+
+// rejectUnknownSubcommand is the Args validator every command with children uses.
+//
+// Cobra's built-in validator produces a plain error for an unknown subcommand, and
+// a plain error is a runtime failure by ExitCodeFor's reckoning. That is the wrong
+// code for a typo: exit 2 is the one that says "you typed something this program
+// does not accept", and the distinction exists so that a wrapper script can retry a
+// backend timeout without retrying a misspelling.
+//
+// The suggestions are cobra's own, kept because losing them would be a real
+// regression in a tree whose subcommands are the point of the release.
+func rejectUnknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	message := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		message += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return UsageErrorf("%s", message)
 }

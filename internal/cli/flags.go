@@ -60,6 +60,18 @@ const (
 	// FlagProfile selects a stanza in the CLI's configuration file.
 	FlagProfile = "profile"
 
+	// FlagOperatorNamespace names the namespace the operator runs in, which is
+	// where a sink's credentials Secret lives by default (D7) and where the
+	// Deployment carrying the cluster identity is found.
+	//
+	// It exists because the two ways of learning it without asking can both fail
+	// in ordinary clusters: searching for the Deployment needs a cluster-wide list
+	// that a locked-down cluster will not grant, and the built-in default is only
+	// right for an install nobody moved. Without a flag, the user whose search is
+	// forbidden *and* whose install is elsewhere has no way out but hand-editing a
+	// configuration file.
+	FlagOperatorNamespace = "operator-namespace"
+
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl
 	// spells it. The long form reads oddly in help output and is kept anyway:
 	// muscle memory for `-v 6` is worth more than the tidier `--verbose`, and a
@@ -104,6 +116,11 @@ type GlobalFlags struct {
 	// Profile selects a stanza in the CLI's configuration file.
 	Profile string
 
+	// OperatorNamespace is where discovery reads a sink's credentials Secret and
+	// the operator's own Deployment. Empty means "work it out": the configuration
+	// file, then a labelled search, then DefaultOperatorNamespace.
+	OperatorNamespace string
+
 	// Verbosity is the klog verbosity level. It is applied to klog rather than
 	// interpreted locally so that `-v 6` shows the API requests client-go is
 	// making, which is the reason anyone reaches for the flag.
@@ -145,6 +162,9 @@ func (g *GlobalFlags) AddFlags(flags *pflag.FlagSet) {
 		"Read directly from a location, bypassing sink discovery: a local directory or an s3:// URL.")
 	flags.StringVar(&g.Profile, FlagProfile, g.Profile,
 		"Use this profile from the kuberecord configuration file.")
+	flags.StringVar(&g.OperatorNamespace, FlagOperatorNamespace, g.OperatorNamespace,
+		"The namespace the kuberecord operator runs in, where a sink's credentials Secret is read. "+
+			"Defaults to the namespace of the operator's Deployment, or "+DefaultOperatorNamespace+".")
 	flags.IntVarP(&g.Verbosity, FlagVerbosity, "v", g.Verbosity,
 		"Number for the log level verbosity of diagnostics, which are written to stderr.")
 }

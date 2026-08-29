@@ -88,6 +88,13 @@ const (
 
 	// scopeColumns is one watch-scope transition, as Coverage pairs them.
 	scopeColumns = "api_group, kind, namespace, action, rule_ref, ts"
+
+	// clusterIDColumn is the projection of the cluster-identity probe. DISTINCT is
+	// part of it rather than a clause of its own because the probe's whole result
+	// is a short list of low-cardinality values, and asking the server to reduce
+	// them is the difference between reading a handful of rows over the wire and
+	// reading every row the table holds.
+	clusterIDColumn = "DISTINCT cluster_id"
 )
 
 // eventGroups is the predicate that catches both API spellings of a Kubernetes
@@ -163,6 +170,29 @@ func renderSelect(projection, table string, final bool, conds conditions, tail .
 		b.WriteString(line)
 	}
 	return statement{SQL: b.String(), Args: conds.args}
+}
+
+// renderSelectAll assembles a statement with no WHERE clause.
+//
+// It exists for the one question this package asks that has nothing to filter by
+// — which clusters are in this sink — and it is a separate function rather than a
+// nil-conditions branch of renderSelect so that a predicate list that came out
+// empty by accident still renders a WHERE and fails loudly, instead of silently
+// widening a read to the whole table.
+func renderSelectAll(projection, table string, final bool, tail ...string) statement {
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(projection)
+	b.WriteString("\nFROM ")
+	b.WriteString(table)
+	if final {
+		b.WriteString(" FINAL")
+	}
+	for _, line := range tail {
+		b.WriteString("\n")
+		b.WriteString(line)
+	}
+	return statement{SQL: b.String()}
 }
 
 // chTime renders an instant as the datetime literal a bound argument carries.
@@ -409,4 +439,34 @@ func coverageStatement(q query.ScopeQuery) statement {
 	}
 	return renderSelect(scopeColumns, tableWatchScopes, false, c,
 		"ORDER BY api_group, kind, namespace, ts")
+}
+
+// The two cluster-identity probes, and why there are two.
+//
+// Both answer the same question — which clusters has this sink recorded — and the
+// caller runs them in this order because their costs are nothing alike.
+//
+// watch_scopes is small: a handful of rows per scope per epoch, written when a
+// rule opens or closes a watch, and it is a plain MergeTree, so the probe over it
+// is a scan of a tiny table with nothing to collapse. Every cluster that ever had
+// a rule pointed at this sink appears there, which in practice is every cluster
+// whose records are in it.
+//
+// resource_states is the fallback, and it is the expensive one: FINAL over the
+// whole table, because this package permits no read of a ReplacingMergeTree
+// without a dedup form and the leading sort-key column is no exception to a rule
+// whose value is that it has none. It exists for the archive whose scope log has
+// been trimmed by a retention policy the records outlived — history with nobody
+// left to say who was watching — and running it only when the cheap probe found
+// nothing is what keeps its cost off the ordinary path.
+//
+// Neither carries a WHERE clause, which no other statement in this package can
+// say. That is not an oversight: this is the question a caller asks precisely
+// because it cannot yet name a cluster to filter by.
+func clusterIDsFromScopesStatement() statement {
+	return renderSelectAll(clusterIDColumn, tableWatchScopes, false, "ORDER BY cluster_id")
+}
+
+func clusterIDsFromRecordsStatement() statement {
+	return renderSelectAll(clusterIDColumn, tableResourceStates, true, "ORDER BY cluster_id")
 }

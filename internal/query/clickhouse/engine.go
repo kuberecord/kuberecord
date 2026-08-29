@@ -56,6 +56,7 @@ package clickhouse
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -84,6 +85,13 @@ const backendName = "clickhouse"
 // over one query.
 type Engine struct {
 	conn driver.Conn
+
+	// ownsConn records that this engine dialled the connection itself and must
+	// therefore close it. It is false for every engine built by New and true only
+	// for one built by Dial, which is what keeps the single sentence in the
+	// contract — Close releases what the engine itself created — true of both.
+	ownsConn bool
+
 	// closed makes Close idempotent. It is atomic rather than mutex-guarded
 	// because it is read on no path but Close itself; what it buys is that a
 	// caller which both defers a Close and calls one explicitly — the documented,
@@ -145,15 +153,28 @@ func (e *Engine) Capabilities() query.Capabilities {
 	}
 }
 
-// Close releases what this engine created, which is nothing: iterators own the
-// driver rows they stream, and the connection belongs to the caller.
+// Close releases what this engine created.
 //
-// It is therefore a no-op that records having run, and is safe to call more than
-// once. Saying so explicitly rather than leaving the method empty matters because
-// the contract promises idempotence, and a promise nothing implements is one a
-// later change can quietly break.
+// For an engine built by New that is nothing: iterators own the driver rows they
+// stream, and the connection belongs to the caller — closing a connection it was
+// lent would break whatever else held it, at a distance, for a reason nothing in
+// the call names. For an engine built by Dial it is the connection, because
+// nobody else has a reference with which to close it.
+//
+// It is idempotent either way, which is the contract's own promise and the reason
+// the flag is flipped by a compare-and-swap rather than a store: the documented,
+// ordinary shape is a caller that both defers a Close and calls one explicitly,
+// and a dialled engine must not hand the driver a second Close for that.
 func (e *Engine) Close() error {
-	e.closed.Store(true)
+	if !e.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if !e.ownsConn {
+		return nil
+	}
+	if err := e.conn.Close(); err != nil {
+		return fmt.Errorf("clickhouse query engine: closing the connection it dialled: %w", err)
+	}
 	return nil
 }
 
