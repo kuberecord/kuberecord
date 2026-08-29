@@ -10,9 +10,10 @@ standalone, which is what an auditor with an object-store archive and no cluster
 access wants. Both are built from the same package and behave identically, down to
 naming themselves correctly in their own help text.
 
-This page is the reference for **where the CLI reads from** and **how it is
-configured**. The commands themselves are documented as they land.
+This page is the reference for **the commands**, **where the CLI reads from** and
+**how it is configured**.
 
+- [`timeline`](#timeline)
 - [Where the data comes from](#where-the-data-comes-from)
 - [The cluster identity](#the-cluster-identity)
 - [The configuration file](#the-configuration-file)
@@ -20,6 +21,147 @@ configured**. The commands themselves are documented as they land.
 - [What the CLI asks of Kubernetes](#what-the-cli-asks-of-kubernetes)
 - [Evaluation mode](#evaluation-mode)
 - [Exit codes](#exit-codes)
+
+## `timeline`
+
+```console
+$ kubectl kuberecord timeline deploy/checkout -n payments
+→ discovered ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+→ cluster-id prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+TIME (UTC)               EVENT     ACTOR                      CHANGE
+2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
+```
+
+The header and the table go to **stdout**; every banner, notice and explanation
+goes to **stderr**. One sentence: stdout is the data, stderr explains it. That is
+what makes `timeline … | wc -l` count changes.
+
+### Flags
+
+| Flag | What it does |
+|------|--------------|
+| `--since`, `--until` | Bound the window. Either a duration — `90m`, `6h`, `3d`, `2w`, `1d6h` — or an instant: `2026-08-20`, `2026-08-20 14:00:00`, `2026-08-20T14:00:00Z`. Both read as *ago*. |
+| `--limit` | At most this many changes, newest first. Default `100`; `0` means no limit. |
+| `--reverse` | Show the same changes oldest first. It reorders rows; it does not select different ones. |
+| `--actor`, `--exclude-actor` | Field-manager predicates. Repeatable. `--exclude-actor` is applied second and wins on conflict. |
+| `--field` | Field-path prefixes, repeatable. Either spelling works: `spec.containers[0].image` or `spec.containers.0.image`. |
+| `--uid` | Pin the timeline to one incarnation. |
+| `--all-incarnations` | Show every incarnation in the window, with a `UID` column. |
+| `--full` | Print every operation of every patch, unshortened. |
+| `--with-events` | Interleave the Kubernetes Events recorded about the object. |
+
+`-o wide` adds the full UID and the resource version, and prints timestamps at the
+nanosecond precision the schema records.
+
+### How a change is summarized
+
+A one-operation patch is one line, with the operation's glyph — `+` added, `-`
+removed, `~` replaced — the field path, and the values. A larger patch is
+summarized as `~N ops`, and `--full` expands it:
+
+```console
+$ kubectl kuberecord timeline deploy/checkout -n payments --full
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+    ~ spec.replicas: 3 → 5
+    + spec.paused: true
+    - spec.minReadySeconds: 10
+```
+
+Paths are RFC 6901 JSON Pointers converted to a dotted form with bracketed array
+indices, elided in the middle when they exceed the column. The head is kept
+because a change under `spec` and one under `status` are different news; the tail
+is kept because that is what names the field.
+
+**The value on the left of the arrow is reconstructed, not recorded.** An RFC 6902
+operation carries the value it wrote and not the one it replaced, so the CLI
+anchors a single `StateAt` just before the oldest change it is about to show and
+replays the patches forward in memory — one round trip, not one per row. Three
+things follow, and each is announced on stderr rather than left to be inferred:
+
+- With `--actor`, `--exclude-actor` or `--field` in force the rows shown are **not
+  consecutive**, so the arrow is dropped. Replaying only the surviving patches
+  over a real base state would produce a document the object was never in, and the
+  numbers read out of it would be confident and wrong.
+- If the base has aged out of the retention window, or the backend cannot
+  reconstruct state, the new value is still exact and the old one is absent.
+- A patch that will not apply to the reconstructed state stops the replay at that
+  row, and the notice names the row.
+
+### Incarnations
+
+Kubernetes reuses names. A `(namespace, name)` pair may have belonged to several
+objects with different UIDs, and a timeline that spliced their histories together
+would be a coherent-looking account of something that never happened. So the
+newest incarnation is shown, the header names its UID, and the others are named
+too:
+
+```
+! payments/checkout has had 2 incarnations in this window; showing the newest
+  (7c9e6679-…). Pass --all-incarnations to see them all, or --uid to pin one
+```
+
+`--all-incarnations` adds a `UID` column, so no two of them can blur together in
+one table.
+
+### An empty result is never presented on its own
+
+Every empty timeline is explained against the watch scopes that were open at the
+time, and there are exactly three answers:
+
+| What was found | What you get |
+|----------------|--------------|
+| The scope was watched across the whole window | `no changes recorded … The scope was confirmed watched over <interval>` — the silence is real. |
+| The scope opened *after* the window started | A warning naming that instant and the rule that opened it: a change before then would not have been recorded. |
+| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result. |
+
+A backend with no scope log to read says that instead, and exits `0`: it cannot
+tell the three apart, and pretending otherwise would be the failure this section
+exists to prevent.
+
+### What a backend cannot record
+
+An object archive holds no deletions at all (see [`docs/TEE.md`](TEE.md) and the
+S3 tier's design), so a timeline over one always simply stops. Without saying so,
+that silence reads as "the object is still there":
+
+```
+! the objectsource backend does not record deletions, so this timeline ending is
+  not evidence that the object still exists; it may have been deleted while
+  unobserved. Check what was being watched with `scopes`
+```
+
+The same backend cannot answer an unbounded question either, so a window is
+supplied — the last seven days — and announced. `--since` widens it.
+
+### Colour, width and paging
+
+Colour follows `--color=auto|always|never`. Under `auto` it is on only when stdout
+is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`,
+which is what the flag is for. The table is laid out to the terminal's width, or
+to 120 columns when output is not a terminal. **There is no pager**: output goes
+to stdout and stays there, so `| less -R` is yours to choose.
+
+### Reading an archive without a cluster
+
+`--source` needs no cluster, but resolving `deploy` into `apps/Deployment` does:
+short names and plural resource names come from the server's own discovery data.
+When the cluster cannot be reached, give the kind as it is recorded and no
+discovery is needed:
+
+```console
+$ kuberecord timeline Deployment.apps/checkout -n payments --source ~/archives/kuberecord
+```
+
+Without `-n`, an address resolved this way is read as cluster-scoped.
 
 ## Where the data comes from
 

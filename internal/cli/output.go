@@ -18,8 +18,12 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // OutputFormat is the value of --output/-o.
@@ -120,4 +124,66 @@ func joinValues[T ~string](values []T) string {
 		parts = append(parts, string(value))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// Colour is decided here rather than in the renderer, and the split is
+// deliberate: --color is what the user asked for, while being attached to a
+// terminal is a property of where the output is going. Collapsing the two at
+// parse time would make `--color=always | tee` lose its colour, which is exactly
+// what `always` is for.
+
+// EnvNoColor is the environment variable every modern terminal tool honours.
+//
+// The convention it follows (no-color.org) is that the variable disables colour
+// when it is present *and non-empty*, so an exported-but-blank NO_COLOR does not
+// silently strip colour from a terminal the user meant to keep colourful.
+const EnvNoColor = "NO_COLOR"
+
+// ShouldColorize reports whether output written to out should carry ANSI colour.
+//
+// `always` overrides NO_COLOR, which is what the --color help text already
+// promises: the variable is honoured under `auto`. That ordering matters for the
+// one case it exists for — a user piping deliberately coloured output into `less
+// -R` on a machine whose profile exports NO_COLOR for everything else.
+func ShouldColorize(mode ColorMode, out io.Writer) bool {
+	switch mode {
+	case ColorNever:
+		return false
+	case ColorAlways:
+		return true
+	}
+	if value, present := os.LookupEnv(EnvNoColor); present && value != "" {
+		return false
+	}
+	return isTerminal(out)
+}
+
+// TerminalWidth reports the column budget for out, or zero when it is not a
+// terminal.
+//
+// Zero rather than a guess, so that the caller decides what a pipe means; see
+// render.DefaultWidth for what it decides.
+func TerminalWidth(out io.Writer) int {
+	file, ok := out.(*os.File)
+	if !ok {
+		return 0
+	}
+	width, _, err := term.GetSize(int(file.Fd()))
+	if err != nil || width <= 0 {
+		// A terminal that will not report its size is treated as no terminal.
+		// Guessing a width for it would be the same guess with a worse name.
+		return 0
+	}
+	return width
+}
+
+// isTerminal reports whether out is an interactive terminal.
+//
+// The type assertion is the whole of the test: an io.Writer that is not an
+// *os.File has no file descriptor to ask about, and a buffer in a test must
+// never be mistaken for a terminal — that is what keeps the golden files free of
+// escape sequences.
+func isTerminal(out io.Writer) bool {
+	file, ok := out.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
 }

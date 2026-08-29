@@ -176,11 +176,14 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 
 	flags.AddFlags(root.PersistentFlags())
 
-	// The configuration subtree is the only command this task adds, and it is added
-	// here rather than by the caller so that both binaries — and every test that
-	// builds a root — get the same tree. Commands that query a backend arrive in
-	// Task 11.3 and later, constructed with the same flags value.
-	root.AddCommand(newConfigCommand(flags, streams, invokedAs))
+	// Commands are added here rather than by the caller so that both binaries —
+	// and every test that builds a root — get the same tree, and so that each one
+	// is constructed with the same parsed flag surface rather than reaching for a
+	// package-level global two concurrently-built roots would share.
+	root.AddCommand(
+		newTimelineCommand(flags, streams, invokedAs),
+		newConfigCommand(flags, streams, invokedAs),
+	)
 
 	return root, flags
 }

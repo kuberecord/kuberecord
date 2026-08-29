@@ -1,0 +1,13 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+TIME (UTC)                      UID                                   EVENT     RESOURCE VERSION  ACTOR                      CHANGE
+2026-08-28T14:09:40.900000000Z  7c9e6679-7425-40de-944b-e07fc1f90ae7  Modified  1004              unknown                    ~ metadata.…io/revision: 1 → 2
+2026-08-28T14:05:02.117000000Z  7c9e6679-7425-40de-944b-e07fc1f90ae7  Modified  1003              kube-controller-manager    ~3 ops
+2026-08-28T14:03:11.482000000Z  7c9e6679-7425-40de-944b-e07fc1f90ae7  Modified  1002              kubectl-client-side-apply  ~ spec.…limits.memory: 2Gi → 51…
+2026-08-28T14:02:58.001000000Z  7c9e6679-7425-40de-944b-e07fc1f90ae7  Added     1001              kubectl-client-side-apply  full state recorded
+=== stderr ===
