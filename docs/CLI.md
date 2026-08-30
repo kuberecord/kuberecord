@@ -54,6 +54,7 @@ what makes `timeline … | wc -l` count changes.
 | Flag | What it does |
 |------|--------------|
 | `--since`, `--until` | Bound the window. Either a duration — `90m`, `6h`, `3d`, `2w`, `1d6h` — or an instant: `2026-08-20`, `2026-08-20 14:00:00`, `2026-08-20T14:00:00Z`. Both read as *ago*. |
+| `--from`, `--to` | Aliases for `--since` and `--until`, spelled the way the structured output and the query contract spell these bounds. Giving one bound under both names with two different values is a usage error. |
 | `--limit` | At most this many changes, newest first. Default `100`; `0` means no limit. |
 | `--reverse` | Show the same changes oldest first. It reorders rows; it does not select different ones. |
 | `--actor`, `--exclude-actor` | Field-manager predicates. Repeatable. `--exclude-actor` is applied second and wins on conflict. |
@@ -209,6 +210,7 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 |------|---------|
 | `--since` | Only changes at or after this point: a duration (`6h`, `90m`, `3d`, `2w`) or an instant (`2026-08-20`, `2026-08-20T14:00:00Z`). |
 | `--until` | Only changes at or before this point, in the same forms. |
+| `--from`, `--to` | Aliases for `--since` and `--until`. |
 | `--limit` | Examine at most this many changes, newest first. Default 100; zero means no limit. |
 | `--reverse` | Oldest first. It reorders the blocks; it does not select different ones. |
 | `--uid` | Pin the diff to one incarnation. |
@@ -386,6 +388,7 @@ ConfigMap        payments   2026-07-02 09:14:00.000  2026-08-11 17:31:22.000  (n
 | `--kind` | Only scopes for this kind. Takes what the object commands take — `deploy`, `deployments.apps`, `Deployment.apps` — and needs a cluster for the first two. |
 | `-n`, `--namespace` | Only scopes covering this namespace, cluster-wide rules included. Without it, **every** namespace: unlike the object commands, the kubeconfig's current namespace does not narrow a compliance question. |
 | `--since`, `--until` | Only periods overlapping this window. A period that merely overlaps is shown **whole**. |
+| `--from`, `--to` | Aliases for `--since` and `--until`. |
 
 `-o` is `table` (the default), `wide`, `json`, `jsonl` or `yaml`. `wide` widens
 the timestamps to the nanosecond precision the schema records.
@@ -869,8 +872,9 @@ ClickHouse, which seeks to the object's rows: they are keyed on the backend's
 declared capabilities, not on its name, so a future indexed backend inherits the
 right behaviour by declaring it.
 
-**The window defaults to 24 hours.** With neither `--since` nor `--until` given, a
-backend that needs a time bound gets one day rather than everything. It is
+**The window defaults to 24 hours.** With neither end given — under either
+spelling, `--since`/`--until` or `--from`/`--to` — a backend that needs a time
+bound gets one day rather than everything. It is
 announced on stderr, and an empty result names it. `--since` widens it.
 
 **The cost is printed before the first object is fetched.**

@@ -55,9 +55,8 @@ import (
 
 // scopesFlags is one invocation's own flag surface.
 type scopesFlags struct {
-	kind  string
-	since string
-	until string
+	kind   string
+	window windowFlags
 }
 
 // newScopesCommand builds `scopes`.
@@ -107,6 +106,9 @@ exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
 		Args: rejectPositionalArgs,
 
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := local.window.resolve(cmd.Flags()); err != nil {
+				return err
+			}
 			return runScopesCommand(cmd.Context(), flags, local, streams, invokedAs)
 		},
 	}
@@ -115,10 +117,9 @@ exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
 		"Only scopes for this kind: a short name, a resource name or a kind, as the object commands "+
 			"accept. Without a cluster to ask, give it as it is recorded — Deployment or "+
 			"Deployment.apps.")
-	command.Flags().StringVar(&local.since, "since", local.since,
+	local.window.addFlags(command.Flags(),
 		"Only periods overlapping this point onwards: a duration (6h, 90m, 3d, 2w) or an instant "+
-			"(2026-08-20, 2026-08-20T14:00:00Z). A period that merely overlaps is shown whole.")
-	command.Flags().StringVar(&local.until, "until", local.until,
+			"(2026-08-20, 2026-08-20T14:00:00Z). A period that merely overlaps is shown whole.",
 		"Only periods overlapping up to this point, in the same forms as --since.")
 
 	return command
@@ -152,7 +153,7 @@ func runScopesCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.since, local.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now)
 	if err != nil {
 		return err
 	}

@@ -55,8 +55,7 @@ import (
 
 // diffFlags is one invocation's own flag surface.
 type diffFlags struct {
-	since    string
-	until    string
+	window   windowFlags
 	limit    int
 	reverse  bool
 	uid      string
@@ -104,14 +103,16 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
   kuberecord diff deploy/checkout -n payments --since 15m --exit-code`,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := local.window.resolve(cmd.Flags()); err != nil {
+				return err
+			}
 			return runDiffCommand(cmd.Context(), flags, local, args, streams, invokedAs)
 		},
 	}
 
-	command.Flags().StringVar(&local.since, "since", local.since,
+	local.window.addFlags(command.Flags(),
 		"Only changes at or after this point: a duration (6h, 90m, 3d, 2w) or an instant "+
-			"(2026-08-20, 2026-08-20T14:00:00Z).")
-	command.Flags().StringVar(&local.until, "until", local.until,
+			"(2026-08-20, 2026-08-20T14:00:00Z).",
 		"Only changes at or before this point, in the same forms as --since.")
 	command.Flags().IntVar(&local.limit, "limit", local.limit,
 		"Examine at most this many changes, newest first. Zero means no limit.")
@@ -153,7 +154,7 @@ func runDiffCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.since, local.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now)
 	if err != nil {
 		return err
 	}

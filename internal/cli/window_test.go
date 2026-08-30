@@ -17,6 +17,8 @@ limitations under the License.
 package cli_test
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,6 +110,69 @@ func TestDescribeWindow(t *testing.T) {
 			if got := cli.DescribeWindow(test.from, test.to); got != test.want {
 				t.Errorf("DescribeWindow = %q, want %q", got, test.want)
 			}
+		})
+	}
+}
+
+// TestWindowAliasesAreWiredIntoEveryCommandThatTakesAWindow is the wiring check
+// behind windowFlags.
+//
+// The resolution itself is unit-tested; what this asserts is that all three
+// commands actually go through it, in both directions. A `--from` that worked on
+// `timeline` and not on `scopes` would be worse than no alias at all — the user
+// learns the flag once and then meets a usage error from the command they reached
+// for second.
+func TestWindowAliasesAreWiredIntoEveryCommandThatTakesAWindow(t *testing.T) {
+	commands := map[string][]string{
+		"timeline": {"timeline", "deploy/x"},
+		"diff":     {"diff", "deploy/x"},
+		"scopes":   {"scopes"},
+	}
+
+	for command, argv := range commands {
+		t.Run(command, func(t *testing.T) {
+			t.Run("the alias reaches the same parser", func(t *testing.T) {
+				// An inverted window is rejected by parseWindow, so seeing its message
+				// proves --from and --to were read as the bounds rather than ignored.
+				io, out, errOut := streams()
+				code := cli.Run(append([]string{"kuberecord"},
+					append(slices.Clone(argv), "--from", "2026-08-20", "--to", "2026-08-01")...), io)
+
+				if code != cli.ExitUsageError {
+					t.Errorf("exit code %d, want %d", code, cli.ExitUsageError)
+				}
+				if !strings.Contains(errOut.String(), "ends before it starts") {
+					t.Errorf("--from/--to did not reach the window parser:\n%s", errOut.String())
+				}
+				if out.Len() != 0 {
+					t.Errorf("a usage error reached stdout:\n%s", out.String())
+				}
+			})
+
+			t.Run("a bound given twice is refused", func(t *testing.T) {
+				io, _, errOut := streams()
+				code := cli.Run(append([]string{"kuberecord"},
+					append(slices.Clone(argv), "--since", "3d", "--from", "6h")...), io)
+
+				if code != cli.ExitUsageError {
+					t.Errorf("exit code %d, want %d", code, cli.ExitUsageError)
+				}
+				if !strings.Contains(errOut.String(), "same bound") {
+					t.Errorf("the conflict was not reported:\n%s", errOut.String())
+				}
+			})
+
+			t.Run("the help names both spellings", func(t *testing.T) {
+				io, out, _ := streams()
+				if code := cli.Run([]string{"kuberecord", argv[0], "--help"}, io); code != cli.ExitSuccess {
+					t.Fatalf("`%s --help` exited %d", argv[0], code)
+				}
+				for _, flag := range []string{"--since", "--until", "--from", "--to"} {
+					if !strings.Contains(out.String(), flag) {
+						t.Errorf("%s is missing from `%s --help`", flag, argv[0])
+					}
+				}
+			})
 		})
 	}
 }

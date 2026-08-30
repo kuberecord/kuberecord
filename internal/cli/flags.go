@@ -72,6 +72,16 @@ const (
 	// configuration file.
 	FlagOperatorNamespace = "operator-namespace"
 
+	// The window's four names. --since/--until is the primary pair and --from/--to
+	// aliases it; see windowFlags for why one bound answers to two names, and why
+	// the aliases are the read plane's own spelling rather than a synonym somebody
+	// liked. They are constants because three commands register them and the error
+	// that reports a conflict between two of them names both.
+	FlagSince = "since"
+	FlagUntil = "until"
+	FlagFrom  = "from"
+	FlagTo    = "to"
+
 	// FlagAssumeYes answers the confirmation a wide cold scan asks for.
 	//
 	// It exists for the same reason `rm -f` does, and it is spelled the way every

@@ -70,8 +70,7 @@ const scopesCommand = "scopes"
 // than reachable through a package-level variable two concurrently-built roots
 // would share.
 type timelineFlags struct {
-	since           string
-	until           string
+	window          windowFlags
 	limit           int
 	reverse         bool
 	actors          []string
@@ -120,14 +119,19 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
   kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse`,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Before anything reads the window: past this line the command sees one
+			// spelling of each bound, which is what keeps the alias a fact about the
+			// flag layer rather than a branch in every caller.
+			if err := local.window.resolve(cmd.Flags()); err != nil {
+				return err
+			}
 			return runTimelineCommand(cmd.Context(), flags, local, args, streams, invokedAs)
 		},
 	}
 
-	command.Flags().StringVar(&local.since, "since", local.since,
+	local.window.addFlags(command.Flags(),
 		"Only changes at or after this point: a duration (6h, 90m, 3d, 2w) or an instant "+
-			"(2026-08-20, 2026-08-20T14:00:00Z).")
-	command.Flags().StringVar(&local.until, "until", local.until,
+			"(2026-08-20, 2026-08-20T14:00:00Z).",
 		"Only changes at or before this point, in the same forms as --since.")
 	command.Flags().IntVar(&local.limit, "limit", local.limit,
 		"Show at most this many changes, newest first. Zero means no limit.")
@@ -181,7 +185,7 @@ func runTimelineCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.since, local.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now)
 	if err != nil {
 		return err
 	}
