@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/cli-runtime/pkg/genericiooptions"
+
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
@@ -86,12 +88,25 @@ type gatherResult struct {
 // the rows in historical order before they are reversed for display, and coverage
 // is consulted on every invocation rather than only on an empty one — because a
 // timeline whose rows stop at a scope's edge is as misleading as an empty one.
-func gatherChanges(ctx context.Context, backend *Backend, request TimelineRequest) (gatherResult, error) {
+func gatherChanges(
+	ctx context.Context, backend *Backend, request TimelineRequest,
+	streams genericiooptions.IOStreams,
+) (gatherResult, error) {
 	var result gatherResult
 	capabilities := backend.Engine.Capabilities()
 
 	from, to, windowNotice := timelineBounds(request, capabilities)
 	result.Notices = appendNotice(result.Notices, windowNotice)
+
+	// Before the first query rather than before the timeline query: listing the
+	// incarnations costs the same partitions, so a guard placed after it would
+	// narrate the second scan of a question that had already silently run one.
+	scan, err := beginColdScan(ctx, backend, request, from, to, streams)
+	if err != nil {
+		return gatherResult{}, err
+	}
+	defer scan.stop()
+	ctx = scan.ctx
 
 	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
 	result.Notices = append(result.Notices, selectionNotices...)
@@ -100,7 +115,7 @@ func gatherChanges(ctx context.Context, backend *Backend, request TimelineReques
 
 	changes, err := collectChanges(ctx, backend.Engine, request.timelineQuery(selection, from, to))
 	if err != nil {
-		return gatherResult{}, timelineQueryError(request, err)
+		return gatherResult{}, timelineQueryError(ctx, request, err)
 	}
 	result.Rows = decodeRows(changes)
 	if request.AllIncarnations && len(result.Incarnations) == 0 {
@@ -130,6 +145,9 @@ func gatherChanges(ctx context.Context, backend *Backend, request TimelineReques
 	coverage, err := askCoverage(
 		ctx, backend, request.scopeQuery(from, to), describeObject(request.Ref))
 	if err != nil {
+		// Not routed through timelineQueryError: this failure is about the scope log
+		// rather than about the timeline, and askCoverage has already said so in the
+		// words that name what could not be read.
 		return gatherResult{}, err
 	}
 	result.Coverage = coverage

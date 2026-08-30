@@ -46,13 +46,36 @@ import (
 // DefaultWindow is the span applied when a backend refuses unbounded queries and
 // the user named neither end.
 //
-// Seven days rather than something longer because the backend that needs it is
-// the object archive, which has no index: the window is not a filter there, it is
-// the set of partitions that will be listed and decompressed. A default nobody
-// chose should be small enough to answer quickly and be visibly a default, and
-// --since is one flag away when the answer is older than a week. When it is
-// applied it is announced, and an empty result names it.
-const DefaultWindow = 7 * 24 * time.Hour
+// Twenty-four hours, because the backend that needs it is the object archive,
+// which has no index: the window is not a filter there, it is the set of
+// partitions that will be listed and decompressed. A default nobody chose should
+// be small enough to answer in the time a person will wait for it and visibly a
+// default, and --since is one flag away when the answer is older than a day. When
+// it is applied it is announced, and an empty result names it.
+//
+// It is deliberately applied only where a bound is *required*. An indexed backend
+// is asked the unbounded question, because the change an engineer is hunting at
+// 02:47 is as likely to be six weeks old as six hours, and a default window there
+// would hide it behind a flag they did not know to pass — at no saving, since the
+// window is a predicate rather than the work.
+const DefaultWindow = 24 * time.Hour
+
+// ConfirmWindow is how wide a window may be, against a backend that has to scan
+// for its answer, before the scan is something the user has to say yes to.
+//
+// A week. Below it the estimate is printed and the scan simply runs, because a
+// tool that asks permission for every question trains people to stop reading the
+// question. Above it the cost stops being incidental — a week of a busy cluster's
+// partitions is already thousands of objects to fetch and decompress, and the
+// windows that hurt are the ones typed casually ("--since 90d") rather than the
+// ones chosen. So the line is drawn where a wide window stops being a rounding
+// error and starts being a decision, and the decision is handed to the person
+// making it, with the figures beside it.
+//
+// It bounds nothing on its own: --yes, and a non-interactive invocation, pass it
+// without argument. What it buys is that nobody waits ten minutes for a scan they
+// did not know they had asked for.
+const ConfirmWindow = 7 * 24 * time.Hour
 
 // The instant layouts accepted by --since and --until, most specific first.
 //

@@ -177,6 +177,17 @@ func TerminalWidth(out io.Writer) int {
 	return width
 }
 
+// isTerminalIn reports whether in is an interactive terminal.
+//
+// It is the input half of isTerminal and is separate only because io.Reader and
+// io.Writer are. It exists for the confirmation prompt: a terminal on stdout with
+// a redirected stdin is an invocation nobody can answer, and asking anyway would
+// hang a pipeline on a question its author never saw.
+func isTerminalIn(in io.Reader) bool {
+	file, ok := in.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
 // isTerminal reports whether out is an interactive terminal.
 //
 // The type assertion is the whole of the test: an io.Writer that is not an

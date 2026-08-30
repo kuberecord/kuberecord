@@ -65,9 +65,13 @@ limitations under the License.
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 )
@@ -82,6 +86,40 @@ import (
 // behaviour — including its exit codes and its stdout/stderr discipline — is
 // reachable from a test. main is the only place that exits.
 func Run(args []string, streams genericiooptions.IOStreams) int {
+	ctx, stop := interruptContext(context.Background())
+	defer stop()
+	return RunContext(ctx, args, streams)
+}
+
+// interruptContext returns a context cancelled by the signals that mean "stop".
+//
+// It exists because a cold scan is genuinely long: an unindexed backend answering
+// a wide question spends minutes listing and decompressing, and the only correct
+// response to Ctrl-C during it is for the scan to stop fetching, close its
+// iterator and report that the window was not read to the end. A process that
+// died where it stood would leave whatever had reached stdout looking like an
+// answer.
+//
+// SIGTERM is honoured alongside SIGINT, which the acceptance criteria name. The
+// CLI is run from CI jobs and wrappers that terminate rather than interrupt, and
+// there is no version of this where a supervisor's TERM deserves a dirtier stop
+// than a person's Ctrl-C.
+//
+// A *second* signal is deliberately fatal: NotifyContext stops handling after the
+// first, so the default disposition takes the process down. That is the escape
+// hatch for a scan wedged in a call that is not honouring its context, and losing
+// it — by handling every signal forever — would be trading a clean exit for an
+// unkillable one.
+func interruptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+}
+
+// RunContext is Run with the cancellation supplied by the caller.
+//
+// It is exported so that the interruption path is reachable from a test without
+// delivering a real signal to the test binary, and so that a future embedder can
+// supply its own cancellation. Run is the whole of what main needs.
+func RunContext(ctx context.Context, args []string, streams genericiooptions.IOStreams) int {
 	root, _ := NewRootCommand(InvocationName(args), streams)
 
 	// Always an explicit, non-nil slice. Cobra reads os.Args[1:] whenever its
@@ -99,7 +137,15 @@ func Run(args []string, streams genericiooptions.IOStreams) int {
 	// ExecuteC returns the command that actually failed, which is what makes the
 	// usage block below the right one: a usage error under a subcommand must
 	// print that subcommand's usage, not the root's.
-	failed, err := root.ExecuteC()
+	failed, err := root.ExecuteContextC(ctx)
+
+	// Checked before the error is, because an interrupted invocation must not exit
+	// zero on the strength of a command that swallowed its cancellation. An answer
+	// abandoned half way is not a short answer, and the exit code is the half a
+	// wrapper script reads.
+	if ctx.Err() != nil {
+		err = interrupted(err)
+	}
 	if err == nil {
 		return ExitSuccess
 	}
@@ -133,4 +179,23 @@ func Run(args []string, streams genericiooptions.IOStreams) int {
 	}
 
 	return code
+}
+
+// interrupted phrases the end of an invocation that was told to stop.
+//
+// The failure the command reported is kept rather than replaced: an interrupted
+// cold scan already says which window it did not finish reading (see the object
+// archive's own abandonment message), and that sentence is more useful than
+// anything this layer could write. What is added is the word that says the
+// stopping was asked for, so that "context canceled" in a CI log is not read as a
+// backend that dropped the connection.
+func interrupted(err error) error {
+	if err == nil {
+		return &Error{
+			Code: ExitRuntimeError,
+			Err: errors.New("interrupted before the answer was complete, so nothing above is a " +
+				"finished result"),
+		}
+	}
+	return &Error{Code: ExitRuntimeError, Err: fmt.Errorf("interrupted: %w", err)}
 }

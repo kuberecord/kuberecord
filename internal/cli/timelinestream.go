@@ -75,6 +75,16 @@ func runTimelineStructured(
 	from, to, windowNotice := timelineBounds(request, capabilities)
 	notices := appendNotice(nil, windowNotice)
 
+	// Same position as the gathered path's, and for the same reason: this is before
+	// the first query of the invocation, incarnation listing included. See
+	// beginColdScan.
+	scan, err := beginColdScan(ctx, backend, request, from, to, streams)
+	if err != nil {
+		return err
+	}
+	defer scan.stop()
+	ctx = scan.ctx
+
 	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
 	notices = append(notices, selectionNotices...)
 
@@ -92,6 +102,12 @@ func runTimelineStructured(
 
 	emitted, sawDeleted, emitErr := emitChanges(
 		ctx, backend.Engine, request, request.timelineQuery(selection, from, to), stream)
+
+	// Stopped here rather than left to the defer: the reading is over, and the
+	// progress line has to be off the terminal before the notices below are written
+	// or a short notice lands on top of a longer line and leaves its tail behind.
+	// stop is idempotent, so the defer above remains the early-return path's.
+	scan.stop()
 	// Closed on every path. For the whole-document formats nothing has reached
 	// stdout until it runs, so returning early on a failed emission would turn a
 	// backend that died halfway into a command that produced no document at all
@@ -137,7 +153,7 @@ func emitChanges(
 
 	iterator, err := engine.Timeline(ctx, q)
 	if err != nil {
-		return 0, false, timelineQueryError(request, err)
+		return 0, false, timelineQueryError(ctx, request, err)
 	}
 	defer func() {
 		if closeErr := iterator.Close(); closeErr != nil && err == nil {
@@ -159,7 +175,7 @@ func emitChanges(
 		emitted++
 	}
 	if iterErr := iterator.Err(); iterErr != nil {
-		return emitted, sawDeleted, timelineQueryError(request, iterErr)
+		return emitted, sawDeleted, timelineQueryError(ctx, request, iterErr)
 	}
 
 	// At most --limit items, and only when --reverse and --limit are both set.

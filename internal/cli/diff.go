@@ -177,6 +177,7 @@ func runDiffCommand(
 			Limit:             local.limit,
 			Reverse:           local.reverse,
 			Structured:        structured,
+			Scan:              scanOptions(flags, streams),
 		},
 		ExitCode: local.exitCode,
 	}
@@ -238,7 +239,7 @@ func RunDiff(
 	ctx context.Context, backend *Backend, request DiffRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
-	gathered, err := gatherChanges(ctx, backend, request.Timeline)
+	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
 	if err != nil {
 		return err
 	}

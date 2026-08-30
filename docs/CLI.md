@@ -66,6 +66,10 @@ what makes `timeline … | wc -l` count changes.
 `-o wide` adds the full UID and the resource version, and prints timestamps at the
 nanosecond precision the schema records.
 
+Against an object archive the window is not a filter, it is the work — see
+[Cold scans](#cold-scans) for what a wide `--since` costs there, and for the
+`--yes` and `--max-objects` flags that go with it.
+
 ### How a change is summarized
 
 A one-operation patch is one line, with the operation's glyph — `+` added, `-`
@@ -211,6 +215,9 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 | `--field` | Only changes touching one of these paths, matched by prefix, with every hunk of those changes. |
 | `--full` | Print every operation and every value in full. |
 | `--exit-code` | `0` when there are no changes, `1` when there are, as `git diff` does. |
+
+`diff` reads exactly what `timeline` reads, so a wide `--since` costs exactly the
+same against an object archive: see [Cold scans](#cold-scans).
 
 ### The old value is reconstructed, not stored
 
@@ -843,18 +850,100 @@ have for the bucket.
 
 The trade is query performance, and it is a real one. The object archive has no
 index, so a single-object question over a wide window lists and decompresses every
-object in that window's partitions. It is honest about that rather than quiet: the
-cost is bounded, reported and interruptible. For wide analytics over an archive —
-aggregations, joins, anything that reads more than one object's history — use the
-DuckDB and Athena recipes in [`docs/QUERIES.md`](QUERIES.md), which are built for
-exactly that shape.
+object in that window's partitions — every object, not only the ones belonging to
+the object you asked about. Ninety days of a busy cluster is thousands of objects
+and gigabytes off the wire for a table with four rows in it.
+
+That is the deliberate price of having no database to run (D18), and the CLI states
+it rather than hiding it: the cost is bounded, reported and interruptible. **For
+wide analytics over an archive** — aggregations, joins, anything that reads more
+than one object's history — **use the DuckDB and Athena recipes in
+[`docs/QUERIES.md`](QUERIES.md)**, which are built for exactly that shape. This CLI
+answers narrow questions honestly; it is not a query engine, and pointing it at a
+question DuckDB answers in one pass will be slow in a way no flag fixes.
+
+### Cold scans
+
+Five things surround every scan of an unindexed backend. None of them applies to
+ClickHouse, which seeks to the object's rows: they are keyed on the backend's
+declared capabilities, not on its name, so a future indexed backend inherits the
+right behaviour by declaring it.
+
+**The window defaults to 24 hours.** With neither `--since` nor `--until` given, a
+backend that needs a time bound gets one day rather than everything. It is
+announced on stderr, and an empty result names it. `--since` widens it.
+
+**The cost is printed before the first object is fetched.**
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --source ~/archives/kuberecord --since 3d
+→ ~1,240 objects, ~3.1 GiB to scan for 3d: the objectsource backend has no index, so this window is the work
+```
+
+The figures come from the listing alone — nothing is opened to produce them — so
+the warning costs a fraction of a listing rather than a fraction of the scan. Both
+are *stored* bytes: what comes off the wire, which is what predicts the wait and
+the egress bill.
+
+**A window wider than 7 days asks first.**
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --source ~/archives/kuberecord --since 90d
+~14,890 objects, ~37.2 GiB — continue? [y/N]
+```
+
+Anything that is not `y` reads nothing at all. The question is asked only when
+somebody can answer it: with stdout or stdin redirected, or with `--yes`, it is
+assumed, and stderr says which of the two reasons applied. **A script therefore
+never hangs on a prompt** — and never silently skips one either, because the line
+that says the confirmation was assumed is printed regardless.
+
+**Progress goes to stderr while it runs**, repainted in place and only when stderr
+is a terminal, so `2>/dev/null` and a redirected log get none of it:
+
+```console
+scanning 412/1,240 objects, 1.1 GiB read
+```
+
+**`--max-objects N` is the circuit breaker.** It bounds the *work*, which `--limit`
+cannot do without an index — `--limit 100` still costs every object in the window
+before the newest hundred changes can be known. A scan that passes `N` stops and
+says so, naming the flag:
+
+```console
+error: reading the timeline of payments/checkout: the scan reached 5,001 objects,
+past the --max-objects=5000 circuit breaker, and was stopped before it had read the
+whole window; narrow it with --since, or raise --max-objects
+```
+
+**Ctrl-C stops it cleanly.** The interruption travels through the context: fetches
+stop being scheduled, the iterator is closed, and the command exits `1` with the
+window it did not finish reading named. It never exits `0` with a short result,
+because a timeline that is short by an unknown amount is worse than no timeline. A
+second Ctrl-C is fatal in the ordinary way, which is the escape hatch if a backend
+is not honouring its context.
+
+| Flag | Meaning |
+|------|---------|
+| `--yes` | Answer the confirmation. Assumed when stdout or stdin is not a terminal. |
+| `--max-objects` | Stop a scan that fetches more than this many stored objects. `0`, the default, means no limit. |
+
+Both are global flags: they apply to any command whose backend has to scan, and are
+inert against one that does not.
+
+The estimate, the confirmation and the progress line cover `timeline` and `diff`,
+whose scans are driven by the window you type. `get --at` is not gated: it walks
+backwards from one instant and stops at the first full state it finds, so its cost
+is a property of the archive's checkpoint cadence rather than of a flag. Neither is
+`scopes`, which reads the scope log — one small object per day, not one per hour.
+Ctrl-C stops all four.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success. For `diff --exit-code`, additionally "no changes". |
-| `1` | Runtime error: a well-formed request that could not be carried out. For `diff --exit-code`, additionally "changes found", which is a finding rather than a failure and prints no `error:` line. |
+| `1` | Runtime error: a well-formed request that could not be carried out — including an interrupted scan and one stopped by `--max-objects`, neither of which may present its partial reading as an answer. For `diff --exit-code`, additionally "changes found", which is a finding rather than a failure and prints no `error:` line. |
 | `2` | Usage error: an unknown flag, a malformed object address, a bad value. |
 | `3` | No coverage: nothing was ever watching the requested scope — which is a different fact from "nothing changed", and is reported as one. |
 

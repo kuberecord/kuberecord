@@ -210,6 +210,7 @@ func runTimelineCommand(
 		Reverse:         local.reverse,
 		WithEvents:      local.withEvents,
 		Structured:      structured,
+		Scan:            scanOptions(flags, streams),
 	}
 	return RunTimeline(ctx, backend, request, streams, timelineRenderOptions(flags, local, streams))
 }
@@ -537,6 +538,13 @@ type TimelineRequest struct {
 	// WithEvents interleaves the Kubernetes Events recorded about the object.
 	WithEvents bool
 
+	// Scan is the cold-scan safety surface: the confirmation, the circuit breaker
+	// and whether either can be shown. It travels with the request rather than
+	// being read from the flags where it is used, so that a test can drive the
+	// guard without a pseudo-terminal — the same reason render.Options carries the
+	// terminal width instead of asking for it.
+	Scan ScanOptions
+
 	// Structured names the serialization of the versioned envelope to write.
 	// Empty means the table, which is the default and the rendering this release
 	// exists for; anything else routes to the structured path, which streams
@@ -569,7 +577,7 @@ func RunTimeline(
 		return runTimelineStructured(ctx, backend, request, streams, opts)
 	}
 
-	gathered, err := gatherChanges(ctx, backend, request)
+	gathered, err := gatherChanges(ctx, backend, request, streams)
 	if err != nil {
 		return err
 	}
@@ -699,7 +707,15 @@ func collectChanges(
 
 // timelineQueryError phrases a failed query, naming the flag that fixes the one
 // failure a flag can fix.
-func timelineQueryError(request TimelineRequest, err error) error {
+//
+// The scan's own context is consulted first, because a query cancelled by this
+// CLI's circuit breaker fails with a context error wherever the scan happened to
+// be — a message that names neither the flag that stopped it nor the fact that
+// something deliberately did. See scanStopped.
+func timelineQueryError(ctx context.Context, request TimelineRequest, err error) error {
+	if stopped := scanStopped(ctx); stopped != nil {
+		return RuntimeErrorf("reading the timeline of %s: %w", describeObject(request.Ref), stopped)
+	}
 	if errors.Is(err, query.ErrTimeBoundRequired) {
 		return RuntimeErrorf("%w; pass --since (and optionally --until) to bound it", err)
 	}

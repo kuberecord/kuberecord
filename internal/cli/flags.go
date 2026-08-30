@@ -72,6 +72,25 @@ const (
 	// configuration file.
 	FlagOperatorNamespace = "operator-namespace"
 
+	// FlagAssumeYes answers the confirmation a wide cold scan asks for.
+	//
+	// It exists for the same reason `rm -f` does, and it is spelled the way every
+	// other tool spells it so that nobody has to look it up while a pipeline is
+	// failing. A non-interactive invocation assumes it anyway (see ScanOptions):
+	// the flag is for the interactive user who already knows what they are asking
+	// for, not for the script, which must never be able to hang on a prompt.
+	FlagAssumeYes = "yes"
+
+	// FlagMaxObjects is the cold scan's circuit breaker.
+	//
+	// It bounds the *work* rather than the answer, which is the half --limit
+	// cannot do against a backend with no index: --limit 100 still reads every
+	// object in the window before it can know which hundred are newest. Naming the
+	// bound in objects rather than in seconds is deliberate — objects are what the
+	// estimate is denominated in, so the number a user types is the number they
+	// were shown before they typed it.
+	FlagMaxObjects = "max-objects"
+
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl
 	// spells it. The long form reads oddly in help output and is kept anyway:
 	// muscle memory for `-v 6` is worth more than the tidier `--verbose`, and a
@@ -125,6 +144,15 @@ type GlobalFlags struct {
 	// interpreted locally so that `-v 6` shows the API requests client-go is
 	// making, which is the reason anyone reaches for the flag.
 	Verbosity int
+
+	// AssumeYes answers the confirmation a wide scan against an unindexed backend
+	// would otherwise ask for.
+	AssumeYes bool
+
+	// MaxObjects aborts a scan that fetches more than this many objects. Zero
+	// means no breaker, which is the default because the confirmation prompt is
+	// already the protection a person gets; this is the one a script gets.
+	MaxObjects int64
 }
 
 // NewGlobalFlags returns the shared flag surface with its defaults in place.
@@ -167,6 +195,12 @@ func (g *GlobalFlags) AddFlags(flags *pflag.FlagSet) {
 			"Defaults to the namespace of the operator's Deployment, or "+DefaultOperatorNamespace+".")
 	flags.IntVarP(&g.Verbosity, FlagVerbosity, "v", g.Verbosity,
 		"Number for the log level verbosity of diagnostics, which are written to stderr.")
+	flags.BoolVar(&g.AssumeYes, FlagAssumeYes, g.AssumeYes,
+		"Answer yes to the confirmation a wide scan of an unindexed backend asks for. "+
+			"Assumed when the output is not a terminal, so a script never waits on a prompt.")
+	flags.Int64Var(&g.MaxObjects, FlagMaxObjects, g.MaxObjects,
+		"Abort a scan that fetches more than this many stored objects, naming this flag. "+
+			"Zero means no limit. It bounds the work, which --limit cannot do without an index.")
 }
 
 // Namespace resolves the namespace this invocation acts in.

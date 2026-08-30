@@ -69,6 +69,11 @@ func (e *Engine) StateAt(
 			"instant is not \"now\", it is the year 1", describeRef(ref))
 	}
 
+	// One reconstruction is one scan, however many days its backward walk visits:
+	// the walk is the pass, and resetting per day would report the same partition
+	// count over and over rather than the cost of the answer.
+	e.beginScan()
+
 	collected, resolved, err := e.walkBack(ctx, ref, at, uid)
 	if err != nil {
 		return nil, fmt.Errorf("reconstructing %s at %s: %w", describeRef(ref), formatInstant(at), err)
