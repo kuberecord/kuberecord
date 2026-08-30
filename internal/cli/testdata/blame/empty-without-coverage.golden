@@ -1,0 +1,9 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+Window:   all recorded history
+Base:     not established
+Coverage: none recorded for this scope
+=== stderr ===
+error: no watch coverage recorded for the requested scope: nothing was ever watching apps/Deployment payments/checkout in cluster "prod-eu-1", so this silence is not evidence that it did not change; the `scopes` command lists what is being recorded

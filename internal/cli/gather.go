@@ -56,6 +56,16 @@ type gatherResult struct {
 	// UID is the incarnation being shown, for the header.
 	UID string
 
+	// From and To are the window every call below was bounded by, after a
+	// backend that insists on one has had a half or absent window completed.
+	//
+	// They are returned rather than recomputed by a caller that needs to name the
+	// window, because the completed bounds are what the answer was actually read
+	// over: a header stating the window the user typed, beside rows fetched over
+	// a window the backend forced, would be a document disagreeing with itself.
+	From time.Time
+	To   time.Time
+
 	// Incarnations is every UID in the window, set only when all of them are
 	// being shown. Its presence is what gives a table its UID column.
 	Incarnations []string
@@ -96,6 +106,7 @@ func gatherChanges(
 	capabilities := backend.Engine.Capabilities()
 
 	from, to, windowNotice := timelineBounds(request, capabilities)
+	result.From, result.To = from, to
 	result.Notices = appendNotice(result.Notices, windowNotice)
 
 	// Before the first query rather than before the timeline query: listing the

@@ -188,6 +188,21 @@ type documentHeader struct {
 	// Incarnations holds every UID in the window, listed in place of UID when a
 	// command is showing all of them.
 	Incarnations []string
+	// Window is the pre-rendered window the question was asked over, and is
+	// written only when a command sets it.
+	//
+	// `timeline` and `diff` leave it empty: their rows carry timestamps, so the
+	// window is visible in the answer itself. `blame` sets it because its rows
+	// carry an attribution rather than a change, and a cell reading
+	// "(before window)" is unreadable without the window it is before.
+	Window string
+	// Base names the recorded row a reconstruction or an attribution started
+	// from, and is written only when a command sets it.
+	//
+	// It is provenance of the kind `get --at` states in its own header: an answer
+	// assembled from history is a claim about the past, and naming the row it was
+	// assembled from is what lets a reader judge it rather than trust it.
+	Base string
 	// Coverage is the pre-rendered coverage summary.
 	Coverage string
 }
@@ -284,6 +299,15 @@ func renderHeader(doc documentHeader, p palette) string {
 		fields = append(fields, field{incarnationsLabel, ""})
 	case doc.UID != "":
 		fields = append(fields, field{"UID", doc.UID})
+	}
+	// Only when a command set them, so that the header of a document that has no
+	// use for either is exactly the header it was before they existed — which is
+	// what the checked-in golden files of the other commands assert.
+	if doc.Window != "" {
+		fields = append(fields, field{"Window", doc.Window})
+	}
+	if doc.Base != "" {
+		fields = append(fields, field{"Base", doc.Base})
 	}
 	fields = append(fields, field{"Coverage", doc.Coverage})
 

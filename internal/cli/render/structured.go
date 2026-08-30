@@ -89,6 +89,9 @@ const (
 	KindObject = "Object"
 	// KindCoverage holds watch-scope intervals, one item per interval.
 	KindCoverage = "Coverage"
+	// KindBlame holds per-field attribution, one item per field: which recorded
+	// change last wrote it, and who was seen on that change.
+	KindBlame = "Blame"
 )
 
 // StructuredFormat is a serialization of the envelope.
@@ -238,6 +241,62 @@ type Hunk struct {
 	// arrives here as the literal sentinel string a redaction policy wrote, which
 	// is RedactionSentinel.
 	New json.RawMessage `json:"new,omitempty"`
+}
+
+// BlameItem is one field's attribution.
+//
+// The fields that exist in the schema are spelled as the schema spells them — ts,
+// actors, uid, resource_version, event_type — because they are the schema's, read
+// back through a different question. The three that do not exist there describe
+// the attribution rather than the change: which field this is, whether the answer
+// is inside the window at all, and how many of the object's fields the row stands
+// for.
+type BlameItem struct {
+	// Path is the dotted display path — "spec.template.spec.containers[0].image" —
+	// which is the grammar --field accepts and the table prints, so a path read out
+	// of structured output can be pasted back into a query.
+	Path string `json:"path"`
+
+	// Pointer is the RFC 6901 pointer the path was rendered from. Both spellings
+	// are carried for the reason a Hunk carries both: Path is the one a human
+	// uses and Pointer is the one a JSON Patch library takes.
+	Pointer string `json:"pointer"`
+
+	// Attributed reports whether the rest of this item describes a change that was
+	// read.
+	//
+	// **Read this, not ts.** False means the field's last write is older than the
+	// window — the table's "(before window)" — and the fields below are then their
+	// zero values rather than an answer. Collapsing the two would be the
+	// fabrication Invariant 4 forbids, told quietly, and it is the same discipline
+	// old_known keeps for a hunk's prior value.
+	Attributed bool `json:"attributed"`
+
+	// TS is when the last write happened, null when Attributed is false.
+	TS *time.Time `json:"ts"`
+
+	// Actors are the field managers seen on that change. Never null: an empty list
+	// is the honest answer for a change that recorded none, and `.actors[]` fails
+	// on a null where it should yield nothing.
+	Actors []string `json:"actors"`
+
+	// UID is the incarnation the attributing change belongs to.
+	UID string `json:"uid"`
+
+	// ResourceVersion is that change's resourceVersion.
+	ResourceVersion string `json:"resource_version"`
+
+	// EventType is that change's event type, as the schema records it.
+	EventType string `json:"event_type"`
+
+	// Removed reports that the last write deleted this path, so the field is no
+	// longer part of the object. The item is emitted anyway, because who removed a
+	// field is one of the two questions this command answers.
+	Removed bool `json:"removed"`
+
+	// Fields is how many of the object's fields this item stands for: one, unless
+	// --depth collapsed a subtree into it.
+	Fields int `json:"fields"`
 }
 
 // ObjectItem is one reconstructed state and the evidence for how it was

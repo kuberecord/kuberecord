@@ -1,0 +1,120 @@
+=== stdout ===
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Blame",
+  "metadata": {
+    "cluster_id": "prod-eu-1",
+    "backend": "clickhouse",
+    "coverage": {
+      "available": true,
+      "summary": "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+      "intervals": [
+        {
+          "api_group": "apps",
+          "kind": "Deployment",
+          "namespace": "",
+          "rule_ref": "ClusterStreamRule/all-workloads",
+          "from": "2026-07-02T09:14:00Z",
+          "to": null
+        }
+      ]
+    }
+  },
+  "items": [
+    {
+      "path": "spec.template.spec.containers[0].resources.limits.cpu",
+      "pointer": "/spec/template/spec/containers/0/resources/limits/cpu",
+      "attributed": true,
+      "ts": "2026-08-28T14:07:20.044Z",
+      "actors": [
+        "argocd-application-controller"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1004",
+      "event_type": "Modified",
+      "removed": false,
+      "fields": 1
+    },
+    {
+      "path": "spec.template.spec.containers[0].resources.limits.memory",
+      "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
+      "attributed": true,
+      "ts": "2026-08-28T14:07:20.044Z",
+      "actors": [
+        "argocd-application-controller"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1004",
+      "event_type": "Modified",
+      "removed": false,
+      "fields": 1
+    },
+    {
+      "path": "spec.minReadySeconds",
+      "pointer": "/spec/minReadySeconds",
+      "attributed": true,
+      "ts": "2026-08-28T14:05:02.117Z",
+      "actors": [
+        "kube-controller-manager"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1003",
+      "event_type": "Modified",
+      "removed": true,
+      "fields": 1
+    },
+    {
+      "path": "spec.paused",
+      "pointer": "/spec/paused",
+      "attributed": true,
+      "ts": "2026-08-28T14:05:02.117Z",
+      "actors": [
+        "kube-controller-manager"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1003",
+      "event_type": "Modified",
+      "removed": false,
+      "fields": 1
+    },
+    {
+      "path": "spec.replicas",
+      "pointer": "/spec/replicas",
+      "attributed": true,
+      "ts": "2026-08-28T14:05:02.117Z",
+      "actors": [
+        "kube-controller-manager"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1003",
+      "event_type": "Modified",
+      "removed": false,
+      "fields": 1
+    },
+    {
+      "path": "spec.template.spec.containers[0].image",
+      "pointer": "/spec/template/spec/containers/0/image",
+      "attributed": false,
+      "ts": null,
+      "actors": [],
+      "uid": "",
+      "resource_version": "",
+      "event_type": "",
+      "removed": false,
+      "fields": 1
+    },
+    {
+      "path": "spec.template.spec.containers[0].name",
+      "pointer": "/spec/template/spec/containers/0/name",
+      "attributed": false,
+      "ts": null,
+      "actors": [],
+      "uid": "",
+      "resource_version": "",
+      "event_type": "",
+      "removed": false,
+      "fields": 1
+    }
+  ]
+}
+=== stderr ===

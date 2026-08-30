@@ -1,0 +1,23 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Window:   2026-08-28T14:30:00Z to 2026-08-28T15:00:00Z
+Base:     2026-08-28T14:02:58Z (Added) plus 4 patches
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+FIELD                                                     LAST CHANGED     ACTOR
+apiVersion                                                (before window)  -
+kind                                                      (before window)  -
+metadata.annotations.deployment.kubernetes.io/revision    (before window)  -
+metadata.name                                             (before window)  -
+metadata.namespace                                        (before window)  -
+spec.paused                                               (before window)  -
+spec.replicas                                             (before window)  -
+spec.template.spec.containers[0].image                    (before window)  -
+spec.template.spec.containers[0].name                     (before window)  -
+spec.template.spec.containers[0].resources.limits.cpu     (before window)  -
+spec.template.spec.containers[0].resources.limits.memory  (before window)  -
+=== stderr ===
+! no changes recorded for payments/checkout in 2026-08-28T14:30:00Z to 2026-08-28T15:00:00Z. The scope was confirmed watched over 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads), so nothing changed in that period

@@ -531,6 +531,18 @@ type TimelineRequest struct {
 	// absorbed silently.
 	DisplayFieldPaths []string
 
+	// NoPriorValues suppresses the state replay that recovers the value each
+	// operation destroyed.
+	//
+	// `blame` sets it. That command replays the same rows itself, forward from the
+	// same anchor, to work out which change last wrote each field — so leaving the
+	// prior-value replay on would buy a second round trip to fill in values its
+	// table never prints, and print a notice about arrows that appear nowhere in
+	// it. It is spelled as a suppression rather than as an opt-in because the
+	// replay is what `timeline` and `diff` are for, and a field named the other way
+	// round would make forgetting it cost the release's flagship column.
+	NoPriorValues bool
+
 	// Limit caps the changes rendered; zero means no cap.
 	Limit int
 
@@ -762,7 +774,7 @@ func decodeRows(changes []query.Change) []render.TimelineRow {
 func priorValueNotices(
 	ctx context.Context, engine query.QueryEngine, request TimelineRequest, rows []render.TimelineRow,
 ) []render.Notice {
-	if len(rows) == 0 {
+	if len(rows) == 0 || request.NoPriorValues {
 		return nil
 	}
 	if request.filtered() {

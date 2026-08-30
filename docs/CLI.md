@@ -16,6 +16,7 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 - [`timeline`](#timeline)
 - [`diff`](#diff)
 - [`get --at`](#get---at)
+- [`blame`](#blame)
 - [`scopes`](#scopes)
 - [Structured output](#structured-output)
 - [Where the data comes from](#where-the-data-comes-from)
@@ -366,6 +367,138 @@ only if the check holds. `kuberecord get … --verify > object.yaml` is how this
 flag gets used, and a disputed reconstruction is the last thing that should land
 in that file.
 
+## `blame`
+
+Per-field attribution: which recorded change last wrote each field, and who made
+it. `timeline` and `diff` are organized by change — here is an instant, here is
+what moved. This is organized the other way round, which is the shape of the
+question somebody usually arrives with: not "what happened at 14:05" but "who set
+this, and when".
+
+```console
+$ kuberecord blame deploy/checkout -n payments --since 2026-08-28T14:04:00Z
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Window:   2026-08-28T14:04:00Z to now
+Base:     2026-08-28T14:02:58Z (Added) plus 1 patch
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+FIELD                                                     LAST CHANGED             ACTOR
+metadata.annotations.deployment.kubernetes.io/revision    2026-08-28 14:09:40.900  unknown
+spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044  argocd-application-controller
+spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044  argocd-application-controller
+spec.minReadySeconds  (removed)                           2026-08-28 14:05:02.117  kube-controller-manager
+spec.paused                                               2026-08-28 14:05:02.117  kube-controller-manager
+spec.replicas                                             2026-08-28 14:05:02.117  kube-controller-manager
+apiVersion                                                (before window)          -
+kind                                                      (before window)          -
+metadata.name                                             (before window)          -
+metadata.namespace                                        (before window)          -
+spec.template.spec.containers[0].image                    (before window)          -
+spec.template.spec.containers[0].name                     (before window)          -
+```
+
+Rows are most recently written first, so the top of the page is what moved last.
+
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--since` | Attribute changes at or after this point: a duration (`6h`, `90m`, `3d`, `2w`) or an instant (`2026-08-20`, `2026-08-20T14:00:00Z`). |
+| `--until` | Attribute nothing after this point, in the same forms. The fields listed are the ones the object held then. |
+| `--from`, `--to` | Aliases for `--since` and `--until`. |
+| `--uid` | Pin the attribution to one incarnation. |
+| `--field` | Only fields at or beneath these paths. Repeatable. |
+| `--depth` | Collapse every path to at most this many levels. `0`, the default, shows every field. |
+
+There is no `--limit`, and that is deliberate: a limit takes the newest changes in
+the window, which would move the replay's anchor to the oldest change *fetched* and
+make fields written inside the window render as `(before window)` — a false
+statement produced by a flag rather than by the data. The window is the bound here;
+`--max-objects` is still the circuit breaker for a cold scan. There is no
+`--all-incarnations` either, because one field table spanning two UIDs attributes
+fields to changes made to two different objects that happened to share a name.
+
+### A field is attributed to the change that wrote it, not to the one that named it
+
+A write to an interior node writes everything beneath it. When argocd replaces the
+whole `resources` block, it is the change that last set the memory limit inside it
+— even though the memory limit appears nowhere in its patch, and even though
+kubectl named that limit directly four minutes earlier. A blame that matched only
+exact pointers would credit kubectl, confidently, in a column somebody is about to
+take to a change-review meeting.
+
+The rows that are not patches are handled with the same care. A checkpoint carries
+both a diff and the state that diff produced, so its diff is the attribution and
+its data is the state. A row carrying full state and *no* diff — a first sighting, a
+snapshot, a modification whose diff could not be produced — moved fields without
+saying which, so its leaves are compared against the state before it and only the
+ones that differ are attributed. Attributing all of them would name somebody against
+fields they left alone.
+
+### `(before window)` is a row, not an omission
+
+The replay starts from the newest full-state row at or **before the start of the
+window**, which is what the `Base:` line names. Most of a fat object's fields were
+last written before any bounded window, and they are listed with `(before window)`
+in place of a timestamp rather than dropped — a dropped row would read as a field
+the object does not have. Widen `--since` and they acquire an attribution.
+
+The two cells go together: `(before window)` in LAST CHANGED and `-` in ACTOR. That
+dash is not `unknown`, which is what a change that recorded no field managers
+renders as. One says no change was read for this field; the other says a change was
+read and had no name on it.
+
+### A removed field keeps its row
+
+A field deleted inside the window is not in the object any more, so nothing in its
+end state would list it. It is kept, marked `(removed)`, and attributed to the
+change that deleted it — who removed the memory limit is one of the two questions
+this command answers, and a table that silently omitted the answer would be a
+silence the output offers no way to notice.
+
+### `--depth` for a fat object
+
+`--depth N` collapses every path to at most `N` levels and adds a `FIELDS` column
+saying how many of the object's fields each row now stands for:
+
+```console
+$ kuberecord blame deploy/checkout -n payments --depth 2
+FIELD                            LAST CHANGED             FIELDS  ACTOR
+metadata.annotations             2026-08-28 14:09:40.900  1       unknown
+spec.template                    2026-08-28 14:07:20.044  4       argocd-application-controller
+spec.minReadySeconds  (removed)  2026-08-28 14:05:02.117  1       kube-controller-manager
+spec.paused                      2026-08-28 14:05:02.117  1       kube-controller-manager
+spec.replicas                    2026-08-28 14:05:02.117  1       kube-controller-manager
+apiVersion                       2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+kind                             2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+metadata.name                    2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+metadata.namespace               2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+```
+
+(The window is unbounded here, so nothing is older than it.)
+
+A collapsed row carries the newest write beneath it. Levels are **JSON Pointer
+tokens**, so an array index is one of them: `--depth 4` collapses a container array
+into a single row and `--depth 5` gives a row per container. That is the object's
+real structure rather than the display grammar's, and it is the only counting that
+does not mis-measure a key containing dots — an annotation named
+`deployment.kubernetes.io/revision` is one level, not three.
+
+### `--field` selects fields here, not changes
+
+For `timeline` and `diff`, a path predicate selects whole *changes*: a change that
+touched the path is shown entire, other fields included, because those are the
+context for the one asked about. Here the rows are fields, so it selects fields.
+Both commands use the same prefix rule, so they agree about which paths
+`spec.template` covers even though they apply the answer to different things.
+
+Like `diff --field`, it narrows what is *shown* and not what is read: the replay
+needs the whole consecutive run, and a filtered slice of history would attribute
+fields to changes that did not write them.
+
 ## `scopes`
 
 What was being recorded, and when. This is the compliance view, and it is the
@@ -486,7 +619,7 @@ exists and the pipeline keeps running while producing empty findings.
 }
 ```
 
-### The four kinds
+### The five kinds
 
 | `kind` | Produced by | What one item is |
 |--------|-------------|------------------|
@@ -494,6 +627,7 @@ exists and the pipeline keeps running while producing empty findings.
 | `Diff` | `diff` | The same, plus `hunks` and `patch_error`. |
 | `Object` | `get` | One reconstruction: `object` plus the provenance for it. |
 | `Coverage` | `scopes` | One watch-scope interval. |
+| `Blame` | `blame` | One field's attribution: which change last wrote it. |
 
 `items` is always a list, including when it is empty. `metadata` carries exactly
 those three fields.
@@ -515,6 +649,23 @@ A `Diff` item adds `hunks`, one per patch operation:
   "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
   "old": "2Gi", "old_known": true, "new": "512Mi" }
 ```
+
+A `Blame` item is one field rather than one change, so it carries the change's own
+columns for the change that last wrote it:
+
+```json
+{ "path": "spec.template.spec.containers[0].resources.limits.memory",
+  "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
+  "attributed": true, "ts": "2026-08-28T14:07:20.044Z",
+  "actors": ["argocd-application-controller"], "uid": "7c9e6679-…",
+  "resource_version": "1004", "event_type": "Modified",
+  "removed": false, "fields": 1 }
+```
+
+**Read `attributed`, not `ts`**: a null `ts` is the table's `(before window)` — the
+field's last write is older than the window — and the other columns are then their
+zero values rather than an answer. `fields` is how many of the object's fields the
+item stands for, which is `1` unless `--depth` collapsed a subtree into it.
 
 `path` is the dotted grammar `--field` accepts and the table prints; `pointer` is
 RFC 6901 as recorded, for a JSON Patch library. **Read `old_known`, not `old`**:
@@ -935,12 +1086,12 @@ is not honouring its context.
 Both are global flags: they apply to any command whose backend has to scan, and are
 inert against one that does not.
 
-The estimate, the confirmation and the progress line cover `timeline` and `diff`,
-whose scans are driven by the window you type. `get --at` is not gated: it walks
-backwards from one instant and stops at the first full state it finds, so its cost
-is a property of the archive's checkpoint cadence rather than of a flag. Neither is
-`scopes`, which reads the scope log — one small object per day, not one per hour.
-Ctrl-C stops all four.
+The estimate, the confirmation and the progress line cover `timeline`, `diff` and
+`blame`, whose scans are driven by the window you type. `get --at` is not gated: it
+walks backwards from one instant and stops at the first full state it finds, so its
+cost is a property of the archive's checkpoint cadence rather than of a flag.
+Neither is `scopes`, which reads the scope log — one small object per day, not one
+per hour. Ctrl-C stops all five.
 
 ## Exit codes
 

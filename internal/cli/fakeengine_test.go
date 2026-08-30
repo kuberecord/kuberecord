@@ -80,6 +80,12 @@ type fakeEngine struct {
 	// number of queries.
 	opened int
 	closed int
+
+	// stateCalls counts the reconstructions asked for. It exists because the cost
+	// of a command is part of its behaviour: `blame` runs one replay of its own
+	// and must not also pay for the prior-value replay it does not render, and a
+	// second round trip is invisible in output.
+	stateCalls int
 }
 
 func (f *fakeEngine) Capabilities() query.Capabilities { return f.caps }
@@ -135,6 +141,7 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 func (f *fakeEngine) StateAt(
 	_ context.Context, _ query.ObjectRef, at time.Time, uid string,
 ) (*query.Reconstruction, error) {
+	f.stateCalls++
 	if f.stateErr != nil {
 		return nil, f.stateErr
 	}
