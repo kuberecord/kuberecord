@@ -16,6 +16,8 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 - [`timeline`](#timeline)
 - [`diff`](#diff)
 - [`get --at`](#get---at)
+- [`scopes`](#scopes)
+- [Structured output](#structured-output)
 - [Where the data comes from](#where-the-data-comes-from)
 - [The cluster identity](#the-cluster-identity)
 - [The configuration file](#the-configuration-file)
@@ -123,7 +125,7 @@ time, and there are exactly three answers:
 |----------------|--------------|
 | The scope was watched across the whole window | `no changes recorded … The scope was confirmed watched over <interval>` — the silence is real. |
 | The scope opened *after* the window started | A warning naming that instant and the rule that opened it: a change before then would not have been recorded. |
-| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result. |
+| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result — [`scopes`](#scopes) is where you go next. |
 
 A backend with no scope log to read says that instead, and exits `0`: it cannot
 tell the three apart, and pretending otherwise would be the failure this section
@@ -274,18 +276,39 @@ $ kuberecord get deploy/checkout -n payments --at 2h
 # at:              2026-08-28T13:00:00Z
 # base row:        2026-08-28T14:05:02Z (Checkpoint)
 # patches applied: 0
+# coverage:        2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 #
 # This is what kuberecord recorded, not what the API server held. Do not
 # `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and
 # metadata.generation were stripped at capture, and every field a redaction
 # policy covers carries the sentinel [REDACTED] in place of its value.
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: cli.kuberecord.io/v1alpha1
+kind: Object
 metadata:
-  name: checkout
-  namespace: payments
-...
+  backend: clickhouse
+  cluster_id: prod-eu-1
+  coverage: ...
+items:
+- at: "2026-08-28T13:00:00Z"
+  base_event: Checkpoint
+  base_ts: "2026-08-28T14:05:02.117Z"
+  object:
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkout
+      namespace: payments
+    ...
+  patches_applied: 0
+  sha256: 283f5a59…
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
 ```
+
+The state is at `.items[0].object`, inside the same [envelope](#structured-output)
+every other command answers in — so `kubectl apply -f` on this file fails loudly
+instead of applying a stripped object, which is the strongest form of the warning
+above it. `jq -r '.items[0].object'`, or `yq '.items[0].object'`, is the whole
+document back.
 
 | Flag | Meaning |
 |------|---------|
@@ -293,8 +316,8 @@ metadata:
 | `--uid` | Pin the reconstruction to one incarnation. Empty means the newest incarnation alive at `--at`, never a blend of two. |
 | `--verify` | Re-hash the reconstruction and compare it against the digest recorded for it. |
 
-`-o` is `yaml` (the default) or `json`. There is nothing for the tabular formats
-to lay out — a reconstructed object is a document, not a row.
+`-o` is `yaml` (the default), `json` or `jsonl`. There is nothing for the tabular
+formats to lay out — a reconstructed object is a document, not a row.
 
 ### The header is not a courtesy
 
@@ -304,8 +327,8 @@ them visible in the document: volatile metadata was stripped before the state wa
 recorded, redacted fields carry a sentinel instead of their values, and the
 document describes a past somebody deliberately moved the object out of. So the
 header is mandatory and says so in those words. JSON has no comment syntax, so
-for `-o json` the identical block goes to **stderr** and stdout stays something
-`jq` can read.
+for `-o json` and `-o jsonl` the identical block goes to **stderr** and stdout
+stays something `jq` can read.
 
 The provenance in it is not diagnostics. A state assembled from a base an hour
 old and two patches deserves more confidence than one assembled from a base three
@@ -333,6 +356,244 @@ nobody gave.
 only if the check holds. `kuberecord get … --verify > object.yaml` is how this
 flag gets used, and a disputed reconstruction is the last thing that should land
 in that file.
+
+## `scopes`
+
+What was being recorded, and when. This is the compliance view, and it is the
+command every other command's empty result points at.
+
+```console
+$ kubectl kuberecord scopes -n payments
+Cluster: prod-eu-1
+Scope:   every kind in namespace payments
+Window:  all recorded history
+
+KIND             NAMESPACE  FROM                     TO                       RULE
+apps/Deployment  payments   2026-06-01 08:00:00.000  2026-07-02 09:14:00.000  StreamRule/payments/workloads
+apps/Deployment  (all)      2026-07-02 09:14:00.000  (open)                   ClusterStreamRule/all-workloads
+ConfigMap        payments   2026-07-02 09:14:00.000  2026-08-11 17:31:22.000  (not recorded)
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--kind` | Only scopes for this kind. Takes what the object commands take — `deploy`, `deployments.apps`, `Deployment.apps` — and needs a cluster for the first two. |
+| `-n`, `--namespace` | Only scopes covering this namespace, cluster-wide rules included. Without it, **every** namespace: unlike the object commands, the kubeconfig's current namespace does not narrow a compliance question. |
+| `--since`, `--until` | Only periods overlapping this window. A period that merely overlaps is shown **whole**. |
+
+`-o` is `table` (the default), `wide`, `json`, `jsonl` or `yaml`. `wide` widens
+the timestamps to the nanosecond precision the schema records.
+
+### Reading a row
+
+Three cells say something a blank would not:
+
+- **`(open)`** in `TO` means the scope is being watched *now*. There is no
+  recorded end because there has not been one.
+- **`(all)`** in `NAMESPACE` is the all-namespaces scope, not a missing value. A
+  cluster-wide rule was watching objects in every namespace, including the one
+  you asked about — which is why it appears in a namespaced listing, with a
+  notice on stderr saying so. Your `--namespace` was not ignored.
+- **`(not recorded)`** in `RULE` is an interval closed by a recovery pass whose
+  rule no longer exists. That is a real state, and a blank there would read as a
+  rule named by the empty string.
+
+### An interval's end is not a deletion
+
+The end of a period says **the recorder stopped watching**. It says nothing
+whatever about the objects in that scope: they may still exist, they may have
+been deleted three weeks later, and this table cannot tell you which. That is the
+whole reason it exists — everything after an interval's end is unobserved, and
+unobserved is not the same as unchanged.
+
+### An empty listing is a finding
+
+No periods means nothing was ever watching what you asked about, so no silence
+anywhere in this cluster's history means what it appears to mean for that scope.
+That is exit **3**, the same code `timeline` reaches when it works the fact out
+from the other end, so one script keys on one code whichever command it asked:
+
+```console
+$ kuberecord scopes --kind Secret -n payments
+Cluster: prod-eu-1
+Scope:   Secret in namespace payments
+Window:  all recorded history
+error: no watch coverage recorded for the requested scope: no watch scope covering
+Secret in namespace payments was open in cluster "prod-eu-1" during all recorded
+history, so a silence there is not evidence that nothing changed — nothing was
+being recorded to change
+```
+
+(For `Secret` specifically the answer is permanent: it is hard-denied as a
+watchable kind, D8.)
+
+A backend with no scope log at all cannot answer this command — there is no other
+half of the question to fall back to — so it exits `1` naming the backend, rather
+than printing an empty table that would read as "nothing was watching".
+
+## Structured output
+
+`-o json`, `-o jsonl` and `-o yaml` produce a **versioned envelope**, and it is a
+public contract (D19). People script against this; a field renamed a release later
+breaks a runbook silently, because `jq` reports nothing for a path that no longer
+exists and the pipeline keeps running while producing empty findings.
+
+```json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Timeline",
+  "metadata": {
+    "cluster_id": "prod-eu-1",
+    "backend": "clickhouse",
+    "coverage": {
+      "available": true,
+      "summary": "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+      "intervals": [
+        {
+          "api_group": "apps",
+          "kind": "Deployment",
+          "namespace": "",
+          "rule_ref": "ClusterStreamRule/all-workloads",
+          "from": "2026-07-02T09:14:00Z",
+          "to": null
+        }
+      ]
+    }
+  },
+  "items": [
+    {
+      "ts": "2026-08-28T14:03:11.482Z",
+      "event_type": "Modified",
+      "actors": ["kubectl-client-side-apply"],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1002",
+      "api_version": "apps/v1",
+      "data": "",
+      "diff": "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/memory\",\"value\":\"512Mi\"}]",
+      "sha256": "",
+      "labels": {}
+    }
+  ]
+}
+```
+
+### The four kinds
+
+| `kind` | Produced by | What one item is |
+|--------|-------------|------------------|
+| `Timeline` | `timeline` | One recorded change, as the schema stores it. |
+| `Diff` | `diff` | The same, plus `hunks` and `patch_error`. |
+| `Object` | `get` | One reconstruction: `object` plus the provenance for it. |
+| `Coverage` | `scopes` | One watch-scope interval. |
+
+`items` is always a list, including when it is empty. `metadata` carries exactly
+those three fields.
+
+### Item field names are the schema's column names
+
+`ts`, `event_type`, `actors`, `uid`, `resource_version`, `api_version`, `data`,
+`diff`, `sha256`, `labels` — spelled exactly as
+[`docs/SCHEMA.md`](SCHEMA.md) spells the columns, because the two are the same
+data reached two ways. A `jq` recipe written against a SQL result transfers here
+unchanged, which is the point of the mirroring rather than a detail of it. An
+empty `actors` or `labels` is `[]` and `{}`, never `null`.
+
+A `Diff` item adds `hunks`, one per patch operation:
+
+```json
+{ "op": "replace",
+  "path": "spec.template.spec.containers[0].resources.limits.memory",
+  "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
+  "old": "2Gi", "old_known": true, "new": "512Mi" }
+```
+
+`path` is the dotted grammar `--field` accepts and the table prints; `pointer` is
+RFC 6901 as recorded, for a JSON Patch library. **Read `old_known`, not `old`**:
+`old` is `null` both when the value really was JSON null and when the state replay
+could not establish it, and those are different facts. A redacted value arrives as
+the literal sentinel `[REDACTED]`.
+
+### `metadata.coverage` on every command that queries changes
+
+This is Invariant 9 in a form a script can branch on. Two answers with zero items
+mean opposite things, and one field tells them apart without a second query:
+
+| `available` | `intervals` | What it means |
+|-------------|-------------|---------------|
+| `true` | non-empty | The scope was watched. An empty `items` means nothing changed. |
+| `true` | `[]` | **Nothing was ever watching.** An empty `items` means nothing was recorded. Exit `3`. |
+| `false` | `[]` | The backend has no scope log and cannot say which of the two you have. |
+
+### The additive-only policy
+
+Within one `apiVersion`, fields may be **added** and are never renamed, removed or
+repurposed — the same policy the frozen schema carries. Consumers must ignore
+fields they do not recognize. Anything else is a new `apiVersion`.
+
+### `jsonl` streams
+
+`-o jsonl` writes the envelope head on the first line and then one item per line,
+as each one arrives from the backend. Memory does not scale with the result, so a
+six-figure timeline can be piped into something that reads it a line at a time:
+
+```
+{"apiVersion":"cli.kuberecord.io/v1alpha1","kind":"Timeline","metadata":{…}}
+{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…}
+{"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…}
+```
+
+The head line carries no `items` key — it cannot, since nothing has been read yet
+— but it carries the full `metadata`, coverage included, so a consumer processing
+the stream as it arrives already knows whether an empty stream means "nothing
+changed" or "nothing was watching".
+
+One case holds items back, and it is bounded by a number you typed rather than by
+the result: `--reverse` with `--limit N` has to read the newest N changes before
+it can write the oldest of them, so at most N are held. Without a limit the two
+orderings select the same changes, so the query is simply asked oldest-first and
+nothing is held at all.
+
+`json` and `yaml` are single documents and are complete before they are written,
+which is what a single document means.
+
+### Two recipes
+
+The flagship question — who changed what — as one line per change:
+
+```console
+$ kubectl kuberecord timeline deploy/checkout -n payments -o jsonl \
+  | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \(.diff)"'
+2026-08-28T14:05:02.117Z  kube-controller-manager    [{"op":"replace","path":"/spec/replicas",…
+2026-08-28T14:03:11.482Z  kubectl-client-side-apply  [{"op":"replace","path":"/spec/template/spec/…
+```
+
+`select(.ts)` is what skips the head line: it is the only line with no `ts`.
+
+Or, with the field paths already decoded, from `diff`:
+
+```console
+$ kubectl kuberecord diff deploy/checkout -n payments --since 24h -o json \
+  | jq -r '.items[] | . as $c | .hunks[] | "\($c.ts)  \($c.actors[0])  \(.path): \(.old) → \(.new)"'
+2026-08-28T14:05:02.117Z   kube-controller-manager    spec.replicas: 3 → 5
+2026-08-28T14:03:11.482Z   kubectl-client-side-apply  spec.template.spec.containers[0].resources.limits.memory: 2Gi → 512Mi
+```
+
+An operation whose prior value the replay could not establish renders `null`
+there too, which is why a script that cares reads `old_known` rather than testing
+`old`.
+
+Telling an empty result from an unobserved one, in a script that must not confuse
+them:
+
+```console
+$ result=$(kubectl kuberecord timeline deploy/checkout -n payments --since 24h -o json)
+$ jq -r 'if (.items | length) > 0 then "changed"
+         elif .metadata.coverage.available | not then "backend cannot say"
+         elif (.metadata.coverage.intervals | length) == 0 then "NOT WATCHED"
+         else "watched, unchanged" end' <<<"$result"
+```
+
+Exit code `3` carries the same finding for a script that would rather branch on
+that; the envelope is still written to stdout, so both work.
 
 ## Where the data comes from
 

@@ -184,6 +184,7 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 		newTimelineCommand(flags, streams, invokedAs),
 		newDiffCommand(flags, streams, invokedAs),
 		newGetCommand(flags, streams, invokedAs),
+		newScopesCommand(flags, streams, invokedAs),
 		newConfigCommand(flags, streams, invokedAs),
 	)
 

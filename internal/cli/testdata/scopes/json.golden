@@ -1,0 +1,66 @@
+=== stdout ===
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Coverage",
+  "metadata": {
+    "cluster_id": "prod-eu-1",
+    "backend": "clickhouse",
+    "coverage": {
+      "available": true,
+      "summary": "2026-06-01T08:00:00Z → open, 3 intervals",
+      "intervals": [
+        {
+          "api_group": "apps",
+          "kind": "Deployment",
+          "namespace": "payments",
+          "rule_ref": "StreamRule/payments/workloads",
+          "from": "2026-06-01T08:00:00Z",
+          "to": "2026-07-02T09:14:00Z"
+        },
+        {
+          "api_group": "apps",
+          "kind": "Deployment",
+          "namespace": "",
+          "rule_ref": "ClusterStreamRule/all-workloads",
+          "from": "2026-07-02T09:14:00Z",
+          "to": null
+        },
+        {
+          "api_group": "",
+          "kind": "ConfigMap",
+          "namespace": "payments",
+          "rule_ref": "",
+          "from": "2026-07-02T09:14:00Z",
+          "to": "2026-08-11T17:31:22Z"
+        }
+      ]
+    }
+  },
+  "items": [
+    {
+      "api_group": "apps",
+      "kind": "Deployment",
+      "namespace": "payments",
+      "rule_ref": "StreamRule/payments/workloads",
+      "from": "2026-06-01T08:00:00Z",
+      "to": "2026-07-02T09:14:00Z"
+    },
+    {
+      "api_group": "apps",
+      "kind": "Deployment",
+      "namespace": "",
+      "rule_ref": "ClusterStreamRule/all-workloads",
+      "from": "2026-07-02T09:14:00Z",
+      "to": null
+    },
+    {
+      "api_group": "",
+      "kind": "ConfigMap",
+      "namespace": "payments",
+      "rule_ref": "",
+      "from": "2026-07-02T09:14:00Z",
+      "to": "2026-08-11T17:31:22Z"
+    }
+  ]
+}
+=== stderr ===

@@ -17,13 +17,11 @@ limitations under the License.
 package render
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
-
-	"sigs.k8s.io/yaml"
 )
 
 // A reconstructed object, and the header that stops somebody deploying it.
@@ -56,23 +54,6 @@ import (
 // it: a state assembled from a base an hour old and two patches deserves more
 // confidence than one assembled from a base three months old and four hundred.
 
-// ObjectFormat is the serialization `get` was asked for.
-//
-// It is this package's own vocabulary rather than the command's OutputFormat,
-// because the renderer must not depend on the flag surface: these are the two
-// serializations a reconstructed object has, and the set of formats a flag
-// accepts is a different question that changes for different reasons.
-type ObjectFormat string
-
-// The serializations a reconstructed object is written in.
-const (
-	// ObjectYAML carries the provenance header as comments, above the document.
-	ObjectYAML ObjectFormat = "yaml"
-	// ObjectJSON carries it on standard error, because JSON has no comments and
-	// an invented field would corrupt the document a verification hashes.
-	ObjectJSON ObjectFormat = "json"
-)
-
 // notDeployable is the sentence the header exists for, in the words the
 // acceptance criteria fix. It is a constant so that a test can assert the exact
 // phrase rather than a paraphrase of it, and so that a rewording is a deliberate
@@ -99,27 +80,52 @@ type ObjectDocument struct {
 	BaseEvent string
 	// PatchesApplied is how many patches were replayed over the base.
 	PatchesApplied int
+	// SHA256 is the digest recorded for the row the replay finished on, which is
+	// what --verify compares a rehash of the state against. Empty when no digest
+	// was recorded, which is an absence rather than a failure and is reported as
+	// one.
+	SHA256 string
+	// Coverage is the pre-rendered coverage summary, carried in the header for
+	// the reason every other document carries one: an object reconstructed from a
+	// period nobody was watching is a different answer from one reconstructed
+	// from a period that was watched, and the reader has to be able to see which
+	// they have (Invariant 9).
+	Coverage string
 	// State is the reconstructed object.
 	State map[string]any
 	// Notices are written to standard error, in order.
 	Notices []Notice
 }
 
-// WriteObject writes the document to out in format, and its notices to errOut.
-func WriteObject(out, errOut io.Writer, doc ObjectDocument, format ObjectFormat, opts Options) error {
-	body, err := encodeObject(doc.State, format)
-	if err != nil {
-		return err
-	}
-
+// WriteObject writes the reconstruction to out as an envelope, and its notices to
+// errOut.
+//
+// The state travels inside the versioned envelope rather than as a bare document,
+// and the choice is deliberate twice over. It is what makes `kind: Object` — one
+// of D19's four — something a command actually produces, so a consumer branches
+// on the same field for every question this CLI answers. And it is the stronger
+// form of the warning below: a document nobody should apply is now a document
+// `kubectl apply -f` cannot apply, because the thing at the top of it is not a
+// Kubernetes object.
+//
+// The provenance header stays mandatory either way. YAML carries it as comments
+// above the envelope; JSON and JSONL have no comment syntax, so the identical
+// block goes to standard error — which keeps stdout a document `jq` can read
+// while still putting the warning in front of whoever ran the command.
+func WriteObject(
+	out, errOut io.Writer, doc ObjectDocument, head EnvelopeHead,
+	format StructuredFormat, opts Options,
+) error {
 	provenance := ObjectProvenance(doc)
+
 	if out != nil {
-		document := body
-		if format == ObjectYAML {
-			document = provenance + body
+		if format == StructuredYAML {
+			if _, err := io.WriteString(out, provenance); err != nil {
+				return fmt.Errorf("writing the reconstructed object's header: %w", err)
+			}
 		}
-		if _, writeErr := io.WriteString(out, document); writeErr != nil {
-			return fmt.Errorf("writing the reconstructed object: %w", writeErr)
+		if err := writeObjectEnvelope(out, doc, head, format); err != nil {
+			return err
 		}
 	}
 
@@ -127,10 +133,7 @@ func WriteObject(out, errOut io.Writer, doc ObjectDocument, format ObjectFormat,
 		return nil
 	}
 	warning := ""
-	if format == ObjectJSON {
-		// JSON has no comment syntax, and inventing a field to hold this would
-		// change the document a --verify hashes. The block goes to the stream
-		// every other qualification of every other command already goes to.
+	if format != StructuredYAML {
 		warning = provenance
 	}
 	if warning == "" && len(doc.Notices) == 0 {
@@ -142,34 +145,44 @@ func WriteObject(out, errOut io.Writer, doc ObjectDocument, format ObjectFormat,
 	return nil
 }
 
-// encodeObject serializes the state.
+// writeObjectEnvelope writes the one-item envelope a reconstruction is.
 //
-// YAML goes through sigs.k8s.io/yaml, which marshals via JSON and therefore emits
-// the same key ordering and the same scalar spellings the JSON form does. That
-// agreement is worth having: a reader comparing the two formats of one
-// reconstruction should see one document in two syntaxes, not two documents.
-func encodeObject(state map[string]any, format ObjectFormat) (string, error) {
+// It goes through the same Stream every other structured answer does, so that a
+// reconstruction and a timeline are the same document shape in the same
+// serializations — including `jsonl`, where an answer of exactly one item is a
+// head line and one item line rather than a special case.
+func writeObjectEnvelope(
+	out io.Writer, doc ObjectDocument, head EnvelopeHead, format StructuredFormat,
+) error {
+	stream, err := NewStream(out, format, head)
+	if err != nil {
+		return err
+	}
+	if writeErr := stream.Write(objectItem(doc)); writeErr != nil {
+		return errors.Join(writeErr, stream.Close())
+	}
+	return stream.Close()
+}
+
+// objectItem is the reconstruction as the envelope carries it.
+//
+// A nil state becomes an empty object rather than a JSON null, which is what
+// marshalling a nil map produces and which would read as a recorded state that
+// genuinely was null.
+func objectItem(doc ObjectDocument) ObjectItem {
+	state := doc.State
 	if state == nil {
-		// An empty document rather than "null", which is what marshalling a nil
-		// map produces and which reads as a recorded state that was the JSON
-		// null.
 		state = map[string]any{}
 	}
-	switch format {
-	case ObjectJSON:
-		encoded, err := json.MarshalIndent(state, "", "  ")
-		if err != nil {
-			return "", fmt.Errorf("encoding the reconstructed object as JSON: %w", err)
-		}
-		return string(encoded) + "\n", nil
-	case ObjectYAML:
-		encoded, err := yaml.Marshal(state)
-		if err != nil {
-			return "", fmt.Errorf("encoding the reconstructed object as YAML: %w", err)
-		}
-		return string(encoded), nil
+	return ObjectItem{
+		At:             doc.At,
+		UID:            doc.UID,
+		BaseTS:         doc.BaseTS,
+		BaseEvent:      doc.BaseEvent,
+		PatchesApplied: doc.PatchesApplied,
+		SHA256:         doc.SHA256,
+		Object:         state,
 	}
-	return "", fmt.Errorf("%q is not a serialization for a reconstructed object", format)
 }
 
 // ObjectProvenance renders the mandatory header: what this document is, where it
@@ -186,6 +199,7 @@ func ObjectProvenance(doc ObjectDocument) string {
 		{"at", FormatInstant(doc.At)},
 		{"base row", fmt.Sprintf("%s (%s)", FormatInstant(doc.BaseTS), valueOrUnrecorded(doc.BaseEvent))},
 		{"patches applied", fmt.Sprintf("%d", doc.PatchesApplied)},
+		{"coverage", valueOrUnrecorded(doc.Coverage)},
 	}
 
 	width := 0

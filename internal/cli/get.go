@@ -158,19 +158,16 @@ func runGetCommand(
 // the document itself rather than on another stream. A user who asked for
 // something this command cannot produce is told so by name, because finding out
 // at the `jq` is worse than finding out here.
-func objectFormat(cmd *cobra.Command, requested OutputFormat) (render.ObjectFormat, error) {
+func objectFormat(cmd *cobra.Command, requested OutputFormat) (render.StructuredFormat, error) {
 	if !cmd.Flags().Changed(FlagOutput) {
-		return render.ObjectYAML, nil
+		return render.StructuredYAML, nil
 	}
-	switch requested {
-	case OutputYAML:
-		return render.ObjectYAML, nil
-	case OutputJSON:
-		return render.ObjectJSON, nil
+	if structured, ok := structuredFormat(requested); ok {
+		return structured, nil
 	}
-	return "", UsageErrorf("get renders %s or %s, not %s: a reconstructed object is a document rather "+
-		"than a row, so there is nothing for the tabular formats to lay out",
-		OutputYAML, OutputJSON, requested)
+	return "", UsageErrorf("get renders %s, %s or %s, not %s: a reconstructed object is a document "+
+		"rather than a row, so there is nothing for the tabular formats to lay out",
+		OutputYAML, OutputJSON, OutputJSONL, requested)
 }
 
 // getRenderOptions decides how the document's notices will look. The object
@@ -199,8 +196,25 @@ type GetRequest struct {
 	// digest.
 	Verify bool
 
-	// Format is the serialization to write.
-	Format render.ObjectFormat
+	// Format is the serialization of the envelope to write.
+	Format render.StructuredFormat
+}
+
+// scopeQuery asks which scopes covered the object at or before the instant.
+//
+// It is unbounded at the start deliberately: the question a reconstruction has to
+// have an answer to is whether this kind was *ever* watched, not whether it was
+// watched inside some window the user did not ask about. ScopeQuery's covering
+// reading of a namespace applies, so a cluster-wide rule counts as having watched
+// an object in one namespace — which it genuinely did.
+func (r GetRequest) scopeQuery() query.ScopeQuery {
+	return query.ScopeQuery{
+		ClusterID: r.Ref.ClusterID,
+		APIGroup:  r.Ref.APIGroup,
+		Kind:      r.Ref.Kind,
+		Namespace: r.Ref.Namespace,
+		To:        r.At,
+	}
 }
 
 // RunGet reconstructs one object's state and renders it.
@@ -208,9 +222,21 @@ func RunGet(
 	ctx context.Context, backend *Backend, request GetRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
-	reconstruction, err := backend.Engine.StateAt(ctx, request.Ref, request.At, request.UID)
+	reconstruction, stateErr := backend.Engine.StateAt(ctx, request.Ref, request.At, request.UID)
+
+	// Coverage is consulted on every invocation rather than only on a failure,
+	// which is a change of shape from asking about it once the object turned out
+	// to be missing. Two things fall out of it. The envelope's metadata carries it
+	// on the success path too, so a script holding a reconstruction can see
+	// whether the period it describes was being watched (Invariant 9). And the
+	// failure path below is handed the same answer instead of asking its own,
+	// which is what stops the two ever disagreeing about what was watching.
+	coverage, err := askCoverage(ctx, backend, request.scopeQuery(), describeObject(request.Ref))
+	if stateErr != nil {
+		return stateFailure(backend, request, coverage, err, stateErr)
+	}
 	if err != nil {
-		return stateFailure(ctx, backend, request, err)
+		return err
 	}
 
 	document := render.ObjectDocument{
@@ -222,6 +248,8 @@ func RunGet(
 		BaseTS:         reconstruction.BaseTS,
 		BaseEvent:      reconstruction.BaseEvent,
 		PatchesApplied: reconstruction.PatchesApplied,
+		SHA256:         reconstruction.SHA256,
+		Coverage:       coverage.Summary(),
 		State:          reconstruction.Object,
 	}
 
@@ -238,8 +266,9 @@ func RunGet(
 		document.Notices = appendNotice(document.Notices, notice)
 	}
 
+	head := envelopeHead(backend, render.KindObject, coverage)
 	if writeErr := render.WriteObject(
-		streams.Out, streams.ErrOut, document, request.Format, opts); writeErr != nil {
+		streams.Out, streams.ErrOut, document, head, request.Format, opts); writeErr != nil {
 		return RuntimeErrorf("%w", writeErr)
 	}
 	return nil
@@ -261,14 +290,22 @@ func reconstructedUID(reconstruction *query.Reconstruction, requested string) st
 	return requested
 }
 
-// stateFailure explains why no state came back, consulting the watch scopes
-// before it says the object was not there.
+// stateFailure explains why no state came back, against the watch scopes that
+// were open at the time.
 //
 // This is Invariant 9 applied to a reconstruction. "No recorded state at that
 // instant" and "nothing was ever watching this kind" are different findings, and
 // an engineer handed the second dressed as the first concludes an object did not
 // exist when in fact nobody was looking at it.
-func stateFailure(ctx context.Context, backend *Backend, request GetRequest, err error) error {
+//
+// coverage is the answer RunGet already obtained, and coverageErr is the failure
+// to obtain it. They are arguments rather than a query of this function's own so
+// that the header of a successful reconstruction and the explanation of an
+// unsuccessful one can never be built from two different readings of the scope
+// log.
+func stateFailure(
+	backend *Backend, request GetRequest, coverage coverageAnswer, coverageErr, err error,
+) error {
 	object := describeObject(request.Ref)
 	instant := render.FormatInstant(request.At)
 
@@ -280,24 +317,14 @@ func stateFailure(ctx context.Context, backend *Backend, request GetRequest, err
 		return RuntimeErrorf("reconstructing %s as of %s: %w", object, instant, err)
 	}
 
-	intervals, coverageErr := backend.Engine.Coverage(ctx, query.ScopeQuery{
-		ClusterID: request.Ref.ClusterID,
-		APIGroup:  request.Ref.APIGroup,
-		Kind:      request.Ref.Kind,
-		Namespace: request.Ref.Namespace,
-		// Unbounded at the start, because the question is whether this kind was
-		// ever watched, not whether it was watched inside some window the user
-		// did not ask about.
-		To: request.At,
-	})
 	switch {
-	case coverageErr != nil && !errors.Is(coverageErr, query.ErrCapabilityUnsupported):
+	case coverageErr != nil:
 		return RuntimeErrorf("no recorded state for %s at %s, and the watch scopes that would say "+
 			"whether anything was looking could not be read: %w", object, instant, coverageErr)
-	case coverageErr != nil:
+	case coverage.Gap != nil:
 		return RuntimeErrorf("no recorded state for %s at %s, and this backend has no scope log: it "+
 			"cannot say whether the object was absent or merely unobserved", object, instant)
-	case len(intervals) == 0:
+	case len(coverage.Intervals) == 0:
 		return fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q at or before %s, so this "+
 			"absence is not evidence that the object did not exist; the `%s` command lists what is "+
 			"being recorded", query.ErrNoCoverage, describeKind(request.Ref), object,
@@ -305,7 +332,7 @@ func stateFailure(ctx context.Context, backend *Backend, request GetRequest, err
 	}
 	return RuntimeErrorf("no recorded state for %s at %s: it had not been observed by then, or it had "+
 		"already been deleted. The scope was watched over %s",
-		object, instant, describeInterval(intervals[0]))
+		object, instant, describeInterval(coverage.Intervals[0]))
 }
 
 // verifyReconstruction re-hashes the reconstructed state and compares it against

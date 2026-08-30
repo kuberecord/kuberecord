@@ -56,6 +56,27 @@ func reconstructedDocument() render.ObjectDocument {
 	}
 }
 
+// reconstructedHead is the envelope head the document is written inside.
+//
+// The provenance a reader judges the reconstruction by travels on the item; what
+// is here is the provenance of the *answer* — which cluster, which engine, and
+// what the watch scopes said about the period being reconstructed.
+func reconstructedHead() render.EnvelopeHead {
+	return render.EnvelopeHead{
+		APIVersion: render.EnvelopeAPIVersion,
+		Kind:       render.KindObject,
+		Metadata: render.EnvelopeMetadata{
+			ClusterID: "prod-eu-1",
+			Backend:   "clickhouse",
+			Coverage: render.CoverageReport{
+				Available: true,
+				Summary:   "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+				Intervals: []query.ScopeInterval{},
+			},
+		},
+	}
+}
+
 // mustInstant parses a fixture timestamp.
 func mustInstant(clock string) time.Time {
 	parsed, err := time.Parse(time.RFC3339Nano, clock)
@@ -71,8 +92,8 @@ func mustInstant(clock string) time.Time {
 // after somebody trimmed the header would still pass. These will not.
 func TestObjectYAMLCarriesTheMandatoryHeader(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if err := render.WriteObject(
-		&out, &errOut, reconstructedDocument(), render.ObjectYAML, render.Options{}); err != nil {
+	if err := render.WriteObject(&out, &errOut, reconstructedDocument(), reconstructedHead(),
+		render.StructuredYAML, render.Options{}); err != nil {
 		t.Fatalf("WriteObject: %v", err)
 	}
 	got := out.String()
@@ -111,7 +132,8 @@ func TestObjectYAMLCarriesTheMandatoryHeader(t *testing.T) {
 func TestObjectYAMLRemainsParseable(t *testing.T) {
 	var out, errOut bytes.Buffer
 	doc := reconstructedDocument()
-	if err := render.WriteObject(&out, &errOut, doc, render.ObjectYAML, render.Options{}); err != nil {
+	if err := render.WriteObject(
+		&out, &errOut, doc, reconstructedHead(), render.StructuredYAML, render.Options{}); err != nil {
 		t.Fatalf("WriteObject: %v", err)
 	}
 
@@ -119,13 +141,42 @@ func TestObjectYAMLRemainsParseable(t *testing.T) {
 	if err := yaml.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("the rendered document is not valid YAML: %v\n%s", err, out.String())
 	}
-	spec, ok := decoded["spec"].(map[string]any)
+	spec, ok := reconstructedState(t, decoded)["spec"].(map[string]any)
 	if !ok {
 		t.Fatalf("the decoded document has no spec: %#v", decoded)
 	}
 	if spec["replicas"] != float64(5) {
 		t.Errorf("the document did not survive the header: spec.replicas is %#v, want 5", spec["replicas"])
 	}
+}
+
+// reconstructedState digs the object out of a decoded envelope.
+//
+// It asserts the envelope on the way past, because every one of those fields is
+// part of the contract a script binds to: an apiVersion it branches on, a kind
+// that says what the items are, and an items list rather than a bare document.
+func reconstructedState(t *testing.T, decoded map[string]any) map[string]any {
+	t.Helper()
+
+	if decoded["apiVersion"] != render.EnvelopeAPIVersion {
+		t.Fatalf("apiVersion is %#v, want %q", decoded["apiVersion"], render.EnvelopeAPIVersion)
+	}
+	if decoded["kind"] != render.KindObject {
+		t.Fatalf("kind is %#v, want %q", decoded["kind"], render.KindObject)
+	}
+	items, ok := decoded["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("a reconstruction is one item, and this envelope holds %#v", decoded["items"])
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the item is not an object: %#v", items[0])
+	}
+	state, ok := item["object"].(map[string]any)
+	if !ok {
+		t.Fatalf("the item carries no reconstructed object: %#v", item)
+	}
+	return state
 }
 
 // TestObjectJSONPutsTheHeaderOnStandardError covers the format with no comment
@@ -137,8 +188,8 @@ func TestObjectYAMLRemainsParseable(t *testing.T) {
 // other option, and it would change the document a --verify hashes.
 func TestObjectJSONPutsTheHeaderOnStandardError(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if err := render.WriteObject(
-		&out, &errOut, reconstructedDocument(), render.ObjectJSON, render.Options{}); err != nil {
+	if err := render.WriteObject(&out, &errOut, reconstructedDocument(), reconstructedHead(),
+		render.StructuredJSON, render.Options{}); err != nil {
 		t.Fatalf("WriteObject: %v", err)
 	}
 
@@ -153,8 +204,8 @@ func TestObjectJSONPutsTheHeaderOnStandardError(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("the rendered document is not valid JSON: %v\n%s", err, out.String())
 	}
-	if decoded["kind"] != "Deployment" {
-		t.Errorf("the decoded document is not the object: %#v", decoded)
+	if state := reconstructedState(t, decoded); state["kind"] != "Deployment" {
+		t.Errorf("the decoded document is not the object: %#v", state)
 	}
 }
 
@@ -169,7 +220,8 @@ func TestObjectReportsAbsentProvenanceAsAbsent(t *testing.T) {
 	doc.BaseEvent = ""
 
 	var out, errOut bytes.Buffer
-	if err := render.WriteObject(&out, &errOut, doc, render.ObjectYAML, render.Options{}); err != nil {
+	if err := render.WriteObject(
+		&out, &errOut, doc, reconstructedHead(), render.StructuredYAML, render.Options{}); err != nil {
 		t.Fatalf("WriteObject: %v", err)
 	}
 	for _, want := range []string{"# uid:             not recorded", "(not recorded)"} {

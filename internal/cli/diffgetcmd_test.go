@@ -48,11 +48,7 @@ func TestDiffAndGetRefuseMalformedInvocations(t *testing.T) {
 			argv: []string{"diff", "deploy"},
 			want: "no object name given",
 		},
-		{
-			name: "diff in a format it does not render",
-			argv: []string{"diff", "deploy/x", "-o", "json"},
-			want: "diff renders diff, table or wide",
-		},
+
 		{
 			name: "diff with a negative limit",
 			argv: []string{"diff", "deploy/x", "--limit", "-1"},
@@ -81,7 +77,7 @@ func TestDiffAndGetRefuseMalformedInvocations(t *testing.T) {
 		{
 			name: "get in a tabular format",
 			argv: []string{"get", "deploy/x", "-o", "wide"},
-			want: "get renders yaml or json",
+			want: "get renders yaml, json or jsonl",
 		},
 		{
 			name: "get with an unreadable --at",

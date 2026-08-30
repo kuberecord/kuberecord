@@ -140,8 +140,9 @@ func runDiffCommand(
 	ctx context.Context, flags *GlobalFlags, local *diffFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
-	if formatErr := requireDiffFormat(flags.Output); formatErr != nil {
-		return formatErr
+	structured, err := diffFormat(flags.Output)
+	if err != nil {
+		return err
 	}
 	arg, err := ParseResourceArg(args)
 	if err != nil {
@@ -175,27 +176,31 @@ func runDiffCommand(
 			DisplayFieldPaths: normalizeFieldPaths(local.fields),
 			Limit:             local.limit,
 			Reverse:           local.reverse,
+			Structured:        structured,
 		},
 		ExitCode: local.exitCode,
 	}
 	return RunDiff(ctx, backend, request, streams, diffRenderOptions(flags, local, streams))
 }
 
-// requireDiffFormat refuses the formats this command does not render.
+// diffFormat decides which of this command's two renderings an invocation asked
+// for.
 //
-// The three it accepts all produce hunks: `diff` is the rendering this command
-// exists for, and `table` is only in the list because it is the global default a
-// user who typed no -o at all will arrive with. The structured formats carry the
-// versioned envelope and are not wired to this command yet, and saying so is
-// better than handing somebody's script a page of hunks.
-func requireDiffFormat(format OutputFormat) error {
+// An empty StructuredFormat means the hunk view. Three -o values arrive at it:
+// `diff` is the rendering this command exists for, `wide` widens the timestamps
+// the way it does everywhere else, and `table` is in the list only because it is
+// the global default a user who typed no -o at all arrives with — refusing that
+// would make a bare `kuberecord diff` a usage error.
+func diffFormat(format OutputFormat) (render.StructuredFormat, error) {
 	switch format {
 	case OutputTable, OutputWide, OutputDiff:
-		return nil
+		return "", nil
 	}
-	return UsageErrorf("diff renders %s, %s or %s, not %s: the structured formats carry the versioned "+
-		"%s envelope and are not wired to this command yet",
-		OutputDiff, OutputTable, OutputWide, format, ConfigAPIVersion)
+	structured, ok := structuredFormat(format)
+	if !ok {
+		return "", UsageErrorf("diff cannot render %s", format)
+	}
+	return structured, nil
 }
 
 // diffRenderOptions decides how the document will look.
@@ -238,27 +243,18 @@ func RunDiff(
 		return err
 	}
 
-	document := render.DiffDocument{
-		Kind:     describeKind(request.Timeline.Ref),
-		Object:   describeObject(request.Timeline.Ref),
-		Cluster:  request.Timeline.Ref.ClusterID,
-		UID:      gathered.UID,
-		Coverage: gathered.Coverage,
-		Changes:  gathered.Rows,
-		Notices:  gathered.Notices,
-	}
-
 	// The finding, not the failure, decides the exit code: a scope nobody ever
 	// watched is reported as such whatever --exit-code was asked for, because a
 	// script told that "nothing changed" when nothing was watching has been given
 	// the one answer Invariant 9 exists to prevent.
+	notices := gathered.Notices
 	changed := gathered.Empty == nil && len(gathered.Rows) > 0
 	if request.ExitCode && changed {
-		document.Notices = append(document.Notices, changesFoundNotice(len(gathered.Rows)))
+		notices = append(notices, changesFoundNotice(len(gathered.Rows)))
 	}
 
-	if writeErr := render.WriteDiff(streams.Out, streams.ErrOut, document, opts); writeErr != nil {
-		return RuntimeErrorf("%w", writeErr)
+	if writeErr := writeDiffAnswer(backend, request, gathered, notices, streams, opts); writeErr != nil {
+		return writeErr
 	}
 	if gathered.Empty != nil {
 		return gathered.Empty
@@ -267,6 +263,66 @@ func RunDiff(
 		return &Error{Code: ExitRuntimeError, Quiet: true, Err: errChangesFound}
 	}
 	return nil
+}
+
+// writeDiffAnswer renders the gathered answer in whichever shape was asked for.
+//
+// Both shapes describe the identical answer, gathered identically: the structured
+// one is not a reduced version of the page, and in one respect it is the fuller
+// of the two, since the hunk view elides long values and caps the operations it
+// prints while an envelope carries every one of them.
+func writeDiffAnswer(
+	backend *Backend, request DiffRequest, gathered gatherResult, notices []render.Notice,
+	streams genericiooptions.IOStreams, opts render.Options,
+) error {
+	if request.Timeline.Structured == "" {
+		document := render.DiffDocument{
+			Kind:     describeKind(request.Timeline.Ref),
+			Object:   describeObject(request.Timeline.Ref),
+			Cluster:  request.Timeline.Ref.ClusterID,
+			UID:      gathered.UID,
+			Coverage: gathered.Coverage.Summary(),
+			Changes:  gathered.Rows,
+			Notices:  notices,
+		}
+		if err := render.WriteDiff(streams.Out, streams.ErrOut, document, opts); err != nil {
+			return RuntimeErrorf("%w", err)
+		}
+		return nil
+	}
+
+	stream, err := render.NewStream(
+		streams.Out, request.Timeline.Structured,
+		envelopeHead(backend, render.KindDiff, gathered.Coverage))
+	if err != nil {
+		return RuntimeErrorf("%w", err)
+	}
+	if err := writeItems(stream, diffItems(gathered.Rows)); err != nil {
+		return err
+	}
+	if err := render.WriteNotices(streams.ErrOut, notices, opts); err != nil {
+		return RuntimeErrorf("%w", err)
+	}
+	return nil
+}
+
+// diffItems turns gathered rows into envelope items.
+//
+// Each item is the schema's own columns plus the two things this command computes
+// that nothing else does: the decoded operations, and the prior value each one
+// destroyed where the replay established it. An operation whose prior value could
+// not be established carries old_known false rather than a null that would read as
+// "the field was null" — the distinction render.Hunk exists to keep.
+func diffItems(rows []render.TimelineRow) []any {
+	items := make([]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, render.DiffItem{
+			Change:     changeItem(row.Change),
+			PatchError: row.PatchErr,
+			Hunks:      render.Hunks(row.Ops),
+		})
+	}
+	return items
 }
 
 // errChangesFound is what --exit-code returns when the answer is "yes".

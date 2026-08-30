@@ -60,9 +60,12 @@ func TestTimelineRefusesMalformedInvocations(t *testing.T) {
 			want: "a single object",
 		},
 		{
-			name: "a structured format this command does not render yet",
-			argv: []string{"timeline", "deploy/x", "-o", "json"},
-			want: "timeline renders table or wide",
+			// The hunk rendering is a command of its own, and the message says so
+			// rather than silently producing a table: two entrances to one layout
+			// would be two places for it to drift.
+			name: "the hunk rendering, which is another command",
+			argv: []string{"timeline", "deploy/x", "-o", "diff"},
+			want: "timeline does not render diff",
 		},
 		{
 			name: "contradictory incarnation flags",

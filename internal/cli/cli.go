@@ -45,6 +45,15 @@ limitations under the License.
 // The tree is built once and answers to both `kubectl kuberecord` and
 // `kuberecord`, adjusting only what it calls itself. See InvocationName.
 //
+// # The structured output is a public contract
+//
+// `-o json`, `-o jsonl` and `-o yaml` produce a versioned envelope
+// (render.EnvelopeAPIVersion) whose item field names mirror the frozen schema's
+// column names exactly (D19). People script against this, and a field renamed a
+// release later breaks a runbook silently — `jq` reports nothing for a path that
+// no longer exists, so the pipeline keeps running while producing empty findings.
+// Within one apiVersion the contract is additive only, exactly as the schema's is.
+//
 // # Where output goes
 //
 // Data goes to stdout. Diagnostics, warnings, progress and errors go to stderr,

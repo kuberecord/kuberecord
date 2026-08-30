@@ -164,8 +164,9 @@ func runTimelineCommand(
 	ctx context.Context, flags *GlobalFlags, local *timelineFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
-	if formatErr := requireTableFormat(flags.Output); formatErr != nil {
-		return formatErr
+	structured, err := timelineFormat(flags.Output)
+	if err != nil {
+		return err
 	}
 	arg, err := ParseResourceArg(args)
 	if err != nil {
@@ -208,6 +209,7 @@ func runTimelineCommand(
 		Limit:           local.limit,
 		Reverse:         local.reverse,
 		WithEvents:      local.withEvents,
+		Structured:      structured,
 	}
 	return RunTimeline(ctx, backend, request, streams, timelineRenderOptions(flags, local, streams))
 }
@@ -231,11 +233,7 @@ func resolveObject(
 	ctx context.Context, flags *GlobalFlags, streams genericiooptions.IOStreams,
 	invokedAs string, arg ResourceArg,
 ) (*Backend, query.ObjectRef, error) {
-	resolver, err := NewBackendResolver(flags, streams, invokedAs)
-	if err != nil {
-		return nil, query.ObjectRef{}, err
-	}
-	backend, err := resolver.Resolve(ctx)
+	backend, err := resolveBackend(ctx, flags, streams, invokedAs)
 	if err != nil {
 		return nil, query.ObjectRef{}, err
 	}
@@ -245,6 +243,22 @@ func resolveObject(
 		return nil, query.ObjectRef{}, errors.Join(err, backend.Close())
 	}
 	return backend, ref, nil
+}
+
+// resolveBackend runs the resolution chain and opens what it chose.
+//
+// It is the half of resolveObject that has nothing to do with an object, and it
+// is separate because `scopes` needs exactly that half: it asks about what was
+// being recorded rather than about one object's history, and there is no address
+// for it to resolve. The caller owns the returned backend and must Close it.
+func resolveBackend(
+	ctx context.Context, flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+) (*Backend, error) {
+	resolver, err := NewBackendResolver(flags, streams, invokedAs)
+	if err != nil {
+		return nil, err
+	}
+	return resolver.Resolve(ctx)
 }
 
 // objectRefFor resolves the address against the opened backend's cluster
@@ -288,19 +302,31 @@ func parseWindow(since, until string, now time.Time) (from, to time.Time, err er
 	return from, to, nil
 }
 
-// requireTableFormat refuses the formats this command does not yet render.
+// timelineFormat decides which of this command's two renderings an invocation
+// asked for, and refuses the one it does not have.
 //
-// Refusing by name rather than rendering a table regardless is the same choice
-// `config view` makes: a user who asked for JSON and received a table has been
-// answered in a format their script cannot read, and finding out at the `jq` is
-// worse than finding out here.
-func requireTableFormat(format OutputFormat) error {
+// An empty StructuredFormat means the table; anything else is the envelope. `diff`
+// is refused by name rather than quietly rendered as a table, for the reason
+// `config view` refuses a format it cannot produce: a user who asked for one
+// shape and received another has been answered in a form their eye or their
+// script cannot read, and finding that out at the `jq` is worse than finding it
+// out here. It is refused rather than implemented because the hunk rendering is a
+// whole command — `diff` — and a second entrance to it would be a second place
+// for the two to drift apart.
+func timelineFormat(format OutputFormat) (render.StructuredFormat, error) {
 	switch format {
 	case OutputTable, OutputWide:
-		return nil
+		return "", nil
+	case OutputDiff:
+		return "", UsageErrorf("timeline does not render %s: its rows are one line each by design. "+
+			"The `diff` command spends the whole page on the same changes, with the old value beside "+
+			"the new one", OutputDiff)
 	}
-	return UsageErrorf("timeline renders %s or %s, not %s: the structured formats carry the versioned "+
-		"%s envelope and are not wired to this command yet", OutputTable, OutputWide, format, ConfigAPIVersion)
+	structured, ok := structuredFormat(format)
+	if !ok {
+		return "", UsageErrorf("timeline cannot render %s", format)
+	}
+	return structured, nil
 }
 
 // normalizeFieldPaths accepts the display spelling of a path as well as the
@@ -510,6 +536,12 @@ type TimelineRequest struct {
 
 	// WithEvents interleaves the Kubernetes Events recorded about the object.
 	WithEvents bool
+
+	// Structured names the serialization of the versioned envelope to write.
+	// Empty means the table, which is the default and the rendering this release
+	// exists for; anything else routes to the structured path, which streams
+	// under `jsonl` rather than gathering the whole answer first.
+	Structured render.StructuredFormat
 }
 
 // filtered reports whether a predicate makes the rendered rows a non-consecutive
@@ -533,6 +565,10 @@ func RunTimeline(
 	ctx context.Context, backend *Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
+	if request.Structured != "" {
+		return runTimelineStructured(ctx, backend, request, streams, opts)
+	}
+
 	gathered, err := gatherChanges(ctx, backend, request)
 	if err != nil {
 		return err
@@ -544,7 +580,7 @@ func RunTimeline(
 		Cluster:      request.Ref.ClusterID,
 		UID:          gathered.UID,
 		Incarnations: gathered.Incarnations,
-		Coverage:     gathered.Coverage,
+		Coverage:     gathered.Coverage.Summary(),
 		Rows:         gathered.Rows,
 		Notices:      gathered.Notices,
 	}
@@ -727,13 +763,8 @@ func priorValueNotices(
 // alone: a backend declaring no deletions can never produce a Deleted row today,
 // but a renderer whose notice does not actually look at the rows would start
 // lying on the day one does.
-func deletionsNotice(capabilities query.Capabilities, rows []render.TimelineRow) render.Notice {
-	if capabilities.Deletions {
-		return render.Notice{}
-	}
-	if slices.ContainsFunc(rows, func(row render.TimelineRow) bool {
-		return row.Change.EventType == query.EventDeleted
-	}) {
+func deletionsNotice(capabilities query.Capabilities, sawDeleted bool) render.Notice {
+	if capabilities.Deletions || sawDeleted {
 		return render.Notice{}
 	}
 	return render.Notice{
@@ -742,6 +773,20 @@ func deletionsNotice(capabilities query.Capabilities, rows []render.TimelineRow)
 			"The `%s` command shows what was being watched", capabilities.Backend, scopesCommand),
 		Warning: true,
 	}
+}
+
+// sawDeletion reports whether a rendered run holds a deletion.
+//
+// It is the honest half of deletionsNotice's predicate, kept as a function
+// because the streaming path never holds the rows and answers the same question
+// with a flag it maintained as they went past. Both callers therefore ask the
+// same question of the same enum value, rather than one of them asking the
+// capability alone — which would start lying on the day a backend that declares
+// no deletions produces one.
+func sawDeletion(rows []render.TimelineRow) bool {
+	return slices.ContainsFunc(rows, func(row render.TimelineRow) bool {
+		return row.Change.EventType == query.EventDeleted
+	})
 }
 
 // appendNotice adds a notice only when there is one, so that callers can build a

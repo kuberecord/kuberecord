@@ -1,28 +1,60 @@
 === stdout ===
 {
-  "apiVersion": "apps/v1",
-  "kind": "Deployment",
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Object",
   "metadata": {
-    "name": "checkout",
-    "namespace": "payments",
-    "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    "cluster_id": "prod-eu-1",
+    "backend": "clickhouse",
+    "coverage": {
+      "available": true,
+      "summary": "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+      "intervals": [
+        {
+          "api_group": "apps",
+          "kind": "Deployment",
+          "namespace": "",
+          "rule_ref": "ClusterStreamRule/all-workloads",
+          "from": "2026-07-02T09:14:00Z",
+          "to": null
+        }
+      ]
+    }
   },
-  "spec": {
-    "template": {
-      "spec": {
-        "containers": [
-          {
-            "image": "registry.example/checkout:1.4.2",
-            "name": "checkout"
-          },
-          {
-            "image": "registry.example/envoy:1.29",
-            "name": "envoy"
+  "items": [
+    {
+      "at": "2026-08-28T15:00:00Z",
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "base_ts": "2026-08-28T14:05:02.117Z",
+      "base_event": "Checkpoint",
+      "patches_applied": 0,
+      "sha256": "283f5a59c38331efcea930d5e95a909f132454c4d3c305df9300d0f69d7544cf",
+      "object": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "checkout",
+          "namespace": "payments",
+          "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        },
+        "spec": {
+          "template": {
+            "spec": {
+              "containers": [
+                {
+                  "image": "registry.example/checkout:1.4.2",
+                  "name": "checkout"
+                },
+                {
+                  "image": "registry.example/envoy:1.29",
+                  "name": "envoy"
+                }
+              ]
+            }
           }
-        ]
+        }
       }
     }
-  }
+  ]
 }
 === stderr ===
 # Reconstructed state — NOT A DEPLOYABLE MANIFEST.
@@ -33,6 +65,7 @@
 # at:              2026-08-28T15:00:00Z
 # base row:        2026-08-28T14:05:02Z (Checkpoint)
 # patches applied: 0
+# coverage:        2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 #
 # This is what kuberecord recorded, not what the API server held. Do not
 # `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and

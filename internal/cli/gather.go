@@ -18,7 +18,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -59,8 +58,11 @@ type gatherResult struct {
 	// being shown. Its presence is what gives a table its UID column.
 	Incarnations []string
 
-	// Coverage is the pre-rendered coverage summary for the header.
-	Coverage string
+	// Coverage is what the watch scopes said, carried whole rather than
+	// pre-rendered: the header wants a sentence and the structured envelope wants
+	// the intervals themselves, and building one from the other afterwards would
+	// be a second reading of the same answer.
+	Coverage coverageAnswer
 
 	// Rows are the changes, in display order.
 	Rows []render.TimelineRow
@@ -125,13 +127,14 @@ func gatherChanges(ctx context.Context, backend *Backend, request TimelineReques
 		slices.Reverse(result.Rows)
 	}
 
-	intervals, coverageErr := backend.Engine.Coverage(ctx, request.scopeQuery(from, to))
-	if coverageErr != nil && !errors.Is(coverageErr, query.ErrCapabilityUnsupported) {
-		return gatherResult{}, RuntimeErrorf(
-			"reading the watch scopes that cover %s: %w", describeObject(request.Ref), coverageErr)
+	coverage, err := askCoverage(
+		ctx, backend, request.scopeQuery(from, to), describeObject(request.Ref))
+	if err != nil {
+		return gatherResult{}, err
 	}
-	result.Coverage = coverageSummary(intervals, coverageErr)
-	result.Notices = appendNotice(result.Notices, deletionsNotice(capabilities, result.Rows))
+	result.Coverage = coverage
+	result.Notices = appendNotice(result.Notices,
+		deletionsNotice(capabilities, sawDeletion(result.Rows)))
 
 	result.Notices = appendNotice(result.Notices,
 		displayFilterNotice(request, from, to, scanned, len(result.Rows)))
@@ -142,7 +145,7 @@ func gatherChanges(ctx context.Context, backend *Backend, request TimelineReques
 		// Consulting coverage about it would answer a question nobody asked and
 		// could report "nothing was watching" about a window that demonstrably
 		// held changes.
-		emptyNotices, emptyErr := explainEmpty(request, from, to, result.Rows, intervals, coverageErr)
+		emptyNotices, emptyErr := explainEmpty(request, from, to, len(result.Rows) > 0, coverage)
 		result.Notices = append(result.Notices, emptyNotices...)
 		result.Empty = emptyErr
 	}

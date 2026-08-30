@@ -114,16 +114,15 @@ func describeRule(interval query.ScopeInterval) string {
 // the number. Everything else is a notice: the command succeeded, and what it
 // found was silence with an explanation attached.
 func explainEmpty(
-	request TimelineRequest, from, to time.Time,
-	rows []render.TimelineRow, intervals []query.ScopeInterval, coverageErr error,
+	request TimelineRequest, from, to time.Time, hasRows bool, coverage coverageAnswer,
 ) ([]render.Notice, error) {
-	if len(rows) > 0 {
+	if hasRows {
 		return nil, nil
 	}
 	object := describeObject(request.Ref)
 	window := DescribeWindow(from, to)
 
-	if coverageErr != nil {
+	if coverage.Gap != nil {
 		return []render.Notice{{
 			Text: fmt.Sprintf("no changes recorded for %s in %s, and this backend has no scope log: "+
 				"it cannot say whether that means nothing changed or nothing was watching",
@@ -132,13 +131,13 @@ func explainEmpty(
 		}}, nil
 	}
 
-	if len(intervals) == 0 {
+	if len(coverage.Intervals) == 0 {
 		return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
 			"not evidence that it did not change; the `%s` command lists what is being recorded",
 			query.ErrNoCoverage, describeKind(request.Ref), object, request.Ref.ClusterID, scopesCommand)
 	}
 
-	earliest := intervals[0]
+	earliest := coverage.Intervals[0]
 	if from.IsZero() || earliest.From.After(from) {
 		return []render.Notice{{
 			Text: fmt.Sprintf("no changes recorded for %s in %s, but %s was not being watched before "+

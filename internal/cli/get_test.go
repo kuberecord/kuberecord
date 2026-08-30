@@ -126,7 +126,7 @@ func runGet(
 }
 
 // getRequest is a `get deploy/checkout -n payments --at …` for the fixture.
-func getRequest(format render.ObjectFormat) cli.GetRequest {
+func getRequest(format render.StructuredFormat) cli.GetRequest {
 	return cli.GetRequest{
 		Ref:    fixtureRef(),
 		At:     at("2026-08-28T15:00:00Z"),
@@ -136,7 +136,7 @@ func getRequest(format render.ObjectFormat) cli.GetRequest {
 
 // TestGetReconstructsStateAsYAML is the flagship of this command, header and all.
 func TestGetReconstructsStateAsYAML(t *testing.T) {
-	stdout, stderr, err := runGet(t, checkpointEngine(t), getRequest(render.ObjectYAML))
+	stdout, stderr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredYAML))
 	if err != nil {
 		t.Fatalf("RunGet: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestGetReconstructsStateAsYAML(t *testing.T) {
 
 // TestGetReconstructsStateAsJSON covers the format with no comment syntax.
 func TestGetReconstructsStateAsJSON(t *testing.T) {
-	stdout, stderr, err := runGet(t, checkpointEngine(t), getRequest(render.ObjectJSON))
+	stdout, stderr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
 	if err != nil {
 		t.Fatalf("RunGet: %v", err)
 	}
@@ -160,6 +160,7 @@ func TestGetReconstructsStateAsJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON, so a script cannot read it: %v\n%s", err, stdout)
 	}
+	assertEnvelope(t, decoded, render.KindObject)
 }
 
 // TestGetDoesNotReapplyACheckpointsOwnDiff is the acceptance criterion, tested
@@ -170,7 +171,7 @@ func TestGetReconstructsStateAsJSON(t *testing.T) {
 // containers — an object that never existed, assembled without a single error
 // being reported.
 func TestGetDoesNotReapplyACheckpointsOwnDiff(t *testing.T) {
-	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.ObjectJSON))
+	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
 	if err != nil {
 		t.Fatalf("RunGet: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestGetDoesNotReapplyACheckpointsOwnDiff(t *testing.T) {
 // it. The provenance header is where a reader checks that, so that is where it is
 // asserted.
 func TestGetUsesTheCheckpointAsTheBase(t *testing.T) {
-	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.ObjectYAML))
+	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredYAML))
 	if err != nil {
 		t.Fatalf("RunGet: %v", err)
 	}
@@ -221,7 +222,7 @@ func containersOf(t *testing.T, document string) []any {
 	if err := json.Unmarshal([]byte(document), &decoded); err != nil {
 		t.Fatalf("the reconstruction is not valid JSON: %v", err)
 	}
-	spec, ok := decoded["spec"].(map[string]any)
+	spec, ok := envelopeObject(t, decoded)["spec"].(map[string]any)
 	if !ok {
 		t.Fatalf("the reconstruction has no spec: %#v", decoded)
 	}
@@ -240,10 +241,34 @@ func containersOf(t *testing.T, document string) []any {
 	return containers
 }
 
+// envelopeObject digs the reconstructed state out of a decoded Object envelope.
+//
+// The state is at .items[0].object rather than at the root, which is the shape
+// D19 fixes for every answer this CLI gives. It is worth a helper rather than an
+// index expression because the assertion it makes on the way past — that the
+// envelope is the one it claims to be — is the contract these tests exist to pin.
+func envelopeObject(t *testing.T, decoded map[string]any) map[string]any {
+	t.Helper()
+
+	items := assertEnvelope(t, decoded, render.KindObject)
+	if len(items) != 1 {
+		t.Fatalf("a reconstruction is one item, and this envelope holds %d", len(items))
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the item is not an object: %#v", items[0])
+	}
+	state, ok := item["object"].(map[string]any)
+	if !ok {
+		t.Fatalf("the item carries no reconstructed object: %#v", item)
+	}
+	return state
+}
+
 // TestGetVerifyReportsAMatch covers the successful half of the chain-of-custody
 // check.
 func TestGetVerifyReportsAMatch(t *testing.T) {
-	request := getRequest(render.ObjectYAML)
+	request := getRequest(render.StructuredYAML)
 	request.Verify = true
 
 	stdout, stderr, err := runGet(t, checkpointEngine(t), request)
@@ -272,7 +297,7 @@ func TestGetVerifyReportsAMismatch(t *testing.T) {
 	engine.changes[len(engine.changes)-1].SHA256 =
 		"0000000000000000000000000000000000000000000000000000000000000000"
 
-	request := getRequest(render.ObjectYAML)
+	request := getRequest(render.StructuredYAML)
 	request.Verify = true
 
 	stdout, _, err := runGet(t, engine, request)
@@ -313,7 +338,7 @@ func TestGetVerifyRefusesToPassWithoutADigest(t *testing.T) {
 		engine.changes[i].SHA256 = ""
 	}
 
-	request := getRequest(render.ObjectYAML)
+	request := getRequest(render.StructuredYAML)
 	request.Verify = true
 
 	stdout, _, err := runGet(t, engine, request)
@@ -337,7 +362,7 @@ func TestGetVerifyRefusesToPassWithoutADigest(t *testing.T) {
 func TestGetWithoutCoverageIsTheNoCoverageFinding(t *testing.T) {
 	engine := &fakeEngine{caps: clickHouseCapabilities()}
 
-	_, _, err := runGet(t, engine, getRequest(render.ObjectYAML))
+	_, _, err := runGet(t, engine, getRequest(render.StructuredYAML))
 	if err == nil {
 		t.Fatal("a scope nobody watched was reported as success")
 	}
@@ -360,7 +385,7 @@ func TestGetWithCoverageButNoStateIsAnAbsence(t *testing.T) {
 		intervals: watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
 	}
 
-	_, _, err := runGet(t, engine, getRequest(render.ObjectYAML))
+	_, _, err := runGet(t, engine, getRequest(render.StructuredYAML))
 	if err == nil {
 		t.Fatal("a missing object was reported as success")
 	}
@@ -377,7 +402,7 @@ func TestGetWithCoverageButNoStateIsAnAbsence(t *testing.T) {
 func TestGetReportsABackendThatCannotReconstruct(t *testing.T) {
 	engine := &fakeEngine{caps: archiveCapabilities(), stateErr: query.ErrCapabilityUnsupported}
 
-	_, _, err := runGet(t, engine, getRequest(render.ObjectYAML))
+	_, _, err := runGet(t, engine, getRequest(render.StructuredYAML))
 	if err == nil {
 		t.Fatal("a backend that cannot reconstruct state produced a successful empty answer")
 	}
@@ -395,7 +420,7 @@ func TestGetReportsABackendThatCannotReconstruct(t *testing.T) {
 // echoed from the flag, so it always names the incarnation the document is
 // actually of.
 func TestGetNamesTheIncarnationItReconstructed(t *testing.T) {
-	request := getRequest(render.ObjectYAML)
+	request := getRequest(render.StructuredYAML)
 	request.UID = fixtureUID
 
 	stdout, _, err := runGet(t, checkpointEngine(t), request)

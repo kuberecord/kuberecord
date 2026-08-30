@@ -1,0 +1,48 @@
+=== stdout ===
+apiVersion: cli.kuberecord.io/v1alpha1
+items:
+- api_group: apps
+  from: "2026-06-01T08:00:00Z"
+  kind: Deployment
+  namespace: payments
+  rule_ref: StreamRule/payments/workloads
+  to: "2026-07-02T09:14:00Z"
+- api_group: apps
+  from: "2026-07-02T09:14:00Z"
+  kind: Deployment
+  namespace: ""
+  rule_ref: ClusterStreamRule/all-workloads
+  to: null
+- api_group: ""
+  from: "2026-07-02T09:14:00Z"
+  kind: ConfigMap
+  namespace: payments
+  rule_ref: ""
+  to: "2026-08-11T17:31:22Z"
+kind: Coverage
+metadata:
+  backend: clickhouse
+  cluster_id: prod-eu-1
+  coverage:
+    available: true
+    intervals:
+    - api_group: apps
+      from: "2026-06-01T08:00:00Z"
+      kind: Deployment
+      namespace: payments
+      rule_ref: StreamRule/payments/workloads
+      to: "2026-07-02T09:14:00Z"
+    - api_group: apps
+      from: "2026-07-02T09:14:00Z"
+      kind: Deployment
+      namespace: ""
+      rule_ref: ClusterStreamRule/all-workloads
+      to: null
+    - api_group: ""
+      from: "2026-07-02T09:14:00Z"
+      kind: ConfigMap
+      namespace: payments
+      rule_ref: ""
+      to: "2026-08-11T17:31:22Z"
+    summary: 2026-06-01T08:00:00Z → open, 3 intervals
+=== stderr ===

@@ -214,6 +214,24 @@ func WriteTimeline(out, errOut io.Writer, doc TimelineDocument, opts Options) er
 	return nil
 }
 
+// WriteNotices writes a document's qualifications to errOut, and nothing to
+// stdout.
+//
+// It exists for the structured renderings, whose document is written by a Stream
+// rather than by one of the WriteX functions above, and which must still put
+// every qualification on the other stream. Exported rather than duplicated at
+// those call sites because the marker, the spacing and the colour of a notice are
+// part of how this CLI reads, and a second implementation of them would drift.
+func WriteNotices(errOut io.Writer, notices []Notice, opts Options) error {
+	if errOut == nil || len(notices) == 0 {
+		return nil
+	}
+	if _, err := io.WriteString(errOut, renderNotices(notices, opts)); err != nil {
+		return fmt.Errorf("writing the document's notices: %w", err)
+	}
+	return nil
+}
+
 // renderNotices builds the stderr half.
 //
 // The prefix is "!" rather than the resolver's "→" so that the two are

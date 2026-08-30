@@ -23,9 +23,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
-
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
@@ -232,12 +229,8 @@ func firstObjectUID(rows []render.TimelineRow) string {
 // nothing to ask: the only honest reading is that the object is in the namespace
 // the user named, and is cluster-scoped when they named none.
 func resolveKindOffline(arg ResourceArg, namespaced bool) (ResolvedResource, error) {
-	fullySpecified, groupKind := schema.ParseKindArg(arg.Resource)
-	gvk := groupKind.WithVersion("")
-	if fullySpecified != nil {
-		gvk = *fullySpecified
-	}
-	if gvk.Kind == "" || !unicode.IsUpper(rune(gvk.Kind[0])) {
+	gvk, ok := parseRecordedKind(arg.Resource)
+	if !ok {
 		return ResolvedResource{}, fmt.Errorf(
 			"%q cannot be resolved without one: short names and plural resource names come from the "+
 				"cluster's own discovery data. Give the kind as it is recorded — Deployment/%s or "+

@@ -19,6 +19,7 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -157,6 +158,30 @@ func (r ResolvedResource) ObjectRef(clusterID, namespace string) query.ObjectRef
 		Namespace: namespace,
 		Name:      r.Name,
 	}
+}
+
+// parseRecordedKind reads a token as the identity the schema itself stores: a
+// capitalised Kind, optionally qualified with its group.
+//
+// It is the whole of what can be resolved without a cluster, and the capital is
+// the test that keeps it honest. `deploy` and `deployments` are not kinds; turning
+// either into one would need the server's own discovery data, and guessing at it
+// offline would silently read a different object's history — or, for `scopes`,
+// report that a kind nobody spells that way was never watched.
+//
+// The boolean rather than an error is deliberate: the callers phrase the failure
+// differently — one is addressing an object and can name it, the other is
+// narrowing a listing — and a shared message would fit neither.
+func parseRecordedKind(token string) (schema.GroupVersionKind, bool) {
+	fullySpecified, groupKind := schema.ParseKindArg(token)
+	gvk := groupKind.WithVersion("")
+	if fullySpecified != nil {
+		gvk = *fullySpecified
+	}
+	if gvk.Kind == "" || !unicode.IsUpper(rune(gvk.Kind[0])) {
+		return schema.GroupVersionKind{}, false
+	}
+	return gvk, true
 }
 
 // Resolver turns an address into the kind, resource and scope it names.
