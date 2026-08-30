@@ -1,0 +1,61 @@
+=== stdout ===
+apiVersion: cli.kuberecord.io/v1alpha1
+items:
+- actors: []
+  api_version: apps/v1
+  data: ""
+  diff: '[{"op":"replace","path":"/metadata/annotations/deployment.kubernetes.io~1revision","value":"2"}]'
+  event_type: Modified
+  labels: {}
+  resource_version: "1004"
+  sha256: ""
+  ts: "2026-08-28T14:09:40.9Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kube-controller-manager
+  api_version: apps/v1
+  data: ""
+  diff: '[{"op":"replace","path":"/spec/replicas","value":5},{"op":"add","path":"/spec/paused","value":true},{"op":"remove","path":"/spec/minReadySeconds"}]'
+  event_type: Modified
+  labels: {}
+  resource_version: "1003"
+  sha256: ""
+  ts: "2026-08-28T14:05:02.117Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kubectl-client-side-apply
+  api_version: apps/v1
+  data: ""
+  diff: '[{"op":"replace","path":"/spec/template/spec/containers/0/resources/limits/memory","value":"512Mi"}]'
+  event_type: Modified
+  labels: {}
+  resource_version: "1002"
+  sha256: ""
+  ts: "2026-08-28T14:03:11.482Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kubectl-client-side-apply
+  api_version: apps/v1
+  data: '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"checkout","namespace":"payments","annotations":{"deployment.kubernetes.io/revision":"1"}},"spec":{"replicas":3,"minReadySeconds":10,"template":{"spec":{"containers":[{"name":"checkout","image":"registry.example/checkout:1.4.2","resources":{"limits":{"cpu":"2","memory":"2Gi"}}}]}}}}'
+  diff: ""
+  event_type: Added
+  labels: {}
+  resource_version: "1001"
+  sha256: ""
+  ts: "2026-08-28T14:02:58.001Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+kind: Timeline
+metadata:
+  backend: clickhouse
+  cluster_id: prod-eu-1
+  coverage:
+    available: true
+    intervals:
+    - api_group: apps
+      from: "2026-07-02T09:14:00Z"
+      kind: Deployment
+      namespace: ""
+      rule_ref: ClusterStreamRule/all-workloads
+      to: null
+    summary: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+=== stderr ===

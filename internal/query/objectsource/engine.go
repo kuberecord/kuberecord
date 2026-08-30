@@ -51,6 +51,7 @@ package objectsource
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,8 +62,9 @@ import (
 // optional estimating half, asserted where the implementation lives rather than at
 // wiring time.
 var (
-	_ query.QueryEngine   = (*Engine)(nil)
-	_ query.ScanEstimator = (*Engine)(nil)
+	_ query.QueryEngine          = (*Engine)(nil)
+	_ query.ScanEstimator        = (*Engine)(nil)
+	_ query.ScanProgressReporter = (*Engine)(nil)
 )
 
 // backendName is what this engine calls itself in structured output.
@@ -181,6 +183,16 @@ type Engine struct {
 	// It is atomic because the documented, ordinary shape is a caller that both
 	// defers a Close and calls one explicitly.
 	closed atomic.Bool
+
+	// progress is the optional callback of the read plane's progress half, and the
+	// two counters are what it reports. A scan fetches from several goroutines at
+	// once and every one of them counts, so the counters are atomic and progressMu
+	// makes counting and reporting one step — see recordScanned for why the second
+	// is not redundant, and query.ScanProgressReporter for what the figures mean.
+	progress    atomic.Pointer[progressSink]
+	progressMu  sync.Mutex
+	scanObjects atomic.Int64
+	scanBytes   atomic.Int64
 }
 
 // NewEngine builds an engine over a source the caller has already opened and still

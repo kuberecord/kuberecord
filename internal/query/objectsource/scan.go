@@ -265,6 +265,13 @@ func waitAll(ctx context.Context, limit, n int, run func(i int)) error {
 func readObject[A any](
 	ctx context.Context, e *Engine, key string, acc *A, decode func(*A, io.Reader) error,
 ) (err error) {
+	// Registered first so that it runs last, once the body has been closed and the
+	// count is final. It runs on every path, a failed fetch included, for the reason
+	// recordScanned gives: a progress line that stalled on an object the lifecycle
+	// rule had already removed would report a hang where there is only a gap.
+	var counted countingReader
+	defer func() { e.recordScanned(counted.n) }()
+
 	body, openErr := e.src.Open(ctx, key)
 	if openErr != nil {
 		if errors.Is(openErr, ErrKeyNotFound) {
@@ -284,7 +291,8 @@ func readObject[A any](
 		}
 	}()
 
-	if decodeErr := decode(acc, body); decodeErr != nil {
+	counted.r = body
+	if decodeErr := decode(acc, &counted); decodeErr != nil {
 		return fmt.Errorf("reading %q: %w", key, decodeErr)
 	}
 	return nil

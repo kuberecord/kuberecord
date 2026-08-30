@@ -1,0 +1,5 @@
+=== stdout ===
+Cluster: prod-eu-1
+Scope:   Secret in namespace payments
+Window:  all recorded history
+=== stderr ===

@@ -100,6 +100,7 @@ func TestEveryResourceStatesReadCarriesADedupForm(t *testing.T) {
 		{"newest incarnation at an instant", newestIncarnationAtStatement(ref, at)},
 		{"events", eventsStatement(ref, from, to, "uid-a", false)},
 		{"events without a pinned incarnation", eventsStatement(ref, from, to, "", true)},
+		{"cluster identity probe over the record table", clusterIDsFromRecordsStatement()},
 	}
 
 	for _, tc := range tests {
@@ -130,6 +131,60 @@ func TestCoverageReadCarriesNoFinal(t *testing.T) {
 	if strings.Contains(stmt.SQL, "FINAL") {
 		t.Errorf("%s is a plain MergeTree whose rows are written once each, so FINAL on it collapses "+
 			"nothing and costs on every read:\n%s", tableWatchScopes, stmt.SQL)
+	}
+}
+
+// TestClusterIDProbesAreShapedForTheirTables pins the two halves of the
+// cluster-identity probe against the tables they read.
+//
+// The pair exists because the same question has two very different costs
+// depending on where it is asked, and this is the test that fails if a later
+// change collapses them into one. The scope-log half must stay cheap — no FINAL
+// on a plain MergeTree, which would be a cost with no return — and the record half
+// must stay correct, because this package permits no read of the
+// ReplacingMergeTree without a dedup form and a leading sort-key column is not an
+// exception to a rule whose whole value is that it has none.
+//
+// Both must also arrive sorted and with no WHERE clause. The sort is the
+// contract's promise about ClusterIDs; the absent WHERE is what the read *is* —
+// this is the question asked precisely because the caller cannot yet name a
+// cluster to filter by.
+func TestClusterIDProbesAreShapedForTheirTables(t *testing.T) {
+	scopes := clusterIDsFromScopesStatement()
+	records := clusterIDsFromRecordsStatement()
+
+	if !strings.Contains(scopes.SQL, "FROM "+tableWatchScopes) {
+		t.Errorf("the cheap probe does not read %s:\n%s", tableWatchScopes, scopes.SQL)
+	}
+	if strings.Contains(scopes.SQL, "FINAL") {
+		t.Errorf("%s is a plain MergeTree whose rows are written once each, so FINAL on it collapses "+
+			"nothing and costs on every read:\n%s", tableWatchScopes, scopes.SQL)
+	}
+	if !readsResourceStates(records.SQL) {
+		t.Errorf("the fallback probe does not read %s:\n%s", tableResourceStates, records.SQL)
+	}
+	if !carriesDedupForm(records.SQL) {
+		t.Errorf("this read of %s carries none of %v:\n%s", tableResourceStates, dedupForms, records.SQL)
+	}
+
+	for name, stmt := range map[string]statement{"scope log": scopes, "record table": records} {
+		if strings.Contains(stmt.SQL, "WHERE") {
+			t.Errorf("the %s probe carries a WHERE clause, but it is the read that exists because the "+
+				"caller cannot yet name a cluster to filter by:\n%s", name, stmt.SQL)
+		}
+		if len(stmt.Args) != 0 {
+			t.Errorf("the %s probe binds %d arguments and has nothing to bind them to: %v",
+				name, len(stmt.Args), stmt.Args)
+		}
+		if !strings.HasSuffix(stmt.SQL, "\nORDER BY cluster_id") {
+			t.Errorf("the %s probe must arrive sorted, since its result is rendered as the values a "+
+				"user may choose from:\n%s", name, stmt.SQL)
+		}
+		if !strings.HasPrefix(stmt.SQL, "SELECT DISTINCT cluster_id\n") {
+			t.Errorf("the %s probe must let the server reduce the column: without DISTINCT it reads "+
+				"every row of the table over the wire to produce a handful of values:\n%s",
+				name, stmt.SQL)
+		}
 	}
 }
 

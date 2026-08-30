@@ -1,0 +1,20 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
+  ~ spec.replicas
+      - 3
+      + 5
+  + spec.paused
+      + true
+  - spec.minReadySeconds
+      - 10
+
+2026-08-28 14:02:58.001 UTC  Added  kubectl-client-side-apply
+  full state recorded
+=== stderr ===
+! 2 of the 4 changes examined touched spec.replicas; the rest were read and replayed so that the values shown are exact, then set aside. --limit bounds the changes examined, not the ones shown

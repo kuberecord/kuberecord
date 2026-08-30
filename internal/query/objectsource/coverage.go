@@ -105,6 +105,8 @@ func (e *Engine) Coverage(ctx context.Context, q query.ScopeQuery) ([]query.Scop
 		return nil, err
 	}
 
+	e.beginScan()
+
 	scan := scopeScan{q: q}
 	var transitions []query.ScopeChange
 	err := scanPartitions(ctx, e, []string{scopesRoot(e.prefix)}, scan.decode,

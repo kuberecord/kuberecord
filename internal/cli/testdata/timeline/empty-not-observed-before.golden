@@ -1,0 +1,7 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+Coverage: 2026-08-20T11:30:00Z → open (StreamRule/payments/checkout-audit)
+=== stderr ===
+! no changes recorded for payments/checkout in 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z, but apps/Deployment was not being watched before 2026-08-20T11:30:00Z, when StreamRule/payments/checkout-audit opened the scope: a change before then would not have been recorded

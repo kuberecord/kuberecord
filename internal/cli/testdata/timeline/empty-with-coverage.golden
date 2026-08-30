@@ -1,0 +1,7 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+=== stderr ===
+! no changes recorded for payments/checkout in 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z. The scope was confirmed watched over 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads), so nothing changed in that period

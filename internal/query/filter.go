@@ -85,11 +85,35 @@ func MatchesFieldPaths(c Change, paths []string) bool {
 		return true
 	}
 	for _, op := range ops {
-		dotted := dottedPath(op.Path)
-		for _, want := range paths {
-			if dotted == want || strings.HasPrefix(dotted, want+".") {
-				return true
-			}
+		if MatchesFieldPath(op.Path, paths) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesFieldPath reports whether one RFC 6901 pointer lies at or beneath one of
+// the requested paths.
+//
+// It is the single-pointer half of the rule [MatchesFieldPaths] applies to a whole
+// change, and it is exported because not every caller is selecting changes. A
+// caller attributing *fields* — which recorded change last wrote each path — asks
+// this question of one pointer at a time, and it must get the same answer a
+// filtered timeline would have given for the change that pointer came from.
+// Spelling the rule twice is how two commands come to disagree about what
+// `--field spec.template` covers, which reads to a user as one of them having lost
+// rows.
+//
+// An empty list matches everything, because that is what "no field restriction"
+// means at every other call site in this package.
+func MatchesFieldPath(pointer string, paths []string) bool {
+	if len(paths) == 0 {
+		return true
+	}
+	dotted := dottedPath(pointer)
+	for _, want := range paths {
+		if dotted == want || strings.HasPrefix(dotted, want+".") {
+			return true
 		}
 	}
 	return false

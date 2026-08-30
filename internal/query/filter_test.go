@@ -180,3 +180,69 @@ func TestMatchesFieldPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestMatchesFieldPath covers the single-pointer half of the same rule.
+//
+// It exists as its own test because it has its own caller: a command attributing
+// *fields* asks the question of one pointer at a time, and must get the answer a
+// filtered timeline would have given for the change that pointer came from. The
+// cases below are therefore the ones where the two could plausibly diverge — the
+// segment boundary and the escapes — rather than a second reading of the whole
+// table above.
+func TestMatchesFieldPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pointer string
+		paths   []string
+		want    bool
+		why     string
+	}{
+		{
+			name: "no predicate keeps everything", pointer: "/spec/replicas", want: true,
+			why: "an empty filter is not a filter, which is what it means at every other call site",
+		},
+		{name: "an exact path matches", pointer: "/spec/replicas", paths: []string{"spec.replicas"}, want: true},
+		{
+			name:    "a prefix matches everything beneath it",
+			pointer: "/spec/template/spec/containers/0/image",
+			paths:   []string{"spec.template.spec.containers"}, want: true,
+		},
+		{
+			name:    "an index is a segment of its own",
+			pointer: "/spec/template/spec/containers/0/image",
+			paths:   []string{"spec.template.spec.containers.0"}, want: true,
+			why: "the filter grammar is dotted throughout, indices included",
+		},
+		{
+			name: "a sibling does not match", pointer: "/status/readyReplicas",
+			paths: []string{"spec.replicas"}, want: false,
+		},
+		{
+			name: "a prefix must end on a segment boundary", pointer: "/spec/replicasHistory",
+			paths: []string{"spec.replicas"}, want: false,
+			why: "otherwise a filter on spec.replicas would quietly match spec.replicasHistory",
+		},
+		{
+			name:    "an escaped slash stays one segment",
+			pointer: "/metadata/annotations/deployment.kubernetes.io~1revision",
+			paths:   []string{"metadata.annotations"}, want: true,
+			why: "~1 is a slash inside a segment, not a separator between two",
+		},
+		{
+			name: "one path out of several is enough", pointer: "/spec/replicas",
+			paths: []string{"status", "spec.replicas"}, want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := query.MatchesFieldPath(tc.pointer, tc.paths); got != tc.want {
+				t.Errorf("MatchesFieldPath(%q, %v) = %t, want %t. %s",
+					tc.pointer, tc.paths, got, tc.want, tc.why)
+			}
+		})
+	}
+}

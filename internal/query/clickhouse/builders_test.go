@@ -48,6 +48,12 @@ var dedupTableExemptions = map[string]string{
 	"coverageStatement": "reads watch_scopes, which is a plain MergeTree with nothing to " +
 		"collapse; TestCoverageReadCarriesNoFinal pins the opposite property for it, that it " +
 		"must carry no FINAL at all",
+	"renderSelectAll": "the shared renderer for the one read with no WHERE clause, not a read " +
+		"of its own: like renderSelect it takes its table as a parameter, so asserting over it " +
+		"would be asserting over an argument",
+	"clusterIDsFromScopesStatement": "reads watch_scopes for the same reason coverageStatement " +
+		"does, and TestClusterIDProbesAreShapedForTheirTables pins the same opposite property: no " +
+		"FINAL on a plain MergeTree. Its resource_states sibling is in the table",
 }
 
 // TestEveryStatementBuilderIsCoveredByTheDedupTable enumerates the builders from

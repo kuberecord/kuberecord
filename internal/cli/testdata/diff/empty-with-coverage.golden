@@ -1,0 +1,8 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+=== stderr ===
+! no changes recorded for payments/checkout in all recorded history, but apps/Deployment was not being watched before 2026-07-02T09:14:00Z, when ClusterStreamRule/all-workloads opened the scope: a change before then would not have been recorded

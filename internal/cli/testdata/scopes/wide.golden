@@ -1,0 +1,10 @@
+=== stdout ===
+Cluster: prod-eu-1
+Scope:   every kind in every namespace
+Window:  all recorded history
+
+KIND             NAMESPACE  FROM                            TO                              RULE
+apps/Deployment  payments   2026-06-01T08:00:00.000000000Z  2026-07-02T09:14:00.000000000Z  StreamRule/payments/workloads
+apps/Deployment  (all)      2026-07-02T09:14:00.000000000Z  (open)                          ClusterStreamRule/all-workloads
+ConfigMap        payments   2026-07-02T09:14:00.000000000Z  2026-08-11T17:31:22.000000000Z  (not recorded)
+=== stderr ===

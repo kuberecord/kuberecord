@@ -1,0 +1,15 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Window:   all recorded history
+Base:     2026-08-28T14:02:58Z (Added), this incarnation's first sighting
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+FIELD                                                     LAST CHANGED             ACTOR
+spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044  argocd-application-controller
+spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044  argocd-application-controller
+spec.template.spec.containers[0].image                    2026-08-28 14:02:58.001  kubectl-client-side-apply
+spec.template.spec.containers[0].name                     2026-08-28 14:02:58.001  kubectl-client-side-apply
+=== stderr ===

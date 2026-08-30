@@ -188,6 +188,11 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 // same code either way, because the two must produce the same answer and the cheapest
 // guarantee of that is that they share the assembly rather than agree about it.
 func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]query.Change, error) {
+	// Here rather than in Timeline: the iterator defers this pass until its first
+	// Next, and progress counted from the moment a query was *built* would spend
+	// that gap reporting zero against an estimate that had not started being earned.
+	e.beginScan()
+
 	scan := recordScan{
 		ref: q.Ref, from: q.From, to: q.To, retain: true, events: q.IncludeEvents,
 		keep: func(c query.Change) bool {
@@ -530,6 +535,8 @@ func (e *Engine) Incarnations(
 	if err := requireWindow(from, to); err != nil {
 		return nil, fmt.Errorf("listing the incarnations of %s: %w", describeRef(ref), err)
 	}
+
+	e.beginScan()
 
 	// retain is false: this question is answered entirely from the marks, so the
 	// scan decodes every object and keeps no object state at all.

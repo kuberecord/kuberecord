@@ -1,0 +1,93 @@
+=== stdout ===
+apiVersion: cli.kuberecord.io/v1alpha1
+items:
+- actors:
+  - argocd-application-controller
+  attributed: true
+  event_type: Modified
+  fields: 1
+  path: spec.template.spec.containers[0].resources.limits.cpu
+  pointer: /spec/template/spec/containers/0/resources/limits/cpu
+  removed: false
+  resource_version: "1004"
+  ts: "2026-08-28T14:07:20.044Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - argocd-application-controller
+  attributed: true
+  event_type: Modified
+  fields: 1
+  path: spec.template.spec.containers[0].resources.limits.memory
+  pointer: /spec/template/spec/containers/0/resources/limits/memory
+  removed: false
+  resource_version: "1004"
+  ts: "2026-08-28T14:07:20.044Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kube-controller-manager
+  attributed: true
+  event_type: Modified
+  fields: 1
+  path: spec.minReadySeconds
+  pointer: /spec/minReadySeconds
+  removed: true
+  resource_version: "1003"
+  ts: "2026-08-28T14:05:02.117Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kube-controller-manager
+  attributed: true
+  event_type: Modified
+  fields: 1
+  path: spec.paused
+  pointer: /spec/paused
+  removed: false
+  resource_version: "1003"
+  ts: "2026-08-28T14:05:02.117Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors:
+  - kube-controller-manager
+  attributed: true
+  event_type: Modified
+  fields: 1
+  path: spec.replicas
+  pointer: /spec/replicas
+  removed: false
+  resource_version: "1003"
+  ts: "2026-08-28T14:05:02.117Z"
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+- actors: []
+  attributed: false
+  event_type: ""
+  fields: 1
+  path: spec.template.spec.containers[0].image
+  pointer: /spec/template/spec/containers/0/image
+  removed: false
+  resource_version: ""
+  ts: null
+  uid: ""
+- actors: []
+  attributed: false
+  event_type: ""
+  fields: 1
+  path: spec.template.spec.containers[0].name
+  pointer: /spec/template/spec/containers/0/name
+  removed: false
+  resource_version: ""
+  ts: null
+  uid: ""
+kind: Blame
+metadata:
+  backend: clickhouse
+  cluster_id: prod-eu-1
+  coverage:
+    available: true
+    intervals:
+    - api_group: apps
+      from: "2026-07-02T09:14:00Z"
+      kind: Deployment
+      namespace: ""
+      rule_ref: ClusterStreamRule/all-workloads
+      to: null
+    summary: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+=== stderr ===
