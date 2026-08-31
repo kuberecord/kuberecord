@@ -56,6 +56,29 @@ than a summary of them.
 
 ### Fixed
 
+- **A cold scan whose size could not be estimated now asks before it runs, however
+  narrow the window.** `kubectl kuberecord timeline`, `diff` and `blame` route an
+  un-estimatable scan through the same confirmation as a wide one, because a
+  listing that failed is not evidence of a small scan — it is the absence of
+  evidence, and the window stops being a proxy for cost the moment the listing that
+  measures it is unreliable. Previously the width alone decided, so a narrow
+  question against an archive whose listing had failed ran unbounded and unasked,
+  with only the opt-in `--max-objects` between it and the whole bucket: the
+  invocation the CLI knew least about was the one it asked the least about.
+
+  The prompt says the size could not be determined, so the decision is visibly one
+  made without a figure, and the notice above it still names the underlying
+  estimator error. Refusing it stops with the same message and the same exit code as
+  refusing a wide scan.
+
+  **Only observable on a terminal.** `--yes` and a non-interactive invocation
+  proceed without prompting exactly as before — a CLI that blocks in a pipeline
+  would be a worse defect than the one this fixes — and a non-interactive one now
+  prints the same "the confirmation was assumed" line it already printed for a wide
+  window. An indexed backend such as ClickHouse is untouched: there is nothing to
+  estimate and nothing to confirm. `--max-objects` behaviour is unchanged, and a
+  confirmed scan carries no implicit ceiling. See
+  [`docs/CLI.md`](docs/CLI.md#cold-scans).
 - **A change to an object carrying a map key that is the empty string is now
   recorded as full state instead of as a diff.** The two RFC 6902 implementations
   either side of the `diff` column disagreed about RFC 6901's *empty reference

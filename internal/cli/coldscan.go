@@ -48,7 +48,8 @@ import (
 //   - The window defaults to DefaultWindow instead of to everything, so a question
 //     asked without thinking about time costs a day rather than the archive.
 //   - The estimate (query.ScanEstimator) is printed before the first object is
-//     fetched, and beyond ConfirmWindow it is printed as a question.
+//     fetched, and beyond ConfirmWindow — or when it could not be made at all —
+//     it is printed as a question.
 //   - Progress goes to stderr while it runs, because a tool that goes quiet for
 //     four minutes is indistinguishable from one that has hung.
 //   - --max-objects stops a scan that turns out larger than the estimate suggested,
@@ -196,9 +197,10 @@ func scanStopped(ctx context.Context) error {
 // Errors: only a refused confirmation, which is a decision rather than a failure
 // and is reported as an ordinary runtime error so that a wrapper script sees a
 // non-zero exit for a question that was never answered. An estimate that cannot be
-// produced is a notice and the scan proceeds unmeasured (Invariant 5): refusing to
-// answer a question because the warning about it could not be assembled would be
-// the degradation making itself into the failure.
+// produced is never itself the failure (Invariant 5) — refusing to answer a
+// question because the warning about it could not be assembled would be the
+// degradation making itself into the failure — but it does turn the scan into a
+// question at any width, for the reason needsConfirmation gives.
 func beginColdScan(
 	ctx context.Context, backend *Backend, request TimelineRequest, from, to time.Time,
 	streams genericiooptions.IOStreams,
@@ -211,9 +213,8 @@ func beginColdScan(
 	}
 
 	opts := request.Scan
-	estimate, estimated := estimateColdScan(
-		ctx, backend.Engine, request.Ref.ClusterID, from, to, streams)
-	if err := confirmColdScan(estimate, estimated, capabilities, from, to, opts, streams); err != nil {
+	size := estimateColdScan(ctx, backend.Engine, request.Ref.ClusterID, from, to, streams)
+	if err := confirmColdScan(size, capabilities, from, to, opts, streams); err != nil {
 		return nil, err
 	}
 
@@ -230,8 +231,8 @@ func beginColdScan(
 	scan.monitor = &scanMonitor{
 		out:       streams.ErrOut,
 		paint:     opts.ShowProgress,
-		total:     estimate,
-		known:     estimated,
+		total:     size.figures,
+		known:     size.known,
 		limit:     opts.MaxObjects,
 		cancel:    scan.cancel,
 		lastAt:    time.Now(),
@@ -240,6 +241,34 @@ func beginColdScan(
 	scan.reporter = reporter
 	reporter.SetScanProgress(scan.monitor.report)
 	return scan, nil
+}
+
+// scanEstimate is what is known about a scan's size before it starts — including
+// the two different ways it can be unknown.
+//
+// Keeping those two apart is the point of the type. "This engine offers no
+// estimator" is a permanent property of a backend and says nothing about this
+// particular scan; "an estimator was asked and could not answer" is a fact about
+// this scan, and it is the one that has to change what is asked before it runs.
+// Collapsing both into one bool, which is what this used to be, left the guard
+// unable to tell them apart.
+type scanEstimate struct {
+	// figures is the estimate itself. It is meaningful only when known, and is
+	// never rendered otherwise: see describeEstimate for why a zero would be worse
+	// than an absence.
+	figures query.ScanEstimate
+
+	// known reports whether figures holds a real estimate, and so whether a number
+	// may be printed at all.
+	known bool
+
+	// unmeasured reports that an estimator existed and could not answer.
+	//
+	// It is deliberately not the negation of known. An engine with no estimating
+	// half is neither known nor unmeasured, because it never claimed it could
+	// measure this or anything else; only a listing that was attempted and failed
+	// is evidence that this scan's size is unknowable right now.
+	unmeasured bool
 }
 
 // estimateColdScan asks what the scan will cost, and reports a backend that
@@ -252,10 +281,10 @@ func beginColdScan(
 func estimateColdScan(
 	ctx context.Context, engine query.QueryEngine, clusterID string, from, to time.Time,
 	streams genericiooptions.IOStreams,
-) (query.ScanEstimate, bool) {
+) scanEstimate {
 	estimator, ok := engine.(query.ScanEstimator)
 	if !ok {
-		return query.ScanEstimate{}, false
+		return scanEstimate{}
 	}
 
 	estimate, err := estimator.EstimateScan(ctx, clusterID, from, to)
@@ -263,30 +292,41 @@ func estimateColdScan(
 		// Reported, not swallowed, and not fatal. The scan is still answerable; what
 		// has been lost is the warning about it, and saying so is what stops the
 		// silence from reading as "this is cheap" (Invariant 4).
+		//
+		// The sentence stops at the fact, and names the underlying error so that a
+		// broken listing is diagnosable rather than merely reported. What follows from
+		// it — a question on a terminal, an assumed confirmation anywhere else — is
+		// said by the next line, because this function cannot know which applies.
 		_ = writeLine(streams.ErrOut, fmt.Sprintf(
-			"→ the size of this scan could not be estimated (%v), so it runs unmeasured", err))
-		return query.ScanEstimate{}, false
+			"→ the size of this scan could not be estimated (%v), so it is unknown", err))
+		return scanEstimate{unmeasured: true}
 	}
-	return estimate, true
+	return scanEstimate{figures: estimate, known: true}
 }
 
-// confirmColdScan prints the estimate and, for a wide window, asks.
+// confirmColdScan prints the estimate and, when the scan is a decision, asks.
 //
 // The two cases are one function because they are one decision: the figures shown
 // are identical, and only the punctuation at the end of the line differs. Keeping
 // them apart would be two places for the estimate's wording to drift.
+//
+// There is exactly one refusal in here, and there must stay exactly one. Both
+// reasons a scan becomes a question — too wide, or unmeasured — decline through the
+// same sentence and the same exit code, because a user who has just said no should
+// not have to work out which of two no's they were given.
 func confirmColdScan(
-	estimate query.ScanEstimate, estimated bool, capabilities query.Capabilities,
+	size scanEstimate, capabilities query.Capabilities,
 	from, to time.Time, opts ScanOptions, streams genericiooptions.IOStreams,
 ) error {
-	figures := describeEstimate(estimate, estimated)
+	figures := describeEstimate(size)
 
-	if !needsConfirmation(capabilities, from, to) {
-		if !estimated {
-			// Nothing to announce. An engine with no estimating half has already been
-			// reported on if it had one and it failed (see estimateColdScan); saying
-			// "an unmeasured number of objects" about one that never offered a figure
-			// would be a warning with no content, printed before every question.
+	if !needsConfirmation(capabilities, size, from, to) {
+		if !size.known {
+			// Nothing to announce. Saying "an unmeasured number of objects" about an
+			// engine that never offered a figure would be a warning with no content,
+			// printed before every question; a failed estimate has already been reported
+			// on by estimateColdScan, and repeating it here would be a second sentence
+			// about the same absence.
 			return nil
 		}
 		return writeLine(streams.ErrOut, fmt.Sprintf(
@@ -296,12 +336,11 @@ func confirmColdScan(
 
 	if opts.AssumeYes || !opts.Interactive {
 		return writeLine(streams.ErrOut, fmt.Sprintf(
-			"→ %s to scan: %s is wider than %s against the %s backend, which has no index. %s",
-			figures, describeScanWidth(from, to), DescribeSpan(ConfirmWindow), capabilities.Backend,
-			assumedReason(opts)))
+			"→ %s to scan: %s. %s",
+			figures, describeConfirmReason(size, capabilities, from, to), assumedReason(opts)))
 	}
 
-	confirmed, err := askConfirmation(streams, figures+" — continue? [y/N] ")
+	confirmed, err := askConfirmation(streams, confirmPrompt(size))
 	if err != nil {
 		return err
 	}
@@ -312,6 +351,41 @@ func confirmColdScan(
 			FlagMaxObjects, FlagAssumeYes)
 	}
 	return nil
+}
+
+// describeConfirmReason says why this scan is a decision, in the words of
+// whichever reason made it one.
+//
+// Both reasons occupy the same position in the sentence, so the line explaining an
+// assumed confirmation reads the same shape whichever applied. The width is
+// deliberately not named in the unmeasured case: a narrow window is exactly the
+// invocation the old guard let through unasked, and mentioning it here would
+// suggest it was the thing being judged.
+func describeConfirmReason(
+	size scanEstimate, capabilities query.Capabilities, from, to time.Time,
+) string {
+	if size.unmeasured {
+		return fmt.Sprintf(
+			"its size could not be determined against the %s backend, which has no index",
+			capabilities.Backend)
+	}
+	return fmt.Sprintf("%s is wider than %s against the %s backend, which has no index",
+		describeScanWidth(from, to), DescribeSpan(ConfirmWindow), capabilities.Backend)
+}
+
+// confirmPrompt is the question itself.
+//
+// The unmeasured case says so in the prompt rather than leaving it to the notice
+// printed above it, because the person answering is deciding on the basis of not
+// knowing, and that has to be legible in the sentence they are answering rather
+// than in one they may have scrolled past. The measured prompt is untouched: the
+// figures and a question mark, which is what a reader has learned to skim.
+func confirmPrompt(size scanEstimate) string {
+	if size.unmeasured {
+		return describeEstimate(size) +
+			", because its size could not be determined — continue? [y/N] "
+	}
+	return describeEstimate(size) + " — continue? [y/N] "
 }
 
 // describeScanSpan names how wide the measured window is, or says nothing when it
@@ -363,16 +437,46 @@ func assumedReason(opts ScanOptions) string {
 	return "Not a terminal, so the confirmation was assumed."
 }
 
-// needsConfirmation reports whether this scan is wide enough to be a decision.
+// needsConfirmation reports whether this scan is a decision rather than a
+// courtesy, which it is for two independent reasons.
+//
+// The first is width: past ConfirmWindow the cost stops being incidental.
+//
+// The second is that the width is only a proxy for cost for as long as the listing
+// that measures it works. An estimate that failed is not evidence of a small scan;
+// it is the absence of evidence. Routing that case through the width threshold — as
+// this did — inverted the guard, so the invocation the CLI knew least about was the
+// one it asked the least about, with only the opt-in --max-objects left between a
+// narrow question and an unbounded scan. An unmeasured scan is therefore a question
+// at any width.
+//
+// That is not extended to an engine which never offered an estimator. Its silence
+// is a permanent property of the backend rather than a fact about this scan, and
+// prompting before every narrow question against it would train people to stop
+// reading the prompt, which is the failure ConfirmWindow itself exists to avoid.
 //
 // A window with an unbounded end is not measurable and is treated as wide: an
 // engine declaring TimeBoundRequired will have had both ends supplied by
 // timelineBounds before this is reached, so the case is a caller that skipped that
 // step, and guessing "narrow" for a window nobody bounded is the wrong direction
 // to guess in.
-func needsConfirmation(capabilities query.Capabilities, from, to time.Time) bool {
+//
+// Nothing further is imposed on an unmeasured scan the user then confirmed: there
+// is deliberately no implicit --max-objects ceiling for it. The estimate that would
+// have bounded expectations is exactly what is missing, but the user was shown that
+// and chose anyway, and a silent ceiling would truncate a scan they consented to.
+// It could in any case only apply on the interactive path — the non-interactive one
+// never confirms — so the same command would be bounded for a person and unbounded
+// in a pipeline, which is a worse surprise than the one it would prevent.
+// --max-objects stays explicit, and unchanged.
+func needsConfirmation(
+	capabilities query.Capabilities, size scanEstimate, from, to time.Time,
+) bool {
 	if !capabilities.TimeBoundRequired {
 		return false
+	}
+	if size.unmeasured {
+		return true
 	}
 	if from.IsZero() || to.IsZero() {
 		return true
@@ -385,11 +489,12 @@ func needsConfirmation(capabilities query.Capabilities, from, to time.Time) bool
 // An unavailable estimate is spelled as such rather than as zero. "0 objects" in
 // front of a scan that is about to read four thousand is worse than no number at
 // all, because it would be believed.
-func describeEstimate(estimate query.ScanEstimate, estimated bool) string {
-	if !estimated {
+func describeEstimate(size scanEstimate) string {
+	if !size.known {
 		return "an unmeasured number of objects"
 	}
-	return fmt.Sprintf("~%s objects, ~%s", formatCount(estimate.Objects), formatBytes(estimate.Bytes))
+	return fmt.Sprintf("~%s objects, ~%s",
+		formatCount(size.figures.Objects), formatBytes(size.figures.Bytes))
 }
 
 // askConfirmation puts the question on stderr and reads the answer.

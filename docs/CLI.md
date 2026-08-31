@@ -1119,6 +1119,29 @@ assumed, and stderr says which of the two reasons applied. **A script therefore
 never hangs on a prompt** — and never silently skips one either, because the line
 that says the confirmation was assumed is printed regardless.
 
+**A scan whose size could not be determined asks too, however narrow the window.**
+A failed listing does not stop the question being answerable — the estimate is a
+courtesy, and refusing to answer because the warning could not be assembled would
+be the degradation making itself into the failure. But it does mean the window has
+stopped being a proxy for cost, so the width no longer decides:
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --source s3://acme-audit --since 6h
+→ the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
+an unmeasured number of objects, because its size could not be determined — continue? [y/N]
+```
+
+A failed estimate is not evidence of a small scan; it is the absence of evidence,
+and a six-hour window against an archive that cannot be listed is exactly the
+invocation this tool knows least about. Refusing it stops with the same message and
+the same exit code as refusing a wide one — there is only one way to say no. `--yes`
+and a non-terminal still pass it without asking, unchanged.
+
+Confirming it imposes no ceiling of its own. `--max-objects` remains the only bound
+on the work and remains opt-in: a silent limit here would truncate a scan you had
+just agreed to, and — since a pipeline never confirms — would bound the same command
+for a person while leaving it unbounded in a script.
+
 **Progress goes to stderr while it runs**, repainted in place and only when stderr
 is a terminal, so `2>/dev/null` and a redirected log get none of it:
 

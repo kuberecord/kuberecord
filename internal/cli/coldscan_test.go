@@ -327,8 +327,171 @@ func TestColdScanReportsAnEstimateItCouldNotMake(t *testing.T) {
 	if !strings.Contains(stderr, "the bucket refused a listing") {
 		t.Errorf("the reason the estimate failed was dropped:\n%s", stderr)
 	}
+	// An unmeasured scan is a decision at any width, so this narrow one is one too —
+	// and a pipeline that cannot be asked is told which of the two reasons applied,
+	// rather than being quietly waved through.
+	if !strings.Contains(stderr, "Not a terminal, so the confirmation was assumed.") {
+		t.Errorf("a scan of unknown size was waved through without saying the confirmation had "+
+			"been assumed:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "[y/N]") {
+		t.Errorf("a prompt was written to an invocation that cannot answer one:\n%s", stderr)
+	}
 	if len(engine.queries) != 1 {
 		t.Errorf("%d timeline queries were issued, want 1", len(engine.queries))
+	}
+}
+
+// TestColdScanAsksWhenItCouldNotEstimateANarrowWindow is the case this guard was
+// missing: a question the CLI cannot price is a decision however narrow it looks.
+//
+// A failed estimate is not evidence of a small scan, it is the absence of evidence,
+// and routing it through the width threshold meant the invocation the CLI knew
+// least about was the one it asked the least about — with only the opt-in
+// --max-objects between a six-hour question and an unbounded scan.
+func TestColdScanAsksWhenItCouldNotEstimateANarrowWindow(t *testing.T) {
+	engine := newScanningEngine(archiveCapabilities())
+	engine.estimateErr = errors.New("the bucket refused a listing")
+	request := scanRequest(6*time.Hour, cli.ScanOptions{Interactive: true})
+
+	_, stderr, err := runScan(t, engine, request, "y\n")
+	if err != nil {
+		t.Fatalf("RunTimeline: %v; a confirmed scan still runs", err)
+	}
+
+	// The notice keeps naming the underlying failure, so a broken listing is
+	// diagnosable rather than merely reported as "unknown".
+	if !strings.Contains(stderr, "the bucket refused a listing") {
+		t.Errorf("the reason the estimate failed was dropped from the question:\n%s", stderr)
+	}
+	// The question says what is being decided on. The user is answering on the basis
+	// of not knowing, and the sentence they answer has to say so — a bare
+	// "continue? [y/N]" after a figure they never got reads as a figure they missed.
+	const want = "could not be determined — continue? [y/N] "
+	if !strings.Contains(stderr, want) {
+		t.Errorf("the prompt does not say the size is unknown.\nwant a line containing %q\ngot:\n%s",
+			want, stderr)
+	}
+	if len(engine.queries) != 1 {
+		t.Errorf("%d timeline queries were issued after a yes, want 1", len(engine.queries))
+	}
+}
+
+// TestColdScanDeclinesTheSameWayForBothReasons: there must not be two ways to say
+// no.
+//
+// A scan is now a question for two independent reasons, and a user who has just
+// refused one should not have to work out which of two refusals they were handed.
+// Same sentence, same exit code, whichever reason asked.
+func TestColdScanDeclinesTheSameWayForBothReasons(t *testing.T) {
+	wide := newScanningEngine(archiveCapabilities())
+	_, _, wideErr := runScan(
+		t, wide, scanRequest(30*24*time.Hour, cli.ScanOptions{Interactive: true}), "n\n")
+
+	unmeasured := newScanningEngine(archiveCapabilities())
+	unmeasured.estimateErr = errors.New("the bucket refused a listing")
+	_, _, unmeasuredErr := runScan(
+		t, unmeasured, scanRequest(6*time.Hour, cli.ScanOptions{Interactive: true}), "n\n")
+
+	if wideErr == nil || unmeasuredErr == nil {
+		t.Fatalf("a declined confirmation succeeded: wide=%v, unmeasured=%v", wideErr, unmeasuredErr)
+	}
+	if wideErr.Error() != unmeasuredErr.Error() {
+		t.Errorf("the two refusals read differently:\nwide       %q\nunmeasured %q",
+			wideErr, unmeasuredErr)
+	}
+	if got, want := cli.ExitCodeFor(unmeasuredErr), cli.ExitCodeFor(wideErr); got != want {
+		t.Errorf("refusing an unmeasured scan exits %d, want %d — the same as any other refusal",
+			got, want)
+	}
+}
+
+// TestColdScanConfirmationMatrix is the whole gate in one table: what makes a scan
+// a decision, and whether the decision can be put to anybody.
+//
+// The un-estimatable × narrow × terminal cell is the one this task adds. The other
+// fifteen are regression guards, and the eight that must not prompt are the
+// load-bearing ones: a CLI that blocks in a pipeline is a worse defect than the one
+// being fixed here, so --yes and a non-terminal are asserted in every row.
+//
+// Every cell is fed "n" on stdin, which makes "did it ask" and "did it stop" the
+// same observation — a cell that must not prompt proves it by succeeding, because a
+// prompt would have read that no.
+func TestColdScanConfirmationMatrix(t *testing.T) {
+	const (
+		narrow = 6 * time.Hour
+		wide   = 30 * 24 * time.Hour
+	)
+	var (
+		terminal    = cli.ScanOptions{Interactive: true}
+		terminalYes = cli.ScanOptions{Interactive: true, AssumeYes: true}
+		pipe        = cli.ScanOptions{}
+		pipeYes     = cli.ScanOptions{AssumeYes: true}
+	)
+
+	for name, cell := range map[string]struct {
+		estimatable bool
+		window      time.Duration
+		opts        cli.ScanOptions
+		wantPrompt  bool
+	}{
+		// Estimatable: the width governs, exactly as it did before this task.
+		"estimatable, narrow, terminal":        {true, narrow, terminal, false},
+		"estimatable, narrow, terminal, --yes": {true, narrow, terminalYes, false},
+		"estimatable, narrow, pipe":            {true, narrow, pipe, false},
+		"estimatable, narrow, pipe, --yes":     {true, narrow, pipeYes, false},
+		"estimatable, wide, terminal":          {true, wide, terminal, true},
+		"estimatable, wide, terminal, --yes":   {true, wide, terminalYes, false},
+		"estimatable, wide, pipe":              {true, wide, pipe, false},
+		"estimatable, wide, pipe, --yes":       {true, wide, pipeYes, false},
+
+		// Un-estimatable: the width stopped governing the moment the listing that
+		// measures it failed. Only who is there to answer still decides.
+		"un-estimatable, narrow, terminal":        {false, narrow, terminal, true},
+		"un-estimatable, narrow, terminal, --yes": {false, narrow, terminalYes, false},
+		"un-estimatable, narrow, pipe":            {false, narrow, pipe, false},
+		"un-estimatable, narrow, pipe, --yes":     {false, narrow, pipeYes, false},
+		"un-estimatable, wide, terminal":          {false, wide, terminal, true},
+		"un-estimatable, wide, terminal, --yes":   {false, wide, terminalYes, false},
+		"un-estimatable, wide, pipe":              {false, wide, pipe, false},
+		"un-estimatable, wide, pipe, --yes":       {false, wide, pipeYes, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine := newScanningEngine(archiveCapabilities())
+			if !cell.estimatable {
+				engine.estimateErr = errors.New("the bucket refused a listing")
+			}
+
+			stdout, stderr, err := runScan(t, engine, scanRequest(cell.window, cell.opts), "n\n")
+
+			if asked := strings.Contains(stderr, "[y/N]"); asked != cell.wantPrompt {
+				t.Fatalf("prompted = %t, want %t:\n%s", asked, cell.wantPrompt, stderr)
+			}
+
+			if !cell.wantPrompt {
+				if err != nil {
+					t.Fatalf("an unasked scan failed: %v", err)
+				}
+				if len(engine.queries) != 1 {
+					t.Errorf("%d timeline queries were issued, want 1", len(engine.queries))
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("a declined confirmation succeeded; a question that was never put to the " +
+					"backend must not exit as though it had been answered")
+			}
+			if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
+				t.Errorf("a declined confirmation exits %d, want %d", code, cli.ExitRuntimeError)
+			}
+			if len(engine.queries) != 0 {
+				t.Errorf("%d queries were issued after a refusal", len(engine.queries))
+			}
+			if stdout != "" {
+				t.Errorf("a refused scan wrote a document to stdout:\n%s", stdout)
+			}
+		})
 	}
 }
 
