@@ -23,6 +23,8 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
@@ -99,8 +101,8 @@ func TestTimelineRefusesMalformedInvocations(t *testing.T) {
 			io, out, errOut := streams()
 			code := cli.Run(append([]string{"kuberecord"}, test.argv...), io)
 
-			if code != cli.ExitUsageError {
-				t.Errorf("exit code %d, want %d", code, cli.ExitUsageError)
+			if code != exit.UsageError {
+				t.Errorf("exit code %d, want %d", code, exit.UsageError)
 			}
 			if !strings.Contains(errOut.String(), test.want) {
 				t.Errorf("the message does not explain the mistake.\nwant it to contain %q\ngot:\n%s",
@@ -119,7 +121,7 @@ func TestTimelineRefusesMalformedInvocations(t *testing.T) {
 // invoke, because every assertion above is about a rejection.
 func TestTimelineIsInTheCommandTree(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != exit.Success {
 		t.Fatalf("`--help` exited %d", code)
 	}
 	if !strings.Contains(out.String(), "timeline") {
@@ -131,7 +133,7 @@ func TestTimelineIsInTheCommandTree(t *testing.T) {
 // flag being renamed or dropped without the change being noticed.
 func TestTimelineHelpNamesEveryFlagTheTaskRequires(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "timeline", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "timeline", "--help"}, io); code != exit.Success {
 		t.Fatalf("`timeline --help` exited %d", code)
 	}
 
@@ -189,19 +191,19 @@ func TestUnknownActorIsDimmed(t *testing.T) {
 func TestNoColorIsHonouredUnderAutoAndOverriddenByAlways(t *testing.T) {
 	_, out, _ := streams()
 
-	t.Setenv(cli.EnvNoColor, "1")
-	if cli.ShouldColorize(cli.ColorAuto, out) {
+	t.Setenv(options.EnvNoColor, "1")
+	if options.ShouldColorize(options.ColorAuto, out) {
 		t.Error("NO_COLOR was set and auto still colourised")
 	}
-	if !cli.ShouldColorize(cli.ColorAlways, out) {
+	if !options.ShouldColorize(options.ColorAlways, out) {
 		t.Error("--color=always must override NO_COLOR; that is what the flag is for")
 	}
 
-	t.Setenv(cli.EnvNoColor, "")
-	if cli.ShouldColorize(cli.ColorAuto, out) {
+	t.Setenv(options.EnvNoColor, "")
+	if options.ShouldColorize(options.ColorAuto, out) {
 		t.Error("a buffer is not a terminal, so auto must not colourise it")
 	}
-	if cli.ShouldColorize(cli.ColorNever, out) {
+	if options.ShouldColorize(options.ColorNever, out) {
 		t.Error("--color=never colourised anyway")
 	}
 }
@@ -212,8 +214,8 @@ func TestNoColorIsHonouredUnderAutoAndOverriddenByAlways(t *testing.T) {
 // golden file is not at the mercy of the window it was generated in.
 func TestTerminalWidthReportsNothingForAPipe(t *testing.T) {
 	_, out, _ := streams()
-	if width := cli.TerminalWidth(out); width != 0 {
-		t.Errorf("TerminalWidth on a buffer = %d, want 0", width)
+	if width := options.TerminalWidth(out); width != 0 {
+		t.Errorf("options.TerminalWidth on a buffer = %d, want 0", width)
 	}
 }
 
@@ -259,9 +261,9 @@ func TestTimelineReadsARecordedKindWithoutACluster(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c", "--color=never",
 	}, io)
 
-	if code != cli.ExitNoCoverage {
+	if code != exit.NoCoverage {
 		t.Fatalf("exit code %d, want %d.\nstdout:\n%s\nstderr:\n%s",
-			code, cli.ExitNoCoverage, out.String(), errOut.String())
+			code, exit.NoCoverage, out.String(), errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "read Deployment.apps/x as recorded, without the cluster") {
 		t.Errorf("the offline resolution was not announced:\n%s", errOut.String())
@@ -285,8 +287,8 @@ func TestTimelineRefusesAShortNameWithoutACluster(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c",
 	}, io)
 
-	if code != cli.ExitRuntimeError {
-		t.Fatalf("exit code %d, want %d.\nstderr:\n%s", code, cli.ExitRuntimeError, errOut.String())
+	if code != exit.RuntimeError {
+		t.Fatalf("exit code %d, want %d.\nstderr:\n%s", code, exit.RuntimeError, errOut.String())
 	}
 	for _, want := range []string{"could not be reached", "Deployment.apps/x"} {
 		if !strings.Contains(errOut.String(), want) {

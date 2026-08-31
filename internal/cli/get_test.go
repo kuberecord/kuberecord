@@ -27,7 +27,9 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -119,7 +121,7 @@ func runGet(
 	t.Helper()
 
 	var out, errOut bytes.Buffer
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 	err = cli.RunGet(context.Background(), backend, request,
 		ioStreams(&out, &errOut), render.Options{Width: goldenWidth})
 	return out.String(), errOut.String(), err
@@ -304,8 +306,8 @@ func TestGetVerifyReportsAMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("--verify passed a reconstruction that does not match its recorded digest")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d", code, exit.RuntimeError)
 	}
 
 	// --verify is an assertion, so a failure withholds the document. Writing it
@@ -366,8 +368,8 @@ func TestGetWithoutCoverageIsTheNoCoverageFinding(t *testing.T) {
 	if err == nil {
 		t.Fatal("a scope nobody watched was reported as success")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("exit code %d, want %d", code, cli.ExitNoCoverage)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
 	}
 	if !errors.Is(err, query.ErrNoCoverage) {
 		t.Errorf("the finding does not carry the read plane's own sentinel: %v", err)
@@ -389,8 +391,8 @@ func TestGetWithCoverageButNoStateIsAnAbsence(t *testing.T) {
 	if err == nil {
 		t.Fatal("a missing object was reported as success")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d", code, exit.RuntimeError)
 	}
 	if !strings.Contains(err.Error(), "The scope was watched over") {
 		t.Errorf("the absence is reported without the coverage that makes it meaningful: %v", err)

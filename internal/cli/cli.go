@@ -15,8 +15,30 @@ limitations under the License.
 */
 
 // Package cli is kuberecord's command-line client: the command tree, the
-// kubectl-conventional flag surface, and the rules by which a failure becomes an
-// exit code.
+// per-command flag sets, and the result domain each command asks its backend
+// about.
+//
+// # The order the CLI is built in
+//
+// This package is the top of it. Everything below is a concern that was pulled
+// out of it because it had a boundary of its own (Task 11.8), and the arrows run
+// one way only — command construction depends on resolution, gating, replay and
+// presentation, and none of them depends on command construction:
+//
+//	exit      the 0/1/2/3 contract; everything may depend on it, it depends on nothing
+//	render    presentation: tables, diffs, the structured envelope
+//	options   the invocation surface: global flags, formats, terminal, window parsing
+//	resolve   backend resolution: --source/--sink, profiles, discovery, cluster identity
+//	coldscan  cold-scan gating: estimation, confirmation, progress, --max-objects
+//	replay    the row domain: decode, prior-state replay, field attribution
+//	cli       this package: the cobra tree, and the query shaping welded to it
+//
+// What stayed here is what could not leave without being dismantled. Window
+// parsing, prior-state lookup and attribution separated cleanly and did; incarnation
+// selection, coverage explanation and structured-envelope assembly are written
+// against TimelineRequest and each other, and moving them would have meant
+// exporting nineteen identifiers to buy one import edge — which is a worse outcome
+// than the flat package it was trying to improve on.
 //
 // # A client of the schema, not of the operator
 //
@@ -39,6 +61,11 @@ limitations under the License.
 // closure, which is where a boundary is actually lost — through an innocent
 // helper package added later rather than through a direct import somebody would
 // have questioned in review.
+//
+// Every package listed above carries that closure test, not just this one. A
+// split that left the new packages guarded only by the depguard glob would have
+// traded the transitive half of the assertion for tidier directories, and the
+// transitive half is the half that catches the reach nobody meant to add.
 //
 // # Two names, one implementation
 //
@@ -73,6 +100,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 )
 
@@ -147,14 +175,14 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 		err = interrupted(err)
 	}
 	if err == nil {
-		return ExitSuccess
+		return exit.Success
 	}
 
-	code := ExitCodeFor(err)
+	code := exit.CodeFor(err)
 
 	// A quiet failure has already said everything it has to say, beside the
 	// document it qualifies. See Error.Quiet.
-	var coded *Error
+	var coded *exit.Error
 	if errors.As(err, &coded) && coded.Quiet {
 		return code
 	}
@@ -163,7 +191,7 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 	// writer's line land between the message and the usage block that explains
 	// it, and stderr is shared with whatever else the shell has pointed at it.
 	diagnostic := fmt.Sprintf("error: %v\n", err)
-	if code == ExitUsageError {
+	if code == exit.UsageError {
 		// A bare "unknown flag" with no reminder of what the flags are is a
 		// worse message than the one cobra would have printed unprompted.
 		diagnostic += "\n" + failed.UsageString()
@@ -191,11 +219,11 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 // backend that dropped the connection.
 func interrupted(err error) error {
 	if err == nil {
-		return &Error{
-			Code: ExitRuntimeError,
+		return &exit.Error{
+			Code: exit.RuntimeError,
 			Err: errors.New("interrupted before the answer was complete, so nothing above is a " +
 				"finished result"),
 		}
 	}
-	return &Error{Code: ExitRuntimeError, Err: fmt.Errorf("interrupted: %w", err)}
+	return &exit.Error{Code: exit.RuntimeError, Err: fmt.Errorf("interrupted: %w", err)}
 }

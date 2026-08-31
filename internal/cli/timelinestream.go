@@ -23,7 +23,10 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -67,7 +70,7 @@ import (
 // rows that had not been read yet when the first byte was written. That is the
 // cost of streaming, and it is paid on the stream nothing is piping.
 func runTimelineStructured(
-	ctx context.Context, backend *Backend, request TimelineRequest,
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	capabilities := backend.Engine.Capabilities()
@@ -77,13 +80,13 @@ func runTimelineStructured(
 
 	// Same position as the gathered path's, and for the same reason: this is before
 	// the first query of the invocation, incarnation listing included. See
-	// beginColdScan.
-	scan, err := beginColdScan(ctx, backend, request, from, to, streams)
+	// coldscan.Begin.
+	scan, err := coldscan.Begin(ctx, backend, request.Scan, request.Ref.ClusterID, from, to, streams)
 	if err != nil {
 		return err
 	}
-	defer scan.stop()
-	ctx = scan.ctx
+	defer scan.Stop()
+	ctx = scan.Ctx
 
 	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
 	notices = append(notices, selectionNotices...)
@@ -97,7 +100,7 @@ func runTimelineStructured(
 	stream, err := render.NewStream(
 		streams.Out, request.Structured, envelopeHead(backend, render.KindTimeline, coverage))
 	if err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 
 	emitted, sawDeleted, emitErr := emitChanges(
@@ -107,13 +110,13 @@ func runTimelineStructured(
 	// progress line has to be off the terminal before the notices below are written
 	// or a short notice lands on top of a longer line and leaves its tail behind.
 	// stop is idempotent, so the defer above remains the early-return path's.
-	scan.stop()
+	scan.Stop()
 	// Closed on every path. For the whole-document formats nothing has reached
 	// stdout until it runs, so returning early on a failed emission would turn a
 	// backend that died halfway into a command that produced no document at all
 	// rather than the head and the rows it had.
 	if closeErr := stream.Close(); closeErr != nil && emitErr == nil {
-		emitErr = RuntimeErrorf("%w", closeErr)
+		emitErr = exit.RuntimeErrorf("%w", closeErr)
 	}
 	if emitErr != nil {
 		return errors.Join(emitErr, render.WriteNotices(streams.ErrOut, notices, opts))
@@ -124,7 +127,7 @@ func runTimelineStructured(
 	notices = append(notices, emptyNotices...)
 
 	if writeErr := render.WriteNotices(streams.ErrOut, notices, opts); writeErr != nil {
-		return RuntimeErrorf("%w", writeErr)
+		return exit.RuntimeErrorf("%w", writeErr)
 	}
 	return emptyErr
 }
@@ -157,7 +160,7 @@ func emitChanges(
 	}
 	defer func() {
 		if closeErr := iterator.Close(); closeErr != nil && err == nil {
-			err = RuntimeErrorf("releasing the change stream: %w", closeErr)
+			err = exit.RuntimeErrorf("releasing the change stream: %w", closeErr)
 		}
 	}()
 
@@ -170,7 +173,7 @@ func emitChanges(
 			continue
 		}
 		if writeErr := stream.Write(changeItem(change)); writeErr != nil {
-			return emitted, sawDeleted, RuntimeErrorf("%w", writeErr)
+			return emitted, sawDeleted, exit.RuntimeErrorf("%w", writeErr)
 		}
 		emitted++
 	}
@@ -182,7 +185,7 @@ func emitChanges(
 	slices.Reverse(held)
 	for _, change := range held {
 		if writeErr := stream.Write(changeItem(change)); writeErr != nil {
-			return emitted, sawDeleted, RuntimeErrorf("%w", writeErr)
+			return emitted, sawDeleted, exit.RuntimeErrorf("%w", writeErr)
 		}
 		emitted++
 	}

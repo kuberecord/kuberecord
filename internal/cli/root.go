@@ -20,29 +20,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
-)
-
-// The two names this binary answers to, and the two ways it names itself back.
-//
-// Both are built from this package: krew installs the plugin binary, a direct
-// download or `go install` gets the standalone one, and an engineer who has both
-// on their PATH must not get two different help texts from one implementation.
-const (
-	// StandaloneName is the command as invoked directly.
-	StandaloneName = "kuberecord"
-
-	// PluginBinaryName is the file name kubectl requires of a plugin providing
-	// the `kuberecord` subcommand. kubectl finds plugins by this convention
-	// alone, so the name is fixed by kubectl rather than chosen here.
-	PluginBinaryName = "kubectl-kuberecord"
-
-	// PluginInvocation is how that plugin must describe itself: a user who ran
-	// `kubectl kuberecord` and is shown `kuberecord timeline …` in an example
-	// has been given a command that will not work unless they happen to also
-	// have the standalone binary installed.
-	PluginInvocation = "kubectl kuberecord"
 )
 
 // InvocationName reports how this process was invoked, for use in usage strings.
@@ -64,7 +45,7 @@ const (
 // is a better trade than an untested platform.
 func InvocationName(args []string) string {
 	if len(args) == 0 {
-		return StandaloneName
+		return options.StandaloneName
 	}
 
 	base := args[0]
@@ -72,10 +53,10 @@ func InvocationName(args []string) string {
 		base = base[cut+1:]
 	}
 	base = strings.TrimSuffix(base, ".exe")
-	if base == PluginBinaryName {
-		return PluginInvocation
+	if base == options.PluginBinaryName {
+		return options.PluginInvocation
 	}
-	return StandaloneName
+	return options.StandaloneName
 }
 
 // rootLong is the root command's description, and the place the exit codes are
@@ -118,11 +99,11 @@ Exit codes:
 // constructed with it as an argument, which keeps the dependency visible in
 // their signatures and keeps this package free of a mutable global that two
 // concurrently-built roots would share.
-func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobra.Command, *GlobalFlags) {
-	flags := NewGlobalFlags()
+func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobra.Command, *options.GlobalFlags) {
+	flags := options.NewGlobalFlags()
 
 	root := &cobra.Command{
-		Use:   StandaloneName,
+		Use:   options.StandaloneName,
 		Short: "Query recorded Kubernetes state changes",
 		Long:  rootLong,
 
@@ -138,12 +119,12 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-			return ApplyVerbosity(flags.Verbosity)
+			return options.ApplyVerbosity(flags.Verbosity)
 		},
 
 		// A stray argument is a usage error, and it is classified here rather than
 		// left to cobra. Cobra's own "unknown command" is a plain error, which
-		// ExitCodeFor reads as a runtime failure — so without this, a typo would
+		// exit.CodeFor reads as a runtime failure — so without this, a typo would
 		// exit 1 and a wrapper script told to retry on 1 and stop on 2 would retry
 		// a misspelling forever.
 		Args: rejectUnknownSubcommand,
@@ -171,7 +152,7 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 	// top of Execute means the classification survives cobra's own error
 	// wrapping, which loses the pflag type.
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return &Error{Code: ExitUsageError, Err: err}
+		return &exit.Error{Code: exit.UsageError, Err: err}
 	})
 
 	flags.AddFlags(root.PersistentFlags())
@@ -195,7 +176,7 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 // rejectUnknownSubcommand is the Args validator every command with children uses.
 //
 // Cobra's built-in validator produces a plain error for an unknown subcommand, and
-// a plain error is a runtime failure by ExitCodeFor's reckoning. That is the wrong
+// a plain error is a runtime failure by exit.CodeFor's reckoning. That is the wrong
 // code for a typo: exit 2 is the one that says "you typed something this program
 // does not accept", and the distinction exists so that a wrapper script can retry a
 // backend timeout without retrying a misspelling.
@@ -210,5 +191,5 @@ func rejectUnknownSubcommand(cmd *cobra.Command, args []string) error {
 	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
 		message += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
 	}
-	return UsageErrorf("%s", message)
+	return exit.UsageErrorf("%s", message)
 }

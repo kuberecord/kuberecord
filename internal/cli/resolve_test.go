@@ -36,6 +36,9 @@ import (
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 )
 
 // The fixture cluster these tests resolve against: one operator, one Secret, and
@@ -67,12 +70,12 @@ func sinkGVR(resource string) schema.GroupVersionResource {
 func clickHouseSink(name, addr string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": v1alpha1.GroupVersion.String(),
-		"kind":       cli.KindClickHouseSink,
+		"kind":       resolve.KindClickHouseSink,
 		"metadata":   map[string]any{"name": name},
 		"spec": map[string]any{
 			"connection": map[string]any{
 				"addr":                 addr,
-				"database":             cli.DefaultClickHouseDatabase,
+				"database":             resolve.DefaultClickHouseDatabase,
 				"username":             "kuberecord",
 				"dialTimeout":          "5s",
 				"credentialsSecretRef": map[string]any{"name": secretName},
@@ -87,7 +90,7 @@ func clickHouseSink(name, addr string) *unstructured.Unstructured {
 func s3Sink(name, bucket, prefix string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": v1alpha1.GroupVersion.String(),
-		"kind":       cli.KindS3Sink,
+		"kind":       resolve.KindS3Sink,
 		"metadata":   map[string]any{"name": name},
 		"spec": map[string]any{
 			"bucket":   bucket,
@@ -135,16 +138,16 @@ func credentialsSecret(namespace string) *corev1.Secret {
 // client-go's own fakes rather than a hand-rolled seam: the messages under test
 // are decided by how an API error is classified, and only a real apierrors value
 // travelling through a real client exercises that.
-func fakeClients(sinks []*unstructured.Unstructured, objects ...runtime.Object) *cli.Clients {
+func fakeClients(sinks []*unstructured.Unstructured, objects ...runtime.Object) *resolve.Clients {
 	listKinds := map[schema.GroupVersionResource]string{
-		sinkGVR("clickhousesinks"): cli.KindClickHouseSink + "List",
-		sinkGVR("s3sinks"):         cli.KindS3Sink + "List",
+		sinkGVR("clickhousesinks"): resolve.KindClickHouseSink + "List",
+		sinkGVR("s3sinks"):         resolve.KindS3Sink + "List",
 	}
 	seeded := make([]runtime.Object, 0, len(sinks))
 	for _, sink := range sinks {
 		seeded = append(seeded, sink)
 	}
-	return &cli.Clients{
+	return &resolve.Clients{
 		Dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 			runtime.NewScheme(), listKinds, seeded...),
 		Typed: k8sfake.NewClientset(objects...),
@@ -153,8 +156,8 @@ func fakeClients(sinks []*unstructured.Unstructured, objects ...runtime.Object) 
 
 // resolverOver builds a resolver whose cluster is the fixture and whose
 // configuration is the one given.
-func resolverOver(t *testing.T, cfg *cli.Config, clients *cli.Clients, args ...string) (
-	*cli.BackendResolver, *strings.Builder,
+func resolverOver(t *testing.T, cfg *resolve.Config, clients *resolve.Clients, args ...string) (
+	*resolve.BackendResolver, *strings.Builder,
 ) {
 	t.Helper()
 
@@ -162,7 +165,7 @@ func resolverOver(t *testing.T, cfg *cli.Config, clients *cli.Clients, args ...s
 	var notices strings.Builder
 	io.ErrOut = &notices
 
-	root, flags := cli.NewRootCommand(cli.StandaloneName, io)
+	root, flags := cli.NewRootCommand(options.StandaloneName, io)
 	root.SetArgs(append([]string{"--kubeconfig", kubeconfigPath}, args...))
 	// Parse the flags without running anything: the resolver reads the parsed
 	// surface, and driving it through a command would need a command this task
@@ -172,12 +175,12 @@ func resolverOver(t *testing.T, cfg *cli.Config, clients *cli.Clients, args ...s
 	}
 
 	if cfg == nil {
-		cfg = &cli.Config{}
+		cfg = &resolve.Config{}
 	}
-	return &cli.BackendResolver{
+	return &resolve.BackendResolver{
 		Flags:      flags,
 		Streams:    io,
-		InvokedAs:  cli.StandaloneName,
+		InvokedAs:  options.StandaloneName,
 		Config:     cfg,
 		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"),
 		Clients:    clients,
@@ -187,7 +190,7 @@ func resolverOver(t *testing.T, cfg *cli.Config, clients *cli.Clients, args ...s
 // closeBackend releases a resolved backend, reporting a failure rather than
 // discarding it: a leaked connection or an unreleased source is a defect worth
 // hearing about even in a test that was about to fail for another reason.
-func closeBackend(t *testing.T, backend *cli.Backend) {
+func closeBackend(t *testing.T, backend *resolve.Backend) {
 	t.Helper()
 	if backend == nil {
 		return
@@ -225,20 +228,20 @@ func localArchive(t *testing.T, clusterIDs ...string) string {
 func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 	archive := localArchive(t, theCluster)
 
-	profileConfig := func() *cli.Config {
-		return &cli.Config{
+	profileConfig := func() *resolve.Config {
+		return &resolve.Config{
 			CurrentProfile: "laptop",
-			Profiles: map[string]cli.Profile{
-				"laptop": {Backend: cli.BackendLocal, Local: &cli.LocalProfile{Path: archive}},
+			Profiles: map[string]resolve.Profile{
+				"laptop": {Backend: resolve.BackendLocal, Local: &resolve.LocalProfile{Path: archive}},
 			},
 		}
 	}
 
 	tests := []struct {
 		name        string
-		config      *cli.Config
+		config      *resolve.Config
 		args        []string
-		wantOrigin  cli.Origin
+		wantOrigin  resolve.Origin
 		wantNotice  string
 		wantBackend string
 	}{
@@ -246,7 +249,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 			name:        "--source wins over everything",
 			config:      profileConfig(),
 			args:        []string{"--source", archive, "--cluster-id", theCluster},
-			wantOrigin:  cli.OriginSourceFlag,
+			wantOrigin:  resolve.OriginSourceFlag,
 			wantNotice:  "→ using --source " + archive + " (local archive)",
 			wantBackend: "objectsource",
 		},
@@ -254,7 +257,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 			name:        "--sink wins over a profile and over discovery",
 			config:      profileConfig(),
 			args:        []string{"--sink", "S3Sink/archive", "--cluster-id", theCluster},
-			wantOrigin:  cli.OriginSinkFlag,
+			wantOrigin:  resolve.OriginSinkFlag,
 			wantNotice:  "→ using --sink S3Sink/archive (s3://acme-audit/kuberecord, region eu-west-1)",
 			wantBackend: "objectsource",
 		},
@@ -262,7 +265,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 			name:        "the active profile wins over discovery",
 			config:      profileConfig(),
 			args:        []string{"--cluster-id", theCluster},
-			wantOrigin:  cli.OriginProfile,
+			wantOrigin:  resolve.OriginProfile,
 			wantNotice:  "→ using profile laptop (local archive at " + archive + ")",
 			wantBackend: "objectsource",
 		},
@@ -270,7 +273,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 			name:        "with nothing said, the cluster's own sink is discovered",
 			config:      nil,
 			args:        []string{"--cluster-id", theCluster},
-			wantOrigin:  cli.OriginDiscovered,
+			wantOrigin:  resolve.OriginDiscovered,
 			wantNotice:  "→ discovered ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)",
 			wantBackend: "clickhouse",
 		},
@@ -285,7 +288,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 				credentialsSecret(operatorNamespace), operatorDeployment(operatorNamespace, theCluster))
 			// The --sink case needs a second sink to name; the discovery case must
 			// not see it, or discovery would have two to choose between.
-			if tc.wantOrigin == cli.OriginSinkFlag {
+			if tc.wantOrigin == resolve.OriginSinkFlag {
 				clients = fakeClients(
 					[]*unstructured.Unstructured{
 						clickHouseSink("default", "clickhouse.kuberecord-system.svc:9000"),
@@ -303,7 +306,7 @@ func TestTheChainPrefersTheMostExplicitSource(t *testing.T) {
 			t.Cleanup(func() { closeBackend(t, backend) })
 
 			if backend.Origin != tc.wantOrigin {
-				t.Errorf("Origin = %q, want %q", backend.Origin, tc.wantOrigin)
+				t.Errorf("resolve.Origin = %q, want %q", backend.Origin, tc.wantOrigin)
 			}
 			if got := backend.Engine.Capabilities().Backend; got != tc.wantBackend {
 				t.Errorf("opened the %q backend, want %q", got, tc.wantBackend)
@@ -338,7 +341,7 @@ func TestNothingResolvesToAnActionableFailure(t *testing.T) {
 				"no sink custom resources in this cluster",
 				"--source", "--sink", "config set-profile",
 			},
-			code: cli.ExitRuntimeError,
+			code: exit.RuntimeError,
 		},
 		{
 			name: "several sinks",
@@ -347,7 +350,7 @@ func TestNothingResolvesToAnActionableFailure(t *testing.T) {
 				s3Sink("archive", "acme-audit", ""),
 			},
 			want: []string{"2 sinks", "ClickHouseSink/hot", "S3Sink/archive", "--sink"},
-			code: cli.ExitRuntimeError,
+			code: exit.RuntimeError,
 		},
 		{
 			name:  "a forbidden list says so, and names the routes that need no permission",
@@ -361,28 +364,28 @@ func TestNothingResolvesToAnActionableFailure(t *testing.T) {
 					})
 			},
 			want: []string{"forbidden", "--source", "config set-profile"},
-			code: cli.ExitRuntimeError,
+			code: exit.RuntimeError,
 		},
 		{
 			name:  "a --profile nobody defined is a usage error, never a fall-through",
 			sinks: []*unstructured.Unstructured{clickHouseSink("default", "clickhouse:9000")},
 			args:  []string{"--profile", "stagign"},
 			want:  []string{"stagign", "no profile"},
-			code:  cli.ExitUsageError,
+			code:  exit.UsageError,
 		},
 		{
 			name:  "an unknown sink kind is a usage error",
 			sinks: nil,
 			args:  []string{"--sink", "PostgresSink/main"},
-			want:  []string{"PostgresSink", cli.KindClickHouseSink, cli.KindS3Sink},
-			code:  cli.ExitUsageError,
+			want:  []string{"PostgresSink", resolve.KindClickHouseSink, resolve.KindS3Sink},
+			code:  exit.UsageError,
 		},
 		{
 			name:  "a malformed --sink is a usage error",
 			sinks: nil,
 			args:  []string{"--sink", "default"},
 			want:  []string{"expected <kind>/<name>"},
-			code:  cli.ExitUsageError,
+			code:  exit.UsageError,
 		},
 	}
 
@@ -405,9 +408,9 @@ func TestNothingResolvesToAnActionableFailure(t *testing.T) {
 					t.Errorf("the failure does not mention %q:\n%v", want, err)
 				}
 			}
-			if got := cli.ExitCodeFor(err); got != tc.code {
+			if got := exit.CodeFor(err); got != tc.code {
 				t.Errorf("exit code %d, want %d — a script that retries on %d must not retry this",
-					got, tc.code, cli.ExitRuntimeError)
+					got, tc.code, exit.RuntimeError)
 			}
 		})
 	}
@@ -467,7 +470,7 @@ func TestTheRemediationNamesTheCommandTheUserCanType(t *testing.T) {
 		})
 
 	resolver, _ := resolverOver(t, nil, clients)
-	resolver.InvokedAs = cli.PluginInvocation
+	resolver.InvokedAs = options.PluginInvocation
 
 	_, err := resolver.Resolve(t.Context())
 	if err == nil {
@@ -518,13 +521,13 @@ func TestNoCredentialIsEverPrinted(t *testing.T) {
 		credentialsSecret(operatorNamespace), operatorDeployment(operatorNamespace, theCluster))
 
 	io, out, errOut := streams()
-	root, flags := cli.NewRootCommand(cli.StandaloneName, io)
+	root, flags := cli.NewRootCommand(options.StandaloneName, io)
 	if err := root.ParseFlags([]string{"--kubeconfig", kubeconfigPath, "-v", "10"}); err != nil {
 		t.Fatalf("parsing flags: %v", err)
 	}
-	resolver := &cli.BackendResolver{
-		Flags: flags, Streams: io, InvokedAs: cli.StandaloneName,
-		Config: &cli.Config{}, ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Clients: clients,
+	resolver := &resolve.BackendResolver{
+		Flags: flags, Streams: io, InvokedAs: options.StandaloneName,
+		Config: &resolve.Config{}, ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Clients: clients,
 	}
 
 	backend, err := resolver.Resolve(t.Context())
@@ -623,9 +626,9 @@ func TestSourceIsReadWithoutACluster(t *testing.T) {
 						t.Errorf("the failure does not mention %q:\n%v", want, err)
 					}
 				}
-				if got := cli.ExitCodeFor(err); got != cli.ExitUsageError {
+				if got := exit.CodeFor(err); got != exit.UsageError {
 					t.Errorf("exit code %d, want %d: a bad flag value is a usage error",
-						got, cli.ExitUsageError)
+						got, exit.UsageError)
 				}
 				return
 			}
@@ -659,7 +662,7 @@ func TestTheOperatorNamespaceIsResolvedBeforeASecretIsRead(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		config          *cli.Config
+		config          *resolve.Config
 		args            []string
 		withDeployment  bool
 		secretNamespace string
@@ -672,7 +675,7 @@ func TestTheOperatorNamespaceIsResolvedBeforeASecretIsRead(t *testing.T) {
 		},
 		{
 			name:            "the configuration file's operatorNamespace",
-			config:          &cli.Config{OperatorNamespace: elsewhere},
+			config:          &resolve.Config{OperatorNamespace: elsewhere},
 			secretNamespace: elsewhere,
 		},
 		{
@@ -804,12 +807,12 @@ func TestAnS3SinksCredentialsSecretIsResolved(t *testing.T) {
 // time, and a variable the shell never exported fails here rather than as an
 // authentication error later.
 func TestAProfileIsOpenedWithWhatItReferences(t *testing.T) {
-	profileConfig := &cli.Config{
+	profileConfig := &resolve.Config{
 		CurrentProfile: profileProd,
-		Profiles: map[string]cli.Profile{
+		Profiles: map[string]resolve.Profile{
 			profileProd: {
-				Backend: cli.BackendClickHouse,
-				ClickHouse: &cli.ClickHouseProfile{
+				Backend: resolve.BackendClickHouse,
+				ClickHouse: &resolve.ClickHouseProfile{
 					Addr: "clickhouse.example:9000", Database: "kuberecord",
 					Username: "kuberecord_ro", PasswordEnv: "KUBERECORD_TEST_PROFILE_PASSWORD",
 					TLS: true,

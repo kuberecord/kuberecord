@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -40,13 +43,13 @@ import (
 // The boolean rather than an error is deliberate: `table` and `wide` are not
 // failures here, they are the other branch, and a command asks this question
 // precisely to decide which of the two renderings it is producing.
-func structuredFormat(format OutputFormat) (render.StructuredFormat, bool) {
+func structuredFormat(format options.OutputFormat) (render.StructuredFormat, bool) {
 	switch format {
-	case OutputJSON:
+	case options.OutputJSON:
 		return render.StructuredJSON, true
-	case OutputJSONL:
+	case options.OutputJSONL:
 		return render.StructuredJSONL, true
-	case OutputYAML:
+	case options.OutputYAML:
 		return render.StructuredYAML, true
 	}
 	return "", false
@@ -110,7 +113,7 @@ func (a coverageAnswer) Report() render.CoverageReport {
 //
 // subject names what the coverage was being asked about, for the failure message.
 func askCoverage(
-	ctx context.Context, backend *Backend, q query.ScopeQuery, subject string,
+	ctx context.Context, backend *resolve.Backend, q query.ScopeQuery, subject string,
 ) (coverageAnswer, error) {
 	intervals, err := backend.Engine.Coverage(ctx, q)
 	switch {
@@ -119,7 +122,7 @@ func askCoverage(
 	case errors.Is(err, query.ErrCapabilityUnsupported):
 		return coverageAnswer{Gap: err}, nil
 	}
-	return coverageAnswer{}, RuntimeErrorf("reading the watch scopes that cover %s: %w", subject, err)
+	return coverageAnswer{}, exit.RuntimeErrorf("reading the watch scopes that cover %s: %w", subject, err)
 }
 
 // envelopeHead assembles the head of an envelope of the given kind.
@@ -130,7 +133,7 @@ func askCoverage(
 // declaration. When two backends hold the same object's history — which the tee
 // pattern makes ordinary (D14) — those two fields are how a reader knows which
 // answer they are holding.
-func envelopeHead(backend *Backend, kind string, coverage coverageAnswer) render.EnvelopeHead {
+func envelopeHead(backend *resolve.Backend, kind string, coverage coverageAnswer) render.EnvelopeHead {
 	return render.EnvelopeHead{
 		APIVersion: render.EnvelopeAPIVersion,
 		Kind:       kind,
@@ -174,11 +177,11 @@ func changeItem(change query.Change) query.Change {
 func writeItems(stream *render.Stream, items []any) error {
 	for _, item := range items {
 		if err := stream.Write(item); err != nil {
-			return errors.Join(RuntimeErrorf("%w", err), stream.Close())
+			return errors.Join(exit.RuntimeErrorf("%w", err), stream.Close())
 		}
 	}
 	if err := stream.Close(); err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	return nil
 }

@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -85,7 +87,7 @@ func runScopes(
 		opts.Width = goldenWidth
 	}
 	var out, errOut bytes.Buffer
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
 	err = cli.RunScopes(context.Background(), backend, request, ioStreams(&out, &errOut), opts)
 	return out.String(), errOut.String(), err
@@ -203,8 +205,8 @@ func TestScopesEmptyIsAFindingNotAList(t *testing.T) {
 	if err == nil {
 		t.Fatal("an empty listing was reported as a successful empty answer")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("exit code %d, want %d: %v", code, cli.ExitNoCoverage, err)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit code %d, want %d: %v", code, exit.NoCoverage, err)
 	}
 	for _, want := range []string{"Secret in namespace payments", fixtureCluster} {
 		if !strings.Contains(err.Error(), want) {
@@ -234,8 +236,8 @@ func TestScopesRefusesToGuessWithoutAScopeLog(t *testing.T) {
 	if err == nil {
 		t.Fatal("a backend with no scope log produced a listing anyway")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d: %v", code, cli.ExitRuntimeError, err)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d: %v", code, exit.RuntimeError, err)
 	}
 	if !strings.Contains(err.Error(), "has no scope log") {
 		t.Errorf("the message does not say why there is no answer: %v", err)
@@ -309,8 +311,8 @@ func TestScopesRefusesMalformedInvocations(t *testing.T) {
 			io, out, errOut := streams()
 			code := cli.Run(append([]string{"kuberecord"}, test.argv...), io)
 
-			if code != cli.ExitUsageError {
-				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, cli.ExitUsageError, errOut.String())
+			if code != exit.UsageError {
+				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, exit.UsageError, errOut.String())
 			}
 			if !strings.Contains(errOut.String(), test.want) {
 				t.Errorf("the message does not explain the mistake.\nwant it to contain %q\ngot:\n%s",
@@ -344,9 +346,9 @@ func TestScopesReadsARecordedKindWithoutACluster(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c", "--color=never",
 	}, io)
 
-	if code != cli.ExitNoCoverage {
+	if code != exit.NoCoverage {
 		t.Fatalf("exit code %d, want %d.\nstdout:\n%s\nstderr:\n%s",
-			code, cli.ExitNoCoverage, out.String(), errOut.String())
+			code, exit.NoCoverage, out.String(), errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "read --kind Deployment.apps as apps/Deployment as recorded") {
 		t.Errorf("the offline resolution was not announced:\n%s", errOut.String())
@@ -370,8 +372,8 @@ func TestScopesRefusesAShortNameWithoutACluster(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c",
 	}, io)
 
-	if code != cli.ExitRuntimeError {
-		t.Fatalf("exit code %d, want %d.\nstderr:\n%s", code, cli.ExitRuntimeError, errOut.String())
+	if code != exit.RuntimeError {
+		t.Fatalf("exit code %d, want %d.\nstderr:\n%s", code, exit.RuntimeError, errOut.String())
 	}
 	for _, want := range []string{"could not be reached", "Deployment.apps"} {
 		if !strings.Contains(errOut.String(), want) {
@@ -395,8 +397,8 @@ func TestScopesWritesTheEnvelopeWithTheFinding(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c", "--color=never",
 	}, io)
 
-	if code != cli.ExitNoCoverage {
-		t.Fatalf("exit code %d, want %d.\nstdout:\n%s", code, cli.ExitNoCoverage, out.String())
+	if code != exit.NoCoverage {
+		t.Fatalf("exit code %d, want %d.\nstdout:\n%s", code, exit.NoCoverage, out.String())
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
@@ -418,7 +420,7 @@ func TestScopesWritesTheEnvelopeWithTheFinding(t *testing.T) {
 // every one of them advice that does not work.
 func TestScopesIsInTheCommandTree(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != exit.Success {
 		t.Fatalf("`--help` exited %d", code)
 	}
 	if !strings.Contains(out.String(), "scopes") {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package options
 
 import (
 	goflag "flag"
@@ -86,7 +86,7 @@ const (
 	//
 	// It exists for the same reason `rm -f` does, and it is spelled the way every
 	// other tool spells it so that nobody has to look it up while a pipeline is
-	// failing. A non-interactive invocation assumes it anyway (see ScanOptions):
+	// failing. A non-interactive invocation assumes it anyway (see coldscan.Options):
 	// the flag is for the interactive user who already knows what they are asking
 	// for, not for the script, which must never be able to hang on a prompt.
 	FlagAssumeYes = "yes"
@@ -190,10 +190,10 @@ func (g *GlobalFlags) AddFlags(flags *pflag.FlagSet) {
 		"The kuberecord cluster identity whose history to read (the cluster_id column). "+
 			"Distinct from --cluster, which selects a kubeconfig cluster entry.")
 	flags.VarP(&g.Output, FlagOutput, "o",
-		fmt.Sprintf("Output format. One of: %s.", joinValues(outputFormats)))
+		fmt.Sprintf("Output format. One of: %s.", JoinValues(outputFormats)))
 	flags.Var(&g.Color, FlagColor,
 		fmt.Sprintf("When to colourise output. One of: %s. NO_COLOR is honoured under auto.",
-			joinValues(colorModes)))
+			JoinValues(colorModes)))
 	flags.StringVar(&g.Sink, FlagSink, g.Sink,
 		"Read through a configured sink, as kind/name (for example ClickHouseSink/default).")
 	flags.StringVar(&g.Source, FlagSource, g.Source,
@@ -257,3 +257,14 @@ func ApplyVerbosity(level int) error {
 	}
 	return nil
 }
+
+// DefaultOperatorNamespace is where the operator is installed by both the chart
+// and the kustomize overlay, and therefore where its credentials Secrets live
+// unless somebody moved them.
+//
+// It sits here rather than with the discovery that uses it because
+// --operator-namespace documents it in its own usage string, and the flag layer
+// is below resolution in the order Task 11.8 fixed. The alternative was to spell
+// the literal twice — once as the default and once in the help text — which is
+// the shape a default and its documentation drift apart in.
+const DefaultOperatorNamespace = "kuberecord-system"

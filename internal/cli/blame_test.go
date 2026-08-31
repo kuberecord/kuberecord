@@ -24,7 +24,9 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -135,7 +137,7 @@ func runBlame(
 		opts.Width = goldenWidth
 	}
 	var out, errOut bytes.Buffer
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
 	err = cli.RunBlame(context.Background(), backend, request, ioStreams(&out, &errOut), opts)
 	assertDrained(t, engine)
@@ -400,8 +402,8 @@ func TestBlameExitsThreeWhenNothingWasWatching(t *testing.T) {
 	if err == nil {
 		t.Fatal("a scope nobody watched was reported as an object with no fields")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("exit code %d, want %d", code, cli.ExitNoCoverage)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
 	}
 	if !errors.Is(err, query.ErrNoCoverage) {
 		t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to an exit code: %v",

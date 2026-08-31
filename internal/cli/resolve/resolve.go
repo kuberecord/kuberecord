@@ -14,7 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+// Package resolve turns what the user configured into an open backend and a
+// cluster identity.
+//
+// It owns the whole chain a command does not want to know about: the
+// --source/--sink flags, the profile stanza, discovery of a sink custom resource
+// through the kubeconfig, reading the Secret that sink names, constructing the
+// query engine behind it, and inferring which cluster's history is being asked
+// about when nobody said.
+//
+// In the CLI's dependency order it sits above options and exit and below the
+// command tree. It reads GlobalFlags and it names the program in its remediation
+// messages, but it never constructs a command and never renders anything: a
+// resolver that could reach the cobra tree would put the whole command surface
+// on the path of every backend that is opened (Task 11.8).
+//
+// The one contract it is a client of on the far side is internal/query — the
+// read plane — which is exactly the boundary deps_test.go in this directory
+// asserts (D16, D20).
+package resolve
 
 import (
 	"context"
@@ -30,6 +48,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/query"
 	chquery "github.com/kuberecord/kuberecord/internal/query/clickhouse"
 	"github.com/kuberecord/kuberecord/internal/query/objectsource"
@@ -80,9 +100,9 @@ const (
 func (o Origin) phrase() string {
 	switch o {
 	case OriginSourceFlag:
-		return "using --" + FlagSource
+		return "using --" + options.FlagSource
 	case OriginSinkFlag:
-		return "using --" + FlagSink
+		return "using --" + options.FlagSink
 	case OriginProfile:
 		return "using profile"
 	case OriginDiscovered:
@@ -144,7 +164,7 @@ func (b *Backend) Close() error {
 // Deployment, and the record of which notices have already been printed.
 type BackendResolver struct {
 	// Flags is the parsed global flag surface.
-	Flags *GlobalFlags
+	Flags *options.GlobalFlags
 
 	// Streams is where notices go — stderr, always, so that structured output on
 	// stdout stays pipeable (Invariant 4 is about not hiding things, not about
@@ -186,14 +206,14 @@ type BackendResolver struct {
 // is, and it is reported here rather than at the step that would have used it,
 // because a file with a typo in it is a mistake the user wants to hear about
 // whether or not this particular command needed a profile.
-func NewBackendResolver(flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) (*BackendResolver, error) {
+func NewBackendResolver(flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) (*BackendResolver, error) {
 	path, err := DefaultConfigPath()
 	if err != nil {
-		return nil, RuntimeErrorf("%w", err)
+		return nil, exit.RuntimeErrorf("%w", err)
 	}
 	cfg, err := LoadConfig(path)
 	if err != nil {
-		return nil, RuntimeErrorf("%w", err)
+		return nil, exit.RuntimeErrorf("%w", err)
 	}
 	return &BackendResolver{
 		Flags:      flags,
@@ -207,7 +227,7 @@ func NewBackendResolver(flags *GlobalFlags, streams genericiooptions.IOStreams, 
 // commandName is what a remediation message tells the reader to type.
 func (r *BackendResolver) commandName() string {
 	if r.InvokedAs == "" {
-		return StandaloneName
+		return options.StandaloneName
 	}
 	return r.InvokedAs
 }
@@ -245,7 +265,7 @@ func (r *BackendResolver) clients() (*Clients, error) {
 			// Unreachable: every path below sets one or the other. Stated anyway,
 			// because the alternative to a stated error here is a nil dereference
 			// at a call site that had no way to know.
-			return nil, RuntimeErrorf("no Kubernetes client, and no reason recorded for it")
+			return nil, exit.RuntimeErrorf("no Kubernetes client, and no reason recorded for it")
 		}
 		return nil, r.clientErr
 	}
@@ -253,17 +273,17 @@ func (r *BackendResolver) clients() (*Clients, error) {
 
 	restConfig, err := r.Flags.ConfigFlags.ToRESTConfig()
 	if err != nil {
-		r.clientErr = RuntimeErrorf("no Kubernetes cluster to ask: %w", err)
+		r.clientErr = exit.RuntimeErrorf("no Kubernetes cluster to ask: %w", err)
 		return nil, r.clientErr
 	}
 	dyn, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
-		r.clientErr = RuntimeErrorf("building a Kubernetes client: %w", err)
+		r.clientErr = exit.RuntimeErrorf("building a Kubernetes client: %w", err)
 		return nil, r.clientErr
 	}
 	typed, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		r.clientErr = RuntimeErrorf("building a Kubernetes client: %w", err)
+		r.clientErr = exit.RuntimeErrorf("building a Kubernetes client: %w", err)
 		return nil, r.clientErr
 	}
 	r.Clients = &Clients{Dynamic: dyn, Typed: typed}
@@ -313,7 +333,7 @@ func (r *BackendResolver) operatorNamespace(ctx context.Context) (string, error)
 		return r.operatorNS, nil
 	}
 
-	r.operatorNS = DefaultOperatorNamespace
+	r.operatorNS = options.DefaultOperatorNamespace
 	return r.operatorNS, nil
 }
 
@@ -404,13 +424,13 @@ func (r *BackendResolver) activeProfile() (string, *Profile, error) {
 	profile, ok := r.Config.Profiles[name]
 	if !ok {
 		if explicit {
-			return "", nil, UsageErrorf("--%s %q names no profile in %s (%s)",
-				FlagProfile, name, r.ConfigPath, describeProfileNames(r.Config.Profiles))
+			return "", nil, exit.UsageErrorf("--%s %q names no profile in %s (%s)",
+				options.FlagProfile, name, r.ConfigPath, DescribeProfileNames(r.Config.Profiles))
 		}
 		// Unreachable through LoadConfig, which validates the reference. Reported
 		// rather than ignored so that a configuration assembled in memory by a
 		// future caller cannot silently fall through to discovery.
-		return "", nil, RuntimeErrorf("%s names the current profile %q, which it does not define",
+		return "", nil, exit.RuntimeErrorf("%s names the current profile %q, which it does not define",
 			r.ConfigPath, name)
 	}
 	return name, &profile, nil
@@ -425,17 +445,17 @@ func (r *BackendResolver) activeProfile() (string, *Profile, error) {
 func (r *BackendResolver) targetFromDiscovery(ctx context.Context) (target, error) {
 	candidates, err := r.listSinks(ctx)
 	if err != nil {
-		return target{}, RuntimeErrorf("%w. %s", err, r.otherRoutes())
+		return target{}, exit.RuntimeErrorf("%w. %s", err, r.otherRoutes())
 	}
 
 	switch len(candidates) {
 	case 0:
-		return target{}, RuntimeErrorf("%w. %s", errNoSinksFound, r.otherRoutes())
+		return target{}, exit.RuntimeErrorf("%w. %s", errNoSinksFound, r.otherRoutes())
 	case 1:
 		return r.targetFromSink(ctx, candidates[0])
 	}
-	return target{}, RuntimeErrorf("this cluster has %d sinks (%s); name one with --%s",
-		len(candidates), describeSinks(candidates), FlagSink)
+	return target{}, exit.RuntimeErrorf("this cluster has %d sinks (%s); name one with --%s",
+		len(candidates), describeSinks(candidates), options.FlagSink)
 }
 
 // otherRoutes is the sentence appended to every discovery failure.
@@ -447,7 +467,7 @@ func (r *BackendResolver) targetFromDiscovery(ctx context.Context) (target, erro
 func (r *BackendResolver) otherRoutes() string {
 	return fmt.Sprintf("Read an archive directly with --%s <dir|s3://bucket/prefix>, "+
 		"name a sink with --%s <kind>/<name>, or configure a profile with `%s config set-profile`",
-		FlagSource, FlagSink, r.commandName())
+		options.FlagSource, options.FlagSink, r.commandName())
 }
 
 // targetFromSinkRef fetches one named sink and resolves it.
@@ -475,7 +495,7 @@ func (r *BackendResolver) targetFromSink(ctx context.Context, candidate sinkCand
 		}
 		return r.s3Target(ctx, candidate.ref, sink)
 	}
-	return target{}, RuntimeErrorf("no sink kind named %q", candidate.ref.Kind)
+	return target{}, exit.RuntimeErrorf("no sink kind named %q", candidate.ref.Kind)
 }
 
 // The CRD's own defaults, repeated for the case where a resource reaches this code
@@ -615,7 +635,7 @@ func targetFromProfile(name string, profile Profile) (target, error) {
 	case BackendClickHouse:
 		password, err := profile.ClickHouse.ResolvePassword()
 		if err != nil {
-			return target{}, RuntimeErrorf("profile %q: %w", name, err)
+			return target{}, exit.RuntimeErrorf("profile %q: %w", name, err)
 		}
 		return target{
 			backend: BackendClickHouse,
@@ -653,8 +673,8 @@ func targetFromProfile(name string, profile Profile) (target, error) {
 			description:   fmt.Sprintf("%s (local archive at %s)", name, profile.Local.Path),
 		}, nil
 	}
-	return target{}, RuntimeErrorf("profile %q names the backend %q, which is not one of %s",
-		name, profile.Backend, joinValues(backendKinds))
+	return target{}, exit.RuntimeErrorf("profile %q names the backend %q, which is not one of %s",
+		name, profile.Backend, options.JoinValues(BackendKinds))
 }
 
 // The environment this package reads when --source names a bucket.
@@ -681,12 +701,12 @@ func targetFromSource(source string) (target, error) {
 	case strings.HasPrefix(source, "s3://"):
 		parsed, err := url.Parse(source)
 		if err != nil {
-			return target{}, UsageErrorf("--%s %q is not a URL: %v", FlagSource, source, err)
+			return target{}, exit.UsageErrorf("--%s %q is not a URL: %v", options.FlagSource, source, err)
 		}
 		bucket := parsed.Host
 		if bucket == "" {
-			return target{}, UsageErrorf("--%s %q names no bucket: expected s3://bucket[/prefix]",
-				FlagSource, source)
+			return target{}, exit.UsageErrorf("--%s %q names no bucket: expected s3://bucket[/prefix]",
+				options.FlagSource, source)
 		}
 		prefix := strings.Trim(parsed.Path, "/")
 		region := valueOr(os.Getenv(envRegion), os.Getenv(envDefaultRegion))
@@ -710,18 +730,18 @@ func targetFromSource(source string) (target, error) {
 	case strings.HasPrefix(source, "file://"):
 		parsed, err := url.Parse(source)
 		if err != nil {
-			return target{}, UsageErrorf("--%s %q is not a URL: %v", FlagSource, source, err)
+			return target{}, exit.UsageErrorf("--%s %q is not a URL: %v", options.FlagSource, source, err)
 		}
 		if parsed.Host != "" && parsed.Host != "localhost" {
-			return target{}, UsageErrorf("--%s %q names the host %q; a file URL this tool can read "+
-				"is file:///an/absolute/path", FlagSource, source, parsed.Host)
+			return target{}, exit.UsageErrorf("--%s %q names the host %q; a file URL this tool can read "+
+				"is file:///an/absolute/path", options.FlagSource, source, parsed.Host)
 		}
 		return localTarget(parsed.Path), nil
 
 	case strings.Contains(source, "://"):
 		scheme, _, _ := strings.Cut(source, "://")
-		return target{}, UsageErrorf("--%s names the scheme %q, which this build cannot read; "+
-			"use s3:// for a bucket, or a path for a directory", FlagSource, scheme)
+		return target{}, exit.UsageErrorf("--%s names the scheme %q, which this build cannot read; "+
+			"use s3:// for a bucket, or a path for a directory", options.FlagSource, scheme)
 	}
 	return localTarget(source), nil
 }
@@ -777,14 +797,14 @@ func (t target) open(ctx context.Context) (query.QueryEngine, []func() error, er
 	case BackendClickHouse:
 		engine, err := chquery.Dial(t.clickhouse)
 		if err != nil {
-			return nil, nil, RuntimeErrorf("%w", err)
+			return nil, nil, exit.RuntimeErrorf("%w", err)
 		}
 		return engine, []func() error{engine.Close}, nil
 
 	case BackendS3:
 		source, err := awssource.New(ctx, t.s3)
 		if err != nil {
-			return nil, nil, RuntimeErrorf("%w", err)
+			return nil, nil, exit.RuntimeErrorf("%w", err)
 		}
 		engine, err := t.openArchive(source)
 		if err != nil {
@@ -795,7 +815,7 @@ func (t target) open(ctx context.Context) (query.QueryEngine, []func() error, er
 	case BackendLocal:
 		source, err := objectsource.NewLocal(t.localPath)
 		if err != nil {
-			return nil, nil, RuntimeErrorf("%w", err)
+			return nil, nil, exit.RuntimeErrorf("%w", err)
 		}
 		engine, err := t.openArchive(source)
 		if err != nil {
@@ -803,7 +823,7 @@ func (t target) open(ctx context.Context) (query.QueryEngine, []func() error, er
 		}
 		return engine, []func() error{source.Close, engine.Close}, nil
 	}
-	return nil, nil, RuntimeErrorf("no backend named %q", t.backend)
+	return nil, nil, exit.RuntimeErrorf("no backend named %q", t.backend)
 }
 
 // openArchive builds the archive engine over a source, with the options this
@@ -814,7 +834,7 @@ func (t target) openArchive(source objectsource.ObjectSource) (query.QueryEngine
 		ObjectSpan: t.objectSpan,
 	})
 	if err != nil {
-		return nil, RuntimeErrorf("%w", err)
+		return nil, exit.RuntimeErrorf("%w", err)
 	}
 	return engine, nil
 }

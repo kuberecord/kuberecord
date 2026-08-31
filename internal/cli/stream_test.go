@@ -29,6 +29,7 @@ import (
 
 	"github.com/kuberecord/kuberecord/internal/cli"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -215,7 +216,7 @@ func streamRequest(limit int, reverse bool) cli.TimelineRequest {
 func runStream(t *testing.T, engine *generatedEngine, request cli.TimelineRequest, out io.Writer) error {
 	t.Helper()
 
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 	return cli.RunTimeline(context.Background(), backend, request,
 		ioStreams(out, io.Discard), render.Options{Width: goldenWidth})
 }

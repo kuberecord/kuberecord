@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/spf13/pflag"
 )
 
@@ -117,9 +118,9 @@ func TestWindowAliasesResolveOntoOnePair(t *testing.T) {
 					t.Fatalf("%q was accepted; one bound given twice with two values is a window the "+
 						"tool would have to choose between", testCase.argv)
 				}
-				if code := ExitCodeFor(err); code != ExitUsageError {
+				if code := exit.CodeFor(err); code != exit.UsageError {
 					t.Errorf("the conflict exits %d, want %d: it is something the user typed, and a "+
-						"script that retries a backend timeout must not retry it", code, ExitUsageError)
+						"script that retries a backend timeout must not retry it", code, exit.UsageError)
 				}
 				for _, want := range testCase.wantErrors {
 					if !strings.Contains(err.Error(), want) {

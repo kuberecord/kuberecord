@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli_test
+package options_test
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 )
 
 // TestOutputFormatSet fixes the accepted vocabulary of --output.
@@ -31,15 +31,15 @@ import (
 func TestOutputFormatSet(t *testing.T) {
 	tests := []struct {
 		value   string
-		want    cli.OutputFormat
+		want    options.OutputFormat
 		wantErr bool
 	}{
-		{value: "table", want: cli.OutputTable},
-		{value: "wide", want: cli.OutputWide},
-		{value: "json", want: cli.OutputJSON},
-		{value: "jsonl", want: cli.OutputJSONL},
-		{value: "yaml", want: cli.OutputYAML},
-		{value: "diff", want: cli.OutputDiff},
+		{value: "table", want: options.OutputTable},
+		{value: "wide", want: options.OutputWide},
+		{value: "json", want: options.OutputJSON},
+		{value: "jsonl", want: options.OutputJSONL},
+		{value: "yaml", want: options.OutputYAML},
+		{value: "diff", want: options.OutputDiff},
 		{value: "JSON", wantErr: true},
 		{value: "tabel", wantErr: true},
 		{value: "", wantErr: true},
@@ -48,7 +48,7 @@ func TestOutputFormatSet(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run("-o "+test.value, func(t *testing.T) {
-			format := cli.OutputTable
+			format := options.OutputTable
 			err := format.Set(test.value)
 
 			switch {
@@ -60,7 +60,7 @@ func TestOutputFormatSet(t *testing.T) {
 				if !strings.Contains(err.Error(), "table") {
 					t.Errorf("rejection does not list the accepted set: %v", err)
 				}
-				if format != cli.OutputTable {
+				if format != options.OutputTable {
 					t.Errorf("a rejected value still changed the format to %q", format)
 				}
 			case err != nil:
@@ -76,12 +76,12 @@ func TestOutputFormatSet(t *testing.T) {
 func TestColorModeSet(t *testing.T) {
 	tests := []struct {
 		value   string
-		want    cli.ColorMode
+		want    options.ColorMode
 		wantErr bool
 	}{
-		{value: "auto", want: cli.ColorAuto},
-		{value: "always", want: cli.ColorAlways},
-		{value: "never", want: cli.ColorNever},
+		{value: "auto", want: options.ColorAuto},
+		{value: "always", want: options.ColorAlways},
+		{value: "never", want: options.ColorNever},
 		{value: "Always", wantErr: true},
 		{value: "yes", wantErr: true},
 		{value: "true", wantErr: true},
@@ -90,7 +90,7 @@ func TestColorModeSet(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run("--color "+test.value, func(t *testing.T) {
-			mode := cli.ColorAuto
+			mode := options.ColorAuto
 			err := mode.Set(test.value)
 
 			switch {
@@ -113,7 +113,7 @@ func TestColorModeSet(t *testing.T) {
 // flag name. "format" and "mode" read better than pflag's default, which would
 // be the Go type name.
 func TestFlagValuesNameTheirTypeInHelp(t *testing.T) {
-	format := cli.OutputTable
+	format := options.OutputTable
 	if got := format.Type(); got != "format" {
 		t.Errorf("OutputFormat.Type() = %q, want %q", got, "format")
 	}
@@ -121,7 +121,7 @@ func TestFlagValuesNameTheirTypeInHelp(t *testing.T) {
 		t.Errorf("OutputFormat.String() = %q, want %q", got, "table")
 	}
 
-	mode := cli.ColorAuto
+	mode := options.ColorAuto
 	if got := mode.Type(); got != "mode" {
 		t.Errorf("ColorMode.Type() = %q, want %q", got, "mode")
 	}

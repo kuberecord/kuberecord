@@ -31,7 +31,10 @@ import (
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -195,7 +198,7 @@ func runTimeline(
 	}
 	var out, errOut bytes.Buffer
 	streams := ioStreams(&out, &errOut)
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
 	err = cli.RunTimeline(context.Background(), backend, request, streams, opts)
 	assertDrained(t, engine)
@@ -488,8 +491,8 @@ func TestTimelineExitsThreeWhenNothingWasWatching(t *testing.T) {
 	if !errors.Is(err, query.ErrNoCoverage) {
 		t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to an exit code: %v", err)
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("ExitCodeFor = %d, want %d", code, cli.ExitNoCoverage)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit.CodeFor = %d, want %d", code, exit.NoCoverage)
 	}
 	assertGolden(t, "empty-without-coverage", stdout, stderr+"error: "+err.Error()+"\n")
 }
@@ -703,15 +706,15 @@ func TestTimelineFailsWhenCoverageItselfFails(t *testing.T) {
 
 	if _, _, err := runTimeline(t, engine, defaultRequest(), render.Options{}); err == nil {
 		t.Fatal("a backend that would not answer was reported as one with nothing to say")
-	} else if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("ExitCodeFor = %d, want %d", code, cli.ExitRuntimeError)
+	} else if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit.CodeFor = %d, want %d", code, exit.RuntimeError)
 	}
 }
 
 // TestTimelineLimitDefaultsToOneHundred pins the documented default.
 func TestTimelineLimitDefaultsToOneHundred(t *testing.T) {
 	streamPair, _, _ := streams()
-	root, _ := cli.NewRootCommand(cli.StandaloneName, streamPair)
+	root, _ := cli.NewRootCommand(options.StandaloneName, streamPair)
 
 	for _, command := range root.Commands() {
 		if command.Name() != "timeline" {

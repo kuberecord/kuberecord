@@ -28,7 +28,12 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/replay"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -79,7 +84,7 @@ type blameFlags struct {
 
 // newBlameCommand builds `blame`.
 func newBlameCommand(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	local := &blameFlags{}
 
@@ -103,7 +108,7 @@ questions this command answers.
 
 An empty result is never presented on its own. It is explained against the watch
 scopes that were open at the time: "nothing changed" and "nothing was watching"
-are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
+are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
 		Example: `  # Who last touched each field of this Deployment.
   kuberecord blame deploy/checkout -n payments
 
@@ -146,7 +151,7 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
 // runBlameCommand turns one invocation into a request, opens the backend, and
 // runs it.
 func runBlameCommand(
-	ctx context.Context, flags *GlobalFlags, local *blameFlags,
+	ctx context.Context, flags *options.GlobalFlags, local *blameFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
 	structured, err := blameFormat(flags.Output)
@@ -158,7 +163,7 @@ func runBlameCommand(
 		return err
 	}
 	if local.depth < 0 {
-		return UsageErrorf("--depth %d is negative; zero shows every field", local.depth)
+		return exit.UsageErrorf("--depth %d is negative; zero shows every field", local.depth)
 	}
 
 	now := time.Now()
@@ -189,7 +194,7 @@ func runBlameCommand(
 			// command never prints. Its own replay, over the same rows, is below.
 			NoPriorValues: true,
 			Structured:    structured,
-			Scan:          scanOptions(flags, streams),
+			Scan:          coldscan.OptionsFrom(flags, streams),
 		},
 		Fields: normalizeFieldPaths(local.fields),
 		Depth:  local.depth,
@@ -204,18 +209,18 @@ func runBlameCommand(
 // reason `timeline` refuses it: a user who asked for one shape and received
 // another has been answered in a form their eye or their script cannot read, and
 // finding that out at the `jq` is worse than finding it out here.
-func blameFormat(format OutputFormat) (render.StructuredFormat, error) {
+func blameFormat(format options.OutputFormat) (render.StructuredFormat, error) {
 	switch format {
-	case OutputTable, OutputWide:
+	case options.OutputTable, options.OutputWide:
 		return "", nil
-	case OutputDiff:
-		return "", UsageErrorf("blame does not render %s: its rows are fields rather than changes, "+
+	case options.OutputDiff:
+		return "", exit.UsageErrorf("blame does not render %s: its rows are fields rather than changes, "+
 			"and there is no old value beside a new one to lay out. The `%s` command spends the "+
-			"whole page on the changes themselves", OutputDiff, OutputDiff)
+			"whole page on the changes themselves", options.OutputDiff, options.OutputDiff)
 	}
 	structured, ok := structuredFormat(format)
 	if !ok {
-		return "", UsageErrorf("blame cannot render %s", format)
+		return "", exit.UsageErrorf("blame cannot render %s", format)
 	}
 	return structured, nil
 }
@@ -224,17 +229,17 @@ func blameFormat(format OutputFormat) (render.StructuredFormat, error) {
 //
 // --full has no meaning here: nothing in this table is a summary of something
 // longer, so there is nothing for it to expand.
-func blameRenderOptions(flags *GlobalFlags, streams genericiooptions.IOStreams) render.Options {
+func blameRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IOStreams) render.Options {
 	return render.Options{
-		Width: TerminalWidth(streams.Out),
-		Color: ShouldColorize(flags.Color, streams.Out),
-		Wide:  flags.Output == OutputWide,
+		Width: options.TerminalWidth(streams.Out),
+		Color: options.ShouldColorize(flags.Color, streams.Out),
+		Wide:  flags.Output == options.OutputWide,
 	}
 }
 
 // BlameRequest is one `blame` invocation, resolved.
 //
-// It is exported, and RunBlame takes an already-opened Backend, for the reason
+// It is exported, and RunBlame takes an already-opened resolve.Backend, for the reason
 // TimelineRequest is: the whole of the command's behaviour is then reachable from
 // a test holding a fake QueryEngine rather than only from one that can reach a
 // kubeconfig and a live sink.
@@ -257,7 +262,7 @@ type BlameRequest struct {
 // RunBlame answers one blame request against an opened backend and renders the
 // result.
 func RunBlame(
-	ctx context.Context, backend *Backend, request BlameRequest,
+	ctx context.Context, backend *resolve.Backend, request BlameRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
@@ -272,10 +277,10 @@ func RunBlame(
 	slices.Reverse(ascending)
 
 	seed, base, seedNotice := seedBlameState(ctx, backend.Engine, request, gathered, ascending)
-	attributed := attributeRun(seed, ascending)
-	rows := attributed.blameRows(request.Fields, request.Depth)
+	attributed := replay.AttributeRun(seed, ascending)
+	rows := attributed.BlameRows(request.Fields, request.Depth)
 
-	notices := append(slices.Clone(gathered.Notices), attributed.notices...)
+	notices := append(slices.Clone(gathered.Notices), attributed.Notices...)
 	if gathered.Empty == nil {
 		// A scope nobody ever watched explains the absent state as well as the
 		// absent changes, and it is about to be returned as the finding it is.
@@ -367,13 +372,13 @@ func fallbackSeed(ascending []render.TimelineRow, err error) ([]byte, string, re
 			render.Notice{
 				Text: fmt.Sprintf("no state survives from before this window (%s), so the fields the "+
 					"changes below did not touch are shown as %s rather than attributed",
-					describeStateFailure(err), render.BeforeWindow),
+					replay.DescribeStateFailure(err), render.BeforeWindow),
 			}
 	}
 	return nil, "not established", render.Notice{
 		Text: fmt.Sprintf("the object's state could not be established (%s), so only the fields the "+
 			"changes in this window wrote are listed; the rest of the object is missing from the "+
-			"table rather than shown as %s", describeStateFailure(err), render.BeforeWindow),
+			"table rather than shown as %s", replay.DescribeStateFailure(err), render.BeforeWindow),
 		Warning: true,
 	}
 }
@@ -414,14 +419,14 @@ func blameFilterNotice(request BlameRequest, gathered gatherResult, shown int) r
 	return render.Notice{
 		Text: fmt.Sprintf("%s has no field at or beneath %s in %s; the object itself is not empty",
 			describeObject(request.Timeline.Ref), strings.Join(request.Fields, ", "),
-			DescribeWindow(gathered.From, gathered.To)),
+			options.DescribeWindow(gathered.From, gathered.To)),
 		Warning: true,
 	}
 }
 
 // writeBlameAnswer renders the gathered answer in whichever shape was asked for.
 func writeBlameAnswer(
-	backend *Backend, request BlameRequest, gathered gatherResult, base string,
+	backend *resolve.Backend, request BlameRequest, gathered gatherResult, base string,
 	rows []render.BlameRow, notices []render.Notice,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
@@ -431,14 +436,14 @@ func writeBlameAnswer(
 			Object:   describeObject(request.Timeline.Ref),
 			Cluster:  request.Timeline.Ref.ClusterID,
 			UID:      gathered.UID,
-			Window:   DescribeWindow(gathered.From, gathered.To),
+			Window:   options.DescribeWindow(gathered.From, gathered.To),
 			Base:     base,
 			Coverage: gathered.Coverage.Summary(),
 			Rows:     rows,
 			Notices:  notices,
 		}
 		if err := render.WriteBlame(streams.Out, streams.ErrOut, document, opts); err != nil {
-			return RuntimeErrorf("%w", err)
+			return exit.RuntimeErrorf("%w", err)
 		}
 		return nil
 	}
@@ -447,13 +452,13 @@ func writeBlameAnswer(
 		streams.Out, request.Timeline.Structured,
 		envelopeHead(backend, render.KindBlame, gathered.Coverage))
 	if err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	if err := writeItems(stream, blameItems(rows)); err != nil {
 		return err
 	}
 	if err := render.WriteNotices(streams.ErrOut, notices, opts); err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	return nil
 }

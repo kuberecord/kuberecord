@@ -24,7 +24,9 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -44,7 +46,7 @@ func runDiff(
 		opts.Width = goldenWidth
 	}
 	var out, errOut bytes.Buffer
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
 	err = cli.RunDiff(context.Background(), backend, request, ioStreams(&out, &errOut), opts)
 	assertDrained(t, engine)
@@ -212,8 +214,8 @@ func TestDiffExitCodeReportsChangesFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("--exit-code returned no error, so the process would exit 0 with changes on screen")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d", code, exit.RuntimeError)
 	}
 	if stdout == "" {
 		t.Error("--exit-code suppressed the document it is reporting on")
@@ -223,7 +225,7 @@ func TestDiffExitCodeReportsChangesFound(t *testing.T) {
 	}
 
 	// The code is a finding rather than a failure, so nothing may print "error:".
-	var coded *cli.Error
+	var coded *exit.Error
 	if !errors.As(err, &coded) || !coded.Quiet {
 		t.Errorf("the changes-found result is not quiet, so `error: …` would be printed over a "+
 			"successful query: %#v", err)
@@ -263,8 +265,8 @@ func TestDiffNoCoverageOutranksExitCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("a scope nobody watched was reported as success")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("exit code %d, want %d", code, cli.ExitNoCoverage)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
 	}
 	if !errors.Is(err, query.ErrNoCoverage) {
 		t.Errorf("the finding does not carry the read plane's own sentinel: %v", err)

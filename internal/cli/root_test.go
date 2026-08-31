@@ -26,6 +26,8 @@ import (
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 )
 
 // streams returns an IOStreams whose three halves can be inspected separately.
@@ -50,16 +52,16 @@ func TestInvocationName(t *testing.T) {
 		argv []string
 		want string
 	}{
-		{"no argv at all", nil, cli.StandaloneName},
-		{"empty argv", []string{}, cli.StandaloneName},
-		{"standalone, bare", []string{"kuberecord"}, cli.StandaloneName},
-		{"standalone, absolute path", []string{"/usr/local/bin/kuberecord"}, cli.StandaloneName},
-		{"plugin, bare", []string{"kubectl-kuberecord"}, cli.PluginInvocation},
-		{"plugin, as kubectl execs it", []string{"/home/x/.krew/bin/kubectl-kuberecord"}, cli.PluginInvocation},
-		{"plugin on windows", []string{`C:\bin\kubectl-kuberecord.exe`}, cli.PluginInvocation},
-		{"standalone on windows", []string{`C:\bin\kuberecord.exe`}, cli.StandaloneName},
-		{"renamed by the user", []string{"/usr/local/bin/kr"}, cli.StandaloneName},
-		{"a plugin for something else", []string{"kubectl-other"}, cli.StandaloneName},
+		{"no argv at all", nil, options.StandaloneName},
+		{"empty argv", []string{}, options.StandaloneName},
+		{"standalone, bare", []string{"kuberecord"}, options.StandaloneName},
+		{"standalone, absolute path", []string{"/usr/local/bin/kuberecord"}, options.StandaloneName},
+		{"plugin, bare", []string{"kubectl-kuberecord"}, options.PluginInvocation},
+		{"plugin, as kubectl execs it", []string{"/home/x/.krew/bin/kubectl-kuberecord"}, options.PluginInvocation},
+		{"plugin on windows", []string{`C:\bin\kubectl-kuberecord.exe`}, options.PluginInvocation},
+		{"standalone on windows", []string{`C:\bin\kuberecord.exe`}, options.StandaloneName},
+		{"renamed by the user", []string{"/usr/local/bin/kr"}, options.StandaloneName},
+		{"a plugin for something else", []string{"kubectl-other"}, options.StandaloneName},
 	}
 
 	for _, test := range tests {
@@ -130,7 +132,7 @@ func TestUsageStringsFollowTheInvocationName(t *testing.T) {
 // computed paths, since that is what a user actually reads.
 func TestHelpNamesTheInvocation(t *testing.T) {
 	io, out, _ := streams()
-	root, _ := cli.NewRootCommand(cli.PluginInvocation, io)
+	root, _ := cli.NewRootCommand(options.PluginInvocation, io)
 	root.SetArgs([]string{"--help"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute(--help): %v", err)
@@ -152,17 +154,17 @@ func TestHelpNamesTheInvocation(t *testing.T) {
 // not write the other.
 func TestClusterIDIsDistinctFromKubeconfigCluster(t *testing.T) {
 	io, _, _ := streams()
-	root, flags := cli.NewRootCommand(cli.StandaloneName, io)
+	root, flags := cli.NewRootCommand(options.StandaloneName, io)
 	set := root.PersistentFlags()
 
-	kubeconfigCluster := set.Lookup(cli.FlagKubeconfigCluster)
+	kubeconfigCluster := set.Lookup(options.FlagKubeconfigCluster)
 	if kubeconfigCluster == nil {
 		t.Fatalf("--%s is not registered; cli-runtime's kubeconfig surface is missing",
-			cli.FlagKubeconfigCluster)
+			options.FlagKubeconfigCluster)
 	}
-	clusterID := set.Lookup(cli.FlagClusterID)
+	clusterID := set.Lookup(options.FlagClusterID)
 	if clusterID == nil {
-		t.Fatalf("--%s is not registered", cli.FlagClusterID)
+		t.Fatalf("--%s is not registered", options.FlagClusterID)
 	}
 
 	if kubeconfigCluster == clusterID {
@@ -181,11 +183,11 @@ func TestClusterIDIsDistinctFromKubeconfigCluster(t *testing.T) {
 
 	// Distinct storage: writing one must leave the other alone. This is the
 	// check that would fail if both flags were ever bound to the same variable.
-	if err := set.Set(cli.FlagKubeconfigCluster, "kubeconfig-entry"); err != nil {
-		t.Fatalf("set --%s: %v", cli.FlagKubeconfigCluster, err)
+	if err := set.Set(options.FlagKubeconfigCluster, "kubeconfig-entry"); err != nil {
+		t.Fatalf("set --%s: %v", options.FlagKubeconfigCluster, err)
 	}
-	if err := set.Set(cli.FlagClusterID, "recorded-cluster"); err != nil {
-		t.Fatalf("set --%s: %v", cli.FlagClusterID, err)
+	if err := set.Set(options.FlagClusterID, "recorded-cluster"); err != nil {
+		t.Fatalf("set --%s: %v", options.FlagClusterID, err)
 	}
 	if flags.ClusterID != "recorded-cluster" {
 		t.Errorf("ClusterID = %q, want %q", flags.ClusterID, "recorded-cluster")
@@ -203,7 +205,7 @@ func TestClusterIDIsDistinctFromKubeconfigCluster(t *testing.T) {
 // left to whatever the registration code happens to spell.
 func TestGlobalFlagSurface(t *testing.T) {
 	io, _, _ := streams()
-	root, _ := cli.NewRootCommand(cli.StandaloneName, io)
+	root, _ := cli.NewRootCommand(options.StandaloneName, io)
 	set := root.PersistentFlags()
 
 	tests := []struct {
@@ -219,14 +221,14 @@ func TestGlobalFlagSurface(t *testing.T) {
 		{"user", ""},
 		{"as", ""},
 		// kuberecord's own.
-		{cli.FlagClusterID, ""},
-		{cli.FlagOutput, "o"},
-		{cli.FlagColor, ""},
-		{cli.FlagSink, ""},
-		{cli.FlagSource, ""},
-		{cli.FlagProfile, ""},
-		{cli.FlagOperatorNamespace, ""},
-		{cli.FlagVerbosity, "v"},
+		{options.FlagClusterID, ""},
+		{options.FlagOutput, "o"},
+		{options.FlagColor, ""},
+		{options.FlagSink, ""},
+		{options.FlagSource, ""},
+		{options.FlagProfile, ""},
+		{options.FlagOperatorNamespace, ""},
+		{options.FlagVerbosity, "v"},
 	}
 
 	for _, test := range tests {
@@ -251,13 +253,13 @@ func TestExitCodesThroughRun(t *testing.T) {
 		argv []string
 		want int
 	}{
-		{"bare invocation prints help", []string{"kuberecord"}, cli.ExitSuccess},
-		{"explicit help", []string{"kuberecord", "--help"}, cli.ExitSuccess},
-		{"unknown flag", []string{"kuberecord", "--no-such-flag"}, cli.ExitUsageError},
-		{"unknown command", []string{"kuberecord", "no-such-command"}, cli.ExitUsageError},
-		{"invalid output format", []string{"kuberecord", "-o", "toml"}, cli.ExitUsageError},
-		{"invalid colour mode", []string{"kuberecord", "--color", "sometimes"}, cli.ExitUsageError},
-		{"non-integer verbosity", []string{"kuberecord", "-v", "loud"}, cli.ExitUsageError},
+		{"bare invocation prints help", []string{"kuberecord"}, exit.Success},
+		{"explicit help", []string{"kuberecord", "--help"}, exit.Success},
+		{"unknown flag", []string{"kuberecord", "--no-such-flag"}, exit.UsageError},
+		{"unknown command", []string{"kuberecord", "no-such-command"}, exit.UsageError},
+		{"invalid output format", []string{"kuberecord", "-o", "toml"}, exit.UsageError},
+		{"invalid colour mode", []string{"kuberecord", "--color", "sometimes"}, exit.UsageError},
+		{"non-integer verbosity", []string{"kuberecord", "-v", "loud"}, exit.UsageError},
 	}
 
 	for _, test := range tests {
@@ -345,8 +347,8 @@ func TestDataAndDiagnosticsAreSeparated(t *testing.T) {
 // what the flags are is a worse message than the one cobra would have printed.
 func TestUsageErrorsCarryTheUsageBlock(t *testing.T) {
 	io, out, errOut := streams()
-	if got := cli.Run([]string{"kuberecord", "--no-such-flag"}, io); got != cli.ExitUsageError {
-		t.Fatalf("Run = %d, want %d", got, cli.ExitUsageError)
+	if got := cli.Run([]string{"kuberecord", "--no-such-flag"}, io); got != exit.UsageError {
+		t.Fatalf("Run = %d, want %d", got, exit.UsageError)
 	}
 	if !strings.Contains(errOut.String(), "Usage:") {
 		t.Errorf("stderr carries no usage block:\n%s", errOut.String())
@@ -360,8 +362,8 @@ func TestUsageErrorsCarryTheUsageBlock(t *testing.T) {
 // the person writing a wrapper script will look for it.
 func TestHelpDocumentsTheExitCodes(t *testing.T) {
 	io, out, _ := streams()
-	if got := cli.Run([]string{"kuberecord", "--help"}, io); got != cli.ExitSuccess {
-		t.Fatalf("Run(--help) = %d, want %d", got, cli.ExitSuccess)
+	if got := cli.Run([]string{"kuberecord", "--help"}, io); got != exit.Success {
+		t.Fatalf("Run(--help) = %d, want %d", got, exit.Success)
 	}
 
 	help := out.String()
@@ -401,9 +403,9 @@ func TestRunIgnoresTheProcessArguments(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			io, out, errOut := streams()
-			if got := cli.Run(test.argv, io); got != cli.ExitSuccess {
+			if got := cli.Run(test.argv, io); got != exit.Success {
 				t.Errorf("Run(%q) = %d, want %d; the process arguments leaked in.\nstderr:\n%s",
-					test.argv, got, cli.ExitSuccess, errOut.String())
+					test.argv, got, exit.Success, errOut.String())
 			}
 			if out.Len() == 0 {
 				t.Error("a bare invocation printed no help to stdout")

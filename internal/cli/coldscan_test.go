@@ -27,7 +27,11 @@ import (
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -42,7 +46,7 @@ import (
 // that declares the two optional halves of the read plane, because that is exactly
 // what a real archive engine is from the command's point of view. The terminal is
 // not faked: whether a prompt can be asked for is a field the command fills in from
-// its streams (cli.ScanOptions), which is what makes this testable without a
+// its streams (coldscan.Options), which is what makes this testable without a
 // pseudo-terminal — the same split render.Options already keeps for the width.
 
 // The estimate the acceptance criteria spell out: `~1,240 objects, ~3.1 GiB`.
@@ -116,7 +120,7 @@ func (e *scanningEngine) Timeline(
 
 // scanRequest is a `timeline` over a window of the given width, ending at the
 // fixture's present.
-func scanRequest(window time.Duration, opts cli.ScanOptions) cli.TimelineRequest {
+func scanRequest(window time.Duration, opts coldscan.Options) cli.TimelineRequest {
 	request := defaultRequest()
 	request.To = request.Now
 	request.From = request.Now.Add(-window)
@@ -135,7 +139,7 @@ func runScan(
 	streams := genericiooptions.IOStreams{
 		In: strings.NewReader(stdin), Out: &out, ErrOut: &errOut,
 	}
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
 	err = cli.RunTimeline(context.Background(), backend, request,
 		streams, render.Options{Width: goldenWidth})
@@ -149,7 +153,7 @@ func runScan(
 func TestColdScanStatesWhatTheQuestionWillCost(t *testing.T) {
 	engine := newScanningEngine(archiveCapabilities())
 
-	stdout, stderr, err := runScan(t, engine, scanRequest(6*time.Hour, cli.ScanOptions{}), "")
+	stdout, stderr, err := runScan(t, engine, scanRequest(6*time.Hour, coldscan.Options{}), "")
 	if err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
@@ -172,7 +176,7 @@ func TestColdScanStatesWhatTheQuestionWillCost(t *testing.T) {
 	// permission for every question would train people to stop reading the question.
 	if strings.Contains(stderr, "[y/N]") {
 		t.Errorf("a %s window asked for confirmation; only one wider than %s should:\n%s",
-			cli.DescribeSpan(6*time.Hour), cli.DescribeSpan(cli.ConfirmWindow), stderr)
+			coldscan.DescribeSpan(6*time.Hour), coldscan.DescribeSpan(options.ConfirmWindow), stderr)
 	}
 	if len(engine.queries) != 1 {
 		t.Errorf("%d timeline queries were issued, want 1", len(engine.queries))
@@ -183,7 +187,7 @@ func TestColdScanStatesWhatTheQuestionWillCost(t *testing.T) {
 // the estimate with a question on the end of it.
 func TestColdScanAsksBeforeAWideWindow(t *testing.T) {
 	engine := newScanningEngine(archiveCapabilities())
-	request := scanRequest(30*24*time.Hour, cli.ScanOptions{Interactive: true})
+	request := scanRequest(30*24*time.Hour, coldscan.Options{Interactive: true})
 
 	_, stderr, err := runScan(t, engine, request, "y\n")
 	if err != nil {
@@ -210,15 +214,15 @@ func TestColdScanStopsWhenTheConfirmationIsDeclined(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			engine := newScanningEngine(archiveCapabilities())
-			request := scanRequest(30*24*time.Hour, cli.ScanOptions{Interactive: true})
+			request := scanRequest(30*24*time.Hour, coldscan.Options{Interactive: true})
 
 			stdout, stderr, err := runScan(t, engine, request, answer)
 			if err == nil {
 				t.Fatal("a declined confirmation succeeded; a question that was never asked of the " +
 					"backend must not exit as though it had been answered")
 			}
-			if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-				t.Errorf("a declined confirmation exits %d, want %d", code, cli.ExitRuntimeError)
+			if code := exit.CodeFor(err); code != exit.RuntimeError {
+				t.Errorf("a declined confirmation exits %d, want %d", code, exit.RuntimeError)
 			}
 			if len(engine.queries) != 0 {
 				t.Errorf("%d queries were issued after a refusal", len(engine.queries))
@@ -244,15 +248,15 @@ func TestColdScanStopsWhenTheConfirmationIsDeclined(t *testing.T) {
 // said out loud.
 func TestColdScanAssumesYesWhenItCannotAsk(t *testing.T) {
 	for name, testCase := range map[string]struct {
-		opts cli.ScanOptions
+		opts coldscan.Options
 		want string
 	}{
 		"not a terminal": {
-			opts: cli.ScanOptions{},
+			opts: coldscan.Options{},
 			want: "Not a terminal, so the confirmation was assumed.",
 		},
 		"--yes": {
-			opts: cli.ScanOptions{AssumeYes: true, Interactive: true},
+			opts: coldscan.Options{AssumeYes: true, Interactive: true},
 			want: "Confirmed by --yes.",
 		},
 	} {
@@ -291,7 +295,7 @@ func TestColdScanAssumesYesWhenItCannotAsk(t *testing.T) {
 // cost that does not exist.
 func TestColdScanDoesNotGuardAnIndexedBackend(t *testing.T) {
 	engine := newScanningEngine(clickHouseCapabilities())
-	request := scanRequest(90*24*time.Hour, cli.ScanOptions{Interactive: true, ShowProgress: true})
+	request := scanRequest(90*24*time.Hour, coldscan.Options{Interactive: true, ShowProgress: true})
 
 	_, stderr, err := runScan(t, engine, request, "n\n")
 	if err != nil {
@@ -316,7 +320,7 @@ func TestColdScanReportsAnEstimateItCouldNotMake(t *testing.T) {
 	engine := newScanningEngine(archiveCapabilities())
 	engine.estimateErr = errors.New("the bucket refused a listing")
 
-	_, stderr, err := runScan(t, engine, scanRequest(6*time.Hour, cli.ScanOptions{}), "")
+	_, stderr, err := runScan(t, engine, scanRequest(6*time.Hour, coldscan.Options{}), "")
 	if err != nil {
 		t.Fatalf("RunTimeline: %v; a scan whose warning could not be assembled is still answerable", err)
 	}
@@ -352,7 +356,7 @@ func TestColdScanReportsAnEstimateItCouldNotMake(t *testing.T) {
 func TestColdScanAsksWhenItCouldNotEstimateANarrowWindow(t *testing.T) {
 	engine := newScanningEngine(archiveCapabilities())
 	engine.estimateErr = errors.New("the bucket refused a listing")
-	request := scanRequest(6*time.Hour, cli.ScanOptions{Interactive: true})
+	request := scanRequest(6*time.Hour, coldscan.Options{Interactive: true})
 
 	_, stderr, err := runScan(t, engine, request, "y\n")
 	if err != nil {
@@ -386,12 +390,12 @@ func TestColdScanAsksWhenItCouldNotEstimateANarrowWindow(t *testing.T) {
 func TestColdScanDeclinesTheSameWayForBothReasons(t *testing.T) {
 	wide := newScanningEngine(archiveCapabilities())
 	_, _, wideErr := runScan(
-		t, wide, scanRequest(30*24*time.Hour, cli.ScanOptions{Interactive: true}), "n\n")
+		t, wide, scanRequest(30*24*time.Hour, coldscan.Options{Interactive: true}), "n\n")
 
 	unmeasured := newScanningEngine(archiveCapabilities())
 	unmeasured.estimateErr = errors.New("the bucket refused a listing")
 	_, _, unmeasuredErr := runScan(
-		t, unmeasured, scanRequest(6*time.Hour, cli.ScanOptions{Interactive: true}), "n\n")
+		t, unmeasured, scanRequest(6*time.Hour, coldscan.Options{Interactive: true}), "n\n")
 
 	if wideErr == nil || unmeasuredErr == nil {
 		t.Fatalf("a declined confirmation succeeded: wide=%v, unmeasured=%v", wideErr, unmeasuredErr)
@@ -400,7 +404,7 @@ func TestColdScanDeclinesTheSameWayForBothReasons(t *testing.T) {
 		t.Errorf("the two refusals read differently:\nwide       %q\nunmeasured %q",
 			wideErr, unmeasuredErr)
 	}
-	if got, want := cli.ExitCodeFor(unmeasuredErr), cli.ExitCodeFor(wideErr); got != want {
+	if got, want := exit.CodeFor(unmeasuredErr), exit.CodeFor(wideErr); got != want {
 		t.Errorf("refusing an unmeasured scan exits %d, want %d — the same as any other refusal",
 			got, want)
 	}
@@ -423,16 +427,16 @@ func TestColdScanConfirmationMatrix(t *testing.T) {
 		wide   = 30 * 24 * time.Hour
 	)
 	var (
-		terminal    = cli.ScanOptions{Interactive: true}
-		terminalYes = cli.ScanOptions{Interactive: true, AssumeYes: true}
-		pipe        = cli.ScanOptions{}
-		pipeYes     = cli.ScanOptions{AssumeYes: true}
+		terminal    = coldscan.Options{Interactive: true}
+		terminalYes = coldscan.Options{Interactive: true, AssumeYes: true}
+		pipe        = coldscan.Options{}
+		pipeYes     = coldscan.Options{AssumeYes: true}
 	)
 
 	for name, cell := range map[string]struct {
 		estimatable bool
 		window      time.Duration
-		opts        cli.ScanOptions
+		opts        coldscan.Options
 		wantPrompt  bool
 	}{
 		// Estimatable: the width governs, exactly as it did before this task.
@@ -482,8 +486,8 @@ func TestColdScanConfirmationMatrix(t *testing.T) {
 				t.Fatal("a declined confirmation succeeded; a question that was never put to the " +
 					"backend must not exit as though it had been answered")
 			}
-			if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-				t.Errorf("a declined confirmation exits %d, want %d", code, cli.ExitRuntimeError)
+			if code := exit.CodeFor(err); code != exit.RuntimeError {
+				t.Errorf("a declined confirmation exits %d, want %d", code, exit.RuntimeError)
 			}
 			if len(engine.queries) != 0 {
 				t.Errorf("%d queries were issued after a refusal", len(engine.queries))
@@ -503,15 +507,15 @@ func TestColdScanBreaksTheCircuitAtMaxObjects(t *testing.T) {
 	engine.emits = []query.ScanProgress{
 		{Objects: 1, Bytes: 100}, {Objects: 2, Bytes: 200}, {Objects: 3, Bytes: 300},
 	}
-	request := scanRequest(6*time.Hour, cli.ScanOptions{MaxObjects: 2})
+	request := scanRequest(6*time.Hour, coldscan.Options{MaxObjects: 2})
 
 	stdout, _, err := runScan(t, engine, request, "")
 	if err == nil {
 		t.Fatal("a scan past its circuit breaker succeeded; a result that stopped early must not " +
 			"present itself as a complete one")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("a tripped breaker exits %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("a tripped breaker exits %d, want %d", code, exit.RuntimeError)
 	}
 	// The flag has to be named. "context canceled" is what the query actually
 	// failed with, and it tells the reader nothing they can act on.
@@ -538,7 +542,7 @@ func TestColdScanPaintsProgressToStderr(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			engine := newScanningEngine(archiveCapabilities())
 			engine.emits = []query.ScanProgress{{Objects: 7, Bytes: 2 << 20}}
-			request := scanRequest(6*time.Hour, cli.ScanOptions{ShowProgress: testCase.show})
+			request := scanRequest(6*time.Hour, coldscan.Options{ShowProgress: testCase.show})
 
 			stdout, stderr, err := runScan(t, engine, request, "")
 			if err != nil {
@@ -569,7 +573,7 @@ func TestColdScanPaintsProgressToStderr(t *testing.T) {
 func TestColdScanDefaultsToADayAgainstAnUnindexedBackend(t *testing.T) {
 	engine := newScanningEngine(archiveCapabilities())
 	request := defaultRequest()
-	request.Scan = cli.ScanOptions{}
+	request.Scan = coldscan.Options{}
 
 	if _, _, err := runScan(t, engine, request, ""); err != nil {
 		t.Fatalf("RunTimeline: %v", err)
@@ -579,18 +583,18 @@ func TestColdScanDefaultsToADayAgainstAnUnindexedBackend(t *testing.T) {
 	}
 
 	asked := engine.queries[0]
-	if want := request.Now.Add(-cli.DefaultWindow); !asked.From.Equal(want) {
+	if want := request.Now.Add(-options.DefaultWindow); !asked.From.Equal(want) {
 		t.Errorf("the default window starts at %s, want %s (%s)",
-			asked.From, want, cli.DescribeSpan(cli.DefaultWindow))
+			asked.From, want, coldscan.DescribeSpan(options.DefaultWindow))
 	}
 	if !asked.To.Equal(request.Now) {
 		t.Errorf("the default window ends at %s, want now (%s)", asked.To, request.Now)
 	}
 	// The default is narrow enough that it can never be the thing that triggers a
 	// confirmation; if it were, every bare invocation would ask.
-	if cli.DefaultWindow > cli.ConfirmWindow {
+	if options.DefaultWindow > options.ConfirmWindow {
 		t.Errorf("the default window (%s) is wider than the one that needs confirming (%s)",
-			cli.DescribeSpan(cli.DefaultWindow), cli.DescribeSpan(cli.ConfirmWindow))
+			coldscan.DescribeSpan(options.DefaultWindow), coldscan.DescribeSpan(options.ConfirmWindow))
 	}
 }
 
@@ -609,15 +613,15 @@ func TestInterruptedScanFailsRatherThanLookingShort(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	streams := genericiooptions.IOStreams{In: strings.NewReader(""), Out: &out, ErrOut: &errOut}
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 
-	err := cli.RunTimeline(ctx, backend, scanRequest(6*time.Hour, cli.ScanOptions{}),
+	err := cli.RunTimeline(ctx, backend, scanRequest(6*time.Hour, coldscan.Options{}),
 		streams, render.Options{Width: goldenWidth})
 	if err == nil {
 		t.Fatal("an interrupted scan succeeded")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("an interrupted scan exits %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("an interrupted scan exits %d, want %d", code, exit.RuntimeError)
 	}
 	if out.String() != "" {
 		t.Errorf("an interrupted scan wrote a document to stdout:\n%s", out.String())
@@ -648,8 +652,8 @@ func TestRunContextReportsAnInterruption(t *testing.T) {
 	// interruption handling rather than a resolution failure that happens to occur
 	// alongside it.
 	code := cli.RunContext(ctx, []string{"kuberecord", "config", "view"}, streams)
-	if code != cli.ExitRuntimeError {
-		t.Errorf("an interrupted invocation exits %d, want %d", code, cli.ExitRuntimeError)
+	if code != exit.RuntimeError {
+		t.Errorf("an interrupted invocation exits %d, want %d", code, exit.RuntimeError)
 	}
 	if !strings.Contains(errOut.String(), "interrupted") {
 		t.Errorf("stderr does not say the run was interrupted:\n%s", errOut.String())

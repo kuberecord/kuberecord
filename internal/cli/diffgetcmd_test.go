@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 )
 
 // The surface of `diff` and `get`: what they refuse before they open anything,
@@ -96,8 +97,8 @@ func TestDiffAndGetRefuseMalformedInvocations(t *testing.T) {
 			io, out, errOut := streams()
 			code := cli.Run(append([]string{"kuberecord"}, test.argv...), io)
 
-			if code != cli.ExitUsageError {
-				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, cli.ExitUsageError, errOut.String())
+			if code != exit.UsageError {
+				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, exit.UsageError, errOut.String())
 			}
 			if !strings.Contains(errOut.String(), test.want) {
 				t.Errorf("the message does not explain the mistake.\nwant it to contain %q\ngot:\n%s",
@@ -116,7 +117,7 @@ func TestDiffAndGetRefuseMalformedInvocations(t *testing.T) {
 // invoke, because every assertion above is about a rejection.
 func TestDiffAndGetAreInTheCommandTree(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != exit.Success {
 		t.Fatalf("`--help` exited %d", code)
 	}
 	for _, command := range []string{"diff", "get"} {
@@ -130,7 +131,7 @@ func TestDiffAndGetAreInTheCommandTree(t *testing.T) {
 // being renamed or dropped without the change being noticed.
 func TestDiffHelpNamesEveryFlagTheTaskRequires(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "diff", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "diff", "--help"}, io); code != exit.Success {
 		t.Fatalf("`diff --help` exited %d", code)
 	}
 
@@ -146,7 +147,7 @@ func TestDiffHelpNamesEveryFlagTheTaskRequires(t *testing.T) {
 // TestGetHelpNamesEveryFlagTheTaskRequires does the same for `get`.
 func TestGetHelpNamesEveryFlagTheTaskRequires(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "get", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "get", "--help"}, io); code != exit.Success {
 		t.Fatalf("`get --help` exited %d", code)
 	}
 
@@ -174,7 +175,7 @@ func TestGetDefaultsToYAML(t *testing.T) {
 		"--source", t.TempDir(), "--cluster-id", "c", "--color=never",
 	}, io)
 
-	if code == cli.ExitUsageError {
+	if code == exit.UsageError {
 		t.Fatalf("a bare `get` was refused for its output format:\n%s", errOut.String())
 	}
 	if strings.Contains(errOut.String(), "get renders yaml or json") {

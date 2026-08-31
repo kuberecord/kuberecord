@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package resolve
 
 import (
 	"errors"
@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"sigs.k8s.io/yaml"
 )
 
@@ -79,8 +80,8 @@ const (
 	BackendLocal BackendKind = "local"
 )
 
-// backendKinds is the accepted set, in the order it is shown to a user.
-var backendKinds = []BackendKind{BackendClickHouse, BackendS3, BackendLocal}
+// BackendKinds is the accepted set, in the order it is shown to a user.
+var BackendKinds = []BackendKind{BackendClickHouse, BackendS3, BackendLocal}
 
 // Config is the CLI's configuration file.
 //
@@ -107,7 +108,7 @@ type Config struct {
 	// OperatorNamespace is where discovery looks for the operator's Deployment and
 	// for the Secrets a sink references. Empty means "work it out" — see
 	// Resolver.operatorNamespace, which searches and then falls back to
-	// DefaultOperatorNamespace.
+	// options.DefaultOperatorNamespace.
 	OperatorNamespace string `json:"operatorNamespace,omitempty"`
 
 	// Profiles are the configured backends, by name.
@@ -300,7 +301,7 @@ func (c *Config) Validate() error {
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(c.Profiles)) {
-		if err := c.Profiles[name].validate(); err != nil {
+		if err := c.Profiles[name].Validate(); err != nil {
 			return fmt.Errorf("profile %q: %w", name, err)
 		}
 	}
@@ -308,7 +309,7 @@ func (c *Config) Validate() error {
 	if c.CurrentProfile != "" {
 		if _, ok := c.Profiles[c.CurrentProfile]; !ok {
 			return fmt.Errorf("currentProfile %q names no profile in this file (%s)",
-				c.CurrentProfile, describeProfileNames(c.Profiles))
+				c.CurrentProfile, DescribeProfileNames(c.Profiles))
 		}
 	}
 
@@ -321,13 +322,13 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validate reports the first thing wrong with one profile.
-func (p Profile) validate() error {
-	if !slices.Contains(backendKinds, p.Backend) {
+// Validate reports the first thing wrong with one profile.
+func (p Profile) Validate() error {
+	if !slices.Contains(BackendKinds, p.Backend) {
 		if p.Backend == "" {
-			return fmt.Errorf("no backend given: one of %s", joinValues(backendKinds))
+			return fmt.Errorf("no backend given: one of %s", options.JoinValues(BackendKinds))
 		}
-		return fmt.Errorf("backend %q is not one of %s", p.Backend, joinValues(backendKinds))
+		return fmt.Errorf("backend %q is not one of %s", p.Backend, options.JoinValues(BackendKinds))
 	}
 
 	// Which stanzas are present must match which backend was named. A profile that
@@ -516,9 +517,9 @@ func writeAndClose(file *os.File, data []byte) error {
 	return file.Close()
 }
 
-// describeProfileNames renders the profiles a file holds, for a message about one
+// DescribeProfileNames renders the profiles a file holds, for a message about one
 // that is missing.
-func describeProfileNames(profiles map[string]Profile) string {
+func DescribeProfileNames(profiles map[string]Profile) string {
 	if len(profiles) == 0 {
 		return "the file defines no profiles"
 	}

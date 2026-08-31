@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 )
 
 // configHome points the configuration file at a temporary directory and returns
@@ -55,12 +55,12 @@ func writeConfigFile(t *testing.T, path, content string) {
 func TestDefaultConfigPathFollowsXDG(t *testing.T) {
 	t.Run("XDG_CONFIG_HOME set", func(t *testing.T) {
 		t.Setenv("XDG_CONFIG_HOME", "/somewhere/config")
-		path, err := cli.DefaultConfigPath()
+		path, err := resolve.DefaultConfigPath()
 		if err != nil {
-			t.Fatalf("DefaultConfigPath: %v", err)
+			t.Fatalf("resolve.DefaultConfigPath: %v", err)
 		}
 		if want := filepath.Join("/somewhere/config", "kuberecord", "config.yaml"); path != want {
-			t.Errorf("DefaultConfigPath() = %q, want %q", path, want)
+			t.Errorf("resolve.DefaultConfigPath() = %q, want %q", path, want)
 		}
 	})
 
@@ -70,12 +70,12 @@ func TestDefaultConfigPathFollowsXDG(t *testing.T) {
 		if err != nil {
 			t.Skipf("no home directory on this machine: %v", err)
 		}
-		path, err := cli.DefaultConfigPath()
+		path, err := resolve.DefaultConfigPath()
 		if err != nil {
-			t.Fatalf("DefaultConfigPath: %v", err)
+			t.Fatalf("resolve.DefaultConfigPath: %v", err)
 		}
 		if want := filepath.Join(home, ".config", "kuberecord", "config.yaml"); path != want {
-			t.Errorf("DefaultConfigPath() = %q, want %q", path, want)
+			t.Errorf("resolve.DefaultConfigPath() = %q, want %q", path, want)
 		}
 	})
 }
@@ -88,12 +88,12 @@ func TestDefaultConfigPathFollowsXDG(t *testing.T) {
 func TestAMissingConfigFileIsNotAFailure(t *testing.T) {
 	path := configHome(t)
 
-	cfg, err := cli.LoadConfig(path)
+	cfg, err := resolve.LoadConfig(path)
 	if err != nil {
-		t.Fatalf("LoadConfig of a missing file: %v", err)
+		t.Fatalf("resolve.LoadConfig of a missing file: %v", err)
 	}
 	if cfg == nil {
-		t.Fatal("LoadConfig returned no configuration and no error")
+		t.Fatal("resolve.LoadConfig returned no configuration and no error")
 	}
 	if len(cfg.Profiles) != 0 || cfg.CurrentProfile != "" {
 		t.Errorf("a missing file produced %+v, want an empty configuration", cfg)
@@ -109,12 +109,12 @@ func TestAMissingConfigFileIsNotAFailure(t *testing.T) {
 func TestSaveConfigWritesAPrivateFile(t *testing.T) {
 	path := configHome(t)
 
-	cfg := &cli.Config{
+	cfg := &resolve.Config{
 		CurrentProfile: "prod",
-		Profiles: map[string]cli.Profile{
+		Profiles: map[string]resolve.Profile{
 			"prod": {
-				Backend: cli.BackendClickHouse,
-				ClickHouse: &cli.ClickHouseProfile{
+				Backend: resolve.BackendClickHouse,
+				ClickHouse: &resolve.ClickHouseProfile{
 					Addr: "ch.example:9000", Database: "kuberecord",
 					Username: "kuberecord_ro", PasswordEnv: "KUBERECORD_CH_PASSWORD",
 				},
@@ -122,23 +122,23 @@ func TestSaveConfigWritesAPrivateFile(t *testing.T) {
 		},
 		Contexts: map[string]string{"prod-eu": theCluster},
 	}
-	if err := cli.SaveConfig(path, cfg); err != nil {
-		t.Fatalf("SaveConfig: %v", err)
+	if err := resolve.SaveConfig(path, cfg); err != nil {
+		t.Fatalf("resolve.SaveConfig: %v", err)
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat the written file: %v", err)
 	}
-	if mode := info.Mode().Perm(); mode != cli.ConfigFileMode {
-		t.Errorf("the configuration file is %v, want %v", mode, os.FileMode(cli.ConfigFileMode))
+	if mode := info.Mode().Perm(); mode != resolve.ConfigFileMode {
+		t.Errorf("the configuration file is %v, want %v", mode, os.FileMode(resolve.ConfigFileMode))
 	}
 	dirInfo, err := os.Stat(filepath.Dir(path))
 	if err != nil {
 		t.Fatalf("stat the configuration directory: %v", err)
 	}
-	if mode := dirInfo.Mode().Perm(); mode != cli.ConfigDirMode {
-		t.Errorf("the configuration directory is %v, want %v", mode, os.FileMode(cli.ConfigDirMode))
+	if mode := dirInfo.Mode().Perm(); mode != resolve.ConfigDirMode {
+		t.Errorf("the configuration directory is %v, want %v", mode, os.FileMode(resolve.ConfigDirMode))
 	}
 
 	// Nothing but the file is left behind: an interrupted write must leave the old
@@ -155,13 +155,13 @@ func TestSaveConfigWritesAPrivateFile(t *testing.T) {
 		t.Errorf("the configuration directory holds %v, want the file alone", names)
 	}
 
-	reloaded, err := cli.LoadConfig(path)
+	reloaded, err := resolve.LoadConfig(path)
 	if err != nil {
-		t.Fatalf("LoadConfig of what SaveConfig wrote: %v", err)
+		t.Fatalf("resolve.LoadConfig of what resolve.SaveConfig wrote: %v", err)
 	}
-	if reloaded.APIVersion != cli.ConfigAPIVersion || reloaded.Kind != cli.ConfigKind {
+	if reloaded.APIVersion != resolve.ConfigAPIVersion || reloaded.Kind != resolve.ConfigKind {
 		t.Errorf("the written file is %s/%s, want %s/%s",
-			reloaded.APIVersion, reloaded.Kind, cli.ConfigAPIVersion, cli.ConfigKind)
+			reloaded.APIVersion, reloaded.Kind, resolve.ConfigAPIVersion, resolve.ConfigKind)
 	}
 	if reloaded.Contexts["prod-eu"] != theCluster {
 		t.Errorf("the context mapping did not survive the round trip: %v", reloaded.Contexts)
@@ -267,7 +267,7 @@ profiles:
 		{
 			name:    "an apiVersion from another release",
 			content: "apiVersion: cli.kuberecord.io/v1beta9\n",
-			want:    []string{"v1beta9", cli.ConfigAPIVersion},
+			want:    []string{"v1beta9", resolve.ConfigAPIVersion},
 		},
 		{
 			name: "a prefix with a slash on it",
@@ -298,9 +298,9 @@ profiles:
 			path := configHome(t)
 			writeConfigFile(t, path, tc.content)
 
-			_, err := cli.LoadConfig(path)
+			_, err := resolve.LoadConfig(path)
 			if err == nil {
-				t.Fatal("LoadConfig accepted a configuration it should have refused")
+				t.Fatal("resolve.LoadConfig accepted a configuration it should have refused")
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(err.Error(), want) {
@@ -321,7 +321,7 @@ profiles:
 func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 	t.Run("from the environment", func(t *testing.T) {
 		t.Setenv("KUBERECORD_TEST_PASSWORD", "hunter2")
-		profile := &cli.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_PASSWORD"}
+		profile := &resolve.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_PASSWORD"}
 
 		password, err := profile.ResolvePassword()
 		if err != nil {
@@ -333,7 +333,7 @@ func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 	})
 
 	t.Run("an unset variable is a failure, not an empty password", func(t *testing.T) {
-		profile := &cli.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_UNSET_PASSWORD"}
+		profile := &resolve.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_UNSET_PASSWORD"}
 
 		_, err := profile.ResolvePassword()
 		if err == nil {
@@ -346,7 +346,7 @@ func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 
 	t.Run("a variable set to empty is an empty password", func(t *testing.T) {
 		t.Setenv("KUBERECORD_TEST_EMPTY_PASSWORD", "")
-		profile := &cli.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_EMPTY_PASSWORD"}
+		profile := &resolve.ClickHouseProfile{PasswordEnv: "KUBERECORD_TEST_EMPTY_PASSWORD"}
 
 		password, err := profile.ResolvePassword()
 		if err != nil {
@@ -362,7 +362,7 @@ func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 		if err := os.WriteFile(file, []byte("hunter2\n"), 0o600); err != nil {
 			t.Fatalf("writing the password file: %v", err)
 		}
-		profile := &cli.ClickHouseProfile{PasswordFile: file}
+		profile := &resolve.ClickHouseProfile{PasswordFile: file}
 
 		password, err := profile.ResolvePassword()
 		if err != nil {
@@ -374,7 +374,7 @@ func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 	})
 
 	t.Run("a missing file is a failure", func(t *testing.T) {
-		profile := &cli.ClickHouseProfile{PasswordFile: filepath.Join(t.TempDir(), "absent")}
+		profile := &resolve.ClickHouseProfile{PasswordFile: filepath.Join(t.TempDir(), "absent")}
 
 		if _, err := profile.ResolvePassword(); err == nil {
 			t.Fatal("a missing password file resolved to a password")
@@ -382,7 +382,7 @@ func TestResolvePasswordReadsTheReferenceAndNotAValue(t *testing.T) {
 	})
 
 	t.Run("no reference is no password", func(t *testing.T) {
-		password, err := (&cli.ClickHouseProfile{}).ResolvePassword()
+		password, err := (&resolve.ClickHouseProfile{}).ResolvePassword()
 		if err != nil {
 			t.Fatalf("ResolvePassword with nothing configured: %v", err)
 		}

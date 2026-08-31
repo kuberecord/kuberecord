@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -56,39 +57,39 @@ type ResourceArg struct {
 func ParseResourceArg(args []string) (ResourceArg, error) {
 	switch len(args) {
 	case 0:
-		return ResourceArg{}, UsageErrorf(
+		return ResourceArg{}, exit.UsageErrorf(
 			"no object given: expected <kind>/<name> or <kind> <name>, for example deploy/nginx")
 
 	case 1:
 		resource, name, found := strings.Cut(args[0], "/")
 		switch {
 		case !found:
-			return ResourceArg{}, UsageErrorf(
+			return ResourceArg{}, exit.UsageErrorf(
 				"no object name given for %q: expected %s/<name> or %s <name>",
 				args[0], args[0], args[0])
 		case resource == "" || name == "":
-			return ResourceArg{}, UsageErrorf(
+			return ResourceArg{}, exit.UsageErrorf(
 				"malformed object address %q: expected <kind>/<name>, for example deploy/nginx", args[0])
 		case strings.Contains(name, "/"):
-			return ResourceArg{}, UsageErrorf(
+			return ResourceArg{}, exit.UsageErrorf(
 				"malformed object address %q: expected exactly one %q", args[0], "/")
 		}
 		return ResourceArg{Resource: resource, Name: name}, nil
 
 	case 2:
 		if strings.Contains(args[0], "/") {
-			return ResourceArg{}, UsageErrorf(
+			return ResourceArg{}, exit.UsageErrorf(
 				"mixed object address forms: %q already names an object, so %q is unexpected",
 				args[0], args[1])
 		}
 		if args[0] == "" || args[1] == "" {
-			return ResourceArg{}, UsageErrorf(
+			return ResourceArg{}, exit.UsageErrorf(
 				"malformed object address: expected <kind> <name>, for example deploy nginx")
 		}
 		return ResourceArg{Resource: args[0], Name: args[1]}, nil
 
 	default:
-		return ResourceArg{}, UsageErrorf(
+		return ResourceArg{}, exit.UsageErrorf(
 			"expected one object, got %d arguments: these commands answer questions about a single object",
 			len(args))
 	}

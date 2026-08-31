@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package replay
 
 import (
 	"fmt"
@@ -27,7 +27,7 @@ import (
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
-// The attribution rules, driven directly.
+// The Attribution rules, driven directly.
 //
 // blame_test.go exercises the command end to end against one story. These are the
 // cases underneath it — the ones where two defensible implementations disagree
@@ -225,12 +225,12 @@ func TestAttributeRun(t *testing.T) {
 				seed = []byte(test.seed)
 			}
 
-			result := attributeRun(seed, test.rows)
-			got := describeBlame(result.blameRows(test.fields, test.depth))
+			result := AttributeRun(seed, test.rows)
+			got := describeBlame(result.BlameRows(test.fields, test.depth))
 			if !slices.Equal(got, test.want) {
 				t.Errorf("the attribution is wrong.\nwant %v\ngot  %v", test.want, got)
 			}
-			assertNotice(t, result.notices, test.notice)
+			assertNotice(t, result.Notices, test.notice)
 		})
 	}
 }
@@ -238,9 +238,9 @@ func TestAttributeRun(t *testing.T) {
 // TestBlameRowsCountCollapsedFields is the other half of --depth: a collapsed row
 // has to say how many fields it stands for, or it reads as a single field.
 func TestBlameRowsCountCollapsedFields(t *testing.T) {
-	result := attributeRun([]byte(`{"spec":{"template":{"spec":{"x":"1","y":"2","z":"3"}}}}`), nil)
+	result := AttributeRun([]byte(`{"spec":{"template":{"spec":{"x":"1","y":"2","z":"3"}}}}`), nil)
 
-	rows := result.blameRows(nil, 2)
+	rows := result.BlameRows(nil, 2)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows at depth 2, want 1: %v", len(rows), describeBlame(rows))
 	}
@@ -281,7 +281,7 @@ func instant(clock string) time.Time {
 
 // patchRow is one recorded modification carrying a diff.
 func patchRow(clock, actor, diff string) render.TimelineRow {
-	return decodeRows([]query.Change{{
+	return DecodeRows([]query.Change{{
 		TS: instant(clock), EventType: query.EventModified, UID: "uid-1",
 		Actors: []string{actor}, Diff: diff,
 	}})[0]
@@ -289,7 +289,7 @@ func patchRow(clock, actor, diff string) render.TimelineRow {
 
 // fullStateRow is one recorded change carrying state, with or without a diff.
 func fullStateRow(clock, actor, event, data, diff string) render.TimelineRow {
-	return decodeRows([]query.Change{{
+	return DecodeRows([]query.Change{{
 		TS: instant(clock), EventType: event, UID: "uid-1",
 		Actors: []string{actor}, Data: data, Diff: diff,
 	}})[0]
