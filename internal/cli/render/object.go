@@ -47,6 +47,15 @@ import (
 // the identical block goes to standard error, which keeps stdout a document `jq`
 // can read while still putting the warning in front of whoever ran the command.
 //
+// # Why the header is not sufficient on its own
+//
+// Standard error is the stream `2>/dev/null` discards and the one a pipe never
+// reads, so `get … -o json | jq '.items[0].object'` receives a reconstruction
+// with nothing in its input saying so. The header is for the person; the
+// envelope's metadata.reconstruction marker is the same facts for the script, on
+// stdout, in every format (ReconstructionReport). ReconstructionOf derives both,
+// so there is one warning rendered twice rather than two warnings.
+//
 // # Why the provenance is in it
 //
 // A reconstruction is an assertion about the past that somebody may act on, and
@@ -112,11 +121,22 @@ type ObjectDocument struct {
 // above the envelope; JSON and JSONL have no comment syntax, so the identical
 // block goes to standard error — which keeps stdout a document `jq` can read
 // while still putting the warning in front of whoever ran the command.
+//
+// # Why the marker is stamped here rather than by the caller
+//
+// The head arrives without metadata.reconstruction and leaves with it, derived
+// from the same document the header is derived from. Two things follow, and both
+// are the point: there is no way to write an Object envelope through this
+// function without the marker on it, and no way for the marker and the header to
+// describe two different reconstructions. head is taken by value, so the
+// caller's own is left as it was.
 func WriteObject(
 	out, errOut io.Writer, doc ObjectDocument, head EnvelopeHead,
 	format StructuredFormat, opts Options,
 ) error {
 	provenance := ObjectProvenance(doc)
+	reconstruction := ReconstructionOf(doc)
+	head.Metadata.Reconstruction = &reconstruction
 
 	if out != nil {
 		if format == StructuredYAML {
@@ -185,20 +205,47 @@ func objectItem(doc ObjectDocument) ObjectItem {
 	}
 }
 
+// ReconstructionOf is the provenance of a reconstruction as structured fields.
+//
+// It is the one place those values are derived from a document, and both
+// renderings go through it: the marker the envelope's metadata carries, and — via
+// ObjectProvenance below — the header a person reads. That is deliberate. Two
+// independent readings of the same ObjectDocument would agree on the day they
+// were written and drift the first time one of them was edited, and a header
+// saying four hundred patches over a machine-readable field saying two is worse
+// than either number alone.
+func ReconstructionOf(doc ObjectDocument) ReconstructionReport {
+	return ReconstructionReport{
+		Reconstructed:  true,
+		NotDeployable:  true,
+		At:             doc.At,
+		BaseTS:         doc.BaseTS,
+		BaseEvent:      doc.BaseEvent,
+		PatchesApplied: doc.PatchesApplied,
+	}
+}
+
 // ObjectProvenance renders the mandatory header: what this document is, where it
 // came from, and what it must not be used for.
 //
 // It is exported because the command writes it to standard error for JSON, and a
 // second spelling of a warning is a warning that eventually only appears in one
-// of the two formats.
+// of the two formats. It is also the *only* definition of that wording: the
+// machine-readable marker beside it carries fields rather than prose precisely so
+// that this stays the single place the sentence lives.
 func ObjectProvenance(doc ObjectDocument) string {
+	// Read from the report rather than from doc, so the three facts the header
+	// shares with the marker are literally the same values (see ReconstructionOf).
+	reconstruction := ReconstructionOf(doc)
+
 	fields := [][2]string{
 		{"object", strings.TrimSpace(doc.Kind + " " + doc.Ref)},
 		{"cluster", valueOrUnrecorded(doc.Cluster)},
 		{"uid", valueOrUnrecorded(doc.UID)},
-		{"at", FormatInstant(doc.At)},
-		{"base row", fmt.Sprintf("%s (%s)", FormatInstant(doc.BaseTS), valueOrUnrecorded(doc.BaseEvent))},
-		{"patches applied", fmt.Sprintf("%d", doc.PatchesApplied)},
+		{"at", FormatInstant(reconstruction.At)},
+		{"base row", fmt.Sprintf("%s (%s)",
+			FormatInstant(reconstruction.BaseTS), valueOrUnrecorded(reconstruction.BaseEvent))},
+		{"patches applied", fmt.Sprintf("%d", reconstruction.PatchesApplied)},
 		{"coverage", valueOrUnrecorded(doc.Coverage)},
 	}
 

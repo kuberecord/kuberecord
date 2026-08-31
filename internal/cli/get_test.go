@@ -431,3 +431,83 @@ func TestGetNamesTheIncarnationItReconstructed(t *testing.T) {
 		t.Errorf("the header does not name the incarnation:\n%s", stdout)
 	}
 }
+
+// TestGetMarksTheReconstructionForAScript is the criterion on the real command
+// path.
+//
+// The renderer's own tests pin the marker against a hand-built document. This one
+// pins it against what `get` actually produces, because the marker is only worth
+// anything if the command puts it on the envelope it hands to a pipe — and it
+// checks the fields against the reconstruction the fixture history really
+// produces rather than against constants, so a replay that started somewhere else
+// would show up here.
+func TestGetMarksTheReconstructionForAScript(t *testing.T) {
+	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
+	if err != nil {
+		t.Fatalf("RunGet: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	metadata, ok := decoded["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("the envelope carries no metadata: %#v", decoded)
+	}
+	marker, ok := metadata["reconstruction"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.reconstruction is absent, so `get … -o json | jq` hands a script a "+
+			"reconstruction with nothing saying it is one: %#v", metadata)
+	}
+
+	for _, want := range []struct {
+		field string
+		value any
+	}{
+		{"reconstructed", true},
+		{"not_deployable", true},
+		{"at", "2026-08-28T15:00:00Z"},
+		{"base_ts", "2026-08-28T14:05:02.117Z"},
+		{"base_event", query.EventCheckpoint},
+		{"patches_applied", float64(0)},
+	} {
+		if got := marker[want.field]; got != want.value {
+			t.Errorf("metadata.reconstruction.%s is %#v, want %#v", want.field, got, want.value)
+		}
+	}
+}
+
+// TestGetYAMLHeaderIsTheBlockJSONSendsToStderr is the unchanged-routing criterion,
+// asserted without writing the warning down a second time.
+//
+// The two formats differ only in which stream the block travels on: YAML puts it
+// on stdout as comments because YAML has comments, and JSON puts it on stderr
+// because JSON does not. Comparing the two renderings against each other pins
+// that they are one block rather than two that resemble each other, and it stays
+// true through any future rewording — which a literal copy of the text here would
+// not.
+func TestGetYAMLHeaderIsTheBlockJSONSendsToStderr(t *testing.T) {
+	yamlOut, yamlErr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredYAML))
+	if err != nil {
+		t.Fatalf("RunGet as YAML: %v", err)
+	}
+	_, jsonErr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
+	if err != nil {
+		t.Fatalf("RunGet as JSON: %v", err)
+	}
+
+	if jsonErr == "" {
+		t.Fatal("JSON wrote no header to stderr, so there is nothing for YAML to agree with")
+	}
+	if !strings.HasPrefix(yamlOut, jsonErr) {
+		t.Errorf("the YAML document does not open with the block JSON sends to stderr."+
+			"\n--- want prefix ---\n%s\n--- got ---\n%s", jsonErr, yamlOut)
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(yamlOut, jsonErr), "apiVersion:") {
+		t.Errorf("the envelope does not follow the header immediately:\n%s", yamlOut)
+	}
+	if yamlErr != "" {
+		t.Errorf("YAML wrote to stderr as well, so the header would be printed twice:\n%s", yamlErr)
+	}
+}

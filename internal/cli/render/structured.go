@@ -60,11 +60,14 @@ import (
 // # What is deliberately not in it
 //
 // Notices are not. They go to standard error with every other qualification this
-// CLI writes, which is what keeps `-o json | jq` safe in their presence. The one
-// qualification a *script* cannot do without is coverage — the difference between
-// "nothing changed" and "nothing was watching" (Invariant 9) — and that is why it
-// is a structured field of the envelope rather than a sentence on the other
-// stream.
+// CLI writes, which is what keeps `-o json | jq` safe in their presence. Two
+// qualifications a *script* cannot do without are the exceptions, and they are
+// exceptions for the same reason: a consumer has to be able to act on them, and
+// standard error is the stream `2>/dev/null` discards. Coverage is the difference
+// between "nothing changed" and "nothing was watching" (Invariant 9);
+// reconstruction is the difference between a document that was recorded and one
+// that was assembled and must not be applied. Both are fields of the envelope
+// rather than sentences on the other stream.
 
 // EnvelopeAPIVersion is the version of this contract.
 //
@@ -132,10 +135,14 @@ type EnvelopeHead struct {
 
 // EnvelopeMetadata is the provenance of an answer.
 //
-// It carries exactly three fields, which is D19's own list. Each is here because
-// a script cannot do its job without it: which cluster's history this is, which
-// engine produced it — two backends can disagree, and then knowing which one
-// answered decides which answer to trust — and whether anything was watching.
+// Three of its fields are on every answer, which is D19's own list. Each is there
+// because a script cannot do its job without it: which cluster's history this is,
+// which engine produced it — two backends can disagree, and then knowing which
+// one answered decides which answer to trust — and whether anything was watching.
+//
+// The fourth is present only on a KindObject envelope, because it is the only
+// kind whose items are assembled rather than read. See ReconstructionReport for
+// why a document that was assembled has to say so on the stream a script reads.
 type EnvelopeMetadata struct {
 	// ClusterID is the kuberecord cluster identity (D21), the cluster_id column
 	// of the frozen schema rather than a kubeconfig entry.
@@ -146,6 +153,74 @@ type EnvelopeMetadata struct {
 	// Coverage is what the watch scopes say about the window that was asked
 	// about.
 	Coverage CoverageReport `json:"coverage"`
+	// Reconstruction marks a document that was assembled from recorded history
+	// rather than read back whole, and is absent from every other kind. It is a
+	// pointer for exactly that reason: a Timeline carrying `"reconstruction":
+	// null` would invite a consumer to test the field for null, and the honest
+	// spelling of "this question has no reconstruction in it" is no key at all.
+	Reconstruction *ReconstructionReport `json:"reconstruction,omitempty"`
+}
+
+// ReconstructionReport is the "not a deployable manifest" warning in a form a
+// script can branch on.
+//
+// # Why the warning needs a second form
+//
+// WriteObject sends the human-facing header to standard error for JSON and JSONL,
+// because neither format has a comment syntax and putting it on standard output
+// would break the `jq` that is the whole reason somebody asked for JSON. That is
+// the right call, and it has one consequence: `2>/dev/null` discards the warning,
+// and a piped consumer never reads that stream in the first place. So
+// `kuberecord get … -o json | jq '.items[0].object'` hands a script a document
+// that looks exactly like a manifest, with nothing anywhere in its input saying
+// it is a reconstruction.
+//
+// This is the same problem CoverageReport solves and it gets the same answer. A
+// fact a consumer must be able to act on cannot live only in prose on the other
+// stream — it has to be a field, on stdout, in every serialization.
+//
+// # Why these fields
+//
+// The first two are what a script branches on: what the document is, and what
+// must not be done with it. NotDeployable is deliberately not left as an
+// inference from Reconstructed, because the inference is precisely what an
+// automated consumer does not make — a guard rail is `jq -e
+// '.metadata.reconstruction.not_deployable'` and refuse to apply, and a field it
+// can name is what makes that one line rather than a comment in a runbook.
+//
+// The rest are the evidence, and they are the same three facts a reader judges
+// the reconstruction by on the header: a state assembled from a base an hour old
+// and two patches deserves more confidence than one assembled from a base three
+// months old and four hundred. They are spelled as ObjectItem spells them, and
+// ObjectProvenance renders the header from this very value (see ReconstructionOf),
+// so the sentence a person reads and the fields a script reads cannot come to
+// describe different reconstructions.
+type ReconstructionReport struct {
+	// Reconstructed is always true where this report appears, and its value is
+	// not the point: a consumer reads `.metadata.reconstruction.reconstructed`
+	// on every document this CLI produces and gets true here and null — falsey —
+	// everywhere else, without having to know which kinds are assembled.
+	Reconstructed bool `json:"reconstructed"`
+
+	// NotDeployable is always true for the same reason, and says the thing the
+	// header says in words: this document must not be applied. Volatile metadata
+	// was stripped before the state was recorded, redacted fields carry
+	// RedactionSentinel in place of their values, and it describes a past
+	// somebody deliberately moved the object out of.
+	NotDeployable bool `json:"not_deployable"`
+
+	// At is the instant the state was reconstructed for — the `--at` that was
+	// asked about, not the wall clock the command ran on.
+	At time.Time `json:"at"`
+
+	// BaseTS is the timestamp of the full-state row the replay started from.
+	BaseTS time.Time `json:"base_ts"`
+
+	// BaseEvent is that row's event type, as the schema records it.
+	BaseEvent string `json:"base_event"`
+
+	// PatchesApplied is how many patches were replayed over the base.
+	PatchesApplied int `json:"patches_applied"`
 }
 
 // CoverageReport is Invariant 9 in a form a script can branch on.
