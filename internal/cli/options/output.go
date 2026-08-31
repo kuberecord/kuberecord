@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package options
 
 import (
 	"fmt"
@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"golang.org/x/term"
 )
 
@@ -64,7 +65,7 @@ func (f *OutputFormat) Type() string { return "format" }
 
 // Set implements pflag.Value, rejecting anything outside the closed set.
 //
-// The rejection is what routes an unknown format to ExitUsageError: pflag wraps
+// The rejection is what routes an unknown format to exit.UsageError: pflag wraps
 // this error, the root's flag-error function codes it, and the process ends
 // with 2 rather than with a rendering surprise.
 func (f *OutputFormat) Set(value string) error { return setEnum(f, value, outputFormats) }
@@ -111,14 +112,14 @@ func (m *ColorMode) Set(value string) error { return setEnum(m, value, colorMode
 func setEnum[T ~string](target *T, value string, allowed []T) error {
 	candidate := T(value)
 	if !slices.Contains(allowed, candidate) {
-		return fmt.Errorf("must be one of %s", joinValues(allowed))
+		return fmt.Errorf("must be one of %s", JoinValues(allowed))
 	}
 	*target = candidate
 	return nil
 }
 
-// joinValues renders an accepted set for a help string or an error message.
-func joinValues[T ~string](values []T) string {
+// JoinValues renders an accepted set for a help string or an error message.
+func JoinValues[T ~string](values []T) string {
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
 		parts = append(parts, string(value))
@@ -155,7 +156,7 @@ func ShouldColorize(mode ColorMode, out io.Writer) bool {
 	if value, present := os.LookupEnv(EnvNoColor); present && value != "" {
 		return false
 	}
-	return isTerminal(out)
+	return IsTerminal(out)
 }
 
 // TerminalWidth reports the column budget for out, or zero when it is not a
@@ -177,24 +178,51 @@ func TerminalWidth(out io.Writer) int {
 	return width
 }
 
-// isTerminalIn reports whether in is an interactive terminal.
+// IsTerminalIn reports whether in is an interactive terminal.
 //
-// It is the input half of isTerminal and is separate only because io.Reader and
+// It is the input half of IsTerminal and is separate only because io.Reader and
 // io.Writer are. It exists for the confirmation prompt: a terminal on stdout with
 // a redirected stdin is an invocation nobody can answer, and asking anyway would
 // hang a pipeline on a question its author never saw.
-func isTerminalIn(in io.Reader) bool {
+func IsTerminalIn(in io.Reader) bool {
 	file, ok := in.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
 }
 
-// isTerminal reports whether out is an interactive terminal.
+// IsTerminal reports whether out is an interactive terminal.
 //
 // The type assertion is the whole of the test: an io.Writer that is not an
 // *os.File has no file descriptor to ask about, and a buffer in a test must
 // never be mistaken for a terminal — that is what keeps the golden files free of
 // escape sequences.
-func isTerminal(out io.Writer) bool {
+func IsTerminal(out io.Writer) bool {
 	file, ok := out.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+// WriteLine writes one line, reporting a failure rather than discarding it.
+//
+// Unlike a resolution notice — which is diagnostic, and whose loss costs nothing
+// the exit code does not already carry — these lines are the whole of what a
+// `config` command produces. A `set-profile` that wrote the file and then could not
+// say so has done something the user cannot see, and reporting the write failure is
+// the only way they find out that their terminal, not their configuration, is what
+// went wrong.
+func WriteLine(out io.Writer, line string) error {
+	if out == nil {
+		return nil
+	}
+	if _, err := io.WriteString(out, line+"\n"); err != nil {
+		return exit.RuntimeErrorf("writing output: %w", err)
+	}
+	return nil
+}
+
+// WriteAll writes a rendered document, reporting a short write as the failure it
+// is.
+func WriteAll(out io.Writer, content string) error {
+	if _, err := io.WriteString(out, content); err != nil {
+		return exit.RuntimeErrorf("writing output: %w", err)
+	}
+	return nil
 }

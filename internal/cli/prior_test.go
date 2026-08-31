@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kuberecord/kuberecord/internal/cli"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -268,7 +268,7 @@ func TestPriorValuesAreGroupedByIncarnation(t *testing.T) {
 // TestBackendCloseIsJoinedRatherThanSwallowed is a small guarantee with a large
 // consequence: the reason a command ended must survive the tidying up.
 func TestBackendCloseIsJoinedRatherThanSwallowed(t *testing.T) {
-	backend := &cli.Backend{Engine: &fakeEngine{caps: clickHouseCapabilities()}}
+	backend := &resolve.Backend{Engine: &fakeEngine{caps: clickHouseCapabilities()}}
 	if err := backend.Close(); err != nil {
 		t.Fatalf("closing a backend with nothing to release: %v", err)
 	}

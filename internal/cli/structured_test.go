@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
@@ -316,14 +317,14 @@ func TestStructuredCoverageDistinguishesTheTwoEmptinesses(t *testing.T) {
 			},
 			wantAvailable: true,
 			wantIntervals: 1,
-			wantExit:      cli.ExitSuccess,
+			wantExit:      exit.Success,
 		},
 		{
 			name:          "nothing was ever watching",
 			engine:        &fakeEngine{caps: clickHouseCapabilities()},
 			wantAvailable: true,
 			wantIntervals: 0,
-			wantExit:      cli.ExitNoCoverage,
+			wantExit:      exit.NoCoverage,
 		},
 		{
 			name: "the backend has no scope log",
@@ -333,7 +334,7 @@ func TestStructuredCoverageDistinguishesTheTwoEmptinesses(t *testing.T) {
 			},
 			wantAvailable: false,
 			wantIntervals: 0,
-			wantExit:      cli.ExitSuccess,
+			wantExit:      exit.Success,
 		},
 	}
 
@@ -344,7 +345,7 @@ func TestStructuredCoverageDistinguishesTheTwoEmptinesses(t *testing.T) {
 			request.To = at("2026-08-28T15:00:00Z")
 
 			stdout, _, err := runTimeline(t, test.engine, request, render.Options{})
-			if code := cli.ExitCodeFor(err); code != test.wantExit {
+			if code := exit.CodeFor(err); code != test.wantExit {
 				t.Errorf("exit code %d, want %d (%v)", code, test.wantExit, err)
 			}
 
@@ -480,8 +481,8 @@ func TestDiffExitCodeStillWritesTheEnvelope(t *testing.T) {
 	request := cli.DiffRequest{Timeline: structuredRequest(render.StructuredJSON), ExitCode: true}
 	stdout, stderr, err := runDiff(t, fixtureEngine(), request, render.Options{})
 
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Fatalf("exit code %d, want %d: %v", code, cli.ExitRuntimeError, err)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Fatalf("exit code %d, want %d: %v", code, exit.RuntimeError, err)
 	}
 	if items := assertEnvelope(t, decodeJSON(t, stdout), render.KindDiff); len(items) == 0 {
 		t.Error("the envelope is empty, but the exit code says changes were found")

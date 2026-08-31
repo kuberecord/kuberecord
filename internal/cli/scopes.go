@@ -27,7 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -61,7 +64,7 @@ type scopesFlags struct {
 
 // newScopesCommand builds `scopes`.
 func newScopesCommand(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	local := &scopesFlags{}
 
@@ -90,7 +93,7 @@ watching objects in it. Such a row shows ` + render.AllNamespaces +
 			` in the namespace column.
 
 An answer with no periods in it is a finding rather than an empty list, and it
-exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
+exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
 		Example: `  # Everything this cluster has ever recorded.
   kuberecord scopes
 
@@ -129,14 +132,14 @@ exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
 // object.
 //
 // Cobra's own NoArgs produces a plain error, and a plain error is a runtime
-// failure by ExitCodeFor's reckoning — the wrong code for somebody typing an
+// failure by exit.CodeFor's reckoning — the wrong code for somebody typing an
 // object name at a command that lists scopes. Exit 2 is the one that says "you
 // typed something this program does not accept".
 func rejectPositionalArgs(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return nil
 	}
-	return UsageErrorf("%s takes no arguments, and %q is not one: it lists the scopes that were being "+
+	return exit.UsageErrorf("%s takes no arguments, and %q is not one: it lists the scopes that were being "+
 		"recorded rather than answering a question about one object. Narrow it with --kind and "+
 		"--namespace", cmd.Name(), args[0])
 }
@@ -144,7 +147,7 @@ func rejectPositionalArgs(cmd *cobra.Command, args []string) error {
 // runScopesCommand turns one invocation into a request, opens the backend, and
 // runs it.
 func runScopesCommand(
-	ctx context.Context, flags *GlobalFlags, local *scopesFlags,
+	ctx context.Context, flags *options.GlobalFlags, local *scopesFlags,
 	streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
 	structured, err := scopesFormat(flags.Output)
@@ -200,31 +203,31 @@ func runScopesCommand(
 // `kubens` selected would drop every namespaced scope but one, and the answer
 // would look like a complete listing of a cluster. Widening is visible in the
 // header, which names the question; narrowing would not have been.
-func scopesNamespace(flags *GlobalFlags) string { return explicitNamespace(flags) }
+func scopesNamespace(flags *options.GlobalFlags) string { return explicitNamespace(flags) }
 
 // scopesFormat decides which of this command's two renderings an invocation asked
 // for. An empty StructuredFormat means the table.
-func scopesFormat(format OutputFormat) (render.StructuredFormat, error) {
+func scopesFormat(format options.OutputFormat) (render.StructuredFormat, error) {
 	switch format {
-	case OutputTable, OutputWide:
+	case options.OutputTable, options.OutputWide:
 		return "", nil
-	case OutputDiff:
-		return "", UsageErrorf("scopes does not render %s: its rows are periods rather than changes, "+
-			"and there is no patch to lay out", OutputDiff)
+	case options.OutputDiff:
+		return "", exit.UsageErrorf("scopes does not render %s: its rows are periods rather than changes, "+
+			"and there is no patch to lay out", options.OutputDiff)
 	}
 	structured, ok := structuredFormat(format)
 	if !ok {
-		return "", UsageErrorf("scopes cannot render %s", format)
+		return "", exit.UsageErrorf("scopes cannot render %s", format)
 	}
 	return structured, nil
 }
 
 // scopesRenderOptions decides how the listing will look.
-func scopesRenderOptions(flags *GlobalFlags, streams genericiooptions.IOStreams) render.Options {
+func scopesRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IOStreams) render.Options {
 	return render.Options{
-		Width: TerminalWidth(streams.Out),
-		Color: ShouldColorize(flags.Color, streams.Out),
-		Wide:  flags.Output == OutputWide,
+		Width: options.TerminalWidth(streams.Out),
+		Color: options.ShouldColorize(flags.Color, streams.Out),
+		Wide:  flags.Output == options.OutputWide,
 	}
 }
 
@@ -241,7 +244,7 @@ func scopesRenderOptions(flags *GlobalFlags, streams genericiooptions.IOStreams)
 // reading an archive without the cluster it came from is a supported way to work
 // (D18).
 func resolveScopeKind(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, kind string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, kind string,
 ) (schema.GroupVersionKind, error) {
 	resolved, err := clusterResolution(flags, ResourceArg{Resource: kind})
 	if err == nil {
@@ -255,12 +258,12 @@ func resolveScopeKind(
 
 	gvk, ok := parseRecordedKind(kind)
 	if !ok {
-		return schema.GroupVersionKind{}, RuntimeErrorf(
+		return schema.GroupVersionKind{}, exit.RuntimeErrorf(
 			"the cluster could not be reached to resolve --kind %q (%v), and short names and plural "+
 				"resource names come from its own discovery data. Give the kind as it is recorded — "+
 				"Deployment or Deployment.apps — which needs no cluster at all", kind, err)
 	}
-	if writeErr := writeLine(streams.ErrOut, fmt.Sprintf(
+	if writeErr := options.WriteLine(streams.ErrOut, fmt.Sprintf(
 		"→ read --kind %s as %s as recorded, without the cluster: %s", kind,
 		render.ScopeKind(query.ScopeInterval{APIGroup: gvk.Group, Kind: gvk.Kind}),
 		reachFailure(err))); writeErr != nil {
@@ -271,7 +274,7 @@ func resolveScopeKind(
 
 // ScopesRequest is one `scopes` invocation, resolved.
 //
-// It is exported, and RunScopes takes an already-opened Backend, for the reason
+// It is exported, and RunScopes takes an already-opened resolve.Backend, for the reason
 // TimelineRequest is: the whole of the command's behaviour — the empty finding,
 // the covering-namespace notice, the rendering — is then reachable from a test
 // holding a fake QueryEngine rather than only from one that can reach a kubeconfig
@@ -335,7 +338,7 @@ func (r ScopesRequest) describeScope() string {
 // RunScopes answers one scopes request against an opened backend and renders the
 // result.
 func RunScopes(
-	ctx context.Context, backend *Backend, request ScopesRequest,
+	ctx context.Context, backend *resolve.Backend, request ScopesRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	coverage, err := askCoverage(ctx, backend, request.scopeQuery(), request.describeScope())
@@ -347,7 +350,7 @@ func RunScopes(
 		// rest of what it was asked (Invariant 5). This command *is* the scope log,
 		// so there is no remaining half to answer with, and saying so plainly is
 		// better than an empty table that would read as "nothing was watching".
-		return RuntimeErrorf("the %s backend has no scope log, so it cannot say what was being "+
+		return exit.RuntimeErrorf("the %s backend has no scope log, so it cannot say what was being "+
 			"recorded: %w", backend.Engine.Capabilities().Backend, coverage.Gap)
 	}
 
@@ -360,19 +363,19 @@ func RunScopes(
 
 // writeScopesAnswer renders the answer in whichever shape was asked for.
 func writeScopesAnswer(
-	backend *Backend, request ScopesRequest, coverage coverageAnswer,
+	backend *resolve.Backend, request ScopesRequest, coverage coverageAnswer,
 	notices []render.Notice, streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	if request.Structured == "" {
 		document := render.ScopesDocument{
 			Cluster:   request.ClusterID,
 			Scope:     request.describeScope(),
-			Window:    DescribeWindow(request.From, request.To),
+			Window:    options.DescribeWindow(request.From, request.To),
 			Intervals: coverage.Intervals,
 			Notices:   notices,
 		}
 		if err := render.WriteScopes(streams.Out, streams.ErrOut, document, opts); err != nil {
-			return RuntimeErrorf("%w", err)
+			return exit.RuntimeErrorf("%w", err)
 		}
 		return nil
 	}
@@ -384,7 +387,7 @@ func writeScopesAnswer(
 	stream, err := render.NewStream(
 		streams.Out, request.Structured, envelopeHead(backend, render.KindCoverage, coverage))
 	if err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	items := make([]any, 0, len(coverage.Intervals))
 	for _, interval := range coverage.Intervals {
@@ -394,7 +397,7 @@ func writeScopesAnswer(
 		return err
 	}
 	if err := render.WriteNotices(streams.ErrOut, notices, opts); err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	return nil
 }
@@ -405,7 +408,7 @@ func writeScopesAnswer(
 // because the header is what says which question came back empty and a finding
 // with no question attached is not actionable.
 //
-// It wraps query.ErrNoCoverage so that ExitCodeFor gives it exit code 3 without
+// It wraps query.ErrNoCoverage so that exit.CodeFor gives it exit code 3 without
 // this call site having to know the number, which is the same code `timeline`
 // reaches when it works the same fact out from the other end. A script watching
 // for "was anything recording this" therefore keys on one code whichever command
@@ -417,7 +420,7 @@ func scopesFinding(request ScopesRequest, intervals []query.ScopeInterval) error
 	return fmt.Errorf("%w: no watch scope covering %s was open in cluster %q during %s, so a "+
 		"silence there is not evidence that nothing changed — nothing was being recorded to change",
 		query.ErrNoCoverage, request.describeScope(), request.ClusterID,
-		DescribeWindow(request.From, request.To))
+		options.DescribeWindow(request.From, request.To))
 }
 
 // coveringNamespaceNotice explains a cluster-wide row in a namespaced question.

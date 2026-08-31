@@ -28,7 +28,10 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -63,7 +66,7 @@ type getFlags struct {
 
 // newGetCommand builds `get`.
 func newGetCommand(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	local := &getFlags{}
 
@@ -85,7 +88,7 @@ moved the object out of. The header says so in those words.
 --verify re-hashes the reconstruction and compares it against the digest
 recorded for the row the replay finished on. A mismatch means history and replay
 disagree, which is a chain-of-custody finding, and it exits ` +
-			fmt.Sprint(ExitRuntimeError) + `.`,
+			fmt.Sprint(exit.RuntimeError) + `.`,
 		Example: `  # What this Deployment looked like two hours ago.
   kuberecord get deploy/checkout -n payments --at 2h
 
@@ -118,7 +121,7 @@ disagree, which is a chain-of-custody finding, and it exits ` +
 // runGetCommand turns one invocation into a request, opens the backend, and runs
 // it.
 func runGetCommand(
-	cmd *cobra.Command, flags *GlobalFlags, local *getFlags,
+	cmd *cobra.Command, flags *options.GlobalFlags, local *getFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
 	format, err := objectFormat(cmd, flags.Output)
@@ -132,7 +135,7 @@ func runGetCommand(
 
 	at := time.Now()
 	if local.at != "" {
-		if at, err = ParseInstant(local.at, at); err != nil {
+		if at, err = options.ParseInstant(local.at, at); err != nil {
 			return err
 		}
 	}
@@ -158,24 +161,24 @@ func runGetCommand(
 // the document itself rather than on another stream. A user who asked for
 // something this command cannot produce is told so by name, because finding out
 // at the `jq` is worse than finding out here.
-func objectFormat(cmd *cobra.Command, requested OutputFormat) (render.StructuredFormat, error) {
-	if !cmd.Flags().Changed(FlagOutput) {
+func objectFormat(cmd *cobra.Command, requested options.OutputFormat) (render.StructuredFormat, error) {
+	if !cmd.Flags().Changed(options.FlagOutput) {
 		return render.StructuredYAML, nil
 	}
 	if structured, ok := structuredFormat(requested); ok {
 		return structured, nil
 	}
-	return "", UsageErrorf("get renders %s, %s or %s, not %s: a reconstructed object is a document "+
+	return "", exit.UsageErrorf("get renders %s, %s or %s, not %s: a reconstructed object is a document "+
 		"rather than a row, so there is nothing for the tabular formats to lay out",
-		OutputYAML, OutputJSON, OutputJSONL, requested)
+		options.OutputYAML, options.OutputJSON, options.OutputJSONL, requested)
 }
 
 // getRenderOptions decides how the document's notices will look. The object
 // itself is serialized rather than laid out, so no width applies to it.
-func getRenderOptions(flags *GlobalFlags, streams genericiooptions.IOStreams) render.Options {
+func getRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IOStreams) render.Options {
 	return render.Options{
-		Width: TerminalWidth(streams.Out),
-		Color: ShouldColorize(flags.Color, streams.Out),
+		Width: options.TerminalWidth(streams.Out),
+		Color: options.ShouldColorize(flags.Color, streams.Out),
 	}
 }
 
@@ -219,7 +222,7 @@ func (r GetRequest) scopeQuery() query.ScopeQuery {
 
 // RunGet reconstructs one object's state and renders it.
 func RunGet(
-	ctx context.Context, backend *Backend, request GetRequest,
+	ctx context.Context, backend *resolve.Backend, request GetRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	reconstruction, stateErr := backend.Engine.StateAt(ctx, request.Ref, request.At, request.UID)
@@ -269,7 +272,7 @@ func RunGet(
 	head := envelopeHead(backend, render.KindObject, coverage)
 	if writeErr := render.WriteObject(
 		streams.Out, streams.ErrOut, document, head, request.Format, opts); writeErr != nil {
-		return RuntimeErrorf("%w", writeErr)
+		return exit.RuntimeErrorf("%w", writeErr)
 	}
 	return nil
 }
@@ -304,25 +307,25 @@ func reconstructedUID(reconstruction *query.Reconstruction, requested string) st
 // unsuccessful one can never be built from two different readings of the scope
 // log.
 func stateFailure(
-	backend *Backend, request GetRequest, coverage coverageAnswer, coverageErr, err error,
+	backend *resolve.Backend, request GetRequest, coverage coverageAnswer, coverageErr, err error,
 ) error {
 	object := describeObject(request.Ref)
 	instant := render.FormatInstant(request.At)
 
 	switch {
 	case errors.Is(err, query.ErrCapabilityUnsupported):
-		return RuntimeErrorf("the %s backend cannot reconstruct state, so it cannot say what %s looked "+
+		return exit.RuntimeErrorf("the %s backend cannot reconstruct state, so it cannot say what %s looked "+
 			"like at %s: %w", backend.Engine.Capabilities().Backend, object, instant, err)
 	case !errors.Is(err, query.ErrObjectNotFound):
-		return RuntimeErrorf("reconstructing %s as of %s: %w", object, instant, err)
+		return exit.RuntimeErrorf("reconstructing %s as of %s: %w", object, instant, err)
 	}
 
 	switch {
 	case coverageErr != nil:
-		return RuntimeErrorf("no recorded state for %s at %s, and the watch scopes that would say "+
+		return exit.RuntimeErrorf("no recorded state for %s at %s, and the watch scopes that would say "+
 			"whether anything was looking could not be read: %w", object, instant, coverageErr)
 	case coverage.Gap != nil:
-		return RuntimeErrorf("no recorded state for %s at %s, and this backend has no scope log: it "+
+		return exit.RuntimeErrorf("no recorded state for %s at %s, and this backend has no scope log: it "+
 			"cannot say whether the object was absent or merely unobserved", object, instant)
 	case len(coverage.Intervals) == 0:
 		return fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q at or before %s, so this "+
@@ -330,7 +333,7 @@ func stateFailure(
 			"being recorded", query.ErrNoCoverage, describeKind(request.Ref), object,
 			request.Ref.ClusterID, instant, scopesCommand)
 	}
-	return RuntimeErrorf("no recorded state for %s at %s: it had not been observed by then, or it had "+
+	return exit.RuntimeErrorf("no recorded state for %s at %s: it had not been observed by then, or it had "+
 		"already been deleted. The scope was watched over %s",
 		object, instant, describeInterval(coverage.Intervals[0]))
 }
@@ -358,20 +361,20 @@ func stateFailure(
 func verifyReconstruction(reconstruction *query.Reconstruction) (render.Notice, error) {
 	recomputed, err := canonicalDigest(reconstruction.Object)
 	if err != nil {
-		return render.Notice{}, RuntimeErrorf("the reconstructed state could not be re-encoded for "+
+		return render.Notice{}, exit.RuntimeErrorf("the reconstructed state could not be re-encoded for "+
 			"verification, so --verify has neither confirmed nor denied it: %w", err)
 	}
 
 	if reconstruction.SHA256 == "" {
 		// Not a mismatch, and not a pass either. Reporting success here would be
 		// the tool inventing an assurance nobody gave it (Invariant 4).
-		return render.Notice{}, RuntimeErrorf("--verify cannot check this reconstruction: no digest is "+
+		return render.Notice{}, exit.RuntimeErrorf("--verify cannot check this reconstruction: no digest is "+
 			"recorded for the row the replay finished on, so there is nothing to compare the "+
 			"recomputed %s against", recomputed)
 	}
 
 	if recomputed != reconstruction.SHA256 {
-		return render.Notice{}, RuntimeErrorf("the reconstruction does not match the digest recorded "+
+		return render.Notice{}, exit.RuntimeErrorf("the reconstruction does not match the digest recorded "+
 			"for it: hashing the reconstructed state gives %s, and the archive recorded %s. History "+
 			"and replay disagree about what this object looked like, which is a chain-of-custody "+
 			"finding and not a rounding error", recomputed, reconstruction.SHA256)

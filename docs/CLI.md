@@ -298,6 +298,13 @@ metadata:
   backend: clickhouse
   cluster_id: prod-eu-1
   coverage: ...
+  reconstruction:
+    at: "2026-08-28T13:00:00Z"
+    base_event: Checkpoint
+    base_ts: "2026-08-28T14:05:02.117Z"
+    not_deployable: true
+    patches_applied: 0
+    reconstructed: true
 items:
 - at: "2026-08-28T13:00:00Z"
   base_event: Checkpoint
@@ -317,8 +324,23 @@ items:
 The state is at `.items[0].object`, inside the same [envelope](#structured-output)
 every other command answers in — so `kubectl apply -f` on this file fails loudly
 instead of applying a stripped object, which is the strongest form of the warning
-above it. `jq -r '.items[0].object'`, or `yq '.items[0].object'`, is the whole
-document back.
+above it.
+
+Pulling the state back out is one `jq`, and it should be one `jq` that reads the
+marker rather than one that steps over it — the document it hands you is evidence,
+not a manifest:
+
+```console
+$ kubectl kuberecord get deploy/checkout -n payments --at 2h -o json \
+  | jq -e 'if .metadata.reconstruction.not_deployable
+           then .items[0].object
+           else error("not a reconstruction: refusing to treat this as evidence") end'
+```
+
+`yq '.items[0].object'` is the same thing for the YAML form, where the header
+above the document says it in words as well. See
+[`metadata.reconstruction`](#metadatareconstruction-on-get) for why the marker is
+there.
 
 | Flag | Meaning |
 |------|---------|
@@ -344,6 +366,12 @@ The provenance in it is not diagnostics. A state assembled from a base an hour
 old and two patches deserves more confidence than one assembled from a base three
 months old and four hundred, and `base row` and `patches applied` are what let a
 reader judge which they have.
+
+The header solves this for a person and not for a script: stderr is the stream
+`2>/dev/null` discards and a pipe never reads, so `get … -o json | jq` would
+otherwise receive a reconstruction with nothing in its input saying so. The same
+facts are therefore carried as fields on stdout, in every format, as
+[`metadata.reconstruction`](#metadatareconstruction-on-get).
 
 ### `--verify`
 
@@ -629,8 +657,9 @@ exists and the pipeline keeps running while producing empty findings.
 | `Coverage` | `scopes` | One watch-scope interval. |
 | `Blame` | `blame` | One field's attribution: which change last wrote it. |
 
-`items` is always a list, including when it is empty. `metadata` carries exactly
-those three fields.
+`items` is always a list, including when it is empty. `metadata` carries
+`cluster_id`, `backend` and `coverage` on every kind, and `reconstruction` on
+`Object` alone.
 
 ### Item field names are the schema's column names
 
@@ -683,6 +712,43 @@ mean opposite things, and one field tells them apart without a second query:
 | `true` | non-empty | The scope was watched. An empty `items` means nothing changed. |
 | `true` | `[]` | **Nothing was ever watching.** An empty `items` means nothing was recorded. Exit `3`. |
 | `false` | `[]` | The backend has no scope log and cannot say which of the two you have. |
+
+### `metadata.reconstruction` on `get`
+
+`get` is the one command whose items are **assembled** rather than read: the state
+in an `Object` envelope was rebuilt by replaying patches over a recorded base, and
+it looks exactly like a manifest. A consumer reading structured output must treat
+an `Object` document as **evidence rather than as a manifest** — it is not what
+the API server held, and it must never be applied. This field is how a script
+knows that without reading prose on another stream:
+
+```json
+"reconstruction": {
+  "reconstructed": true,
+  "not_deployable": true,
+  "at": "2026-08-28T13:00:00Z",
+  "base_ts": "2026-08-28T14:05:02.117Z",
+  "base_event": "Checkpoint",
+  "patches_applied": 0
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `reconstructed` | Always `true` where the field appears. Absent on every other kind, so `.metadata.reconstruction.reconstructed` is falsey for a `Timeline` without a consumer needing to know which kinds are assembled. |
+| `not_deployable` | Always `true`. The machine-readable form of **NOT A DEPLOYABLE MANIFEST**: volatile metadata was stripped before the state was recorded, redacted fields carry `[REDACTED]` in place of their values, and the document describes a past somebody deliberately moved the object out of. |
+| `at` | The instant the state was reconstructed **for** — the `--at` that was asked about, not the wall clock the command ran on. |
+| `base_ts` | The timestamp of the full-state row the replay started from. |
+| `base_event` | That row's `event_type`, as the schema records it. |
+| `patches_applied` | How many patches were replayed over the base. |
+
+The last four are the same facts the header renders and are spelled as an `Object`
+item spells them, so a `jq` recipe transfers between the marker, the item and a
+SQL result. They are what a reader judges the answer by: a base an hour old and
+two patches invites more confidence than a base three months old and four hundred.
+
+The header on stderr is unchanged, and for `-o yaml` the comment block above the
+document is unchanged too. A reader gets both; a parser gets one.
 
 ### The additive-only policy
 
@@ -1052,6 +1118,29 @@ somebody can answer it: with stdout or stdin redirected, or with `--yes`, it is
 assumed, and stderr says which of the two reasons applied. **A script therefore
 never hangs on a prompt** — and never silently skips one either, because the line
 that says the confirmation was assumed is printed regardless.
+
+**A scan whose size could not be determined asks too, however narrow the window.**
+A failed listing does not stop the question being answerable — the estimate is a
+courtesy, and refusing to answer because the warning could not be assembled would
+be the degradation making itself into the failure. But it does mean the window has
+stopped being a proxy for cost, so the width no longer decides:
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --source s3://acme-audit --since 6h
+→ the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
+an unmeasured number of objects, because its size could not be determined — continue? [y/N]
+```
+
+A failed estimate is not evidence of a small scan; it is the absence of evidence,
+and a six-hour window against an archive that cannot be listed is exactly the
+invocation this tool knows least about. Refusing it stops with the same message and
+the same exit code as refusing a wide one — there is only one way to say no. `--yes`
+and a non-terminal still pass it without asking, unchanged.
+
+Confirming it imposes no ceiling of its own. `--max-objects` remains the only bound
+on the work and remains opt-in: a silent limit here would truncate a scan you had
+just agreed to, and — since a pipeline never confirms — would bound the same command
+for a person while leaving it unbounded in a script.
 
 **Progress goes to stderr while it runs**, repainted in place and only when stderr
 is a terminal, so `2>/dev/null` and a redirected log get none of it:

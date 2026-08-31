@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package options
 
 import (
 	"fmt"
@@ -22,8 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
-
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
@@ -44,102 +43,6 @@ import (
 // with the user: an engineer asking for "the last three days" wants 72 hours and
 // is not thinking about the clocks going back. Both are accepted, with the Go
 // parser tried first so that "1h30m" keeps its exact meaning.
-
-// windowFlags is the pair of bounds a command's window is given with, under both
-// of the names each of them accepts.
-//
-// It is one type shared by `timeline`, `diff` and `scopes` rather than four flag
-// registrations repeated in each of them. The vocabulary of a window is the part
-// of this CLI a user carries between commands, and three copies of it would be
-// three places for one spelling, one alias or one conflict rule to drift — which
-// the user discovers as `--from` working on `timeline` and not on `scopes`.
-//
-// # Why there are two names
-//
-// --since/--until is the kubectl-adjacent spelling and stays the primary one: it
-// is what a person types, and both ends read as "ago".
-//
-// --from/--to is the read plane's own spelling, and it is not invented here. It is
-// what query.TimelineQuery calls these bounds, and — the half that reaches users —
-// what the D19 structured envelope calls them: every coverage interval in `-o json`
-// carries `from` and `to`. Somebody who has just written a `jq` expression over
-// those fields and reaches for the matching flag should find it rather than a
-// usage error, and a released CLI cannot add the spelling later without the
-// asymmetry becoming permanent.
-type windowFlags struct {
-	// since and until hold the resolved bounds after resolve has run. Before that
-	// they hold only what was given under those two names.
-	since string
-	until string
-
-	// from and to hold what was given under the aliases, and are read exactly once
-	// — by resolve, which collapses them onto the pair above so that no code past
-	// the flag layer has to know there are two spellings.
-	from string
-	to   string
-}
-
-// addFlags registers all four names.
-//
-// The two descriptions are the caller's because the bound selects a different
-// thing in each command — changes in `timeline` and `diff`, watch periods in
-// `scopes` — and a shared string would have to be vague enough to cover both,
-// which is how help text stops being read.
-func (w *windowFlags) addFlags(flags *pflag.FlagSet, sinceHelp, untilHelp string) {
-	flags.StringVar(&w.since, FlagSince, w.since, sinceHelp)
-	flags.StringVar(&w.until, FlagUntil, w.until, untilHelp)
-	flags.StringVar(&w.from, FlagFrom, w.from,
-		"Alias for --"+FlagSince+", spelled as the structured output and the query contract spell it.")
-	flags.StringVar(&w.to, FlagTo, w.to,
-		"Alias for --"+FlagUntil+", spelled as the structured output and the query contract spell it.")
-}
-
-// resolve collapses the aliases onto --since/--until, and refuses one bound given
-// twice with two different values.
-//
-// The conflict is a usage error rather than a last-one-wins, because the two
-// readings of `--since 3d --from 6h` are a window of three days and a window of
-// six, and a tool that silently picks one has answered a question the user did not
-// ask — with a table that looks exactly like the one they wanted. Exit 2 says "you
-// typed something this program does not accept", which is the code a wrapper
-// script must not retry.
-//
-// Giving both names the *same* value is accepted rather than refused. It is
-// harmless, it is what a generated command line does when a template fills in both
-// spellings, and rejecting it would be pedantry with a non-zero exit code.
-//
-// The flag set is consulted for which names were given rather than the values
-// being tested for emptiness: `--since ""` is a malformed value that ParseInstant
-// explains well, and an emptiness test would silently replace it with --from
-// instead.
-func (w *windowFlags) resolve(flags *pflag.FlagSet) error {
-	since, err := oneSpelling(flags, FlagSince, w.since, FlagFrom, w.from)
-	if err != nil {
-		return err
-	}
-	until, err := oneSpelling(flags, FlagUntil, w.until, FlagTo, w.to)
-	if err != nil {
-		return err
-	}
-	w.since, w.until = since, until
-	return nil
-}
-
-// oneSpelling picks the value of one bound out of the two names it may arrive
-// under.
-func oneSpelling(flags *pflag.FlagSet, primary, primaryValue, alias, aliasValue string) (string, error) {
-	switch {
-	case !flags.Changed(alias):
-		return primaryValue, nil
-	case !flags.Changed(primary):
-		return aliasValue, nil
-	case primaryValue != aliasValue:
-		return "", UsageErrorf(
-			"--%s and --%s are two names for the same bound, and they were given different values "+
-				"(%q and %q); pass one of them", primary, alias, primaryValue, aliasValue)
-	}
-	return primaryValue, nil
-}
 
 // DefaultWindow is the span applied when a backend refuses unbounded queries and
 // the user named neither end.
@@ -200,13 +103,13 @@ var instantLayouts = []string{
 func ParseInstant(value string, now time.Time) (time.Time, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return time.Time{}, UsageErrorf("the time bound is empty: give a duration such as 6h or 3d, " +
+		return time.Time{}, exit.UsageErrorf("the time bound is empty: give a duration such as 6h or 3d, " +
 			"or an instant such as 2026-08-20T14:00:00Z")
 	}
 
 	if duration, ok := parseWindowDuration(trimmed); ok {
 		if duration < 0 {
-			return time.Time{}, UsageErrorf(
+			return time.Time{}, exit.UsageErrorf(
 				"%q is a negative duration: these bounds are read as \"ago\", so a window ending "+
 					"in the future cannot be asked for", value)
 		}
@@ -219,7 +122,7 @@ func ParseInstant(value string, now time.Time) (time.Time, error) {
 		}
 	}
 
-	return time.Time{}, UsageErrorf(
+	return time.Time{}, exit.UsageErrorf(
 		"%q is neither a duration (6h, 90m, 3d, 2w) nor an instant "+
 			"(2026-08-20, 2026-08-20T14:00:00Z)", value)
 }

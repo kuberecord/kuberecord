@@ -22,7 +22,7 @@ limitations under the License.
 // measured in gigabytes, plus the monitor's own bookkeeping, and driving them
 // through a command would assert one case each.
 
-package cli
+package coldscan
 
 import (
 	"bytes"
@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -92,8 +93,8 @@ func TestDescribeSpan(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{DefaultWindow, "1d"},
-		{ConfirmWindow, "1w"},
+		{options.DefaultWindow, "1d"},
+		{options.ConfirmWindow, "1w"},
 		{90 * 24 * time.Hour, "90d"},
 		{14 * 24 * time.Hour, "2w"},
 		{6 * time.Hour, "6h"},
@@ -109,6 +110,10 @@ func TestDescribeSpan(t *testing.T) {
 
 // TestNeedsConfirmation pins where the line is drawn, including the two edges that
 // decide whether a bare invocation prompts.
+//
+// The unmeasured rows are the inversion this guard used to have: a scan whose size
+// could not be determined is a decision at any width, because the window is only a
+// proxy for cost while the listing that measures it works.
 func TestNeedsConfirmation(t *testing.T) {
 	t.Parallel()
 
@@ -116,21 +121,64 @@ func TestNeedsConfirmation(t *testing.T) {
 	archive := query.Capabilities{Backend: "objectsource", TimeBoundRequired: true}
 	indexed := query.Capabilities{Backend: "clickhouse", PointQuery: true}
 
+	measured := scanEstimate{figures: query.ScanEstimate{Objects: 1240}, known: true}
+	unmeasured := scanEstimate{unmeasured: true}
+	// An engine that never offered an estimator: neither known nor unmeasured, and
+	// deliberately still governed by the width alone.
+	silent := scanEstimate{}
+
 	for name, testCase := range map[string]struct {
 		capabilities query.Capabilities
+		size         scanEstimate
 		from, to     time.Time
 		want         bool
 	}{
-		"the default window":    {archive, now.Add(-DefaultWindow), now, false},
-		"exactly the threshold": {archive, now.Add(-ConfirmWindow), now, false},
-		"a minute past it":      {archive, now.Add(-ConfirmWindow - time.Minute), now, true},
-		"ninety days":           {archive, now.Add(-90 * 24 * time.Hour), now, true},
-		"an unbounded end":      {archive, now.Add(-time.Hour), time.Time{}, true},
-		"an indexed backend":    {indexed, now.Add(-90 * 24 * time.Hour), now, false},
+		"the default window":    {archive, measured, now.Add(-options.DefaultWindow), now, false},
+		"exactly the threshold": {archive, measured, now.Add(-options.ConfirmWindow), now, false},
+		"a minute past it":      {archive, measured, now.Add(-options.ConfirmWindow - time.Minute), now, true},
+		"ninety days":           {archive, measured, now.Add(-90 * 24 * time.Hour), now, true},
+		"an unbounded end":      {archive, measured, now.Add(-time.Hour), time.Time{}, true},
+		"an indexed backend":    {indexed, measured, now.Add(-90 * 24 * time.Hour), now, false},
+
+		"an hour, unmeasured":     {archive, unmeasured, now.Add(-time.Hour), now, true},
+		"a day, unmeasured":       {archive, unmeasured, now.Add(-options.DefaultWindow), now, true},
+		"ninety days, unmeasured": {archive, unmeasured, now.Add(-90 * 24 * time.Hour), now, true},
+		// Nothing to estimate and nothing to confirm: the guard stays keyed on the
+		// declared capability, so a failed listing cannot invent work for an index.
+		"an indexed backend, unmeasured": {indexed, unmeasured, now.Add(-90 * 24 * time.Hour), now, false},
+
+		"a day, no estimator offered":       {archive, silent, now.Add(-options.DefaultWindow), now, false},
+		"ninety days, no estimator offered": {archive, silent, now.Add(-90 * 24 * time.Hour), now, true},
 	} {
-		if got := needsConfirmation(testCase.capabilities, testCase.from, testCase.to); got != testCase.want {
+		got := needsConfirmation(testCase.capabilities, testCase.size, testCase.from, testCase.to)
+		if got != testCase.want {
 			t.Errorf("%s: needsConfirmation = %t, want %t", name, got, testCase.want)
 		}
+	}
+}
+
+// TestConfirmPromptNamesAnUnknownSize is the half of the new gate a person reads.
+//
+// The measured prompt is asserted byte-for-byte because it is the one that has
+// shipped: a reader has learned to skim the figures and a question mark, and the
+// unmeasured case must not be paid for by rewording it.
+func TestConfirmPromptNamesAnUnknownSize(t *testing.T) {
+	t.Parallel()
+
+	measured := scanEstimate{
+		figures: query.ScanEstimate{Objects: 1240, Bytes: 3328599655}, known: true,
+	}
+	if got, want := confirmPrompt(measured), "~1,240 objects, ~3.1 GiB — continue? [y/N] "; got != want {
+		t.Errorf("the measured prompt changed:\ngot  %q\nwant %q", got, want)
+	}
+
+	unmeasured := confirmPrompt(scanEstimate{unmeasured: true})
+	if !strings.Contains(unmeasured, "could not be determined") {
+		t.Errorf("the prompt does not say the size is unknown, so the user is being asked to decide "+
+			"on the basis of a figure they were never given: %q", unmeasured)
+	}
+	if !strings.HasSuffix(unmeasured, "continue? [y/N] ") {
+		t.Errorf("the unmeasured prompt does not end in the question: %q", unmeasured)
 	}
 }
 
@@ -146,7 +194,7 @@ func TestDescribeScanWidth(t *testing.T) {
 		want     string
 		wantSpan string
 	}{
-		"a week":         {now.Add(-ConfirmWindow), now, "1w", " for 1w"},
+		"a week":         {now.Add(-options.ConfirmWindow), now, "1w", " for 1w"},
 		"no lower bound": {time.Time{}, now, "an unbounded window", ""},
 		"no upper bound": {now.Add(-time.Hour), time.Time{}, "an unbounded window", ""},
 		"inverted":       {now, now.Add(-time.Hour), "an unbounded window", ""},
@@ -237,16 +285,16 @@ func TestScanMonitorTripsOnceWithACauseThatNamesTheFlag(t *testing.T) {
 			"once per object still in flight", trips)
 	}
 
-	stopped := scanStopped(ctx)
+	stopped := Stopped(ctx)
 	if stopped == nil {
-		t.Fatal("scanStopped reported nothing after a trip, so the failure would read as a bare " +
+		t.Fatal("Stopped reported nothing after a trip, so the failure would read as a bare " +
 			"cancellation")
 	}
 	var limit *scanLimitError
 	if !errors.As(stopped, &limit) {
 		t.Fatalf("the cause is %T, want *scanLimitError", stopped)
 	}
-	for _, want := range []string{"--" + FlagMaxObjects + "=2", "3 objects", "--since"} {
+	for _, want := range []string{"--" + options.FlagMaxObjects + "=2", "3 objects", "--since"} {
 		if !strings.Contains(limit.Error(), want) {
 			t.Errorf("the breaker's message does not mention %q: %s", want, limit)
 		}
@@ -264,7 +312,7 @@ func TestScanStoppedIgnoresAnOrdinaryCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if stopped := scanStopped(ctx); stopped != nil {
+	if stopped := Stopped(ctx); stopped != nil {
 		t.Errorf("an interrupted scan was attributed to the circuit breaker: %v", stopped)
 	}
 }

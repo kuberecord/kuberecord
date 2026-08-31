@@ -22,6 +22,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 )
 
 // kubeconfigPath is a fixture carrying two contexts, one with a namespace and
@@ -78,7 +79,7 @@ func TestNamespaceResolution(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			io, _, _ := streams()
-			root, flags := cli.NewRootCommand(cli.StandaloneName, io)
+			root, flags := cli.NewRootCommand(options.StandaloneName, io)
 			if err := root.PersistentFlags().Parse(test.args); err != nil {
 				t.Fatalf("parse %q: %v", test.args, err)
 			}
@@ -104,7 +105,7 @@ func TestApplyVerbosityDrivesKlog(t *testing.T) {
 	// klog's verbosity is process-global. Putting it back is what keeps this
 	// test from changing the meaning of every test that runs after it.
 	t.Cleanup(func() {
-		if err := cli.ApplyVerbosity(0); err != nil {
+		if err := options.ApplyVerbosity(0); err != nil {
 			t.Errorf("restore klog verbosity: %v", err)
 		}
 	})
@@ -112,8 +113,8 @@ func TestApplyVerbosityDrivesKlog(t *testing.T) {
 	if enabled := klog.V(4); enabled.Enabled() {
 		t.Fatal("klog is already verbose before the test set it, so this proves nothing")
 	}
-	if err := cli.ApplyVerbosity(4); err != nil {
-		t.Fatalf("ApplyVerbosity(4): %v", err)
+	if err := options.ApplyVerbosity(4); err != nil {
+		t.Fatalf("options.ApplyVerbosity(4): %v", err)
 	}
 	if raised := klog.V(4); !raised.Enabled() {
 		t.Error("-v 4 did not raise klog's verbosity, so client-go diagnostics stay silent")
@@ -122,8 +123,8 @@ func TestApplyVerbosityDrivesKlog(t *testing.T) {
 		t.Error("-v 4 enabled level 5, so the level is not being honoured")
 	}
 
-	if err := cli.ApplyVerbosity(0); err != nil {
-		t.Fatalf("ApplyVerbosity(0): %v", err)
+	if err := options.ApplyVerbosity(0); err != nil {
+		t.Fatalf("options.ApplyVerbosity(0): %v", err)
 	}
 	if lowered := klog.V(4); lowered.Enabled() {
 		t.Error("verbosity could not be lowered again")
@@ -133,13 +134,13 @@ func TestApplyVerbosityDrivesKlog(t *testing.T) {
 // TestGlobalFlagDefaults pins what an invocation with no flags means.
 func TestGlobalFlagDefaults(t *testing.T) {
 	io, _, _ := streams()
-	_, flags := cli.NewRootCommand(cli.StandaloneName, io)
+	_, flags := cli.NewRootCommand(options.StandaloneName, io)
 
-	if flags.Output != cli.OutputTable {
-		t.Errorf("default --output = %q, want %q", flags.Output, cli.OutputTable)
+	if flags.Output != options.OutputTable {
+		t.Errorf("default --output = %q, want %q", flags.Output, options.OutputTable)
 	}
-	if flags.Color != cli.ColorAuto {
-		t.Errorf("default --color = %q, want %q", flags.Color, cli.ColorAuto)
+	if flags.Color != options.ColorAuto {
+		t.Errorf("default --color = %q, want %q", flags.Color, options.ColorAuto)
 	}
 	if flags.ClusterID != "" {
 		t.Errorf("default --cluster-id = %q, want empty so Task 11.2 can resolve it", flags.ClusterID)

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
@@ -110,7 +111,7 @@ func describeRule(interval query.ScopeInterval) string {
 // explainEmpty turns an empty timeline into the reason for it.
 //
 // The error it returns is the no-coverage finding, wrapping query.ErrNoCoverage
-// so that ExitCodeFor gives it exit code 3 without this call site having to know
+// so that exit.CodeFor gives it exit code 3 without this call site having to know
 // the number. Everything else is a notice: the command succeeded, and what it
 // found was silence with an explanation attached.
 func explainEmpty(
@@ -120,7 +121,7 @@ func explainEmpty(
 		return nil, nil
 	}
 	object := describeObject(request.Ref)
-	window := DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to)
 
 	if coverage.Gap != nil {
 		return []render.Notice{{

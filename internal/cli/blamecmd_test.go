@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 )
 
 // The surface of `blame`: what it refuses before it opens anything, and the code
@@ -79,8 +80,8 @@ func TestBlameRefusesMalformedInvocations(t *testing.T) {
 			io, out, errOut := streams()
 			code := cli.Run(append([]string{"kuberecord"}, test.argv...), io)
 
-			if code != cli.ExitUsageError {
-				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, cli.ExitUsageError, errOut.String())
+			if code != exit.UsageError {
+				t.Errorf("exit code %d, want %d.\nstderr:\n%s", code, exit.UsageError, errOut.String())
 			}
 			if !strings.Contains(errOut.String(), test.want) {
 				t.Errorf("the message does not explain the mistake.\nwant it to contain %q\ngot:\n%s",
@@ -99,7 +100,7 @@ func TestBlameRefusesMalformedInvocations(t *testing.T) {
 // invoke, because all of them are about a rejection.
 func TestBlameIsInTheCommandTree(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "--help"}, io); code != exit.Success {
 		t.Fatalf("`--help` exited %d", code)
 	}
 	if !strings.Contains(out.String(), "blame") {
@@ -116,7 +117,7 @@ func TestBlameIsInTheCommandTree(t *testing.T) {
 // changes made to another that wore the same name.
 func TestBlameHelpNamesEveryFlagTheTaskRequires(t *testing.T) {
 	io, out, _ := streams()
-	if code := cli.Run([]string{"kuberecord", "blame", "--help"}, io); code != cli.ExitSuccess {
+	if code := cli.Run([]string{"kuberecord", "blame", "--help"}, io); code != exit.Success {
 		t.Fatalf("`blame --help` exited %d", code)
 	}
 

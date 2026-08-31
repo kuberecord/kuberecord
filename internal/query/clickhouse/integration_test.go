@@ -74,8 +74,14 @@ func TestQueryConformanceIntegration(t *testing.T) {
 			t.Fatalf("building an engine over the integration connection: %v", err)
 		}
 		return conformance.Harness{
-			Engine:         engine,
-			Seed:           func(h conformance.History) error { return seedServer(t, conn, h) },
+			Engine: engine,
+			Seed:   func(h conformance.History) error { return seedServer(t, conn, h) },
+			// The corpus becomes rows in the shipped tables, through the same INSERT
+			// the history fixtures travel: the flush labels carry nothing this
+			// backend stores, so the row rendering is the whole of the translation.
+			SeedCorpus: func(c conformance.Corpus) error {
+				return seedServer(t, conn, c.History())
+			},
 			SetStreamFault: faulting.setFault,
 			Capabilities:   fakeCapabilities(),
 		}

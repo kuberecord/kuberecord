@@ -14,7 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+// Package exit holds the CLI's exit contract: the 0/1/2/3 codes, the error type
+// that carries one, and the single function that turns a returned error into a
+// process exit status.
+//
+// It is the bottom of the CLI's dependency order. Every other package under
+// internal/cli — options, resolve, coldscan, replay, render and the command tree
+// itself — may depend on it, and it depends on none of them. That direction is
+// the whole point: the exit contract is one contract (Task 11.8), and a second
+// copy of UsageErrorf living beside a command would be a second opinion about
+// what "exit 2" means, arrived at without anyone deciding to have one.
+//
+// The read plane is the one dependency it does have. query.ErrNoCoverage is the
+// backend-independent sentinel for "nothing was watching", and mapping it to a
+// code here rather than at each call site is what makes Invariant 9's exit
+// contract something a command inherits rather than something it remembers.
+package exit
 
 import (
 	"errors"
@@ -28,7 +43,7 @@ import (
 // code that changes meaning between versions silently changes what that script
 // does. They are documented in `--help` for the same reason.
 //
-// The interesting one is ExitNoCoverage. Every other CLI in this space collapses
+// The interesting one is NoCoverage. Every other CLI in this space collapses
 // "your query matched nothing" and "nothing was ever watching that object" into
 // a single successful empty result, and that collapse is precisely what
 // Invariant 9 forbids: an engineer who greps for a deployment that was never in
@@ -36,27 +51,27 @@ import (
 // that nothing happened to it. Giving it a code of its own means a script can
 // tell the two apart without parsing prose.
 const (
-	// ExitSuccess is a completed command. For `diff --exit-code` (Task 11.4) it
+	// Success is a completed command. For `diff --exit-code` (Task 11.4) it
 	// additionally means "no changes", which is why that flag is opt-in: it
 	// overloads a code that otherwise only means success.
-	ExitSuccess = 0
+	Success = 0
 
-	// ExitRuntimeError is a well-formed invocation that could not be carried
+	// RuntimeError is a well-formed invocation that could not be carried
 	// out: a backend that would not answer, a kind this cluster does not serve,
 	// a reconstruction that disagreed with its recorded hash.
-	ExitRuntimeError = 1
+	RuntimeError = 1
 
-	// ExitUsageError is a malformed invocation — an unknown flag, an
+	// UsageError is a malformed invocation — an unknown flag, an
 	// unparseable object address, a flag value outside its documented set. It is
-	// distinct from ExitRuntimeError because a script that retries on failure
+	// distinct from RuntimeError because a script that retries on failure
 	// should retry a backend timeout and must not retry a typo.
-	ExitUsageError = 2
+	UsageError = 2
 
-	// ExitNoCoverage means the request was well formed and the backend answered,
+	// NoCoverage means the request was well formed and the backend answered,
 	// and the answer was that no watch scope ever covered the requested object.
 	// It is not an error in the backend and not an empty result: it is the
 	// finding that kuberecord was not looking (Invariant 9).
-	ExitNoCoverage = 3
+	NoCoverage = 3
 )
 
 // Error is an error carrying the exit code the process should end with.
@@ -96,31 +111,31 @@ func (e *Error) Unwrap() error { return e.Err }
 // naming this type.
 func (e *Error) ExitCode() int { return e.Code }
 
-// UsageErrorf reports a malformed invocation: exit code ExitUsageError, and the
+// UsageErrorf reports a malformed invocation: exit code UsageError, and the
 // command's usage block printed after the message.
 func UsageErrorf(format string, args ...any) error {
-	return &Error{Code: ExitUsageError, Err: fmt.Errorf(format, args...)}
+	return &Error{Code: UsageError, Err: fmt.Errorf(format, args...)}
 }
 
 // RuntimeErrorf reports a well-formed invocation that failed: exit code
-// ExitRuntimeError, message only.
+// RuntimeError, message only.
 //
 // It exists mainly for symmetry and for call sites that want the code stated
-// rather than inferred; an uncoded error already resolves to ExitRuntimeError.
+// rather than inferred; an uncoded error already resolves to RuntimeError.
 func RuntimeErrorf(format string, args ...any) error {
-	return &Error{Code: ExitRuntimeError, Err: fmt.Errorf(format, args...)}
+	return &Error{Code: RuntimeError, Err: fmt.Errorf(format, args...)}
 }
 
-// ExitCodeFor is the single place a returned error becomes a process exit code.
+// CodeFor is the single place a returned error becomes a process exit code.
 //
 // The order of the two checks is deliberate. An explicit *Error wins over the
 // inferred mapping below it, so a command that has decided a missing-coverage
 // condition is really a runtime failure in its context can say so and be
 // believed. Only when nothing has decided does the sentinel from the read-plane
 // contract get to speak for itself.
-func ExitCodeFor(err error) int {
+func CodeFor(err error) int {
 	if err == nil {
-		return ExitSuccess
+		return Success
 	}
 
 	var coded *Error
@@ -134,8 +149,8 @@ func ExitCodeFor(err error) int {
 	// means a command added later inherits Invariant 9's exit contract by
 	// returning the sentinel the contract already defines.
 	if errors.Is(err, query.ErrNoCoverage) {
-		return ExitNoCoverage
+		return NoCoverage
 	}
 
-	return ExitRuntimeError
+	return RuntimeError
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package replay
 
 import (
 	"encoding/json"
@@ -91,8 +91,8 @@ type fieldEntry struct {
 	removed bool
 }
 
-// attribution is the outcome of replaying a consecutive run of history forward.
-type attribution struct {
+// Attribution is the outcome of replaying a consecutive run of history forward.
+type Attribution struct {
 	// writes is the last write of every pointer the run touched.
 	writes map[string]fieldWrite
 
@@ -104,22 +104,28 @@ type attribution struct {
 	// field list it yields describes an earlier instant than the attribution does.
 	stale bool
 
-	// notices are the qualifications the replay produced, in order.
-	notices []render.Notice
+	// Notices are the qualifications the replay produced, in order.
+	//
+	// They are exported because they are half the result: a field list that
+	// stopped being maintained part way through is still worth printing, and it
+	// is only honest if the caller prints the reason beside it (Invariant 5).
+	// Returning the rows without them would let a command render a degraded
+	// answer as a complete one.
+	Notices []render.Notice
 }
 
-// attributeRun replays rows over seed and records the last write of every field.
+// AttributeRun replays rows over seed and records the last write of every field.
 //
 // rows must be in ascending timestamp order — the order history happened in —
 // and must be one incarnation's consecutive run. Both are the caller's to
-// guarantee for the reason priorValues states: a replay walked backwards, or over
+// guarantee for the reason PriorValues states: a replay walked backwards, or over
 // a filtered slice, produces plausible nonsense.
 //
 // seed is the state as it stood immediately before the first row, or nil when
 // none could be established. A nil seed is not a failure: the fields the window's
 // own patches name are still attributable, and the caller says what was lost.
-func attributeRun(seed []byte, rows []render.TimelineRow) attribution {
-	result := attribution{writes: map[string]fieldWrite{}, state: seed}
+func AttributeRun(seed []byte, rows []render.TimelineRow) Attribution {
+	result := Attribution{writes: map[string]fieldWrite{}, state: seed}
 
 	for _, row := range rows {
 		if row.Change.EventType == query.EventKubernetes {
@@ -129,7 +135,7 @@ func attributeRun(seed []byte, rows []render.TimelineRow) attribution {
 			continue
 		}
 		if row.Change.EventType == query.EventDeleted {
-			result.notices = append(result.notices, render.Notice{
+			result.Notices = append(result.Notices, render.Notice{
 				Text: fmt.Sprintf("this incarnation was deleted at %s, so the fields below are what it "+
 					"held immediately before the deletion rather than what it holds now",
 					render.FormatInstant(row.Change.TS)),
@@ -143,7 +149,7 @@ func attributeRun(seed []byte, rows []render.TimelineRow) attribution {
 }
 
 // record attributes one row and advances the state past it.
-func (a *attribution) record(row render.TimelineRow) {
+func (a *Attribution) record(row render.TimelineRow) {
 	write := fieldWrite{
 		ts:              row.Change.TS,
 		actors:          row.Change.Actors,
@@ -158,7 +164,7 @@ func (a *attribution) record(row render.TimelineRow) {
 		// so is the whole of what can be done honestly: attributing nothing leaves
 		// those fields credited to an earlier writer, and the notice is what stops a
 		// reader believing that credit.
-		a.notices = append(a.notices, render.Notice{
+		a.Notices = append(a.Notices, render.Notice{
 			Text: fmt.Sprintf("the patch recorded at %s could not be decoded (%s), so the fields it "+
 				"moved are still attributed to whatever wrote them before it",
 				render.FormatInstant(row.Change.TS), row.PatchErr),
@@ -181,7 +187,7 @@ func (a *attribution) record(row render.TimelineRow) {
 
 // recordFullState attributes the leaves a full-state row changed, added or
 // dropped.
-func (a *attribution) recordFullState(data string, write fieldWrite) {
+func (a *Attribution) recordFullState(data string, write fieldWrite) {
 	var next any
 	if err := json.Unmarshal([]byte(data), &next); err != nil {
 		// Recorded state is JSON by construction, so this is handled rather than
@@ -222,7 +228,7 @@ func (a *attribution) recordFullState(data string, write fieldWrite) {
 // attribution after it is still sound — a patch names the paths it writes whether
 // or not it applies — so what is lost is the field list, and that is what the
 // notice says.
-func (a *attribution) advance(row render.TimelineRow) {
+func (a *Attribution) advance(row render.TimelineRow) {
 	if row.Change.Data != "" {
 		a.state, a.stale = []byte(row.Change.Data), false
 		return
@@ -240,7 +246,7 @@ func (a *attribution) advance(row render.TimelineRow) {
 		}
 	}
 	a.stale = true
-	a.notices = append(a.notices, render.Notice{
+	a.Notices = append(a.Notices, render.Notice{
 		Text: fmt.Sprintf("the fields listed below are the ones the object held at %s: the patch "+
 			"recorded there did not apply to the reconstructed state (%v), so anything added or "+
 			"removed after it is missing from the list. The attribution of the fields that are "+
@@ -249,13 +255,13 @@ func (a *attribution) advance(row render.TimelineRow) {
 	})
 }
 
-// blameRows turns the attribution into the rows a table or an envelope renders.
+// BlameRows turns the attribution into the rows a table or an envelope renders.
 //
 // fields narrows to the paths asked for and depth collapses what is left, in that
 // order: collapsing first would decide which rows exist from paths the reader
 // never asked about, and a --field under the collapse depth would then select
 // nothing.
-func (a attribution) blameRows(fields []string, depth int) []render.BlameRow {
+func (a Attribution) BlameRows(fields []string, depth int) []render.BlameRow {
 	entries := a.entries()
 	rows := make([]render.BlameRow, 0, len(entries))
 	index := map[string]int{}
@@ -292,7 +298,7 @@ func (a attribution) blameRows(fields []string, depth int) []render.BlameRow {
 // "the last time anything under here moved". A tie is broken towards the write
 // already held, so that two operations of one change — which share a timestamp to
 // the nanosecond — cannot make the row depend on map iteration order.
-func (a attribution) applyWrite(row *render.BlameRow, pointer string) {
+func (a Attribution) applyWrite(row *render.BlameRow, pointer string) {
 	write, found := a.lastWrite(pointer)
 	if !found || (row.Attributed && !write.ts.After(row.TS)) {
 		return
@@ -323,7 +329,7 @@ func (a attribution) applyWrite(row *render.BlameRow, pointer string) {
 // A tie is broken towards the shallower pointer, so that two operations of one
 // change — which share a timestamp to the nanosecond — cannot make the row depend
 // on map iteration order.
-func (a attribution) lastWrite(pointer string) (fieldWrite, bool) {
+func (a Attribution) lastWrite(pointer string) (fieldWrite, bool) {
 	var (
 		newest fieldWrite
 		at     string
@@ -372,7 +378,7 @@ func (a attribution) lastWrite(pointer string) (fieldWrite, bool) {
 // beneath it are already rows and listing the interior node as well would report
 // one change twice. It is skipped when an ancestor of it was removed, because that
 // ancestor's row already says the whole subtree went.
-func (a attribution) entries() []fieldEntry {
+func (a Attribution) entries() []fieldEntry {
 	var document any
 	known := false
 	if len(a.state) > 0 {
@@ -413,7 +419,7 @@ func (a attribution) entries() []fieldEntry {
 }
 
 // removedAncestor reports whether a strict ancestor of pointer was itself removed.
-func (a attribution) removedAncestor(pointer string) bool {
+func (a Attribution) removedAncestor(pointer string) bool {
 	for at := parentPointer(pointer); at != ""; at = parentPointer(at) {
 		if write, ok := a.writes[at]; ok && write.removed {
 			return true

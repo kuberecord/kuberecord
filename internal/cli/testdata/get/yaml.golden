@@ -50,4 +50,11 @@ metadata:
       rule_ref: ClusterStreamRule/all-workloads
       to: null
     summary: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+  reconstruction:
+    at: "2026-08-28T15:00:00Z"
+    base_event: Checkpoint
+    base_ts: "2026-08-28T14:05:02.117Z"
+    not_deployable: true
+    patches_applied: 0
+    reconstructed: true
 === stderr ===

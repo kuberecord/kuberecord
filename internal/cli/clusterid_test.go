@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,8 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
-
-	"github.com/kuberecord/kuberecord/internal/cli"
 )
 
 // The cluster identity is resolved by a five-step chain, and each step is asserted
@@ -51,8 +50,8 @@ const kubeconfigContext = "kuberecord-test"
 // clusterIDResolvedFrom runs a resolution over a local archive and returns the
 // identity and the notice explaining where it came from.
 func clusterIDResolvedFrom(
-	t *testing.T, cfg *cli.Config, clients *cli.Clients, archive string, args ...string,
-) (*cli.Backend, string, error) {
+	t *testing.T, cfg *resolve.Config, clients *resolve.Clients, archive string, args ...string,
+) (*resolve.Backend, string, error) {
 	t.Helper()
 
 	resolver, notices := resolverOver(t, cfg, clients, append([]string{"--source", archive}, args...)...)
@@ -81,7 +80,7 @@ func TestEachStepOfTheClusterIDChainAnswersOnItsOwn(t *testing.T) {
 
 	t.Run("2: the configuration file's context mapping", func(t *testing.T) {
 		archive := localArchive(t, "an-archive-holding-something-else")
-		cfg := &cli.Config{Contexts: map[string]string{kubeconfigContext: theCluster}}
+		cfg := &resolve.Config{Contexts: map[string]string{kubeconfigContext: theCluster}}
 
 		backend, notices, err := clusterIDResolvedFrom(t, cfg, fakeClients(nil), archive)
 		if err != nil {
@@ -155,15 +154,15 @@ func TestEachStepOfTheClusterIDChainAnswersOnItsOwn(t *testing.T) {
 // is an answer that looks entirely correct.
 func TestTheClusterIDChainIsConsultedInOrder(t *testing.T) {
 	archive := localArchive(t, "from-the-sink")
-	mapping := &cli.Config{Contexts: map[string]string{kubeconfigContext: "from-the-mapping"}}
-	withOperator := func() *cli.Clients {
+	mapping := &resolve.Config{Contexts: map[string]string{kubeconfigContext: "from-the-mapping"}}
+	withOperator := func() *resolve.Clients {
 		return fakeClients(nil, operatorDeployment(operatorNamespace, "from-the-operator"))
 	}
 
 	tests := []struct {
 		name    string
-		config  *cli.Config
-		clients *cli.Clients
+		config  *resolve.Config
+		clients *resolve.Clients
 		args    []string
 		want    string
 	}{

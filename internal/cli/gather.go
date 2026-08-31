@@ -25,7 +25,11 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/replay"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -99,7 +103,7 @@ type gatherResult struct {
 // is consulted on every invocation rather than only on an empty one — because a
 // timeline whose rows stop at a scope's edge is as misleading as an empty one.
 func gatherChanges(
-	ctx context.Context, backend *Backend, request TimelineRequest,
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams,
 ) (gatherResult, error) {
 	var result gatherResult
@@ -112,12 +116,12 @@ func gatherChanges(
 	// Before the first query rather than before the timeline query: listing the
 	// incarnations costs the same partitions, so a guard placed after it would
 	// narrate the second scan of a question that had already silently run one.
-	scan, err := beginColdScan(ctx, backend, request, from, to, streams)
+	scan, err := coldscan.Begin(ctx, backend, request.Scan, request.Ref.ClusterID, from, to, streams)
 	if err != nil {
 		return gatherResult{}, err
 	}
-	defer scan.stop()
-	ctx = scan.ctx
+	defer scan.Stop()
+	ctx = scan.Ctx
 
 	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
 	result.Notices = append(result.Notices, selectionNotices...)
@@ -128,7 +132,7 @@ func gatherChanges(
 	if err != nil {
 		return gatherResult{}, timelineQueryError(ctx, request, err)
 	}
-	result.Rows = decodeRows(changes)
+	result.Rows = replay.DecodeRows(changes)
 	if request.AllIncarnations && len(result.Incarnations) == 0 {
 		// The listing failed, and a table that may span several incarnations must
 		// still carry the column that tells them apart (Invariant 7). The rows
@@ -219,7 +223,7 @@ func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, s
 		return render.Notice{
 			Text: fmt.Sprintf("%d changes are recorded for %s in %s, and none of them touched %s; "+
 				"the window itself is not empty", scanned, describeObject(request.Ref),
-				DescribeWindow(from, to), paths),
+				options.DescribeWindow(from, to), paths),
 			Warning: true,
 		}
 	}

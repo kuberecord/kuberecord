@@ -18,6 +18,14 @@
           "to": null
         }
       ]
+    },
+    "reconstruction": {
+      "reconstructed": true,
+      "not_deployable": true,
+      "at": "2026-08-28T15:00:00Z",
+      "base_ts": "2026-08-28T14:05:02.117Z",
+      "base_event": "Checkpoint",
+      "patches_applied": 0
     }
   },
   "items": [

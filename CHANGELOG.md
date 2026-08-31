@@ -18,6 +18,27 @@ than a summary of them.
 
 ### Added
 
+- **`kubectl kuberecord get` now marks a reconstruction in its structured output.**
+  The `Object` envelope's `metadata` carries a `reconstruction` block —
+  `reconstructed`, `not_deployable`, `at`, `base_ts`, `base_event` and
+  `patches_applied` — in `-o json`, `-o jsonl` and `-o yaml` alike.
+
+  The "NOT A DEPLOYABLE MANIFEST" header is unchanged and still mandatory, but for
+  the JSON formats it travels on **stderr**, because neither format has a comment
+  syntax and putting it on stdout would break the `jq` it exists to keep working.
+  That left the warning on a stream `2>/dev/null` discards and a pipe never reads:
+  `get … -o json | jq '.items[0].object'` handed a script a reconstructed document
+  with nothing in its input saying it was one. The marker is those same facts as
+  fields, on stdout, so a consumer can refuse to apply what it was given —
+  `jq -e '.metadata.reconstruction.not_deployable'` — without parsing prose.
+
+  **Additive and backward compatible.** No existing field changed name, type or
+  meaning; the key is absent from `Timeline`, `Diff`, `Coverage` and `Blame`
+  envelopes, whose output is byte-identical; the `-o yaml` comment header is
+  byte-identical; and the CLI output contract stays `cli.kuberecord.io/v1alpha1`,
+  whose policy has always been that fields may be added and that a consumer
+  ignores what it does not recognize. See
+  [`docs/CLI.md`](docs/CLI.md#metadatareconstruction-on-get).
 - The Helm chart is published as an OCI artifact at
   `oci://ghcr.io/kuberecord/charts/kuberecord`, signed with the same keyless
   cosign identity as the image. `helm install
@@ -35,6 +56,29 @@ than a summary of them.
 
 ### Fixed
 
+- **A cold scan whose size could not be estimated now asks before it runs, however
+  narrow the window.** `kubectl kuberecord timeline`, `diff` and `blame` route an
+  un-estimatable scan through the same confirmation as a wide one, because a
+  listing that failed is not evidence of a small scan — it is the absence of
+  evidence, and the window stops being a proxy for cost the moment the listing that
+  measures it is unreliable. Previously the width alone decided, so a narrow
+  question against an archive whose listing had failed ran unbounded and unasked,
+  with only the opt-in `--max-objects` between it and the whole bucket: the
+  invocation the CLI knew least about was the one it asked the least about.
+
+  The prompt says the size could not be determined, so the decision is visibly one
+  made without a figure, and the notice above it still names the underlying
+  estimator error. Refusing it stops with the same message and the same exit code as
+  refusing a wide scan.
+
+  **Only observable on a terminal.** `--yes` and a non-interactive invocation
+  proceed without prompting exactly as before — a CLI that blocks in a pipeline
+  would be a worse defect than the one this fixes — and a non-interactive one now
+  prints the same "the confirmation was assumed" line it already printed for a wide
+  window. An indexed backend such as ClickHouse is untouched: there is nothing to
+  estimate and nothing to confirm. `--max-objects` behaviour is unchanged, and a
+  confirmed scan carries no implicit ceiling. See
+  [`docs/CLI.md`](docs/CLI.md#cold-scans).
 - **A change to an object carrying a map key that is the empty string is now
   recorded as full state instead of as a diff.** The two RFC 6902 implementations
   either side of the `diff` column disagreed about RFC 6901's *empty reference

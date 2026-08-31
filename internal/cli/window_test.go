@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 )
 
 // TestParseInstantReadsBothGrammars covers the one flag that takes either a
@@ -58,12 +60,12 @@ func TestParseInstantReadsBothGrammars(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := cli.ParseInstant(test.given, now)
+			got, err := options.ParseInstant(test.given, now)
 			if err != nil {
-				t.Fatalf("ParseInstant(%q): %v", test.given, err)
+				t.Fatalf("options.ParseInstant(%q): %v", test.given, err)
 			}
 			if !got.Equal(test.want) {
-				t.Errorf("ParseInstant(%q) = %s, want %s", test.given, got, test.want)
+				t.Errorf("options.ParseInstant(%q) = %s, want %s", test.given, got, test.want)
 			}
 		})
 	}
@@ -78,10 +80,10 @@ func TestParseInstantRejectsWhatItCannotRead(t *testing.T) {
 
 	for _, given := range []string{"", "   ", "yesterday", "3 days", "6hours", "-2h", "2026-13-45"} {
 		t.Run(given, func(t *testing.T) {
-			if _, err := cli.ParseInstant(given, now); err == nil {
-				t.Fatalf("ParseInstant(%q) was accepted", given)
-			} else if code := cli.ExitCodeFor(err); code != cli.ExitUsageError {
-				t.Errorf("ParseInstant(%q) failed with exit code %d, want %d", given, code, cli.ExitUsageError)
+			if _, err := options.ParseInstant(given, now); err == nil {
+				t.Fatalf("options.ParseInstant(%q) was accepted", given)
+			} else if code := exit.CodeFor(err); code != exit.UsageError {
+				t.Errorf("options.ParseInstant(%q) failed with exit code %d, want %d", given, code, exit.UsageError)
 			}
 		})
 	}
@@ -107,8 +109,8 @@ func TestDescribeWindow(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := cli.DescribeWindow(test.from, test.to); got != test.want {
-				t.Errorf("DescribeWindow = %q, want %q", got, test.want)
+			if got := options.DescribeWindow(test.from, test.to); got != test.want {
+				t.Errorf("options.DescribeWindow = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -138,8 +140,8 @@ func TestWindowAliasesAreWiredIntoEveryCommandThatTakesAWindow(t *testing.T) {
 				code := cli.Run(append([]string{"kuberecord"},
 					append(slices.Clone(argv), "--from", "2026-08-20", "--to", "2026-08-01")...), io)
 
-				if code != cli.ExitUsageError {
-					t.Errorf("exit code %d, want %d", code, cli.ExitUsageError)
+				if code != exit.UsageError {
+					t.Errorf("exit code %d, want %d", code, exit.UsageError)
 				}
 				if !strings.Contains(errOut.String(), "ends before it starts") {
 					t.Errorf("--from/--to did not reach the window parser:\n%s", errOut.String())
@@ -154,8 +156,8 @@ func TestWindowAliasesAreWiredIntoEveryCommandThatTakesAWindow(t *testing.T) {
 				code := cli.Run(append([]string{"kuberecord"},
 					append(slices.Clone(argv), "--since", "3d", "--from", "6h")...), io)
 
-				if code != cli.ExitUsageError {
-					t.Errorf("exit code %d, want %d", code, cli.ExitUsageError)
+				if code != exit.UsageError {
+					t.Errorf("exit code %d, want %d", code, exit.UsageError)
 				}
 				if !strings.Contains(errOut.String(), "same bound") {
 					t.Errorf("the conflict was not reported:\n%s", errOut.String())
@@ -164,7 +166,7 @@ func TestWindowAliasesAreWiredIntoEveryCommandThatTakesAWindow(t *testing.T) {
 
 			t.Run("the help names both spellings", func(t *testing.T) {
 				io, out, _ := streams()
-				if code := cli.Run([]string{"kuberecord", argv[0], "--help"}, io); code != cli.ExitSuccess {
+				if code := cli.Run([]string{"kuberecord", argv[0], "--help"}, io); code != exit.Success {
 					t.Fatalf("`%s --help` exited %d", argv[0], code)
 				}
 				for _, flag := range []string{"--since", "--until", "--from", "--to"} {

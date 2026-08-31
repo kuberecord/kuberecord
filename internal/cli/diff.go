@@ -25,7 +25,11 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 )
 
 // `diff` is the detail view, once `timeline` has named a suspect.
@@ -66,7 +70,7 @@ type diffFlags struct {
 
 // newDiffCommand builds `diff`.
 func newDiffCommand(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	local := &diffFlags{limit: defaultLimit}
 
@@ -89,7 +93,7 @@ fields shows the first of them and counts the rest; --full prints everything.
 
 An empty result is never presented on its own. It is explained against the watch
 scopes that were open at the time: "nothing changed" and "nothing was watching"
-are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
+are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
 		Example: `  # What actually changed on this Deployment in the last two hours.
   kuberecord diff deploy/checkout -n payments --since 2h
 
@@ -130,7 +134,7 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
 	command.Flags().BoolVar(&local.exitCode, "exit-code", local.exitCode,
 		fmt.Sprintf("Exit %d when there are no changes and %d when there are, as `git diff` does. "+
 			"Exit %d still means nothing was ever watching.",
-			ExitSuccess, ExitRuntimeError, ExitNoCoverage))
+			exit.Success, exit.RuntimeError, exit.NoCoverage))
 
 	return command
 }
@@ -138,7 +142,7 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
 // runDiffCommand turns one invocation into a request, opens the backend, and runs
 // it.
 func runDiffCommand(
-	ctx context.Context, flags *GlobalFlags, local *diffFlags,
+	ctx context.Context, flags *options.GlobalFlags, local *diffFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
 	structured, err := diffFormat(flags.Output)
@@ -150,7 +154,7 @@ func runDiffCommand(
 		return err
 	}
 	if local.limit < 0 {
-		return UsageErrorf("--limit %d is negative; zero means no limit", local.limit)
+		return exit.UsageErrorf("--limit %d is negative; zero means no limit", local.limit)
 	}
 
 	now := time.Now()
@@ -178,7 +182,7 @@ func runDiffCommand(
 			Limit:             local.limit,
 			Reverse:           local.reverse,
 			Structured:        structured,
-			Scan:              scanOptions(flags, streams),
+			Scan:              coldscan.OptionsFrom(flags, streams),
 		},
 		ExitCode: local.exitCode,
 	}
@@ -193,33 +197,33 @@ func runDiffCommand(
 // the way it does everywhere else, and `table` is in the list only because it is
 // the global default a user who typed no -o at all arrives with — refusing that
 // would make a bare `kuberecord diff` a usage error.
-func diffFormat(format OutputFormat) (render.StructuredFormat, error) {
+func diffFormat(format options.OutputFormat) (render.StructuredFormat, error) {
 	switch format {
-	case OutputTable, OutputWide, OutputDiff:
+	case options.OutputTable, options.OutputWide, options.OutputDiff:
 		return "", nil
 	}
 	structured, ok := structuredFormat(format)
 	if !ok {
-		return "", UsageErrorf("diff cannot render %s", format)
+		return "", exit.UsageErrorf("diff cannot render %s", format)
 	}
 	return structured, nil
 }
 
 // diffRenderOptions decides how the document will look.
 func diffRenderOptions(
-	flags *GlobalFlags, local *diffFlags, streams genericiooptions.IOStreams,
+	flags *options.GlobalFlags, local *diffFlags, streams genericiooptions.IOStreams,
 ) render.Options {
 	return render.Options{
-		Width: TerminalWidth(streams.Out),
-		Color: ShouldColorize(flags.Color, streams.Out),
-		Wide:  flags.Output == OutputWide,
+		Width: options.TerminalWidth(streams.Out),
+		Color: options.ShouldColorize(flags.Color, streams.Out),
+		Wide:  flags.Output == options.OutputWide,
 		Full:  local.full,
 	}
 }
 
 // DiffRequest is one `diff` invocation, resolved.
 //
-// It is exported, and RunDiff takes an already-opened Backend, for the reason
+// It is exported, and RunDiff takes an already-opened resolve.Backend, for the reason
 // TimelineRequest is: the whole of the command's behaviour is then reachable from
 // a test holding a fake QueryEngine, rather than only from a test that can reach a
 // kubeconfig and a live sink.
@@ -237,7 +241,7 @@ type DiffRequest struct {
 // RunDiff answers one diff request against an opened backend and renders the
 // result.
 func RunDiff(
-	ctx context.Context, backend *Backend, request DiffRequest,
+	ctx context.Context, backend *resolve.Backend, request DiffRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
@@ -262,7 +266,7 @@ func RunDiff(
 		return gathered.Empty
 	}
 	if request.ExitCode && changed {
-		return &Error{Code: ExitRuntimeError, Quiet: true, Err: errChangesFound}
+		return &exit.Error{Code: exit.RuntimeError, Quiet: true, Err: errChangesFound}
 	}
 	return nil
 }
@@ -274,7 +278,7 @@ func RunDiff(
 // of the two, since the hunk view elides long values and caps the operations it
 // prints while an envelope carries every one of them.
 func writeDiffAnswer(
-	backend *Backend, request DiffRequest, gathered gatherResult, notices []render.Notice,
+	backend *resolve.Backend, request DiffRequest, gathered gatherResult, notices []render.Notice,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	if request.Timeline.Structured == "" {
@@ -288,7 +292,7 @@ func writeDiffAnswer(
 			Notices:  notices,
 		}
 		if err := render.WriteDiff(streams.Out, streams.ErrOut, document, opts); err != nil {
-			return RuntimeErrorf("%w", err)
+			return exit.RuntimeErrorf("%w", err)
 		}
 		return nil
 	}
@@ -297,13 +301,13 @@ func writeDiffAnswer(
 		streams.Out, request.Timeline.Structured,
 		envelopeHead(backend, render.KindDiff, gathered.Coverage))
 	if err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	if err := writeItems(stream, diffItems(gathered.Rows)); err != nil {
 		return err
 	}
 	if err := render.WriteNotices(streams.ErrOut, notices, opts); err != nil {
-		return RuntimeErrorf("%w", err)
+		return exit.RuntimeErrorf("%w", err)
 	}
 	return nil
 }
@@ -338,7 +342,7 @@ var errChangesFound = errors.New("changes were found and --exit-code was request
 func changesFoundNotice(count int) render.Notice {
 	return render.Notice{Text: fmt.Sprintf(
 		"%d %s shown; --exit-code reports that as exit %d, the way `git diff` does. "+
-			"It is not a failure", count, plural(count, "change"), ExitRuntimeError)}
+			"It is not a failure", count, plural(count, "change"), exit.RuntimeError)}
 }
 
 // plural spells a count's noun so a notice reads as a sentence.

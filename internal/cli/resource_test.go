@@ -28,6 +28,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -146,9 +147,9 @@ func TestParseResourceArg(t *testing.T) {
 				}
 				// A malformed address must never be a runtime error: a script
 				// that retries on failure should not retry a typo.
-				if code := cli.ExitCodeFor(err); code != cli.ExitUsageError {
+				if code := exit.CodeFor(err); code != exit.UsageError {
 					t.Errorf("ParseResourceArg(%q) error carries exit code %d, want %d (%v)",
-						test.args, code, cli.ExitUsageError, err)
+						test.args, code, exit.UsageError, err)
 				}
 				return
 			}
@@ -322,8 +323,8 @@ func TestResolveUnknownResource(t *testing.T) {
 			// A kind the cluster does not serve is a well-formed request that
 			// could not be carried out, which is exit 1 and not exit 2 — the
 			// same classification kubectl makes.
-			if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-				t.Errorf("exit code for %q = %d, want %d", test.resource, code, cli.ExitRuntimeError)
+			if code := exit.CodeFor(err); code != exit.RuntimeError {
+				t.Errorf("exit code for %q = %d, want %d", test.resource, code, exit.RuntimeError)
 			}
 			if unknown.Unwrap() == nil {
 				t.Error("the mapper's own verdict was dropped, so -v can show nothing useful")

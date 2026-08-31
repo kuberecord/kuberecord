@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package resolve
 
 import (
 	"context"
@@ -33,6 +33,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 )
 
 // Discovery reads the sink custom resources through the kubeconfig, and it is the
@@ -68,11 +70,6 @@ const (
 
 // sinkKinds is the accepted set, in the order it is shown to a user.
 var sinkKinds = []string{KindClickHouseSink, KindS3Sink}
-
-// DefaultOperatorNamespace is where the operator is installed by both the chart
-// and the kustomize overlay, and therefore where its credentials Secrets live
-// unless somebody moved them.
-const DefaultOperatorNamespace = "kuberecord-system"
 
 // operatorSelector finds the operator's Deployment.
 //
@@ -141,7 +138,7 @@ func (s SinkRef) String() string { return s.Kind + "/" + s.Name }
 func ParseSinkRef(value string) (SinkRef, error) {
 	kind, name, found := strings.Cut(value, "/")
 	if !found || kind == "" || name == "" {
-		return SinkRef{}, UsageErrorf(
+		return SinkRef{}, exit.UsageErrorf(
 			"malformed --sink %q: expected <kind>/<name>, for example %s/default",
 			value, KindClickHouseSink)
 	}
@@ -152,7 +149,7 @@ func ParseSinkRef(value string) (SinkRef, error) {
 			return SinkRef{Kind: known, Name: name}, nil
 		}
 	}
-	return SinkRef{}, UsageErrorf("--sink names the kind %q, which is not one of %s",
+	return SinkRef{}, exit.UsageErrorf("--sink names the kind %q, which is not one of %s",
 		kind, strings.Join(sinkKinds, ", "))
 }
 
@@ -164,7 +161,7 @@ func gvrFor(kind string) (schema.GroupVersionResource, error) {
 	case KindS3Sink:
 		return s3SinkGVR, nil
 	}
-	return schema.GroupVersionResource{}, UsageErrorf("no sink kind named %q; one of %s",
+	return schema.GroupVersionResource{}, exit.UsageErrorf("no sink kind named %q; one of %s",
 		kind, strings.Join(sinkKinds, ", "))
 }
 
@@ -242,17 +239,17 @@ type sinkCandidate struct {
 // a next step.
 func (r *BackendResolver) classifySinkAccess(err error, what string) error {
 	if apierrors.IsForbidden(err) {
-		return RuntimeErrorf("cannot %s (forbidden); read an archive directly with --%s, "+
-			"or configure a profile with `%s config set-profile`", what, FlagSource, r.commandName())
+		return exit.RuntimeErrorf("cannot %s (forbidden); read an archive directly with --%s, "+
+			"or configure a profile with `%s config set-profile`", what, options.FlagSource, r.commandName())
 	}
-	return RuntimeErrorf("cannot %s: %w", what, err)
+	return exit.RuntimeErrorf("cannot %s: %w", what, err)
 }
 
 // decodeClickHouseSink converts a discovered object into the published API type.
 func decodeClickHouseSink(object *unstructured.Unstructured) (*v1alpha1.ClickHouseSink, error) {
 	var sink v1alpha1.ClickHouseSink
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &sink); err != nil {
-		return nil, RuntimeErrorf("decoding %s/%s: %w", KindClickHouseSink, object.GetName(), err)
+		return nil, exit.RuntimeErrorf("decoding %s/%s: %w", KindClickHouseSink, object.GetName(), err)
 	}
 	return &sink, nil
 }
@@ -261,7 +258,7 @@ func decodeClickHouseSink(object *unstructured.Unstructured) (*v1alpha1.ClickHou
 func decodeS3Sink(object *unstructured.Unstructured) (*v1alpha1.S3Sink, error) {
 	var sink v1alpha1.S3Sink
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &sink); err != nil {
-		return nil, RuntimeErrorf("decoding %s/%s: %w", KindS3Sink, object.GetName(), err)
+		return nil, exit.RuntimeErrorf("decoding %s/%s: %w", KindS3Sink, object.GetName(), err)
 	}
 	return &sink, nil
 }
@@ -294,13 +291,13 @@ func (r *BackendResolver) secretData(ctx context.Context, ref v1alpha1.SecretRef
 	secret, err := clients.Typed.CoreV1().Secrets(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsForbidden(err):
-		return nil, RuntimeErrorf("cannot read Secret %s/%s (forbidden); configure a profile with "+
+		return nil, exit.RuntimeErrorf("cannot read Secret %s/%s (forbidden); configure a profile with "+
 			"`%s config set-profile`", namespace, ref.Name, r.commandName())
 	case apierrors.IsNotFound(err):
-		return nil, RuntimeErrorf("Secret %s/%s does not exist, and %s names it as where its "+
+		return nil, exit.RuntimeErrorf("Secret %s/%s does not exist, and %s names it as where its "+
 			"credentials live", namespace, ref.Name, owner)
 	case err != nil:
-		return nil, RuntimeErrorf("cannot read Secret %s/%s: %w", namespace, ref.Name, err)
+		return nil, exit.RuntimeErrorf("cannot read Secret %s/%s: %w", namespace, ref.Name, err)
 	}
 	return secret.Data, nil
 }
@@ -315,7 +312,7 @@ func (r *BackendResolver) secretData(ctx context.Context, ref v1alpha1.SecretRef
 func requireSecretKey(data map[string][]byte, key string, owner SinkRef, namespace, name string) (string, error) {
 	value, ok := data[key]
 	if !ok {
-		return "", RuntimeErrorf("Secret %s/%s has no %q key, which is where %s expects its "+
+		return "", exit.RuntimeErrorf("Secret %s/%s has no %q key, which is where %s expects its "+
 			"credential (keys present: %s)", namespace, name, key, owner, describeKeys(data))
 	}
 	return string(value), nil
@@ -397,7 +394,7 @@ func (r *BackendResolver) findOperatorDeployment(ctx context.Context) (*operator
 		// team — and picking the first silently would attribute the wrong cluster
 		// identity to a query. Say which was used and how to override it.
 		r.notef("this cluster has %d kuberecord operators; reading the identity from %s/%s "+
-			"(override with --%s)", len(list.Items), info.namespace, info.name, FlagClusterID)
+			"(override with --%s)", len(list.Items), info.namespace, info.name, options.FlagClusterID)
 	}
 	r.operator = info
 	return info, nil
@@ -470,10 +467,10 @@ func clusterIDFromPodSpec(containers []corev1.Container) string {
 // clusterIDFromArgs reads --cluster-id from an argument list, in both spellings.
 func clusterIDFromArgs(args []string) string {
 	for i, arg := range args {
-		if value, found := strings.CutPrefix(arg, "--"+FlagClusterID+"="); found {
+		if value, found := strings.CutPrefix(arg, "--"+options.FlagClusterID+"="); found {
 			return value
 		}
-		if arg == "--"+FlagClusterID && i+1 < len(args) {
+		if arg == "--"+options.FlagClusterID && i+1 < len(args) {
 			return args[i+1]
 		}
 	}

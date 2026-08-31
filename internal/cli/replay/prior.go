@@ -14,7 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+// Package replay reconstructs what an object looked like, and who last touched
+// each of its fields.
+//
+// It is the row domain: decoding recorded changes into renderable rows, replaying
+// a consecutive run of them forward over a reconstructed state to recover the
+// value each operation replaced, and attributing every leaf of the resulting
+// document to the write that last moved it.
+//
+// It is a leaf. It reaches the read plane and the renderer's row types and nothing
+// else in this CLI — not the command tree, not backend resolution, not the flag
+// layer. That is what makes the replay rules testable as rules: every property
+// here is a statement about a sequence of changes and a seed document, and none of
+// them depends on how the sequence was asked for (Task 11.8).
+package replay
 
 import (
 	"context"
@@ -68,14 +81,14 @@ import (
 // operation — a value set twice looks like a value set once — which is why the
 // rule is restated here rather than left to be inferred.
 
-// priorValues fills Op.Old on every operation whose replaced value a replay can
+// PriorValues fills Op.Old on every operation whose replaced value a replay can
 // establish, and reports the notices that filling it produced.
 //
 // rows must be in ascending timestamp order — the order history happened in,
 // which is not necessarily the order it is displayed in. The caller re-sorts a
 // copy rather than this function taking a display-ordered slice and guessing,
 // because a replay walked backwards is a replay that produces plausible nonsense.
-func priorValues(
+func PriorValues(
 	ctx context.Context, engine query.QueryEngine, ref query.ObjectRef, rows []render.TimelineRow,
 ) []render.Notice {
 	var notices []render.Notice
@@ -205,7 +218,7 @@ func seedState(
 	at := rows[0].Change.TS.Add(-time.Nanosecond)
 	reconstruction, err := engine.StateAt(ctx, ref, at, rows[0].Change.UID)
 	if err != nil {
-		return nil, 0, describeStateFailure(err)
+		return nil, 0, DescribeStateFailure(err)
 	}
 	encoded, err := json.Marshal(reconstruction.Object)
 	if err != nil {
@@ -214,14 +227,14 @@ func seedState(
 	return encoded, 0, nil
 }
 
-// describeStateFailure turns a reconstruction failure into the half-sentence a
+// DescribeStateFailure turns a reconstruction failure into the half-sentence a
 // notice reads best with.
 //
 // The three cases lead a reader somewhere different, which is why they are not
 // collapsed: a backend that cannot reconstruct at all is a property of the tool,
 // a base that aged out is a property of retention, and anything else is a failure
 // worth seeing in full.
-func describeStateFailure(err error) error {
+func DescribeStateFailure(err error) error {
 	switch {
 	case errors.Is(err, query.ErrCapabilityUnsupported):
 		return errors.New("this backend cannot reconstruct state")

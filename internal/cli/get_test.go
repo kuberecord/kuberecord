@@ -27,7 +27,9 @@ import (
 	"testing"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -119,7 +121,7 @@ func runGet(
 	t.Helper()
 
 	var out, errOut bytes.Buffer
-	backend := &cli.Backend{Engine: engine, ClusterID: fixtureCluster}
+	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
 	err = cli.RunGet(context.Background(), backend, request,
 		ioStreams(&out, &errOut), render.Options{Width: goldenWidth})
 	return out.String(), errOut.String(), err
@@ -304,8 +306,8 @@ func TestGetVerifyReportsAMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("--verify passed a reconstruction that does not match its recorded digest")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d", code, exit.RuntimeError)
 	}
 
 	// --verify is an assertion, so a failure withholds the document. Writing it
@@ -366,8 +368,8 @@ func TestGetWithoutCoverageIsTheNoCoverageFinding(t *testing.T) {
 	if err == nil {
 		t.Fatal("a scope nobody watched was reported as success")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitNoCoverage {
-		t.Errorf("exit code %d, want %d", code, cli.ExitNoCoverage)
+	if code := exit.CodeFor(err); code != exit.NoCoverage {
+		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
 	}
 	if !errors.Is(err, query.ErrNoCoverage) {
 		t.Errorf("the finding does not carry the read plane's own sentinel: %v", err)
@@ -389,8 +391,8 @@ func TestGetWithCoverageButNoStateIsAnAbsence(t *testing.T) {
 	if err == nil {
 		t.Fatal("a missing object was reported as success")
 	}
-	if code := cli.ExitCodeFor(err); code != cli.ExitRuntimeError {
-		t.Errorf("exit code %d, want %d", code, cli.ExitRuntimeError)
+	if code := exit.CodeFor(err); code != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d", code, exit.RuntimeError)
 	}
 	if !strings.Contains(err.Error(), "The scope was watched over") {
 		t.Errorf("the absence is reported without the coverage that makes it meaningful: %v", err)
@@ -429,5 +431,85 @@ func TestGetNamesTheIncarnationItReconstructed(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "# uid:             "+fixtureUID) {
 		t.Errorf("the header does not name the incarnation:\n%s", stdout)
+	}
+}
+
+// TestGetMarksTheReconstructionForAScript is the criterion on the real command
+// path.
+//
+// The renderer's own tests pin the marker against a hand-built document. This one
+// pins it against what `get` actually produces, because the marker is only worth
+// anything if the command puts it on the envelope it hands to a pipe — and it
+// checks the fields against the reconstruction the fixture history really
+// produces rather than against constants, so a replay that started somewhere else
+// would show up here.
+func TestGetMarksTheReconstructionForAScript(t *testing.T) {
+	stdout, _, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
+	if err != nil {
+		t.Fatalf("RunGet: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
+	}
+	metadata, ok := decoded["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("the envelope carries no metadata: %#v", decoded)
+	}
+	marker, ok := metadata["reconstruction"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata.reconstruction is absent, so `get … -o json | jq` hands a script a "+
+			"reconstruction with nothing saying it is one: %#v", metadata)
+	}
+
+	for _, want := range []struct {
+		field string
+		value any
+	}{
+		{"reconstructed", true},
+		{"not_deployable", true},
+		{"at", "2026-08-28T15:00:00Z"},
+		{"base_ts", "2026-08-28T14:05:02.117Z"},
+		{"base_event", query.EventCheckpoint},
+		{"patches_applied", float64(0)},
+	} {
+		if got := marker[want.field]; got != want.value {
+			t.Errorf("metadata.reconstruction.%s is %#v, want %#v", want.field, got, want.value)
+		}
+	}
+}
+
+// TestGetYAMLHeaderIsTheBlockJSONSendsToStderr is the unchanged-routing criterion,
+// asserted without writing the warning down a second time.
+//
+// The two formats differ only in which stream the block travels on: YAML puts it
+// on stdout as comments because YAML has comments, and JSON puts it on stderr
+// because JSON does not. Comparing the two renderings against each other pins
+// that they are one block rather than two that resemble each other, and it stays
+// true through any future rewording — which a literal copy of the text here would
+// not.
+func TestGetYAMLHeaderIsTheBlockJSONSendsToStderr(t *testing.T) {
+	yamlOut, yamlErr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredYAML))
+	if err != nil {
+		t.Fatalf("RunGet as YAML: %v", err)
+	}
+	_, jsonErr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))
+	if err != nil {
+		t.Fatalf("RunGet as JSON: %v", err)
+	}
+
+	if jsonErr == "" {
+		t.Fatal("JSON wrote no header to stderr, so there is nothing for YAML to agree with")
+	}
+	if !strings.HasPrefix(yamlOut, jsonErr) {
+		t.Errorf("the YAML document does not open with the block JSON sends to stderr."+
+			"\n--- want prefix ---\n%s\n--- got ---\n%s", jsonErr, yamlOut)
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(yamlOut, jsonErr), "apiVersion:") {
+		t.Errorf("the envelope does not follow the header immediately:\n%s", yamlOut)
+	}
+	if yamlErr != "" {
+		t.Errorf("YAML wrote to stderr as well, so the header would be printed twice:\n%s", yamlErr)
 	}
 }

@@ -28,7 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
+	"github.com/kuberecord/kuberecord/internal/cli/coldscan"
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/cli/render"
+	"github.com/kuberecord/kuberecord/internal/cli/replay"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -84,7 +89,7 @@ type timelineFlags struct {
 
 // newTimelineCommand builds `timeline`.
 func newTimelineCommand(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	local := &timelineFlags{limit: defaultLimit}
 
@@ -105,7 +110,7 @@ chosen, the others are named, and --all-incarnations shows them all.
 
 An empty result is never presented on its own. It is explained against the watch
 scopes that were open at the time: "nothing changed" and "nothing was watching"
-are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.`,
+are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
 		Example: `  # What happened to this Deployment lately.
   kuberecord timeline deploy/checkout -n payments
 
@@ -165,7 +170,7 @@ are different findings, and the second exits ` + fmt.Sprint(ExitNoCoverage) + `.
 // about the object, and so that a reader watching a slow question already knows
 // what is being asked.
 func runTimelineCommand(
-	ctx context.Context, flags *GlobalFlags, local *timelineFlags,
+	ctx context.Context, flags *options.GlobalFlags, local *timelineFlags,
 	args []string, streams genericiooptions.IOStreams, invokedAs string,
 ) (err error) {
 	structured, err := timelineFormat(flags.Output)
@@ -177,11 +182,11 @@ func runTimelineCommand(
 		return err
 	}
 	if local.uid != "" && local.allIncarnations {
-		return UsageErrorf("--uid and --all-incarnations contradict each other: " +
+		return exit.UsageErrorf("--uid and --all-incarnations contradict each other: " +
 			"one pins the timeline to a single incarnation and the other shows every one of them")
 	}
 	if local.limit < 0 {
-		return UsageErrorf("--limit %d is negative; zero means no limit", local.limit)
+		return exit.UsageErrorf("--limit %d is negative; zero means no limit", local.limit)
 	}
 
 	now := time.Now()
@@ -214,7 +219,7 @@ func runTimelineCommand(
 		Reverse:         local.reverse,
 		WithEvents:      local.withEvents,
 		Structured:      structured,
-		Scan:            scanOptions(flags, streams),
+		Scan:            coldscan.OptionsFrom(flags, streams),
 	}
 	return RunTimeline(ctx, backend, request, streams, timelineRenderOptions(flags, local, streams))
 }
@@ -235,9 +240,9 @@ func runTimelineCommand(
 // about the object. The caller owns the returned backend and must Close it; on
 // failure this closes it, so a caller only has one path to think about.
 func resolveObject(
-	ctx context.Context, flags *GlobalFlags, streams genericiooptions.IOStreams,
+	ctx context.Context, flags *options.GlobalFlags, streams genericiooptions.IOStreams,
 	invokedAs string, arg ResourceArg,
-) (*Backend, query.ObjectRef, error) {
+) (*resolve.Backend, query.ObjectRef, error) {
 	backend, err := resolveBackend(ctx, flags, streams, invokedAs)
 	if err != nil {
 		return nil, query.ObjectRef{}, err
@@ -257,9 +262,9 @@ func resolveObject(
 // being recorded rather than about one object's history, and there is no address
 // for it to resolve. The caller owns the returned backend and must Close it.
 func resolveBackend(
-	ctx context.Context, flags *GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
-) (*Backend, error) {
-	resolver, err := NewBackendResolver(flags, streams, invokedAs)
+	ctx context.Context, flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+) (*resolve.Backend, error) {
+	resolver, err := resolve.NewBackendResolver(flags, streams, invokedAs)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +274,7 @@ func resolveBackend(
 // objectRefFor resolves the address against the opened backend's cluster
 // identity.
 func objectRefFor(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, backend *Backend, arg ResourceArg,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, backend *resolve.Backend, arg ResourceArg,
 ) (query.ObjectRef, error) {
 	resolved, err := resolveObjectAddress(flags, streams, arg)
 	if err != nil {
@@ -290,17 +295,17 @@ func objectRefFor(
 // process started.
 func parseWindow(since, until string, now time.Time) (from, to time.Time, err error) {
 	if since != "" {
-		if from, err = ParseInstant(since, now); err != nil {
+		if from, err = options.ParseInstant(since, now); err != nil {
 			return time.Time{}, time.Time{}, err
 		}
 	}
 	if until != "" {
-		if to, err = ParseInstant(until, now); err != nil {
+		if to, err = options.ParseInstant(until, now); err != nil {
 			return time.Time{}, time.Time{}, err
 		}
 	}
 	if !from.IsZero() && !to.IsZero() && to.Before(from) {
-		return time.Time{}, time.Time{}, UsageErrorf(
+		return time.Time{}, time.Time{}, exit.UsageErrorf(
 			"the window ends before it starts: --since resolves to %s and --until to %s",
 			render.FormatInstant(from), render.FormatInstant(to))
 	}
@@ -318,18 +323,18 @@ func parseWindow(since, until string, now time.Time) (from, to time.Time, err er
 // out here. It is refused rather than implemented because the hunk rendering is a
 // whole command — `diff` — and a second entrance to it would be a second place
 // for the two to drift apart.
-func timelineFormat(format OutputFormat) (render.StructuredFormat, error) {
+func timelineFormat(format options.OutputFormat) (render.StructuredFormat, error) {
 	switch format {
-	case OutputTable, OutputWide:
+	case options.OutputTable, options.OutputWide:
 		return "", nil
-	case OutputDiff:
-		return "", UsageErrorf("timeline does not render %s: its rows are one line each by design. "+
+	case options.OutputDiff:
+		return "", exit.UsageErrorf("timeline does not render %s: its rows are one line each by design. "+
 			"The `diff` command spends the whole page on the same changes, with the old value beside "+
-			"the new one", OutputDiff)
+			"the new one", options.OutputDiff)
 	}
 	structured, ok := structuredFormat(format)
 	if !ok {
-		return "", UsageErrorf("timeline cannot render %s", format)
+		return "", exit.UsageErrorf("timeline cannot render %s", format)
 	}
 	return structured, nil
 }
@@ -353,12 +358,12 @@ func normalizeFieldPaths(paths []string) []string {
 
 // timelineRenderOptions decides how the document will look.
 func timelineRenderOptions(
-	flags *GlobalFlags, local *timelineFlags, streams genericiooptions.IOStreams,
+	flags *options.GlobalFlags, local *timelineFlags, streams genericiooptions.IOStreams,
 ) render.Options {
 	return render.Options{
-		Width: TerminalWidth(streams.Out),
-		Color: ShouldColorize(flags.Color, streams.Out),
-		Wide:  flags.Output == OutputWide,
+		Width: options.TerminalWidth(streams.Out),
+		Color: options.ShouldColorize(flags.Color, streams.Out),
+		Wide:  flags.Output == options.OutputWide,
 		Full:  local.full,
 	}
 }
@@ -378,7 +383,7 @@ func timelineRenderOptions(
 // discovery data would be a guess — and a guess here silently reads a different
 // object's history.
 func resolveObjectAddress(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, arg ResourceArg,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, arg ResourceArg,
 ) (ResolvedResource, error) {
 	reach, err := clusterResolution(flags, arg)
 	if err == nil {
@@ -395,11 +400,11 @@ func resolveObjectAddress(
 
 	resolved, offlineErr := resolveKindOffline(arg, explicitNamespace(flags) != "")
 	if offlineErr != nil {
-		return ResolvedResource{}, RuntimeErrorf(
+		return ResolvedResource{}, exit.RuntimeErrorf(
 			"the cluster could not be reached to resolve %q (%v), and %w",
 			arg.Resource, err, offlineErr)
 	}
-	if writeErr := writeLine(streams.ErrOut, fmt.Sprintf(
+	if writeErr := options.WriteLine(streams.ErrOut, fmt.Sprintf(
 		"→ read %s/%s as recorded, without the cluster: %s",
 		describeGroupKind(resolved.GVK), resolved.Name, reachFailure(err))); writeErr != nil {
 		return ResolvedResource{}, writeErr
@@ -414,7 +419,7 @@ func resolveObjectAddress(
 // lookup. So both steps are taken here and reported as one failure, which is what
 // lets the caller decide between "the cluster said no" and "there was no cluster
 // to ask" from a single error.
-func clusterResolution(flags *GlobalFlags, arg ResourceArg) (ResolvedResource, error) {
+func clusterResolution(flags *options.GlobalFlags, arg ResourceArg) (ResolvedResource, error) {
 	mapper, err := flags.ConfigFlags.ToRESTMapper()
 	if err != nil {
 		return ResolvedResource{}, err
@@ -453,17 +458,17 @@ func describeGroupKind(gvk schema.GroupVersionKind) string {
 // narrowed their question and the tool widened it back, and a result that did not
 // obey a flag has to say which flag it did not obey.
 func objectNamespace(
-	flags *GlobalFlags, streams genericiooptions.IOStreams, resolved ResolvedResource,
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, resolved ResolvedResource,
 ) (string, error) {
 	namespace, err := flags.Namespace()
 	if err != nil {
-		return "", RuntimeErrorf("%w", err)
+		return "", exit.RuntimeErrorf("%w", err)
 	}
 	if resolved.Namespaced {
 		return namespace, nil
 	}
 	if named := explicitNamespace(flags); named != "" {
-		if writeErr := writeLine(streams.ErrOut, fmt.Sprintf(
+		if writeErr := options.WriteLine(streams.ErrOut, fmt.Sprintf(
 			"→ %s is cluster-scoped, so --namespace %s is not part of its identity and was ignored",
 			resolved.GVK.Kind, named)); writeErr != nil {
 			return "", writeErr
@@ -478,7 +483,7 @@ func objectNamespace(
 // The distinction matters twice: a --namespace given for a cluster-scoped kind is
 // a flag being ignored and has to be announced, and offline it is the only signal
 // there is about whether the address names a namespaced object at all.
-func explicitNamespace(flags *GlobalFlags) string {
+func explicitNamespace(flags *options.GlobalFlags) string {
 	if flags.ConfigFlags.Namespace == nil {
 		return ""
 	}
@@ -487,7 +492,7 @@ func explicitNamespace(flags *GlobalFlags) string {
 
 // TimelineRequest is one `timeline` invocation, resolved.
 //
-// It is exported, and RunTimeline takes an already-opened Backend, so that the
+// It is exported, and RunTimeline takes an already-opened resolve.Backend, so that the
 // whole of the command's behaviour — the incarnation choice, the coverage
 // explanation, the capability notices, the rendering — is reachable from a test
 // holding a fake QueryEngine. A command whose only entry point went through a
@@ -559,7 +564,7 @@ type TimelineRequest struct {
 	// being read from the flags where it is used, so that a test can drive the
 	// guard without a pseudo-terminal — the same reason render.Options carries the
 	// terminal width instead of asking for it.
-	Scan ScanOptions
+	Scan coldscan.Options
 
 	// Structured names the serialization of the versioned envelope to write.
 	// Empty means the table, which is the default and the rendering this release
@@ -586,7 +591,7 @@ func (r TimelineRequest) filtered() bool {
 // two commands ask the backend the identical question, and the whole of their
 // difference is how the answer is laid out.
 func RunTimeline(
-	ctx context.Context, backend *Backend, request TimelineRequest,
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
 	if request.Structured != "" {
@@ -609,7 +614,7 @@ func RunTimeline(
 		Notices:      gathered.Notices,
 	}
 	if writeErr := render.WriteTimeline(streams.Out, streams.ErrOut, document, opts); writeErr != nil {
-		return RuntimeErrorf("%w", writeErr)
+		return exit.RuntimeErrorf("%w", writeErr)
 	}
 	return gathered.Empty
 }
@@ -641,18 +646,18 @@ func timelineBounds(
 
 	switch {
 	case from.IsZero() && to.IsZero():
-		from, to = now.Add(-DefaultWindow), now
+		from, to = now.Add(-options.DefaultWindow), now
 		return from, to, render.Notice{Text: fmt.Sprintf(
 			"the %s backend cannot answer an unbounded question, so the window defaults to %s; "+
-				"pass --since to widen it", capabilities.Backend, DescribeWindow(from, to))}
+				"pass --since to widen it", capabilities.Backend, options.DescribeWindow(from, to))}
 	case from.IsZero():
-		from = to.Add(-DefaultWindow)
+		from = to.Add(-options.DefaultWindow)
 	default:
 		to = now
 	}
 	return from, to, render.Notice{Text: fmt.Sprintf(
 		"the %s backend needs both ends of a window, so this one was completed to %s; "+
-			"pass --since and --until to set it yourself", capabilities.Backend, DescribeWindow(from, to))}
+			"pass --since and --until to set it yourself", capabilities.Backend, options.DescribeWindow(from, to))}
 }
 
 // timelineQuery builds the read-plane query.
@@ -727,39 +732,20 @@ func collectChanges(
 // The scan's own context is consulted first, because a query cancelled by this
 // CLI's circuit breaker fails with a context error wherever the scan happened to
 // be — a message that names neither the flag that stopped it nor the fact that
-// something deliberately did. See scanStopped.
+// something deliberately did. See coldscan.Stopped.
 func timelineQueryError(ctx context.Context, request TimelineRequest, err error) error {
-	if stopped := scanStopped(ctx); stopped != nil {
-		return RuntimeErrorf("reading the timeline of %s: %w", describeObject(request.Ref), stopped)
+	if stopped := coldscan.Stopped(ctx); stopped != nil {
+		return exit.RuntimeErrorf("reading the timeline of %s: %w", describeObject(request.Ref), stopped)
 	}
 	if errors.Is(err, query.ErrTimeBoundRequired) {
-		return RuntimeErrorf("%w; pass --since (and optionally --until) to bound it", err)
+		return exit.RuntimeErrorf("%w; pass --since (and optionally --until) to bound it", err)
 	}
 	if errors.Is(err, query.ErrNoCoverage) {
-		// The sentinel already carries exit code 3 through ExitCodeFor, so it is
+		// The sentinel already carries exit code 3 through exit.CodeFor, so it is
 		// wrapped for context rather than reclassified.
 		return fmt.Errorf("reading the timeline of %s: %w", describeObject(request.Ref), err)
 	}
-	return RuntimeErrorf("reading the timeline of %s: %w", describeObject(request.Ref), err)
-}
-
-// decodeRows turns changes into rows, decoding each patch once.
-//
-// A patch that will not decode is carried as an error on the row rather than
-// dropped: the change still happened, and an audit timeline missing an entry is
-// worse than one carrying a cell that says the patch was unreadable.
-func decodeRows(changes []query.Change) []render.TimelineRow {
-	rows := make([]render.TimelineRow, 0, len(changes))
-	for _, change := range changes {
-		row := render.TimelineRow{Change: change}
-		ops, err := render.PatchOps(change.Diff)
-		if err != nil {
-			row.PatchErr = err.Error()
-		}
-		row.Ops = ops
-		rows = append(rows, row)
-	}
-	return rows
+	return exit.RuntimeErrorf("reading the timeline of %s: %w", describeObject(request.Ref), err)
 }
 
 // priorValueNotices recovers the value each operation replaced, or explains why
@@ -785,7 +771,7 @@ func priorValueNotices(
 
 	ascending := slices.Clone(rows)
 	slices.Reverse(ascending)
-	return priorValues(ctx, engine, request.Ref, ascending)
+	return replay.PriorValues(ctx, engine, request.Ref, ascending)
 }
 
 // deletionsNotice reports a backend that cannot record deletions, when nothing

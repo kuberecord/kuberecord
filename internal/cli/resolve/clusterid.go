@@ -14,13 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cli
+package resolve
 
 import (
 	"context"
 	"fmt"
 	"strings"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -52,7 +54,7 @@ import (
 // answer nobody asked for.
 func (r *BackendResolver) resolveClusterID(ctx context.Context, engine query.QueryEngine) (string, string, error) {
 	if id := r.Flags.ClusterID; id != "" {
-		return id, "from --" + FlagClusterID, nil
+		return id, "from --" + options.FlagClusterID, nil
 	}
 
 	if id, contextName := r.clusterIDFromContext(); id != "" {
@@ -85,15 +87,15 @@ func (r *BackendResolver) clusterIDFromContext() (id, contextName string) {
 	if len(r.Config.Contexts) == 0 {
 		return "", ""
 	}
-	contextName = r.kubeContext()
+	contextName = r.KubeContext()
 	if contextName == "" {
 		return "", ""
 	}
 	return r.Config.Contexts[contextName], contextName
 }
 
-// kubeContext reports the kubeconfig context this invocation is using.
-func (r *BackendResolver) kubeContext() string {
+// KubeContext reports the kubeconfig context this invocation is using.
+func (r *BackendResolver) KubeContext() string {
 	if r.Flags == nil || r.Flags.ConfigFlags == nil {
 		return ""
 	}
@@ -147,26 +149,26 @@ func (r *BackendResolver) clusterIDFromOperator(ctx context.Context) (id, source
 func (r *BackendResolver) clusterIDFromSink(ctx context.Context, engine query.QueryEngine) (string, string, error) {
 	lister, ok := engine.(query.ClusterIDLister)
 	if !ok {
-		return "", "", RuntimeErrorf(
+		return "", "", exit.RuntimeErrorf(
 			"no cluster identity: nothing named one and this backend cannot list the clusters it "+
 				"holds. %s", r.clusterIDRemedies())
 	}
 
 	ids, err := lister.ClusterIDs(ctx)
 	if err != nil {
-		return "", "", RuntimeErrorf("no cluster identity: nothing named one, and asking the backend "+
+		return "", "", exit.RuntimeErrorf("no cluster identity: nothing named one, and asking the backend "+
 			"which clusters it holds failed: %w", err)
 	}
 
 	switch len(ids) {
 	case 0:
-		return "", "", RuntimeErrorf("no cluster identity: this sink holds no recorded history at "+
+		return "", "", exit.RuntimeErrorf("no cluster identity: this sink holds no recorded history at "+
 			"all, so there is nothing here to name. Check that the operator is streaming to it, or "+
-			"read a different source with --%s", FlagSource)
+			"read a different source with --%s", options.FlagSource)
 	case 1:
 		return ids[0], "the only cluster in this sink", nil
 	}
-	return "", "", RuntimeErrorf("no cluster identity: this sink holds %d of them (%s). %s",
+	return "", "", exit.RuntimeErrorf("no cluster identity: this sink holds %d of them (%s). %s",
 		len(ids), strings.Join(ids, ", "), r.clusterIDRemedies())
 }
 
@@ -179,5 +181,5 @@ func (r *BackendResolver) clusterIDFromSink(ctx context.Context, engine query.Qu
 // per command.
 func (r *BackendResolver) clusterIDRemedies() string {
 	return fmt.Sprintf("Pass --%s, or record it for this kubeconfig context with "+
-		"`%s config set-context-cluster-id`", FlagClusterID, r.commandName())
+		"`%s config set-context-cluster-id`", options.FlagClusterID, r.commandName())
 }

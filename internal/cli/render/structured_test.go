@@ -216,3 +216,41 @@ func TestEmptyHunksAreAListNotANull(t *testing.T) {
 		t.Errorf("a patchless item's hunks are not an empty list:\n%s", encoded)
 	}
 }
+
+// TestOnlyAReconstructionIsMarkedAsOne keeps the marker meaningful.
+//
+// metadata.reconstruction says a document was assembled from recorded history
+// rather than read back whole, and that is only true of a KindObject envelope.
+// A Timeline carrying the key — even as a null — would teach a consumer to test
+// it for null rather than for presence, and the first backend to return a null
+// coverage report is a reminder of how that ends. The honest spelling of "there
+// is no reconstruction in this answer" is no key at all.
+func TestOnlyAReconstructionIsMarkedAsOne(t *testing.T) {
+	for _, kind := range []string{
+		render.KindTimeline, render.KindDiff, render.KindCoverage, render.KindBlame,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			var out bytes.Buffer
+			stream, err := render.NewStream(&out, render.StructuredJSON, testHead(kind))
+			if err != nil {
+				t.Fatalf("NewStream: %v", err)
+			}
+			if err := stream.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			var decoded map[string]any
+			if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+				t.Fatalf("the envelope is not valid JSON: %v\n%s", err, out.String())
+			}
+			metadata, ok := decoded["metadata"].(map[string]any)
+			if !ok {
+				t.Fatalf("the envelope carries no metadata: %#v", decoded)
+			}
+			if _, present := metadata["reconstruction"]; present {
+				t.Errorf("a %s envelope carries metadata.reconstruction, which says its items were "+
+					"assembled rather than recorded: %#v", kind, metadata)
+			}
+		})
+	}
+}

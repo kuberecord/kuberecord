@@ -92,6 +92,7 @@ func TestIntegrationQueryConformanceAgainstMinIO(t *testing.T) {
 		return conformance.Harness{
 			Engine:         engine,
 			Seed:           h.seed,
+			SeedCorpus:     h.seedCorpus,
 			SetStreamFault: h.setFault,
 			Capabilities: conformance.DeclareCapabilities(
 				// The same declaration the local run makes, written out again rather
@@ -119,19 +120,37 @@ type bucketHarness struct {
 // of a Seed: an object store's PUT is acknowledged when the object is durable, so there
 // is nothing to wait for beyond the calls themselves.
 func (h *bucketHarness) seed(history conformance.History) error {
-	layout, err := archivetest.Write(func(key string, body []byte) error {
-		_, putErr := h.client.PutObject(h.ctx, &awss3.PutObjectInput{
-			Bucket: aws.String(h.bucket),
-			Key:    aws.String(key),
-			Body:   bytes.NewReader(body),
-		})
-		return putErr
-	}, h.prefix, history)
+	layout, err := archivetest.Write(h.put, h.prefix, history)
 	if err != nil {
 		return err
 	}
 	h.layout = layout
 	return nil
+}
+
+// seedCorpus writes the shared agreement corpus into the bucket as real objects, one
+// per flush, so that the cross-backend comparison is made against the objects a
+// writer would actually have produced rather than against a shape assembled for the
+// test.
+func (h *bucketHarness) seedCorpus(corpus conformance.Corpus) error {
+	layout, err := archivetest.WriteCorpus(h.put, h.prefix, corpus)
+	if err != nil {
+		return err
+	}
+	h.layout = layout
+	return nil
+}
+
+// put is the fixture's own writer. The source under test lists and fetches, which is
+// the whole of what reading an archive needs; widening it so a test could seed one
+// would make that claim untrue.
+func (h *bucketHarness) put(key string, body []byte) error {
+	_, err := h.client.PutObject(h.ctx, &awss3.PutObjectInput{
+		Bucket: aws.String(h.bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body),
+	})
+	return err
 }
 
 // setFault refuses the objects holding every change after the nth, which is how a

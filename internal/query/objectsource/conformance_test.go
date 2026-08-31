@@ -33,8 +33,10 @@ package objectsource
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kuberecord/kuberecord/internal/query/conformance"
 	"github.com/kuberecord/kuberecord/internal/query/objectsource/archivetest"
@@ -74,6 +76,23 @@ type harness struct {
 // seed writes the history the property asserts against.
 func (h *harness) seed(history conformance.History) error {
 	layout, err := archivetest.WriteDir(h.dir, archivePrefix, history)
+	if err != nil {
+		return err
+	}
+	h.layout = layout
+	return nil
+}
+
+// seedCorpus writes the shared agreement corpus as real archive objects: real keys,
+// real lines, real zstd frames, one object per flush.
+//
+// One object per flush rather than one per record, which is the opposite of what
+// seed does above, and deliberately: the corpus says which records a writer handed
+// to its sink together, and a flush is exactly what a writer turns into an object.
+// It is also the only way to produce the record that straddles an hour boundary —
+// filed under the partition its flush opened in, stamped into the next.
+func (h *harness) seedCorpus(corpus conformance.Corpus) error {
+	layout, err := archivetest.WriteCorpusDir(h.dir, archivePrefix, corpus)
 	if err != nil {
 		return err
 	}
@@ -177,6 +196,7 @@ func newHarness(t *testing.T) conformance.Harness {
 	return conformance.Harness{
 		Engine:         engine,
 		Seed:           h.seed,
+		SeedCorpus:     h.seedCorpus,
 		SetStreamFault: h.setFault,
 		Capabilities:   declaredCapabilities(),
 	}
@@ -185,6 +205,64 @@ func newHarness(t *testing.T) conformance.Harness {
 // TestQueryConformance runs the read-plane contract against this backend.
 func TestQueryConformance(t *testing.T) {
 	conformance.RunQuerySuite(t, newHarness)
+}
+
+// TestTheAgreementCorpusReallyStraddlesAnHour keeps the shared corpus honest about
+// the one case only this backend's storage can express.
+//
+// The cross-backend agreement suite says its corpus holds "a record straddling an
+// hour boundary — filed under one partition, stamped into the next", and against
+// this backend that is a claim about the objects on disk rather than about the
+// records. It is also a claim a later edit to the corpus's timings could quietly
+// break: shift one offset by a minute and the flush no longer crosses the boundary,
+// every assertion still passes, and the case the corpus was sized to cover has
+// stopped being covered with nothing anywhere saying so.
+//
+// So the shape is asserted where the shape lives. The corpus is written out and the
+// keys are read back: one object per flush, and the flush that crosses the hour
+// filed under the earlier one with nothing at all under the later.
+func TestTheAgreementCorpusReallyStraddlesAnHour(t *testing.T) {
+	corpus := conformance.AgreementCorpus()
+
+	var filedUnder, stampedInto time.Time
+	for _, flush := range corpus.Flushes() {
+		last := flush[len(flush)-1].Change.TS.UTC().Truncate(time.Hour)
+		if first := flush[0].Change.TS.UTC().Truncate(time.Hour); !first.Equal(last) {
+			filedUnder, stampedInto = first, last
+			break
+		}
+	}
+	if filedUnder.IsZero() {
+		t.Fatalf("no flush in the agreement corpus crosses an hour boundary, so seeding it produces no " +
+			"object filed under one partition and holding a record stamped into the next — the case the " +
+			"corpus names, and the one this backend has to widen a partition range to answer")
+	}
+
+	layout, err := archivetest.WriteCorpusDir(t.TempDir(), archivePrefix, corpus)
+	if err != nil {
+		t.Fatalf("writing the agreement corpus: %v", err)
+	}
+
+	later := "/hour=" + stampedInto.Format("15") + "/"
+	for _, key := range layout.RecordKeys {
+		if strings.Contains(key, later) {
+			t.Errorf("the corpus produced the object %q under the hour a straddling record is merely "+
+				"*stamped* into; the flush opened at %s and must be filed there in full, or a reader "+
+				"that found it by its own partition would never have had to widen its range",
+				key, filedUnder.Format(time.RFC3339))
+		}
+	}
+
+	earlier := "/hour=" + filedUnder.Format("15") + "/"
+	found := 0
+	for _, key := range layout.RecordKeys {
+		if strings.Contains(key, earlier) {
+			found++
+		}
+	}
+	if found == 0 {
+		t.Errorf("no object was filed under %s, the hour the straddling flush opened in", earlier)
+	}
 }
 
 // Compile-time proof that the faulting wrapper is a source like any other, so a
