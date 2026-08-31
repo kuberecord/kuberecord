@@ -78,6 +78,7 @@ func newFakeHarness(t *testing.T) conformance.Harness {
 	return conformance.Harness{
 		Engine:         engine,
 		Seed:           store.seed,
+		SeedCorpus:     store.seedCorpus,
 		SetStreamFault: store.setFault,
 		Capabilities:   fakeCapabilities(),
 	}

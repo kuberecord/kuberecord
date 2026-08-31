@@ -77,7 +77,7 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # `integration`). The target boots throwaway containers, waits for each to answer,
 # runs the tagged tests, and always tears them down.
 #
-# Six suites run here. internal/sink/clickhouse exercises the ClickHouse writer
+# Seven suites run here. internal/sink/clickhouse exercises the ClickHouse writer
 # and reader paths, and internal/query/clickhouse runs the whole read-plane
 # conformance suite against the real engine (Task 9.3) — the half a stand-in
 # connection cannot prove, since no fake executes SQL: that FINAL really collapses
@@ -102,6 +102,17 @@ test: manifests generate fmt vet setup-envtest helm kustomize ## Run tests.
 # Everything above that seam is tested against a directory, so the day the two
 # diverge is the day those tests stop saying anything about a bucket. The three S3
 # suites create a bucket per test, so they need no database-style isolation.
+# test/agreement is the seventh and the only one that needs both containers at
+# once (Task 11.11): it seeds one declarative corpus into both query backends —
+# rows through the shipped DDL, encoded objects through the archive format — and
+# requires them to answer identically. Each backend already passes the read-plane
+# conformance suite, but each is seeded by its own harness into its own storage
+# shape, so nothing else compares the two; a divergence in incarnation
+# resolution, ordering or reconstruction base would be invisible without this. It
+# lives under test/ because seeding one backend needs the ClickHouse driver and
+# the other needs the S3 SDK, and the depguard rules confine each to two packages
+# under internal/ with no package on both lists. It works in a database of its
+# own, for the same reason the two suites above do.
 #
 # Non-standard host ports throughout, so this never collides with a developer's
 # own ClickHouse on 9000/8123 or MinIO on 9000. ClickHouse's image default user is
@@ -159,7 +170,7 @@ test-integration: duckdb ## Run integration tests against a dockerized ClickHous
 	S3_TEST_ENDPOINT=$(MINIO_IT_ENDPOINT) \
 	S3_TEST_ACCESS_KEY_ID=$(MINIO_IT_USER) S3_TEST_SECRET_ACCESS_KEY=$(MINIO_IT_PASSWORD) \
 	DUCKDB="$(DUCKDB)" \
-		go test -tags=integration ./internal/sink/... ./internal/query/... ./test/queries/... -run Integration -v
+		go test -tags=integration ./internal/sink/... ./internal/query/... ./test/queries/... ./test/agreement/... -run Integration -v
 
 # bench-load runs the synthetic-churn load harness (test/loadgen, Task 0.8)
 # against a throwaway dockerized ClickHouse plus an in-process envtest apiserver.

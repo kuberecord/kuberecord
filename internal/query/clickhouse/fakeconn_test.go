@@ -195,6 +195,19 @@ func (s *fakeStore) seed(h conformance.History) error {
 	return nil
 }
 
+// seedCorpus plants the shared agreement corpus in the stand-in store.
+//
+// The corpus's flush labels are dropped rather than honoured, and that is the
+// truthful mapping rather than a shortcut: this backend stores one row per recorded
+// change, so two changes written in one flush and two written in two are the same
+// two rows. A store that recorded the distinction would be modelling something the
+// real table does not have.
+//
+// This is the stand-in, so what it proves is the engine's Go logic against a known
+// row set. The authoritative seeding is the INSERT in integration_test.go, against
+// the shipped DDL — see test/agreement for which of the two is the run that counts.
+func (s *fakeStore) seedCorpus(c conformance.Corpus) error { return s.seed(c.History()) }
+
 func emptyIfNil(m map[string]string) map[string]string {
 	if m == nil {
 		return map[string]string{}

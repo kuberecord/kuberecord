@@ -199,6 +199,97 @@ func Write(put Put, prefix string, history conformance.History) (*Layout, error)
 	return layout, nil
 }
 
+// WriteCorpus encodes the shared agreement corpus into archive objects and hands
+// each one to put.
+//
+// It differs from Write in exactly one respect, and the difference is the reason it
+// exists: the corpus says which records were handed to the sink in one flush, and a
+// flush is what a real writer turns into a single object. So this writes one object
+// per flush, filed under the partition of that flush's *first* record — which is
+// what a rotating writer does — and the records after it in the same flush go into
+// that object whatever they are stamped.
+//
+// That is the whole of the straddling case. An object filed under hour=11 carrying a
+// record stamped 12:00 is an ordinary archive object, docs/SCHEMA.md warns every
+// reader about it, and a fixture that could not produce one could not check that two
+// backends agree about history one of them indexes trivially and the other has to
+// widen a partition range to find.
+//
+// Deletions are dropped, exactly as Write drops them and for the same reason: this
+// tier is written by a Writer that never receives one (D12). A flush holding nothing
+// else produces no object rather than an empty frame.
+func WriteCorpus(put Put, prefix string, corpus conformance.Corpus) (*Layout, error) {
+	if put == nil {
+		return nil, fmt.Errorf("archivetest: a Put is required to write an archive")
+	}
+
+	layout := &Layout{}
+	for _, flush := range corpus.Flushes() {
+		kept := make([]conformance.Row, 0, len(flush))
+		for _, row := range flush {
+			if row.Change.EventType == query.EventDeleted {
+				layout.Dropped++
+				continue
+			}
+			kept = append(kept, row)
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		// The partition comes from the flush's first record and the records are free
+		// to disagree with it, which is the one place this differs from Write.
+		key, body, err := encodeFlush(prefix, flush[0].Change.TS, kept)
+		if err != nil {
+			return nil, err
+		}
+		if err := put(key, body); err != nil {
+			return nil, fmt.Errorf("archivetest: write %q: %w", key, err)
+		}
+		layout.RecordKeys = append(layout.RecordKeys, key)
+	}
+
+	for _, transition := range corpus.Scopes {
+		key, body, err := encodeScope(prefix, transition)
+		if err != nil {
+			return nil, err
+		}
+		if err := put(key, body); err != nil {
+			return nil, fmt.Errorf("archivetest: write %q: %w", key, err)
+		}
+		layout.ScopeKeys = append(layout.ScopeKeys, key)
+	}
+	return layout, nil
+}
+
+// WriteCorpusDir writes the corpus into a directory tree, which is the archive a
+// local source reads.
+func WriteCorpusDir(dir, prefix string, corpus conformance.Corpus) (*Layout, error) {
+	return WriteCorpus(putDir(dir), prefix, corpus)
+}
+
+// encodeFlush renders one flush as one object, filed under the partition of at.
+//
+// The key's last segment is the content hash of the uncompressed payload, as the
+// format specifies — not a name invented for the fixture. A corpus seeded with
+// unrealistic keys would still read back correctly, since nothing interprets that
+// segment, and would stop being evidence about the objects a writer produces.
+func encodeFlush(prefix string, at time.Time, rows []conformance.Row) (key string, body []byte, err error) {
+	var payload []byte
+	for _, row := range rows {
+		line, marshalErr := marshalLine(recordLineOf(row))
+		if marshalErr != nil {
+			return "", nil, marshalErr
+		}
+		payload = append(payload, line...)
+	}
+	hash := contentHash(payload)
+	key = joinSegments(prefix, formatPartition, clusterSegment+rows[0].Ref.ClusterID,
+		dateSegment+at.UTC().Format(dateLayout),
+		hourSegment+at.UTC().Format(hourLayout),
+		hash+objectSuffix)
+	return key, compress(payload), nil
+}
+
 // WriteDir writes a history into a directory tree, which is the archive a local
 // source reads.
 //
@@ -206,13 +297,22 @@ func Write(put Put, prefix string, history conformance.History) (*Layout, error)
 // part of the claim a directory and a bucket answer identically: keys are
 // slash-separated and become directories, with nothing else invented on the way.
 func WriteDir(dir, prefix string, history conformance.History) (*Layout, error) {
-	return Write(func(key string, body []byte) error {
+	return Write(putDir(dir), prefix, history)
+}
+
+// putDir is the Put that turns a key into a path under dir.
+//
+// Keys are slash-separated and become directories, with nothing else invented on the
+// way — which is part of the claim that a directory and a bucket answer identically,
+// and the reason the mapping lives here rather than in each suite.
+func putDir(dir string) Put {
+	return func(key string, body []byte) error {
 		path := filepath.Join(dir, filepath.FromSlash(key))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("create the parents of %q: %w", key, err)
 		}
 		return os.WriteFile(path, body, 0o600)
-	}, prefix, history)
+	}
 }
 
 // WriteObjectAt writes one object into the partition of at, holding every row it is

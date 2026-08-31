@@ -449,7 +449,17 @@ func harnessOver(e *fakeEngine) Harness {
 	return Harness{
 		Engine:         e,
 		Seed:           e.seed,
+		SeedCorpus:     e.seedCorpus,
 		SetStreamFault: e.setStreamFault,
 		Capabilities:   DeclareCapabilities(declared...),
 	}
 }
+
+// seedCorpus plants the shared corpus in a fake engine.
+//
+// A reference engine stores rows and nothing else, so the flush labels carry no
+// information for it and the corpus's own row rendering is the whole of the
+// translation. A backend whose storage batches has real work to do here; this one
+// genuinely does not, and pretending otherwise would invent a distinction the
+// engine does not have.
+func (e *fakeEngine) seedCorpus(c Corpus) error { return e.seed(c.History()) }

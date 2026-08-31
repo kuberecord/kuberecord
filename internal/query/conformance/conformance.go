@@ -188,6 +188,27 @@ type Harness struct {
 	// the opposite of what a backend-agnostic suite is for.
 	Seed func(History) error
 
+	// SeedCorpus makes the shared agreement corpus this backend's recorded past,
+	// through the same writing path an operator's records travel — rows into the
+	// tables an engine reads, encoded artifacts into the store an engine lists.
+	//
+	// "Through the backend's own path" is the whole obligation, and it is the one
+	// worth stating in the contract rather than leaving to each harness. A seeding
+	// that assembled the backend's internal representation by hand would let the
+	// agreement suite certify that two engines agree about a shape neither of them
+	// actually stores — which is a stronger-sounding claim than the per-backend
+	// suites already make, and a weaker one.
+	//
+	// Like Seed it must not return until the corpus is readable through Engine,
+	// and it drops rather than refuses a record this backend cannot represent, for
+	// the same reasons.
+	//
+	// It is mandatory. Made optional it would be declined by whichever backend
+	// found it hardest to implement, which is the backend whose storage differs
+	// most from the others' — that is, exactly the backend most likely to disagree
+	// with them, and the only one an agreement test was ever needed for.
+	SeedCorpus func(Corpus) error
+
 	// SetStreamFault installs the fault the backend applies to its next Timeline;
 	// nil clears it.
 	//
@@ -223,6 +244,36 @@ func (h Harness) validate(t conformanceT) {
 	case h.SetStreamFault == nil:
 		t.Fatalf("conformance: Harness.SetStreamFault is nil; the suite cannot break the stream, and the " +
 			"property that stops a truncated history from reading as a complete one would certify nothing")
+	case h.SeedCorpus == nil:
+		t.Fatalf("conformance: Harness.SeedCorpus is nil; this backend cannot be seeded from the shared " +
+			"corpus, so nothing anywhere checks that it agrees with any other backend about identical " +
+			"history — only that it agrees with what its own harness wrote")
+	}
+	requireCapabilityAgreement(t, h)
+}
+
+// validateForAgreement is the narrower gate the agreement suite goes through.
+//
+// It asks for what that suite actually uses: a live engine, the shared seeding
+// path, and a capability declaration the engine agrees with — since the whole of
+// the agreement suite's reasoning about where two backends may legitimately differ
+// is derived from that declaration.
+//
+// It deliberately does not require Seed or SetStreamFault. Those exist to serve the
+// per-property suite, and demanding them here would mean a harness built to compare
+// two live backends had to carry a fault injector it never uses — which is how a
+// lever ends up implemented as a no-op that lies the first time somebody does use
+// it.
+func (h Harness) validateForAgreement(t conformanceT) {
+	t.Helper()
+	switch {
+	case h.Engine == nil:
+		t.Fatalf("conformance: Harness.Engine is nil; the agreement suite needs a live QueryEngine on " +
+			"both sides to have anything to compare")
+	case h.SeedCorpus == nil:
+		t.Fatalf("conformance: Harness.SeedCorpus is nil; the agreement suite plants one corpus in both " +
+			"backends and compares the answers, so a backend that cannot be seeded from it cannot take " +
+			"part")
 	}
 	requireCapabilityAgreement(t, h)
 }
