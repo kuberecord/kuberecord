@@ -2290,13 +2290,19 @@ func TestHomebrewTapIsUpdatedByTheRelease(t *testing.T) {
 }
 
 // TestTapRefusesWhatItMustRefuse runs the target rather than reading it. Both
-// guards fire before anything is cloned, so this needs no token, no network and no
-// generated formula.
+// guards fire before anything is cloned, so this needs no token and no network.
+//
+// It does need a formula, and it supplies one rather than using whatever is in
+// dist/release/. The token guard is the *last* of three, so a run that reached it
+// only because an earlier `make release-artifacts` had left a file behind is a
+// test that passes on the machine that generated one and fails on a clean
+// checkout — which is exactly what it did. RELEASE_BREW_FORMULA is `?=` in the
+// Makefile, so pointing it at a temporary file is enough to make the precondition
+// the test's own.
 func TestTapRefusesWhatItMustRefuse(t *testing.T) {
 	tests := []struct {
 		name    string
 		version string
-		env     []string
 		wantOK  bool
 		says    string
 	}{
@@ -2321,7 +2327,10 @@ func TestTapRefusesWhatItMustRefuse(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("make", "release-brew-push", "RELEASE_VERSION="+tc.version)
+			formula := writeTemp(t, "kuberecord.rb", "# a stand-in; no guard below reads it\n")
+
+			cmd := exec.Command("make", "release-brew-push",
+				"RELEASE_VERSION="+tc.version, "RELEASE_BREW_FORMULA="+formula)
 			cmd.Dir = repoPath()
 			// An inherited token would turn the second case into a real clone.
 			cmd.Env = append(os.Environ(), "HOMEBREW_TAP_TOKEN=")
