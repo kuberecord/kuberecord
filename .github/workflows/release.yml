@@ -10,6 +10,13 @@
 # runs the identical sequence with nothing pushed to a public registry and nothing
 # published, which is what makes a rehearsal meaningful.
 #
+# Since Task 12.1 the CLI ships from this same run rather than from a pipeline of
+# its own: one archive per platform, each carrying both binary names, cross-compiled
+# cgo-free in the publish job and described by an SBOM of their own. They are signed
+# the only way a file on a Release page can be — through checksums.txt, which names
+# every asset by content and is what `cosign sign-blob` puts a keyless signature
+# over.
+#
 # The chart is published two ways on purpose (Task 8.1). The `.tgz` on the Release
 # page reaches a reader through a GitHub redirect from this repository's
 # pre-migration path, and that redirect disappears permanently the day anyone
@@ -292,7 +299,22 @@ jobs:
         with:
           cosign-release: v3.1.3
 
-      - name: Build the release artifacts
+      # syft is needed here as well as in the image job since Task 12.1: the CLI
+      # is a second binary with a second dependency set, and it is built here.
+      # Same pin, for the same reason — what described a release is part of it.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.51.0
+
+      # This builds the CLI too (Task 12.1): `make release-artifacts` cross-compiles
+      # kubectl-kuberecord and kuberecord for every platform in CLI_PLATFORMS, with
+      # CGO_ENABLED=0 asserted against the produced binaries rather than against the
+      # command line, and packages both names into one archive per platform. It runs
+      # on a rehearsal exactly as it does on a release — a cross-compile is a build,
+      # and building it is the half of the CLI story that can go wrong without
+      # publishing anything.
+      - name: Build the release artifacts, the CLI archives included
         run: make release-artifacts RELEASE_VERSION="$RELEASE_VERSION"
 
       # The SBOM describes the image, so the image job produced it; it is attached
@@ -304,7 +326,13 @@ jobs:
           name: kuberecord-${{ env.RELEASE_VERSION }}-sbom
           path: dist/release
 
-      - name: Checksum every asset, the SBOM included
+      # The CLI's SBOM, unlike the image's, needs nothing published: it is scanned
+      # from the binary that was just built. So it runs on a rehearsal as well, and
+      # a rehearsal's document is the real one rather than a stand-in.
+      - name: Describe the CLI (SBOM)
+        run: make release-cli-sbom RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Checksum every asset, both SBOMs and the CLI archives included
         run: make release-checksums RELEASE_VERSION="$RELEASE_VERSION"
 
       # checksums.txt is handed over as the subject list rather than a glob of
@@ -318,14 +346,36 @@ jobs:
         with:
           subject-checksums: dist/release/checksums.txt
 
+      # The archives have no digest a registry could name, so the signature is over
+      # checksums.txt — the file that already names every asset by content, and the
+      # file the attestation above takes its subjects from. One signature therefore
+      # covers the CLI archives, install.yaml, the chart and both SBOMs, and a
+      # reader verifies the signature over the list and the list over the bytes.
+      #
+      # It runs after the attestation because it signs the finished file: a
+      # checksums.txt that changed afterwards would leave a valid signature over a
+      # list nobody published.
+      - name: Sign the artifacts' checksums
+        if: env.DRY_RUN == 'false'
+        run: make release-artifacts-sign RELEASE_VERSION="$RELEASE_VERSION"
+
+      # The published verification commands, run against what was just signed —
+      # the artifacts' half of what the image job does, and what keeps the CLI
+      # section of docs/VERIFYING.md from being a promise nobody checks.
+      - name: Verify the checksums signature and the checksums
+        if: env.DRY_RUN == 'false'
+        run: make release-artifacts-verify RELEASE_VERSION="$RELEASE_VERSION"
+
       - name: Show the subjects a real run would attest (rehearsal)
         if: env.DRY_RUN == 'true'
         run: |
           {
             echo "## Rehearsal: the subjects a release would attest"
             echo
-            echo "Each line below would become one SLSA provenance subject. Nothing"
-            echo "was attested."
+            echo "Each line below would become one SLSA provenance subject, and one"
+            echo "\`cosign sign-blob\` over this file would cover all of them. Nothing"
+            echo "was attested and nothing was signed; the CLI archives listed here were"
+            echo "built for real and are attached to this run."
             echo
             echo '```'
             cat dist/release/checksums.txt
@@ -342,6 +392,8 @@ jobs:
           path: |
             dist/release/install.yaml
             dist/release/*.tgz
+            dist/release/kuberecord_*.tar.gz
+            dist/release/kuberecord_*.zip
             dist/release/checksums.txt
             dist/release/*-sbom.spdx.json
             dist/release/RELEASE_NOTES.md
@@ -405,7 +457,10 @@ jobs:
             $prerelease \
             dist/release/install.yaml \
             dist/release/kuberecord-*.tgz \
+            dist/release/kuberecord_*.tar.gz \
+            dist/release/kuberecord_*.zip \
             dist/release/checksums.txt \
+            dist/release/checksums.txt.sigstore.json \
             dist/release/*-sbom.spdx.json
 
       - name: Summarise
@@ -427,6 +482,8 @@ jobs:
               # re-resolved — the same digest that was signed.
               echo "Chart: \`oci://ghcr.io/kuberecord/charts/kuberecord:${RELEASE_VERSION#v}\`"
               echo "(\`$(cat dist/release/chart-digest.txt)\`)"
+              echo
+              echo "CLI: $(ls dist/release/kuberecord_*.tar.gz dist/release/kuberecord_*.zip | wc -l) archives, signed through checksums.txt"
               echo
               echo "Signed, attested and described. How to check any of that:"
               echo "https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"

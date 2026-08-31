@@ -168,6 +168,7 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 		newBlameCommand(flags, streams, invokedAs),
 		newScopesCommand(flags, streams, invokedAs),
 		newConfigCommand(flags, streams, invokedAs),
+		newVersionCommand(flags, streams),
 	)
 
 	return root, flags

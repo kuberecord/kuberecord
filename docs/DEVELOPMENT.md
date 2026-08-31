@@ -258,11 +258,18 @@ make release-notes RELEASE_VERSION=v0.2.0         # the gate, on its own
 ```
 
 The dry run writes `dist/release/` (git-ignored): the notes extracted from
-`CHANGELOG.md`, `install.yaml`, the packaged chart, an SBOM and `checksums.txt` —
-and it builds the image for every supported platform without a registry to push
-to. It also performs a real `helm push` of that packaged chart into a throwaway
+`CHANGELOG.md`, `install.yaml`, the packaged chart, the five CLI archives, an SBOM
+for the image and one for the CLI, and `checksums.txt` — and it builds the image
+for every supported platform without a registry to push to. It also performs a real `helm push` of that packaged chart into a throwaway
 registry it starts and destroys, which is the one supply-chain step a rehearsal
-can exercise rather than print. `test/release` covers the extractor and the wiring under `make test`.
+can exercise rather than print.
+
+The CLI is built for real by any of this, on every platform, and `make build-cli`
+is the same cross-compile on its own — a couple of minutes, and it asserts
+`CGO_ENABLED=0` against each binary it produced rather than against the
+environment it set (D18). It runs on every pull request in its own CI job, since a
+cgo dependency would otherwise break only the four platforms nobody builds
+locally. `test/release` covers the extractor and the wiring under `make test`.
 [`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
 cutting one.
 
@@ -274,6 +281,10 @@ step backwards:
 ```sh
 brew install cosign syft    # or each project's own install instructions
 ```
+
+`zip` is needed too, for the Windows CLI archive. It ships with macOS and with
+every ubuntu runner, so this is worth knowing only when a container image turns
+out not to have it.
 
 CI installs both from SHA-pinned vendor actions. Without them the rehearsal fails
 at the SBOM with a message naming the tool and how to get it, rather than at a
@@ -299,12 +310,12 @@ finds out what each became.
 
 | Workflow | What it runs |
 |---|---|
-| `test.yml` | `make test` |
+| `test.yml` | `make test`, and — in a job of its own — `make build-cli`, the cgo-free cross-compile of the CLI for all five published platforms |
 | `lint.yml` | `make lint-config` and `make lint` |
 | `test-e2e.yml` | `make test-e2e` |
 | `install-paths.yml` | `make verify-packaging`, the chart tests, a `dist/install.yaml` staleness check, and three smokes on Kind: the chart from a checkout, the chart from an OCI reference, and the installer |
 | `observability.yml` | `make verify-observability` |
 | `quickstart.yml` | `make quickstart` with `QUICKSTART_BUDGET_SECONDS=600` — the ten-minute claim, tested |
-| `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, its cosign signature, SBOM and provenance, then the artifacts, their provenance and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed, signed, attested or published |
+| `release.yml` | On a `vX.Y.Z` tag: the version and changelog gate, the multi-arch image, its cosign signature, SBOM and provenance, then the artifacts — the CLI archives among them — their SBOM, provenance, the signature over `checksums.txt` and the GitHub Release. On `workflow_dispatch`: the same sequence with nothing pushed, signed, attested or published |
 
 [kind]: https://kind.sigs.k8s.io/

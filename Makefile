@@ -441,6 +441,162 @@ OPERATOR_NAMESPACE ?= kuberecord-system
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go --operator-namespace=$(OPERATOR_NAMESPACE)
 
+# The CLI (Task 12.1). One compilation per platform, two shipped names, no cgo.
+#
+# It is built here rather than inside a container, and that is the whole point of
+# D18: `kubectl krew install` downloads a binary, not an image, so the artifact has
+# to be a static executable that this repository can produce for a platform nobody
+# on the release runner is holding. Pure Go with CGO_ENABLED=0 is what makes that
+# five `go build` invocations instead of five cross-toolchains, and it is a
+# property that would regress silently — a dependency that needs cgo fails only for
+# the platforms nobody builds locally — which is why verify-cli asserts it against
+# the produced binaries rather than against the command line that produced them.
+#
+# The operator is untouched by any of this: it ships as an image, cmd/main.go is
+# still what the Dockerfile builds, and the two binaries share no runtime (D20).
+
+# CLI_PLATFORMS is what a release cross-compiles for. Narrow it for a quick local
+# build (`make build-cli CLI_PLATFORMS=darwin/arm64`); the release builds them all,
+# and Task 12.2's krew manifest has one entry per platform listed here.
+CLI_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+# CLI_DIR holds the built binaries, one directory per platform. It is ignored by
+# git: these are per-tag artifacts, like everything else under dist/release/.
+CLI_DIR ?= dist/cli
+CLI_PKG ?= ./cmd/kubectl-kuberecord
+
+# The two names one build ships under. kubectl finds a plugin by file name alone,
+# so CLI_PLUGIN_NAME is fixed by kubectl rather than chosen here; CLI_STANDALONE_NAME
+# is what somebody who downloaded the archive directly types. They are the same
+# bytes — the second is copied from the first rather than compiled again, so the
+# two can never be built from different trees or with different flags.
+CLI_PLUGIN_NAME ?= kubectl-kuberecord
+CLI_STANDALONE_NAME ?= kuberecord
+
+# What `kuberecord version` reports, stamped by the linker into the one package
+# that exists to receive it. The variable path is a public interface of the build:
+# internal/cli/buildinfo says so, and a variable that moved would leave `-X` naming
+# nothing — which the linker does not treat as an error, so the failure would be a
+# release that reports no version rather than a build that fails.
+CLI_BUILDINFO_PKG = github.com/kuberecord/kuberecord/internal/cli/buildinfo
+
+# The commit this was built from, abbreviated, and marked when the tree was dirty.
+# `unknown` outside a checkout (an unpacked source archive, a vendored build),
+# because a commit is the only thing tying an artifact to a source tree and a
+# plausible-looking wrong answer is worse than no answer.
+CLI_COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+# When the binary was linked, RFC 3339 in UTC. Override it to build at a
+# particular stamp; `date -u` is spelled the same way on GNU and BSD, which the
+# ways of pinning it from an epoch are not.
+CLI_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# -s -w strip the symbol table and DWARF, which halves the download without
+# touching what a crash report needs: Go stack traces come from the pclntab, which
+# is not stripped, and `go version -m` still reads the build info verify-cli
+# depends on. -trimpath keeps a maintainer's home directory out of a published
+# binary.
+CLI_LDFLAGS = -s -w \
+	-X $(CLI_BUILDINFO_PKG).version=$(RELEASE_VERSION) \
+	-X $(CLI_BUILDINFO_PKG).commit=$(CLI_COMMIT) \
+	-X $(CLI_BUILDINFO_PKG).date=$(CLI_BUILD_DATE)
+
+.PHONY: build-cli
+build-cli: ## Cross-compile the CLI (both names) for every platform in CLI_PLATFORMS.
+	@# The flags are expanded once, here, rather than once per platform: they carry
+	@# a timestamp, and five archives stamped with five different build dates would
+	@# be five builds of one release by their own account.
+	@set -e; \
+	ldflags='$(CLI_LDFLAGS)'; \
+	for platform in $(CLI_PLATFORMS); do \
+		os="$${platform%%/*}"; arch="$${platform##*/}"; \
+		if [ "$$os" = "windows" ]; then suffix=".exe"; else suffix=""; fi; \
+		staged="$(CLI_DIR)/$$os-$$arch"; \
+		rm -rf "$$staged"; mkdir -p "$$staged"; \
+		echo "cli: building $$os/$$arch"; \
+		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" \
+			go build -trimpath -ldflags "$$ldflags" \
+			-o "$$staged/$(CLI_PLUGIN_NAME)$$suffix" $(CLI_PKG); \
+		cp "$$staged/$(CLI_PLUGIN_NAME)$$suffix" "$$staged/$(CLI_STANDALONE_NAME)$$suffix"; \
+	done
+	$(MAKE) verify-cli
+
+.PHONY: verify-cli
+verify-cli: ## Assert every built CLI binary is cgo-free, built for the platform it is filed under, and stamped.
+	@# CGO_ENABLED=0 is read back out of the binary rather than trusted from the
+	@# command line above, because that is the claim krew depends on and the two can
+	@# come apart: an environment that exports CGO_ENABLED=1, a dependency that
+	@# needs cgo on one platform only, a build somebody ran by hand. The Go
+	@# toolchain records the setting it actually used, so the artifact is the
+	@# witness.
+	@set -e; \
+	checked=0; \
+	for platform in $(CLI_PLATFORMS); do \
+		os="$${platform%%/*}"; arch="$${platform##*/}"; \
+		if [ "$$os" = "windows" ]; then suffix=".exe"; else suffix=""; fi; \
+		for name in $(CLI_PLUGIN_NAME) $(CLI_STANDALONE_NAME); do \
+			binary="$(CLI_DIR)/$$os-$$arch/$$name$$suffix"; \
+			if [ ! -f "$$binary" ]; then \
+				echo "cli: $$binary does not exist; run build-cli first."; \
+				echo "  Both names ship from one build, so a missing one is half a release."; \
+				exit 1; \
+			fi; \
+			settings="$$(go version -m "$$binary")"; \
+			if ! printf '%s\n' "$$settings" | grep -qE 'build[[:space:]]+CGO_ENABLED=0'; then \
+				echo "cli: $$binary was not built with CGO_ENABLED=0."; \
+				echo "  A cgo build is dynamically linked against the host it was built on, so it"; \
+				echo "  cannot cross-compile and would not run where krew installs it (D18)."; \
+				exit 1; \
+			fi; \
+			if ! printf '%s\n' "$$settings" | grep -qE "build[[:space:]]+GOOS=$$os\$$"; then \
+				echo "cli: $$binary is filed under $$os but was not built for it."; \
+				exit 1; \
+			fi; \
+			if ! printf '%s\n' "$$settings" | grep -qE "build[[:space:]]+GOARCH=$$arch\$$"; then \
+				echo "cli: $$binary is filed under $$arch but was not built for it."; \
+				exit 1; \
+			fi; \
+			checked=$$((checked + 1)); \
+		done; \
+	done; \
+	if [ "$$checked" -eq 0 ]; then \
+		echo "cli: no binaries were checked, so this proved nothing. CLI_PLATFORMS is empty."; \
+		exit 1; \
+	fi; \
+	echo "cli: $$checked binaries are cgo-free and built for the platform they are filed under."
+	@# And the stamp, which only running the binary can establish: `-X` naming a
+	@# variable that no longer exists is not an error, so an unstamped release is a
+	@# silent outcome. Only the host's own binary can be run, which is enough — the
+	@# five builds differ in nothing but GOOS and GOARCH.
+	@set -e; \
+	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
+	host="$(CLI_DIR)/$$host_os-$$host_arch/$(CLI_STANDALONE_NAME)"; \
+	built=""; \
+	for platform in $(CLI_PLATFORMS); do \
+		if [ "$$platform" = "$$host_os/$$host_arch" ]; then built=yes; fi; \
+	done; \
+	if [ -z "$$built" ] || [ ! -x "$$host" ]; then \
+		echo "cli: $$host_os/$$host_arch is not in CLI_PLATFORMS, so the version stamp"; \
+		echo "  was not checked by running anything."; \
+	else \
+		document="$$("$$host" version -o json)"; \
+		field() { printf '%s' "$$1" | sed -n "s/.*\"$$2\": \"\(.*\)\".*/\1/p"; }; \
+		version="$$(field "$$document" version)"; \
+		if [ "$$version" != "$(RELEASE_VERSION)" ]; then \
+			echo "cli: $$host reports version \"$$version\", not $(RELEASE_VERSION)."; \
+			echo "  -X names a variable by its full import path and silently does nothing when"; \
+			echo "  that path is wrong, so an unstamped binary is what a renamed variable"; \
+			echo "  produces. See $(CLI_BUILDINFO_PKG)."; \
+			exit 1; \
+		fi; \
+		for stamp in commit buildDate; do \
+			if [ -z "$$(field "$$document" "$$stamp")" ]; then \
+				echo "cli: $$host reports no $$stamp. All three stamps travel together."; \
+				exit 1; \
+			fi; \
+		done; \
+		echo "cli: $$host reports $$version, $$(field "$$document" commit), built $$(field "$$document" buildDate)"; \
+	fi
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
@@ -786,6 +942,48 @@ SBOM_SOURCE ?=
 # to move it.
 SBOM_MIN_PACKAGES ?= 50
 
+# The CLI archives (Task 12.1). One per platform, each carrying both binary names
+# and the licence the Apache terms require a binary distribution to travel with.
+#
+# The name is underscore-separated so no field can contain the separator, and it
+# is deliberately unlike the chart's `kuberecord-X.Y.Z.tgz`: the two land in the
+# same directory and are attached to the same Release page, and a reader reaching
+# for a CLI and getting a Helm chart is a mistake the file names should make
+# impossible.
+CLI_ARCHIVE_PREFIX = $(CLI_STANDALONE_NAME)_$(RELEASE_VERSION)
+cli-archive = $(CLI_ARCHIVE_PREFIX)_$(subst /,_,$(1))$(if $(filter windows/%,$(1)),.zip,.tar.gz)
+RELEASE_CLI_ARCHIVES = $(foreach platform,$(CLI_PLATFORMS),$(call cli-archive,$(platform)))
+
+# The CLI gets an SBOM of its own rather than a mention in the image's, because it
+# is a different binary with a different dependency set: no controller-runtime, and
+# a ClickHouse driver and an AWS SDK the operator's read path does not carry. One
+# document covers every platform for the same reason the image's does — the five
+# builds differ in GOOS and GOARCH and in nothing else — and the platform scanned
+# is stated in docs/VERIFYING.md rather than implied.
+RELEASE_CLI_SBOM ?= $(RELEASE_DIR)/kuberecord-cli-$(RELEASE_CHART_VERSION)-sbom.spdx.json
+CLI_SBOM_PLATFORM ?= linux/amd64
+
+# The signature over checksums.txt (Task 12.1).
+#
+# The image and the chart are signed by digest, because they are OCI artifacts and
+# a registry has a digest to name. An archive on a Release page has no such
+# reference, so the release signs the one file that already names every asset by
+# content: `cosign sign-blob` over checksums.txt, whose lines are sha256 sums. A
+# reader verifies the signature over the list and then the list over the bytes,
+# which is two commands for one claim and covers whichever assets they downloaded.
+#
+# The consequence worth stating plainly is that this newly signs install.yaml, the
+# chart archive and both SBOMs as well, since they are already in that file. That
+# is a strict improvement — they were attested but not signed — and it costs
+# nothing extra, but it is a change to what a release publishes rather than a CLI
+# detail.
+#
+# `.sigstore.json` is the Sigstore bundle's own conventional extension; the bundle
+# carries the certificate, the signature and the transparency-log proof together,
+# so verification needs this file and the asset and nothing else on disk.
+RELEASE_CHECKSUMS ?= $(RELEASE_DIR)/checksums.txt
+RELEASE_CHECKSUMS_BUNDLE ?= $(RELEASE_CHECKSUMS).sigstore.json
+
 # require-tool fails with the sentence a reader needs rather than
 # "make: cosign: No such file or directory".
 # $1 - the tool (a name on PATH or a path)
@@ -844,9 +1042,11 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	@# a digest left behind by an earlier rehearsal is what release-sbom and
 	@# release-sign would otherwise read, and they would then describe and sign an
 	@# image from a previous run without anything looking wrong.
-	rm -f "$(RELEASE_DIR)/install.yaml" "$(RELEASE_DIR)"/*.tgz "$(RELEASE_DIR)/checksums.txt" \
+	rm -f "$(RELEASE_DIR)/install.yaml" "$(RELEASE_DIR)"/*.tgz "$(RELEASE_CHECKSUMS)" \
 		"$(RELEASE_SBOM)" "$(RELEASE_DIGEST_FILE)" "$(RELEASE_IMAGE_NAME_FILE)" \
-		"$(RELEASE_CHART_DIGEST_FILE)"
+		"$(RELEASE_CHART_DIGEST_FILE)" \
+		"$(RELEASE_DIR)"/*.tar.gz "$(RELEASE_DIR)"/*.zip "$(RELEASE_CLI_SBOM)" \
+		"$(RELEASE_CHECKSUMS_BUNDLE)"
 	$(MAKE) build-installer INSTALLER_IMG=$(RELEASE_IMAGE) INSTALLER_OUT=$(RELEASE_DIR)/install.yaml
 	@# The manifest people apply is the manifest that was validated, rather than a
 	@# sibling of it built from the same sources.
@@ -854,7 +1054,152 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	"$(HELM)" package "$(CHART_DIR)" \
 		--version $(RELEASE_CHART_VERSION) --app-version $(RELEASE_VERSION) \
 		--destination "$(RELEASE_DIR)"
+	@# The CLI archives are built here rather than by a step of their own so that
+	@# they exist before the first checksum run: checksums.txt requires them by
+	@# name, on the same argument install.yaml is required by name — a checksums
+	@# file that silently omits an asset is worse than none, because it looks
+	@# complete.
+	$(MAKE) release-cli
 	$(MAKE) release-checksums
+
+.PHONY: release-cli
+release-cli: build-cli ## Package the CLI binaries into per-platform archives in RELEASE_DIR.
+	$(call require-tool,zip,Install zip: it ships with macOS and with every ubuntu runner (`apt-get install zip`).)
+	@mkdir -p "$(RELEASE_DIR)"
+	@# Both names go into one archive on purpose. krew installs the plugin binary
+	@# and a direct download wants the standalone one, and shipping them together
+	@# means one URI per platform for the krew manifest, the Homebrew formula, the
+	@# checksums and the documentation to agree about. They are the same bytes, so
+	@# what it costs is archive size and what it buys is that "both names ship from
+	@# one build" is checkable by opening any one archive.
+	@#
+	@# LICENSE travels with them because the Apache terms require a binary
+	@# distribution to carry it, not as a courtesy.
+	@#
+	@# The archives are built once and the bytes that were hashed are the bytes that
+	@# are published — the same discipline the chart follows, and the reason neither
+	@# is repackaged later in the release. gzip -n keeps the source file name and
+	@# mtime out of the header, so an archive describes its contents rather than the
+	@# machine that made it.
+	@set -e; \
+	destination="$$(cd "$(RELEASE_DIR)" && pwd)"; \
+	for platform in $(CLI_PLATFORMS); do \
+		os="$${platform%%/*}"; arch="$${platform##*/}"; \
+		if [ "$$os" = "windows" ]; then suffix=".exe"; else suffix=""; fi; \
+		staged="$(CLI_DIR)/$$os-$$arch"; \
+		cp LICENSE "$$staged/LICENSE"; \
+		files="$(CLI_PLUGIN_NAME)$$suffix $(CLI_STANDALONE_NAME)$$suffix LICENSE"; \
+		if [ "$$os" = "windows" ]; then \
+			archive="$(CLI_ARCHIVE_PREFIX)_$${os}_$${arch}.zip"; \
+			rm -f "$$destination/$$archive"; \
+			( cd "$$staged" && zip -q -X "$$destination/$$archive" $$files ); \
+		else \
+			archive="$(CLI_ARCHIVE_PREFIX)_$${os}_$${arch}.tar.gz"; \
+			rm -f "$$destination/$$archive"; \
+			( cd "$$staged" && tar -cf - $$files ) | gzip -9n > "$$destination/$$archive"; \
+		fi; \
+		echo "release: $(RELEASE_DIR)/$$archive"; \
+	done
+	@# A release that shipped an archive for one platform and not another would be
+	@# discovered by whoever runs `krew install` on the missing one.
+	@set -e; \
+	for archive in $(RELEASE_CLI_ARCHIVES); do \
+		[ -f "$(RELEASE_DIR)/$$archive" ] || { \
+			echo "release: $(RELEASE_DIR)/$$archive was not produced, though CLI_PLATFORMS asks for it."; \
+			exit 1; \
+		}; \
+	done
+
+# The CLI's SBOM, scanned from the binary rather than from a source tree: what is
+# published is what is described. syft reads the module list the Go toolchain
+# embeds, which survives -s -w and -trimpath.
+#
+# Unlike the image's, this one needs nothing published — the binary exists as soon
+# as build-cli has run — so a rehearsal produces the real document rather than a
+# stand-in for it.
+.PHONY: release-cli-sbom
+release-cli-sbom: ## Generate the CLI SBOM (SPDX JSON) into RELEASE_DIR.
+	$(call require-tool,$(SYFT),Install syft: https://github.com/anchore/syft#installation (`brew install syft`).)
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	binary="$(CLI_DIR)/$(subst /,-,$(CLI_SBOM_PLATFORM))/$(CLI_STANDALONE_NAME)"; \
+	if [ ! -f "$$binary" ]; then \
+		echo "release: $$binary does not exist, so there is no CLI to describe."; \
+		echo "  Run build-cli first, or scan another platform with CLI_SBOM_PLATFORM=<os>/<arch>."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(SYFT)" scan "file:$$binary" \
+		--source-name "$(CLI_STANDALONE_NAME)-cli" --source-version "$(RELEASE_VERSION)" \
+		-o '$(SBOM_FORMAT)=$(RELEASE_CLI_SBOM).tmp'
+	@# The same three checks the image's SBOM gets, and for the same reason: syft
+	@# succeeds on a file it could not read the modules out of, and the result is a
+	@# valid SPDX document describing nothing.
+	@set -e; \
+	if ! grep -q '"spdxVersion"' "$(RELEASE_CLI_SBOM).tmp"; then \
+		rm -f "$(RELEASE_CLI_SBOM).tmp"; \
+		echo "release: syft did not produce an SPDX document for the CLI."; \
+		exit 1; \
+	fi; \
+	if ! grep -q 'github.com/$(GITHUB_REPO)' "$(RELEASE_CLI_SBOM).tmp"; then \
+		rm -f "$(RELEASE_CLI_SBOM).tmp"; \
+		echo "release: the CLI SBOM does not mention github.com/$(GITHUB_REPO), so syft did not"; \
+		echo "  read the binary's module list. It is describing something other than this build."; \
+		exit 1; \
+	fi; \
+	packages="$$(grep -o -E '"SPDXID": ?"SPDXRef-Package' "$(RELEASE_CLI_SBOM).tmp" | wc -l | tr -d ' ')"; \
+	if [ "$$packages" -lt $(SBOM_MIN_PACKAGES) ]; then \
+		rm -f "$(RELEASE_CLI_SBOM).tmp"; \
+		echo "release: the CLI SBOM lists $$packages packages, fewer than the $(SBOM_MIN_PACKAGES) a real"; \
+		echo "  scan finds. It is describing something other than this binary."; \
+		exit 1; \
+	fi; \
+	mv "$(RELEASE_CLI_SBOM).tmp" "$(RELEASE_CLI_SBOM)"; \
+	echo "release: $$packages packages in $(RELEASE_CLI_SBOM)"
+
+# Keyless, like the image's and the chart's, and bound to the same identity — the
+# workflow, the ref and the repository. What differs is only that a file on a
+# Release page has no digest a registry could name, so the subject is
+# checksums.txt: signing the list and letting the list cover the bytes.
+.PHONY: release-artifacts-sign
+release-artifacts-sign: ## Sign checksums.txt with cosign (keyless/OIDC), covering every attached asset.
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_CHECKSUMS)" ]; then \
+		echo "release: $(RELEASE_CHECKSUMS) does not exist; run release-checksums first."; \
+		echo "  Signing anything else would sign a subset of the release and look like all of it."; \
+		exit 1; \
+	fi; \
+	rm -f "$(RELEASE_CHECKSUMS_BUNDLE)"; \
+	set -x; \
+	"$(COSIGN)" sign-blob --yes --bundle "$(RELEASE_CHECKSUMS_BUNDLE)" "$(RELEASE_CHECKSUMS)"
+
+# The published verification commands, run against what was just published — the
+# artifacts' half of what release-verify does for the image. Both steps are here
+# rather than only the signature: a valid signature over a list nothing was checked
+# against would prove the list authentic and say nothing about the archives.
+.PHONY: release-artifacts-verify
+release-artifacts-verify: ## Verify the checksums signature, and the checksums, the way a user would.
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@set -e; \
+	if [ ! -f "$(RELEASE_CHECKSUMS_BUNDLE)" ]; then \
+		echo "release: $(RELEASE_CHECKSUMS_BUNDLE) does not exist; there is nothing published to verify."; \
+		exit 1; \
+	fi; \
+	set -x; \
+	"$(COSIGN)" verify-blob \
+		--bundle "$(RELEASE_CHECKSUMS_BUNDLE)" \
+		--certificate-oidc-issuer "$(COSIGN_ISSUER)" \
+		--certificate-identity "$(COSIGN_IDENTITY)" \
+		"$(RELEASE_CHECKSUMS)"
+	@echo "release: the signature on $(RELEASE_CHECKSUMS) is valid,"
+	@echo "  and it was made by $(COSIGN_IDENTITY)"
+	@set -e; cd "$(RELEASE_DIR)"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum -c checksums.txt; \
+	else \
+		shasum -a 256 -c checksums.txt; \
+	fi
 
 # checksums.txt is one file listing every asset a release attaches, and it is
 # recomputed rather than appended to: the SBOM is produced after the install
@@ -875,7 +1220,7 @@ release-checksums: ## Hash every asset in RELEASE_DIR into checksums.txt.
 	@# a maintainer rehearses on either. Names in the file are relative to the
 	@# directory, so `sha256sum -c checksums.txt` works wherever the assets land.
 	@set -e; cd "$(RELEASE_DIR)"; \
-	assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz"; \
+	assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz $(RELEASE_CLI_ARCHIVES)"; \
 	for f in $$assets; do \
 		[ -f "$$f" ] || { \
 			echo "release: $(RELEASE_DIR)/$$f is missing; run release-artifacts first."; \
@@ -884,6 +1229,9 @@ release-checksums: ## Hash every asset in RELEASE_DIR into checksums.txt.
 	done; \
 	if [ -f "$(notdir $(RELEASE_SBOM))" ]; then \
 		assets="$$assets $(notdir $(RELEASE_SBOM))"; \
+	fi; \
+	if [ -f "$(notdir $(RELEASE_CLI_SBOM))" ]; then \
+		assets="$$assets $(notdir $(RELEASE_CLI_SBOM))"; \
 	fi; \
 	if command -v sha256sum >/dev/null 2>&1; then \
 		sha256sum $$assets > checksums.txt; \
@@ -1220,6 +1568,15 @@ release-rehearse-publishing: ## Print, without running, the publishing steps a r
 	@$(MAKE) --dry-run --no-print-directory release-chart-sign release-chart-verify \
 		RELEASE_VERSION="$(RELEASE_VERSION)" | sed 's/^/    /'
 	@echo
+	@# The CLI archives are built for real by a rehearsal — they are files on a
+	@# runner, and building them is the half with something to get wrong. Their
+	@# signature is not, for the same reason the image's is not: sign-blob writes a
+	@# public transparency-log entry, which is a publication whatever it is over.
+	@echo "  ...and, over $(RELEASE_CHECKSUMS), which covers every attached asset"
+	@echo "  including the $(words $(CLI_PLATFORMS)) CLI archives:"
+	@$(MAKE) --dry-run --no-print-directory release-artifacts-sign release-artifacts-verify \
+		RELEASE_VERSION="$(RELEASE_VERSION)" | sed 's/^/    /'
+	@echo
 	@echo "  ...and, from the workflow rather than from make, the two"
 	@echo "  actions/attest-build-provenance calls over:"
 	@echo "    $(IMAGE_REPO)@<the pushed digest>"
@@ -1232,6 +1589,10 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@# from a locally built image — the same target the workflow's rehearsal path
 	@# calls, so the two rehearsals exercise one code path.
 	$(MAKE) release-sbom-local
+	@# The CLI's SBOM needs nothing published, so a rehearsal produces the real
+	@# document rather than a stand-in: the binary release-artifacts built is the
+	@# binary a release would ship.
+	$(MAKE) release-cli-sbom
 	$(MAKE) release-checksums
 	@echo
 	$(MAKE) release-chart-rehearse
@@ -1241,9 +1602,10 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@echo "release: dry run for $(RELEASE_VERSION) complete. Nothing was pushed or published."
 	@echo "  image      $(RELEASE_IMAGE) (built for $(PLATFORMS), discarded)"
 	@echo "  notes      $(RELEASE_NOTES)"
-	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_CHART_TGZ), $(RELEASE_DIR)/checksums.txt"
+	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_CHART_TGZ), $(RELEASE_CHECKSUMS)"
+	@echo "  cli        $(words $(CLI_PLATFORMS)) archives in $(RELEASE_DIR), both binary names in each"
 	@echo "  chart      $(CHART_OCI_REF):$(RELEASE_CHART_VERSION) (pushed to a throwaway registry, discarded)"
-	@echo "  sbom       $(RELEASE_SBOM)"
+	@echo "  sbom       $(RELEASE_SBOM), $(RELEASE_CLI_SBOM)"
 	@echo "  unsigned   a rehearsal signs nothing and attests nothing; see docs/VERIFYING.md"
 
 ##@ Deployment

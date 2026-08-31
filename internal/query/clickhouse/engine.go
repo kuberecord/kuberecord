@@ -68,13 +68,18 @@ import (
 // asserted where the implementation lives rather than at wiring time.
 var _ query.QueryEngine = (*Engine)(nil)
 
-// backendName is what this engine calls itself in structured output.
+// BackendName is what this engine calls itself in structured output.
 //
 // It is surfaced as metadata.backend so a scripted consumer can attribute a
 // result to the engine that produced it — and, when two backends disagree, decide
 // which to trust for the question asked. People pin scripts to it, so a release
 // must not rename it.
-const backendName = "clickhouse"
+//
+// It is exported because `kuberecord version` lists the engines a binary was
+// built with (Task 12.1). A CLI that spelled the name a second time would
+// eventually spell it differently from what metadata.backend carries, and the
+// reader comparing the two would have no way to tell which was the typo.
+const BackendName = "clickhouse"
 
 // Engine answers the read-plane contract over one already-configured ClickHouse
 // connection.
@@ -145,7 +150,7 @@ func New(conn driver.Conn) (*Engine, error) {
 // answer this engine can give cheaply.
 func (e *Engine) Capabilities() query.Capabilities {
 	return query.Capabilities{
-		Backend:           backendName,
+		Backend:           BackendName,
 		Deletions:         true,
 		ServerSideFilter:  true,
 		PointQuery:        true,

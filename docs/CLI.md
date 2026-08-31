@@ -18,6 +18,7 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 - [`get --at`](#get---at)
 - [`blame`](#blame)
 - [`scopes`](#scopes)
+- [`version`](#version)
 - [Structured output](#structured-output)
 - [Where the data comes from](#where-the-data-comes-from)
 - [The cluster identity](#the-cluster-identity)
@@ -600,6 +601,86 @@ watchable kind, D8.)
 A backend with no scope log at all cannot answer this command — there is no other
 half of the question to fall back to — so it exits `1` naming the backend, rather
 than printing an empty table that would read as "nothing was watching".
+
+## `version`
+
+Which build is running, and what it can read.
+
+```console
+$ kuberecord version
+kuberecord v0.3.0
+  commit  77514b632925
+  built   2026-08-31T21:04:11Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+```
+
+The version, the commit and the build date are stamped into the binary at release
+time, so they identify the artifact rather than a source tree that resembles it. A
+build made any other way reports what the Go toolchain recorded — a module version
+for `go install`, the revision and its `-dirty` mark for a build from a checkout —
+and prints `unknown` where nothing could say. A commit with no `-dirty` on it was
+built from exactly that tree.
+
+**The backend list is what this build can read**, not what the project supports,
+and it is the first thing to check when a `--source` or a profile is refused. The
+`engine` column is the value that appears as `metadata.backend` in
+[structured output](#structured-output), so an answer you are holding can be
+matched to the row that produced it — `s3` and `local` are two ways of reaching one
+engine, which is why the column is not redundant.
+
+It contacts nothing: no cluster, no sink, no network. That is deliberate — the
+reason to run it is usually that something else already failed.
+
+`-o json` and `-o yaml` render the same facts as a document. It carries the same
+`apiVersion` as every other structured answer and the same additive-only promise,
+with a `kind` of its own:
+
+```console
+$ kuberecord version -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Version",
+  "version": "v0.3.0",
+  "commit": "77514b632925",
+  "buildDate": "2026-08-31T21:04:11Z",
+  "goVersion": "go1.25.7",
+  "platform": "linux/amd64",
+  "backends": [
+    {
+      "name": "clickhouse",
+      "engine": "clickhouse",
+      "description": "schema v1 in ClickHouse"
+    },
+    {
+      "name": "s3",
+      "engine": "objectsource",
+      "description": "jsonl-v1 archive in an S3-compatible bucket"
+    },
+    {
+      "name": "local",
+      "engine": "objectsource",
+      "description": "jsonl-v1 archive in a directory"
+    }
+  ]
+}
+```
+
+`-o jsonl` and `-o diff` are refused by name rather than quietly rendered as
+something else: this is one document, not a stream, and there are no change
+operations in it to diff.
+
+There is no `--version` flag. kubectl has none either, and cobra's built-in one is
+handled before any command runs — so it could not honour `-o`, and
+`kuberecord --version -o json` would print a table while appearing to have been
+asked for JSON.
+
+How to check that the binary this reports on is the one you verified:
+[`VERIFYING.md`](VERIFYING.md#the-cli-archives).
 
 ## Structured output
 

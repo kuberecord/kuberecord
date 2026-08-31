@@ -561,6 +561,17 @@ func TestReleaseWorkflow(t *testing.T) {
 		{"the chart is signed", "make release-chart-sign", "an unsigned chart is an unsigned operator by another route"},
 		{"the chart verifies itself", "make release-chart-verify", "a signature that does not verify must fail the release"},
 		{"the chart push is rehearsed", "make release-chart-rehearse", "a push is the step with something to get wrong"},
+		// Task 12.1. The CLI ships from this run rather than from a pipeline of
+		// its own, so each half of that has to still be wired up here.
+		{"the CLI is described", "make release-cli-sbom", "a binary with a different dependency set needs its own SBOM"},
+		{"the artifacts are signed", "make release-artifacts-sign",
+			"an archive on a Release page has no digest, so the checksums carry the signature"},
+		{"the signature verifies itself", "make release-artifacts-verify",
+			"a signature that does not verify must fail the release"},
+		{"the CLI archives are attached", "dist/release/kuberecord_*.tar.gz", "archives nobody can download install nothing"},
+		{"the Windows archive is attached", "dist/release/kuberecord_*.zip", "krew's windows selector points at it"},
+		{"the signature is attached", "dist/release/checksums.txt.sigstore.json",
+			"a signature nobody can fetch verifies nothing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -628,8 +639,14 @@ func TestVersioningPolicyIsDocumented(t *testing.T) {
 // for one tag and would otherwise show up as untracked noise in every release
 // rehearsal — the state in which somebody is most likely to `git add -A`.
 func TestReleaseArtifactsAreIgnored(t *testing.T) {
-	if !strings.Contains(readFile(t, ".gitignore"), "dist/release/") {
+	gitignore := readFile(t, ".gitignore")
+	if !strings.Contains(gitignore, "dist/release/") {
 		t.Error(".gitignore does not ignore dist/release/, which `make release-artifacts` fills")
+	}
+	// dist/cli/ holds ten binaries of sixty megabytes each. A commit of one would
+	// be noticed by whoever cloned next rather than by whoever made it.
+	if !strings.Contains(gitignore, "dist/cli/") {
+		t.Error(".gitignore does not ignore dist/cli/, which `make build-cli` fills")
 	}
 }
 
@@ -662,12 +679,24 @@ type releaseWorkflow struct {
 
 func parseReleaseWorkflow(t *testing.T) releaseWorkflow {
 	t.Helper()
+	return parseWorkflow(t, releaseWorkflowPath)
+}
+
+// parseWorkflow is the same parse for any workflow in the directory.
+//
+// It exists because a `strings.Contains` over a workflow's raw text cannot tell a
+// step from a comment about a step, and this file's comments deliberately quote
+// the commands they explain — so a text search for `make build-cli` matches the
+// paragraph saying why it runs even after the step running it is gone. That is
+// not hypothetical: it happened to the assertion in TestCLICrossCompilesCgoFree.
+func parseWorkflow(t *testing.T, path string) releaseWorkflow {
+	t.Helper()
 	var wf releaseWorkflow
-	if err := yaml.Unmarshal([]byte(readFile(t, releaseWorkflowPath)), &wf); err != nil {
-		t.Fatalf("parse %s: %v", releaseWorkflowPath, err)
+	if err := yaml.Unmarshal([]byte(readFile(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
 	if len(wf.Jobs) == 0 {
-		t.Fatalf("%s parsed with no jobs", releaseWorkflowPath)
+		t.Fatalf("%s parsed with no jobs", path)
 	}
 	return wf
 }
@@ -827,6 +856,10 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-sign") },
 			"a signature is a registry write and a public transparency-log entry",
 		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-artifacts-sign") },
+			"sign-blob writes a public transparency-log entry, whatever it is over",
+		},
 	}
 
 	found := make([]int, len(publishing))
@@ -901,6 +934,9 @@ func TestSupplyChainTargetsExist(t *testing.T) {
 		// Task 8.1's four, which break the same way.
 		"release-chart-login:", "release-chart-push:", "release-chart-sign:",
 		"release-chart-verify:", "release-chart-rehearse:",
+		// Task 12.1's, likewise: rename one and CI stays green until somebody tags.
+		"build-cli:", "verify-cli:", "release-cli:", "release-cli-sbom:",
+		"release-artifacts-sign:", "release-artifacts-verify:",
 	} {
 		if !strings.Contains(makefile, "\n"+target) {
 			t.Errorf("the Makefile no longer defines %s", strings.TrimSuffix(target, ":"))
@@ -1026,6 +1062,12 @@ var verifyingPageClaims = []struct {
 	// getting it have to be stated as one thing, not two.
 	{"ghcr.io/kuberecord/charts/kuberecord", "the chart's reference, which is the address and the whole address"},
 	{"helm pull", "a reader who cannot fetch the chart cannot check it"},
+	// The CLI is a third signed artifact (Task 12.1), and it is verified
+	// differently — a file, not a registry reference — so its command has to be on
+	// the page in full rather than left to be inferred from the image's.
+	{"cosign verify-blob", "the archives are files, and a file is verified with a bundle rather than a digest"},
+	{"checksums.txt.sigstore.json", "the bundle's name, which is the argument a reader passes"},
+	{"kubectl-kuberecord", "both names ship in every archive, and which one is installed decides how it is invoked"},
 }
 
 // TestVerifyingPageCoversItsSubject is the positive half of the pair: a page that
@@ -1277,6 +1319,281 @@ func TestNoUnreliableDigestTemplate(t *testing.T) {
 				"template and print the default listing with exit code 0, so the caller gets "+
 				"prose where it expected a digest. Hash the raw manifest instead: "+
 				"`imagetools inspect --raw <ref> | sha256sum`.", f, i+1, banned)
+		}
+	}
+}
+
+//
+// The CLI is built, packaged and signed by this pipeline (Task 12.1)
+//
+
+// cliPlatforms reads the platform list out of the Makefile, so every test below
+// measures what the release actually builds rather than a list restated here.
+//
+// A test carrying its own copy would keep passing after a platform was dropped,
+// which is the failure that matters: the archive simply stops being attached, and
+// the person who finds out is whoever runs `krew install` on that platform.
+func cliPlatforms(t *testing.T) []string {
+	t.Helper()
+
+	match := regexp.MustCompile(`(?m)^CLI_PLATFORMS \?= (.+)$`).FindStringSubmatch(readFile(t, "Makefile"))
+	if match == nil {
+		t.Fatal("the Makefile no longer defines CLI_PLATFORMS, so nothing decides what the CLI is built for")
+	}
+	platforms := strings.Fields(match[1])
+	if len(platforms) == 0 {
+		t.Fatal("CLI_PLATFORMS is empty; a release would attach no CLI archives and fail nowhere")
+	}
+	return platforms
+}
+
+// TestCLICrossCompilesCgoFree is the acceptance criterion that would regress
+// silently, so it is asserted three ways: the build sets it, the build reads it
+// back, and CI runs the build.
+//
+// The middle one is the point. `CGO_ENABLED=0` on a command line is a request; the
+// Go toolchain records the value it actually used in the binary, and that is the
+// only witness that survives an environment exporting CGO_ENABLED=1 or a
+// dependency that quietly needs cgo on one platform. D18 makes this property
+// load-bearing for krew: a cgo build is dynamically linked against the machine it
+// was built on and cannot cross-compile at all.
+func TestCLICrossCompilesCgoFree(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	if !strings.Contains(makefile, "CGO_ENABLED=0 GOOS=") {
+		t.Error("build-cli no longer sets CGO_ENABLED=0 for the cross-compile; D18's " +
+			"static build is what makes krew distribution five archives from one make")
+	}
+	// The read-back. `go version -m` is what prints the recorded build settings.
+	if !strings.Contains(makefile, `go version -m "$$binary"`) {
+		t.Error("verify-cli no longer reads the build settings back out of the binaries. " +
+			"Trusting the command line asserts that the recipe was written correctly, " +
+			"not that the artifact is what it claims")
+	}
+	if !strings.Contains(makefile, `grep -qE 'build[[:space:]]+CGO_ENABLED=0'`) {
+		t.Error("verify-cli no longer matches CGO_ENABLED=0 in the recorded build settings, so " +
+			"the read-back above is reading something other than the setting it exists for")
+	}
+
+	// And the third: a property nothing runs is a comment. Read out of the parsed
+	// steps rather than the file's text, because the file's text also contains the
+	// comment explaining the step.
+	if !workflowRuns(t, ".github/workflows/test.yml", "make build-cli") {
+		t.Error("no step in .github/workflows/test.yml runs `make build-cli`, so the cgo-free " +
+			"cross-compile is asserted only at tag time — which is after the release it " +
+			"would have stopped")
+	}
+}
+
+// workflowRuns reports whether any step of any job runs a command containing want.
+func workflowRuns(t *testing.T, path, want string) bool {
+	t.Helper()
+	for _, job := range parseWorkflow(t, path).Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestCLIBuildsBothNamesForEveryPlatform is the other half of the build criterion.
+//
+// Both names come from one compilation rather than two builds of the same source,
+// which is what makes them the same bytes: a plugin and a standalone binary that
+// could differ would be two products with one version number.
+func TestCLIBuildsBothNamesForEveryPlatform(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	for _, want := range []string{
+		"CLI_PLUGIN_NAME ?= kubectl-kuberecord",
+		"CLI_STANDALONE_NAME ?= kuberecord",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("the Makefile no longer defines %q; kubectl finds a plugin by file name "+
+				"alone, so one of these names is not a choice", want)
+		}
+	}
+	// Copied, not compiled twice.
+	if !strings.Contains(makefile, `cp "$$staged/$(CLI_PLUGIN_NAME)$$suffix" "$$staged/$(CLI_STANDALONE_NAME)$$suffix"`) {
+		t.Error("build-cli no longer copies one compilation into the second name. Two builds " +
+			"could differ — in flags, in the tree they saw, in the moment they ran — and " +
+			"nothing downstream would notice")
+	}
+
+	// The five the acceptance criterion names. D18's prose says six; the task's
+	// list is five and is what ships, so this pins the list that exists.
+	want := []string{"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64"}
+	if got := cliPlatforms(t); !slices.Equal(got, want) {
+		t.Errorf("CLI_PLATFORMS is %v, want %v. krew's plugin manifest has one entry per "+
+			"platform here, so dropping one silently stops shipping to those users", got, want)
+	}
+}
+
+// TestCLIPlatformsAreDocumented is the anti-drift check between what is built and
+// what a reader is told is built.
+//
+// It is the same class as the signing identity's: prose nobody can run, describing
+// machinery that moved. A reader deciding whether their architecture is supported
+// reads the page, not the Makefile.
+func TestCLIPlatformsAreDocumented(t *testing.T) {
+	page := readFile(t, "docs/RELEASING.md")
+	for _, platform := range cliPlatforms(t) {
+		if !strings.Contains(page, platform) {
+			t.Errorf("docs/RELEASING.md does not name %s, which the release builds a CLI "+
+				"archive for", platform)
+		}
+	}
+}
+
+// TestCLIArchivesAreChecksummedAndAttached is the property that ties the archives
+// into the evidence the rest of the release already carries.
+//
+// checksums.txt is the attestation's subject list and, since this task, the thing
+// the signature is over. An archive missing from it is an archive with no
+// provenance and no signature — published, and backed by nothing — and nothing
+// else in the release would fail.
+func TestCLIArchivesAreChecksummedAndAttached(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	// Required by name, on the same argument install.yaml is: a checksums file
+	// that silently omits an asset is worse than none, because it looks complete.
+	const required = `assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz $(RELEASE_CLI_ARCHIVES)"`
+	if !strings.Contains(makefile, required) {
+		t.Error("release-checksums no longer requires the CLI archives by name. Made optional, " +
+			"a release that failed to build them would publish a complete-looking checksums " +
+			"file describing a release missing its CLI")
+	}
+	// And they have to exist before the first checksum run, which is why
+	// release-artifacts builds them rather than a separate workflow step.
+	artifacts := strings.Index(makefile, "release-artifacts: release-verify-version")
+	if artifacts < 0 {
+		t.Fatal("the Makefile no longer defines release-artifacts")
+	}
+	recipe := makefile[artifacts:]
+	buildsCLI := strings.Index(recipe, "$(MAKE) release-cli")
+	checksums := strings.Index(recipe, "$(MAKE) release-checksums")
+	if buildsCLI < 0 {
+		t.Fatal("release-artifacts no longer builds the CLI, so checksums.txt would require " +
+			"archives nothing produced")
+	}
+	if checksums < 0 || buildsCLI > checksums {
+		t.Error("release-artifacts computes the checksums before it builds the CLI archives, " +
+			"so the first run would fail on assets that arrive afterwards")
+	}
+}
+
+// TestArtifactSignatureCoversTheChecksums pins how the archives are signed, which
+// is the one part of this task that had to differ from what the release already
+// did.
+//
+// The image and the chart are signed by digest because a registry has one. A file
+// on a Release page does not, so the subject is checksums.txt — and the
+// consequence, which is worth a test rather than a comment, is that the signature
+// covers every asset in that file. Signing an archive individually instead would
+// leave install.yaml and the chart where they were.
+func TestArtifactSignatureCoversTheChecksums(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	if !strings.Contains(makefile,
+		`"$(COSIGN)" sign-blob --yes --bundle "$(RELEASE_CHECKSUMS_BUNDLE)" "$(RELEASE_CHECKSUMS)"`) {
+		t.Error("release-artifacts-sign no longer signs checksums.txt into a bundle. A bundle " +
+			"carries the certificate, the signature and the log proof together, which is what " +
+			"lets a reader verify with nothing but the file and the bundle")
+	}
+	// Verification pins both halves of the identity, exactly as the image's does.
+	// A `verify-blob` without them answers "is this signed by anybody?", which
+	// anyone who can obtain a Sigstore certificate can satisfy.
+	for _, want := range []string{
+		`--certificate-oidc-issuer "$(COSIGN_ISSUER)"`,
+		`--certificate-identity "$(COSIGN_IDENTITY)"`,
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("release-artifacts-verify does not pass %s, so it would accept a signature "+
+				"from any workflow the issuer serves", want)
+		}
+	}
+	// And the digests themselves. A valid signature over a list nothing was
+	// checked against proves the list authentic and says nothing about the bytes.
+	if !strings.Contains(makefile, "sha256sum -c checksums.txt") {
+		t.Error("release-artifacts-verify no longer checks the assets against the list it just " +
+			"verified the signature of")
+	}
+}
+
+// TestTheRehearsalExercisesTheCLI is the acceptance criterion about
+// `workflow_dispatch`, and the line it draws is the one the rest of this workflow
+// already draws.
+//
+// A cross-compile publishes nothing, so a rehearsal does it for real — and the
+// CLI's SBOM too, since that is scanned from a local binary rather than from
+// something pushed. The signature is the only half that cannot be rehearsed,
+// because `sign-blob` writes to a public transparency log, so it is printed
+// instead.
+func TestTheRehearsalExercisesTheCLI(t *testing.T) {
+	wf := parseReleaseWorkflow(t)
+
+	var buildsArtifacts, describesCLI bool
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			// `release-artifacts` is what builds the archives, and it must not be
+			// gated on the dry run: building them is the half of the CLI story a
+			// rehearsal exists to exercise.
+			if strings.Contains(step.Run, "make release-artifacts ") {
+				buildsArtifacts = true
+				if step.If != "" {
+					t.Errorf("the artifacts (and with them the CLI archives) are built under "+
+						"`if: %s`, so a rehearsal would not exercise the cross-compile", step.If)
+				}
+			}
+			if strings.Contains(step.Run, "make release-cli-sbom") {
+				describesCLI = true
+				if step.If != "" {
+					t.Errorf("the CLI SBOM is produced under `if: %s`, though it is scanned from "+
+						"a local binary and needs nothing published", step.If)
+				}
+			}
+		}
+	}
+	if !buildsArtifacts {
+		t.Error("no step runs `make release-artifacts`, so nothing builds the CLI archives")
+	}
+	if !describesCLI {
+		t.Error("no step runs `make release-cli-sbom`")
+	}
+
+	// The printed half. A rehearsal must say what it is deliberately not doing,
+	// or the difference between it and a release is invisible in its log.
+	makefile := readFile(t, "Makefile")
+	if !strings.Contains(makefile, "release-artifacts-sign release-artifacts-verify \\") {
+		t.Error("release-rehearse-publishing no longer prints the artifact signing commands, " +
+			"so a rehearsal is silent about the one step it cannot perform")
+	}
+}
+
+// TestCLISBOMIsValidated keeps the CLI's SBOM to the standard the image's is held
+// to: syft succeeds on a file whose contents it could not read, and the result is
+// a valid SPDX document describing nothing.
+func TestCLISBOMIsValidated(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	start := strings.Index(makefile, "release-cli-sbom: ##")
+	if start < 0 {
+		t.Fatal("the Makefile no longer defines release-cli-sbom")
+	}
+	recipe := makefile[start:]
+	if end := strings.Index(recipe, "\n.PHONY:"); end > 0 {
+		recipe = recipe[:end]
+	}
+
+	for want, why := range map[string]string{
+		`"spdxVersion"`:             "a document that is not SPDX is not the artifact that was promised",
+		"SBOM_MIN_PACKAGES":         "a scan that read no modules produces a valid, useless document",
+		"github.com/$(GITHUB_REPO)": "an SBOM that does not mention this module is describing something else",
+	} {
+		if !strings.Contains(recipe, want) {
+			t.Errorf("release-cli-sbom no longer checks %s: %s", want, why)
 		}
 	}
 }

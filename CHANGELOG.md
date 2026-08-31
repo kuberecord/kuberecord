@@ -18,6 +18,38 @@ than a summary of them.
 
 ### Added
 
+- **The CLI ships from the release pipeline, signed and verifiable.** Every tag
+  from v0.3.0 onward attaches five archives —
+  `kuberecord_vX.Y.Z_<os>_<arch>.tar.gz`, and `.zip` for Windows — covering
+  `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64` and
+  `windows/amd64`. Each carries **both binary names from one compilation**:
+  `kubectl-kuberecord`, which makes `kubectl kuberecord …` work, and `kuberecord`,
+  which works on its own. They are cross-compiled with `CGO_ENABLED=0` — a
+  property `make build-cli` asserts by reading it back out of each produced
+  binary, and that CI checks on every pull request, because a cgo dependency would
+  break only the platforms nobody builds locally and would not be noticed until
+  somebody installed one.
+
+  The archives are described by an SBOM of their own
+  (`kuberecord-cli-X.Y.Z-sbom.spdx.json`), covered by `checksums.txt`, and
+  attested by the same SLSA build provenance the install artifacts carry. They are
+  signed the only way a file on a Release page can be: a keyless `cosign
+  sign-blob` over `checksums.txt`, published as `checksums.txt.sigstore.json`.
+  **That signature covers every attached asset**, so `install.yaml`, the packaged
+  chart and both SBOMs are now signed as well as attested — additive, and an
+  improvement on what earlier releases published rather than a change to it. See
+  [`docs/VERIFYING.md`](docs/VERIFYING.md#the-cli-archives).
+- **`kuberecord version`** reports the version, commit and build date stamped into
+  the binary, the Go toolchain and platform it was built for, and the query
+  backends compiled into it — `clickhouse`, `s3` and `local`, each named with the
+  engine it opens, so a row can be matched against the `metadata.backend` field of
+  a structured answer. It contacts nothing: no cluster, no sink, no network, which
+  is the point, because the reason to run it is usually that something else has
+  already failed. `-o json` and `-o yaml` render it as a `Version` document under
+  the same `cli.kuberecord.io/v1alpha1` contract. A build that was not stamped —
+  `go install`, or `go build` from a checkout — reports what the Go toolchain
+  recorded instead, and `unknown` where nothing could say. See
+  [`docs/CLI.md`](docs/CLI.md#version).
 - **`kubectl kuberecord get` now marks a reconstruction in its structured output.**
   The `Object` envelope's `metadata` carries a `reconstruction` block —
   `reconstructed`, `not_deployable`, `at`, `base_ts`, `base_event` and

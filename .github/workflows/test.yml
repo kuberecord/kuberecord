@@ -29,3 +29,34 @@ jobs:
         run: |
           go mod tidy
           make test
+
+  cross-compile:
+    permissions:
+      contents: read
+    name: Cross-compile the CLI
+    runs-on: ubuntu-latest
+    # A job of its own rather than a step of the one above, for two reasons. It is
+    # the only thing in CI that builds for a platform nobody here runs, so a
+    # failure should say so by name; and it runs while the tests do, so the wall
+    # clock of a pull request is unchanged.
+    #
+    # It exists because D18's cgo-free cross-compile is load-bearing for krew and
+    # would otherwise regress silently: a dependency that needs cgo, or a build
+    # tag that pulls one in, breaks only for the four platforms nobody builds
+    # locally — and the first person to find out would be somebody running
+    # `kubectl krew install kuberecord` on a release that had already shipped.
+    # `make build-cli` asserts CGO_ENABLED=0 by reading it back out of each
+    # produced binary, not by trusting the environment it set (Task 12.1).
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build both binary names for every platform, cgo-free
+        run: make build-cli
