@@ -18,6 +18,33 @@ than a summary of them.
 
 ### Added
 
+- **`kubectl krew install kuberecord` and `brew install kuberecord/tap/kuberecord`.**
+  Two channels, one build: both install the archives the release already
+  publishes, so neither is a second artifact with its own provenance.
+
+  The krew plugin manifest (`kuberecord.yaml`) and the Homebrew formula
+  (`kuberecord.rb`) are **generated from the archives**, not hand-maintained —
+  each digest in them is computed from the file it describes. Both are attached to
+  the Release, both are lines in `checksums.txt`, and both are therefore covered
+  by the same SLSA provenance and the same keyless cosign signature as everything
+  else a release publishes. After the Release is created, every URI in both
+  documents is fetched back and re-hashed, so an asset that failed to upload fails
+  the release rather than a stranger's install.
+
+  Homebrew is updated by the release workflow, which pushes the *published*
+  formula — downloaded back off the Release page and checked against the signed
+  checksums — to [`kuberecord/homebrew-tap`](https://github.com/kuberecord/homebrew-tap).
+  A prerelease is never pushed: `brew install` cannot ask for a stable version, so
+  a formula naming a candidate would hand it to everyone.
+
+  krew installs the plugin name only, which is what a plugin manager does; the
+  standalone `kuberecord` comes from Homebrew or from the archive. Submitting the
+  manifest to [krew-index](https://github.com/kubernetes-sigs/krew-index) is
+  `make krew-index-pr`, run by a maintainer once the tag is published — a tag push
+  does not open a pull request against another project's repository, and krew-index
+  CI could not pass before the assets exist. Merging there is external and does not
+  block the release. See [`docs/CLI.md`](docs/CLI.md#installing) and
+  [`docs/RELEASING.md`](docs/RELEASING.md#the-two-distribution-channels).
 - **The CLI ships from the release pipeline, signed and verifiable.** Every tag
   from v0.3.0 onward attaches five archives —
   `kuberecord_vX.Y.Z_<os>_<arch>.tar.gz`, and `.zip` for Windows — covering

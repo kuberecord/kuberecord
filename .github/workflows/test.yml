@@ -60,3 +60,20 @@ jobs:
 
       - name: Build both binary names for every platform, cgo-free
         run: make build-cli
+
+      # And the two documents that tell krew and Homebrew where those archives are
+      # and what they hash to (Task 12.2). Packaged, generated and checked here on
+      # every pull request rather than only at tag time, because the failure mode
+      # is a naming drift nothing else notices: the archives are named by the
+      # Makefile and the URIs are generated from that naming, so a renamed archive
+      # produces a manifest full of URLs that 404 with every other step passing.
+      #
+      # It publishes nothing and touches no tap. `release-cli` re-enters
+      # `build-cli` above, which the Go build cache makes a relink rather than a
+      # second cross-compile.
+      - name: The krew manifest and the Homebrew formula describe the archives
+        run: |
+          make release-cli
+          make release-krew-manifest
+          make release-brew-formula
+          make release-krew-verify

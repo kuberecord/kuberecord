@@ -35,13 +35,16 @@ is where that limit is spelled out.
 | `install.yaml` | Its `sha256` in `checksums.txt`, and a **SLSA build provenance** attestation naming that digest. |
 | `kuberecord-X.Y.Z.tgz` | The same. |
 | `kuberecord_vX.Y.Z_<os>_<arch>.tar.gz` (`.zip` for Windows) | The same. Five archives, one per platform, each carrying both `kubectl-kuberecord` and `kuberecord`. |
+| `kuberecord.yaml` | The same. It is the krew plugin manifest, and every `sha256` in it is one of the archive rows above, computed a second time from the archive itself. |
+| `kuberecord.rb` | The same, for the Homebrew formula. It is the file the release pushes to the tap, so what `brew install` runs is an asset this release signed. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | The same, and it is itself the inventory of the image. |
 | `kuberecord-cli-X.Y.Z-sbom.spdx.json` | The same, for the CLI binary. |
 | `checksums.txt` | A keyless **cosign signature** over the file (`checksums.txt.sigstore.json`), and the provenance attestation's subject list *is* this file's contents — so the two cannot disagree, and one signature covers every asset above it. |
 
-Releases from **v0.2.0** onward carry all of it except three things that start at
+Releases from **v0.2.0** onward carry all of it except four things that start at
 **v0.3.0**: the chart in the registry (before that the chart shipped only as a
-release asset), the CLI archives, and the signature over `checksums.txt`. `v0.1.0`
+release asset), the CLI archives, the krew manifest and Homebrew formula that
+describe them, and the signature over `checksums.txt`. `v0.1.0`
 predates the whole scheme and has `checksums.txt` only. In every case the absence
 of a signature is expected, not a failure to investigate — there is nothing to
 verify because there was nothing published to verify.
@@ -291,6 +294,30 @@ kuberecord version
 stamped into the binary at release time, so it is also how you check that the
 binary on your PATH is the archive you just verified — and not an older one
 further up it.
+
+### What krew and Homebrew check, and what they do not
+
+Both channels check a `sha256`, and both take it from a document this release
+published: `kuberecord.yaml` for krew, `kuberecord.rb` for Homebrew. Each is
+generated from the archives, and each is a line in `checksums.txt` — so the two
+commands above cover the documents as well as the archives they describe.
+
+That gets you integrity, not provenance. krew and brew verify that the bytes they
+downloaded are the bytes their manifest names; neither knows who signed the
+manifest, and neither would notice a manifest that was authentic for a *different*
+release. If that distinction matters to you, verify the document you were served
+against the release:
+
+```sh
+# What krew was told, checked against what this release signed.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord.yaml
+sha256sum kuberecord.yaml          # the line checksums.txt carries for it
+```
+
+The release itself does not take this on trust either. Every URI in both documents
+is fetched and re-hashed after the Release is created — `make
+release-krew-verify-published`, run by the release workflow — so a manifest naming
+an asset that never uploaded fails the release rather than reaching a user.
 
 ## The build provenance
 

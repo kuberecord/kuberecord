@@ -403,6 +403,41 @@ make undeploy                                    # kustomize: operator + CRDs
 Deleting the CRDs deletes every sink and rule, but not a single row: the sink is
 the durable store, and nothing in an uninstall touches ClickHouse.
 
+## Installing the CLI
+
+The operator writes the rows; `kubectl kuberecord` is how you read them. It ships
+as one binary under two names — `kubectl-kuberecord`, which makes
+`kubectl kuberecord …` work, and `kuberecord`, which runs standalone against an
+object-store archive with no cluster at all.
+
+```sh
+# 1. krew, which is how a kubectl user finds a plugin.
+kubectl krew install kuberecord
+kubectl kuberecord timeline deploy/checkout -n payments
+
+# 2. Homebrew, on macOS and on Linux. The one channel that installs both names.
+brew install kuberecord/tap/kuberecord
+
+# 3. The release archive, directly — five platforms, Windows included.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord_v0.3.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
+
+# 4. From source, with a Go toolchain.
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.0
+```
+
+krew installs the plugin name only — that is what a plugin manager is for — so
+the standalone `kuberecord` comes from Homebrew or from the archive. `go install`
+compiles rather than downloads: no standalone name, no release stamp, and nothing
+signed. Which channel gives you what is a table in
+[`docs/CLI.md`](docs/CLI.md#installing).
+
+The archives are cross-compiled cgo-free, carry both names from one compilation,
+and are signed through `checksums.txt` — see
+[`docs/VERIFYING.md`](docs/VERIFYING.md#the-cli-archives). The CLI ships from
+v0.3.0 onward; earlier releases have no archives to install.
+
 ## Documentation
 
 | Page | What is in it |

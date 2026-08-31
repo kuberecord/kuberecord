@@ -335,6 +335,20 @@ jobs:
       - name: Checksum every asset, both SBOMs and the CLI archives included
         run: make release-checksums RELEASE_VERSION="$RELEASE_VERSION"
 
+      # The krew manifest and the Homebrew formula were generated inside
+      # `release-artifacts` and checked against the checksums file that existed
+      # then. The step above rewrote that file to take in the two SBOMs, so they
+      # are checked again — against the finished one, before anything is attested
+      # or signed. Neither document should have changed: they hash the archives,
+      # not the list. That is the invariant, and this is where it is worth
+      # re-asserting rather than assuming.
+      #
+      # It runs on a rehearsal too. Re-deriving a digest publishes nothing, and a
+      # manifest that stopped describing the archives is exactly the failure a
+      # rehearsal exists to find before a tag does.
+      - name: The krew manifest and the formula still describe the archives
+        run: make release-krew-verify RELEASE_VERSION="$RELEASE_VERSION"
+
       # checksums.txt is handed over as the subject list rather than a glob of
       # dist/release/: "what is checksummed" and "what is attested" are then the
       # same set by construction. A glob that stopped matching one asset would
@@ -394,6 +408,8 @@ jobs:
             dist/release/*.tgz
             dist/release/kuberecord_*.tar.gz
             dist/release/kuberecord_*.zip
+            dist/release/kuberecord.yaml
+            dist/release/kuberecord.rb
             dist/release/checksums.txt
             dist/release/*-sbom.spdx.json
             dist/release/RELEASE_NOTES.md
@@ -459,9 +475,25 @@ jobs:
             dist/release/kuberecord-*.tgz \
             dist/release/kuberecord_*.tar.gz \
             dist/release/kuberecord_*.zip \
+            dist/release/kuberecord.yaml \
+            dist/release/kuberecord.rb \
             dist/release/checksums.txt \
             dist/release/checksums.txt.sigstore.json \
             dist/release/*-sbom.spdx.json
+
+      # The other half of the digest check, and the half the acceptance criterion
+      # names: not "the documents describe what was built" but "the URLs in them
+      # resolve to it". It runs here because it cannot run earlier — the assets do
+      # not exist until the Release does — and the failures it catches are the ones
+      # a local check is blind to: an asset that never uploaded, a file name the
+      # Release page spells differently, a tag that is not there.
+      #
+      # It is the last step that can fail, and it fails after the Release is
+      # public. That is the right way round: the alternative is finding out from
+      # somebody whose `krew install` 404s.
+      - name: Every URL krew and brew publish resolves to the digest it claims
+        if: env.DRY_RUN == 'false'
+        run: make release-krew-verify-published RELEASE_VERSION="$RELEASE_VERSION"
 
       - name: Summarise
         run: |
@@ -485,11 +517,95 @@ jobs:
               echo
               echo "CLI: $(ls dist/release/kuberecord_*.tar.gz dist/release/kuberecord_*.zip | wc -l) archives, signed through checksums.txt"
               echo
+              echo "krew: \`dist/release/kuberecord.yaml\`, attached and checksummed. Submitting it to"
+              echo "kubernetes-sigs/krew-index is \`make krew-index-pr\`, run by a maintainer —"
+              echo "a tag push does not open a pull request on somebody else's repository."
+              echo
               echo "Signed, attested and described. How to check any of that:"
               echo "https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"
             fi
             echo
             echo '```'
             cat dist/release/checksums.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The Homebrew tap (Task 12.2). A job of its own, after the Release exists,
+  # because it publishes into a *different* repository — `kuberecord/homebrew-tap`,
+  # which is what `brew tap kuberecord/tap` consumes.
+  #
+  # Separate rather than a step of `publish` for two reasons. The Release is
+  # already public by the time this runs, so a tap failure must be loudly red
+  # without implying the release did not happen; and this is the only job holding a
+  # token for another repository, which is a thing worth being able to point at.
+  #
+  # The formula it pushes is downloaded back off the Release page and checked
+  # against the signed checksums.txt, rather than rebuilt here. Rebuilding would
+  # put a file in the tap that nothing had signed — installable by anyone,
+  # verifiable by nobody.
+  #
+  # There is no job-level `if:`. GitHub does not expose the `env` context to one,
+  # so DRY_RUN is unavailable there, and spelling the same gate two ways is how a
+  # rehearsal eventually publishes something. Every step that touches anything
+  # published carries the step-level gate the rest of this file uses; on a
+  # rehearsal the job runs and does nothing but say so.
+  tap:
+    name: Homebrew tap
+    needs: [gate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      # Only to check this repository out for its Makefile. Writing to the tap is
+      # HOMEBREW_TAP_TOKEN's job, and no GITHUB_TOKEN scope can do it: a token is
+      # issued for the repository the workflow lives in.
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Same pin as the two jobs above. The formula is only as trustworthy as the
+      # signature it was checked against, so this job verifies one.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Take the formula off the Release page and verify it
+        if: env.DRY_RUN == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make release-brew-fetch RELEASE_VERSION="$RELEASE_VERSION"
+
+      # A prerelease is refused by the target itself, with a message and exit 0:
+      # `brew install` has no way to ask for a stable version, so a tap carrying a
+      # candidate hands it to everybody.
+      - name: Push it to the tap
+        if: env.DRY_RUN == 'false'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: make release-brew-push RELEASE_VERSION="$RELEASE_VERSION"
+
+      - name: Say what a real run would push (rehearsal)
+        if: env.DRY_RUN == 'true'
+        run: |
+          {
+            echo "## Rehearsal: the Homebrew tap was not touched"
+            echo
+            echo "A release takes the published \`kuberecord.rb\` off its own Release page, checks"
+            echo "it against the signed \`checksums.txt\`, and pushes it to the tap. None of that"
+            echo "can be rehearsed: there is no published release to read it from."
+            echo
+            echo "The formula itself *was* built, for real, and is attached to this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarise
+        if: env.DRY_RUN == 'false'
+        run: |
+          {
+            echo "## Homebrew"
+            echo
+            echo '```sh'
+            echo "brew install kuberecord/tap/kuberecord"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

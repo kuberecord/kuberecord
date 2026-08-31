@@ -13,6 +13,7 @@ naming themselves correctly in their own help text.
 This page is the reference for **the commands**, **where the CLI reads from** and
 **how it is configured**.
 
+- [Installing](#installing)
 - [`timeline`](#timeline)
 - [`diff`](#diff)
 - [`get --at`](#get---at)
@@ -27,6 +28,61 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 - [What the CLI asks of Kubernetes](#what-the-cli-asks-of-kubernetes)
 - [Evaluation mode](#evaluation-mode)
 - [Exit codes](#exit-codes)
+
+## Installing
+
+Four channels, one build. Whichever you use, the bytes come from the archives a
+tagged release publishes — krew, Homebrew and `go install` are three ways of
+getting a copy of the same artifact, not three builds of the same source.
+
+```sh
+# 1. krew, which is how a kubectl user finds a plugin.
+kubectl krew install kuberecord
+kubectl kuberecord version
+
+# 2. Homebrew, on macOS and on Linux. The one channel that installs both names.
+brew install kuberecord/tap/kuberecord
+
+# 3. The release archive, directly. Verifiable, and the only way to install on
+#    Windows.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord_v0.3.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
+
+# 4. From source, with a Go toolchain.
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.0
+```
+
+They do not all give you the same thing, and the difference is the two names:
+
+| | `kubectl kuberecord …` | `kuberecord …` | Version stamp | Signature you can check |
+|---|---|---|---|---|
+| `kubectl krew install` | yes | no | yes | krew checks the `sha256` |
+| `brew install` | yes | yes | yes | brew checks the `sha256` |
+| Release archive | yes | yes | yes | yes — cosign, [`VERIFYING.md`](VERIFYING.md#the-cli-archives) |
+| `go install` | yes | no | module version only | no — you are building it |
+
+**krew installs the plugin only**, because that is what krew is: a plugin
+manager. `kubectl kuberecord …` works; the standalone `kuberecord`, which is what
+an auditor reading an archive with no cluster wants, comes from Homebrew or from
+the release archive. They are the same bytes either way — one compilation, copied
+into the second name (Task 12.1), so the two can never be built from different
+trees.
+
+**`go install` builds rather than downloads.** It gets you `kubectl-kuberecord`
+and nothing else, it reports the module version rather than the release stamp —
+`commit` and `buildDate` come out of what the Go toolchain recorded — and there is
+no signature over a binary you compiled yourself. Pin a tag rather than `@latest`
+if you want to know what you got.
+
+**Windows** is release archives only: `kuberecord_v0.3.0_windows_amd64.zip`, which
+carries `kubectl-kuberecord.exe` and `kuberecord.exe`. krew supports Windows and
+the plugin manifest declares it; Homebrew does not run there.
+
+The manifest krew consumes (`kuberecord.yaml`) and the Homebrew formula
+(`kuberecord.rb`) are themselves release assets, generated from the archives and
+listed in `checksums.txt` — so the digests they publish are covered by the same
+signature as everything else a release attaches.
 
 ## `timeline`
 

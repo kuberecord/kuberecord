@@ -984,6 +984,67 @@ CLI_SBOM_PLATFORM ?= linux/amd64
 RELEASE_CHECKSUMS ?= $(RELEASE_DIR)/checksums.txt
 RELEASE_CHECKSUMS_BUNDLE ?= $(RELEASE_CHECKSUMS).sigstore.json
 
+# The distribution manifests (Task 12.2).
+#
+# krew is how a kubectl user discovers a plugin and Homebrew is how a macOS user
+# installs a binary, and both channels consume the same shape of document: a URL
+# and a sha256 per platform. Neither is hand-maintained. A digest somebody typed
+# is wrong exactly once, and it stays wrong until an install fails on a platform
+# nobody here runs — which, for the four platforms this release cross-compiles
+# for, is most of them.
+#
+# Both documents are generated from the archives release-cli just built, and both
+# are release assets: they are lines in checksums.txt, so the artifact attestation
+# and the one cosign signature over that file already cover them. The consequence
+# is worth having on purpose — the formula the tap serves is a file a third party
+# can verify against the release, rather than something that appeared in a
+# repository one day.
+KREW_MANIFEST_SCRIPT := hack/krew-manifest.sh
+BREW_FORMULA_SCRIPT := hack/homebrew-formula.sh
+MANIFEST_DIGESTS_SCRIPT := hack/manifest-digests.sh
+
+# krew requires three names to be one string: the manifest's file name, the
+# `metadata.name` inside it, and whatever follows `kubectl-` in the binary. So
+# this is derived from CLI_PLUGIN_NAME rather than written down again — kubectl
+# fixed the binary's name, and krew fixed the rest to match it.
+KREW_PLUGIN_NAME = $(patsubst kubectl-%,%,$(CLI_PLUGIN_NAME))
+RELEASE_KREW_MANIFEST ?= $(RELEASE_DIR)/$(KREW_PLUGIN_NAME).yaml
+RELEASE_BREW_FORMULA ?= $(RELEASE_DIR)/$(CLI_STANDALONE_NAME).rb
+
+# The platform-to-archive pairing, computed from the same `cli-archive` function
+# release-cli packages with. The generators are handed the pairs rather than the
+# naming convention, so neither carries a second copy of it — a copy that would
+# keep emitting plausible file names after the archives were renamed, and publish
+# URLs that 404 with nothing in the release having failed.
+CLI_ARCHIVE_PAIRS = $(foreach platform,$(CLI_PLATFORMS),$(platform)=$(call cli-archive,$(platform)))
+
+# The Homebrew tap. A repository of its own because that is what `brew tap`
+# consumes, under the same owner as this one, and derived from the module path for
+# the same reason GITHUB_REPO is: a fork must not push to somebody else's tap.
+#
+# What a user types is `brew install <owner>/tap/<formula>` — brew drops the
+# `homebrew-` prefix — so the two spellings below are one repository under two
+# names, and both appear in the documentation.
+BREW_TAP_REPO ?= $(dir $(GITHUB_REPO))homebrew-tap
+BREW_TAP_NAME ?= $(dir $(GITHUB_REPO))tap
+BREW_FORMULA_PATH ?= Formula/$(CLI_STANDALONE_NAME).rb
+# Where release-brew-push clones the tap. Per-tag scratch space like everything
+# else under dist/, and git-ignored.
+BREW_TAP_DIR ?= dist/homebrew-tap
+
+# The identity the tap commit is made under. The GitHub Actions bot, because that
+# is what makes the commit, and a maintainer's name on a commit they did not write
+# is a small lie that gets believed.
+BREW_TAP_COMMIT_NAME ?= github-actions[bot]
+BREW_TAP_COMMIT_EMAIL ?= 41898282+github-actions[bot]@users.noreply.github.com
+
+# The krew plugin index. Submitting to it is a pull request against somebody
+# else's repository, so it is never run by the release workflow — a release must
+# not open a PR on a third-party repo on its own. `make krew-index-pr` is what a
+# maintainer runs once the tag is published; docs/RELEASING.md says when.
+KREW_INDEX_REPO ?= kubernetes-sigs/krew-index
+KREW_INDEX_DIR ?= dist/krew-index
+
 # require-tool fails with the sentence a reader needs rather than
 # "make: cosign: No such file or directory".
 # $1 - the tool (a name on PATH or a path)
@@ -1046,6 +1107,7 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 		"$(RELEASE_SBOM)" "$(RELEASE_DIGEST_FILE)" "$(RELEASE_IMAGE_NAME_FILE)" \
 		"$(RELEASE_CHART_DIGEST_FILE)" \
 		"$(RELEASE_DIR)"/*.tar.gz "$(RELEASE_DIR)"/*.zip "$(RELEASE_CLI_SBOM)" \
+		"$(RELEASE_KREW_MANIFEST)" "$(RELEASE_BREW_FORMULA)" \
 		"$(RELEASE_CHECKSUMS_BUNDLE)"
 	$(MAKE) build-installer INSTALLER_IMG=$(RELEASE_IMAGE) INSTALLER_OUT=$(RELEASE_DIR)/install.yaml
 	@# The manifest people apply is the manifest that was validated, rather than a
@@ -1060,7 +1122,18 @@ release-artifacts: release-verify-version release-notes helm helm-sync kubeconfo
 	@# file that silently omits an asset is worse than none, because it looks
 	@# complete.
 	$(MAKE) release-cli
+	@# And the two documents that describe those archives to krew and to brew
+	@# (Task 12.2). They are generated here, between the packaging and the first
+	@# checksum run, because they hash the archives and are then hashed themselves:
+	@# both are required entries in checksums.txt, so the attestation and the one
+	@# signature over that file cover them without anything extra.
+	$(MAKE) release-krew-manifest
+	$(MAKE) release-brew-formula
 	$(MAKE) release-checksums
+	@# Cheap, and it runs on every rehearsal: the two documents are re-read from
+	@# disk, their digests re-derived from the archives, and cross-checked against
+	@# the checksums file that was just written by a different pass.
+	$(MAKE) release-krew-verify
 
 .PHONY: release-cli
 release-cli: build-cli ## Package the CLI binaries into per-platform archives in RELEASE_DIR.
@@ -1109,6 +1182,323 @@ release-cli: build-cli ## Package the CLI binaries into per-platform archives in
 			exit 1; \
 		}; \
 	done
+
+# The krew plugin manifest, generated from the archives release-cli just packaged.
+#
+# It is written through a temporary file for the same reason the release notes
+# are: a shell redirect leaves a truncated document behind on failure, and the
+# next step would happily checksum and publish it.
+.PHONY: release-krew-manifest
+release-krew-manifest: ## Generate the krew plugin manifest from the archives in RELEASE_DIR.
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	if ./$(KREW_MANIFEST_SCRIPT) "$(RELEASE_VERSION)" "$(GITHUB_REPO)" "$(RELEASE_DIR)" \
+		$(CLI_ARCHIVE_PAIRS) > "$(RELEASE_KREW_MANIFEST).tmp"; then \
+		mv "$(RELEASE_KREW_MANIFEST).tmp" "$(RELEASE_KREW_MANIFEST)"; \
+		echo "release: $(RELEASE_KREW_MANIFEST)"; \
+	else \
+		rm -f "$(RELEASE_KREW_MANIFEST).tmp"; \
+		exit 1; \
+	fi
+
+# The Homebrew formula, from the same archives and the same pairs. It covers the
+# four platforms brew runs on; the Windows archive has no place in it, and the
+# generator says so on stderr rather than narrowing the release quietly.
+.PHONY: release-brew-formula
+release-brew-formula: ## Generate the Homebrew formula from the archives in RELEASE_DIR.
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	if ./$(BREW_FORMULA_SCRIPT) "$(RELEASE_VERSION)" "$(GITHUB_REPO)" "$(RELEASE_DIR)" \
+		$(CLI_ARCHIVE_PAIRS) > "$(RELEASE_BREW_FORMULA).tmp"; then \
+		mv "$(RELEASE_BREW_FORMULA).tmp" "$(RELEASE_BREW_FORMULA)"; \
+		echo "release: $(RELEASE_BREW_FORMULA)"; \
+	else \
+		rm -f "$(RELEASE_BREW_FORMULA).tmp"; \
+		exit 1; \
+	fi
+
+# Every digest in both documents, re-derived from the archives on disk.
+#
+# This is the half of the check a rehearsal can run, and it is not the tautology
+# it looks like. The generators hashed the archives; this hashes them again out of
+# the finished documents, cross-checks the answer against checksums.txt — which
+# was computed by a different tool, in a different pass — and asserts that every
+# URL names this tag and an archive this release actually built. A manifest that
+# agreed with itself and with nothing else would pass none of those.
+.PHONY: release-krew-verify
+release-krew-verify: ## Re-derive every digest in the krew manifest and the formula from the local archives.
+	@set -e; \
+	pairs="$$(mktemp)"; trap 'rm -f "$$pairs"' EXIT; \
+	checked=0; \
+	for document in "$(RELEASE_KREW_MANIFEST)" "$(RELEASE_BREW_FORMULA)"; do \
+		if [ ! -f "$$document" ]; then \
+			echo "release: $$document does not exist; run release-artifacts first."; \
+			echo "  A release that published archives and no way to install them is half a release."; \
+			exit 1; \
+		fi; \
+		./$(MANIFEST_DIGESTS_SCRIPT) "$$document" > "$$pairs"; \
+		while read -r url digest; do \
+			archive="$${url##*/}"; \
+			case "$$url" in \
+			https://github.com/$(GITHUB_REPO)/releases/download/$(RELEASE_VERSION)/*) ;; \
+			*) \
+				echo "release: $$document points at"; \
+				echo "    $$url"; \
+				echo "  which is not a $(RELEASE_VERSION) asset of $(GITHUB_REPO). Published, that is an"; \
+				echo "  install command that serves somebody another release."; \
+				exit 1 ;; \
+			esac; \
+			found=""; \
+			for known in $(RELEASE_CLI_ARCHIVES); do \
+				if [ "$$known" = "$$archive" ]; then found=yes; fi; \
+			done; \
+			if [ -z "$$found" ]; then \
+				echo "release: $$document names $$archive, which is not one of the archives this"; \
+				echo "  release builds ($(RELEASE_CLI_ARCHIVES))."; \
+				exit 1; \
+			fi; \
+			if [ ! -f "$(RELEASE_DIR)/$$archive" ]; then \
+				echo "release: $$document names $$archive, which is not in $(RELEASE_DIR)."; \
+				exit 1; \
+			fi; \
+			if command -v sha256sum >/dev/null 2>&1; then \
+				actual="$$(sha256sum "$(RELEASE_DIR)/$$archive" | cut -d' ' -f1)"; \
+			else \
+				actual="$$(shasum -a 256 "$(RELEASE_DIR)/$$archive" | cut -d' ' -f1)"; \
+			fi; \
+			if [ "$$actual" != "$$digest" ]; then \
+				echo "release: $$document claims $$archive hashes to"; \
+				echo "    $$digest"; \
+				echo "  but the archive in $(RELEASE_DIR) hashes to"; \
+				echo "    $$actual"; \
+				echo "  krew and brew both refuse a download whose digest disagrees, so this is an"; \
+				echo "  install that fails for everyone rather than a document that is slightly wrong."; \
+				exit 1; \
+			fi; \
+			if [ -f "$(RELEASE_CHECKSUMS)" ]; then \
+				if ! grep -q "^$$digest  $$archive\$$" "$(RELEASE_CHECKSUMS)"; then \
+					echo "release: $$archive hashes to $$digest, which is not the line checksums.txt"; \
+					echo "  carries for it. Two independent hashes of one release disagreeing means one"; \
+					echo "  of the two files was written against a different archive."; \
+					exit 1; \
+				fi; \
+			fi; \
+			checked=$$((checked + 1)); \
+		done < "$$pairs"; \
+	done; \
+	if [ "$$checked" -eq 0 ]; then \
+		echo "release: no downloads were checked, so this proved nothing."; \
+		exit 1; \
+	fi; \
+	echo "release: $$checked downloads in the krew manifest and the Homebrew formula match the"; \
+	echo "  archives in $(RELEASE_DIR), and the lines checksums.txt carries for them."
+
+# The same digests, against the bytes GitHub is now serving.
+#
+# This is the acceptance criterion's "published archives", and it is a different
+# claim from the one above: that one says the documents describe what was built,
+# this one says the URLs in them resolve to it. The failures it catches are the
+# ones a local check cannot see — an asset that never uploaded, a file name the
+# Release page spells differently, a tag that does not exist.
+#
+# It runs after `gh release create`, so it cannot run on a rehearsal: there is
+# nothing published to download.
+.PHONY: release-krew-verify-published
+release-krew-verify-published: ## Download every URL the krew manifest and the formula name, and check its digest.
+	$(call require-tool,curl,curl ships with macOS and with every ubuntu runner.)
+	@set -e; \
+	pairs="$$(mktemp)"; download="$$(mktemp)"; \
+	trap 'rm -f "$$pairs" "$$download"' EXIT; \
+	checked=0; \
+	for document in "$(RELEASE_KREW_MANIFEST)" "$(RELEASE_BREW_FORMULA)"; do \
+		if [ ! -f "$$document" ]; then \
+			echo "release: $$document does not exist; run release-artifacts first."; \
+			exit 1; \
+		fi; \
+		./$(MANIFEST_DIGESTS_SCRIPT) "$$document" > "$$pairs"; \
+		while read -r url digest; do \
+			echo "release: fetching $$url"; \
+			if ! curl --fail --silent --show-error --location --retry 3 --output "$$download" "$$url"; then \
+				echo "release: $$document names $$url, and it does not serve."; \
+				echo "  Every krew and brew install of $(RELEASE_VERSION) on that platform would fail the"; \
+				echo "  same way. Check that the asset was attached to the Release."; \
+				exit 1; \
+			fi; \
+			if command -v sha256sum >/dev/null 2>&1; then \
+				actual="$$(sha256sum "$$download" | cut -d' ' -f1)"; \
+			else \
+				actual="$$(shasum -a 256 "$$download" | cut -d' ' -f1)"; \
+			fi; \
+			if [ "$$actual" != "$$digest" ]; then \
+				echo "release: $$url serves bytes hashing to"; \
+				echo "    $$actual"; \
+				echo "  but $$document says"; \
+				echo "    $$digest"; \
+				exit 1; \
+			fi; \
+			checked=$$((checked + 1)); \
+		done < "$$pairs"; \
+	done; \
+	if [ "$$checked" -eq 0 ]; then \
+		echo "release: no downloads were checked, so this proved nothing."; \
+		exit 1; \
+	fi; \
+	echo "release: $$checked published downloads match the digests $(RELEASE_VERSION) publishes for them."
+
+# The formula the tap gets, taken back off the Release page rather than out of
+# this working tree.
+#
+# The tap job could rebuild it, and then the file people install from would be one
+# nothing had signed. Downloading the published asset and checking it against the
+# signed checksums.txt costs one more step and makes the formula in the tap the
+# same bytes the release attested — verifiable by anyone, afterwards, without
+# trusting the job that pushed it.
+.PHONY: release-brew-fetch
+release-brew-fetch: ## Download the published formula and checksums, and verify the formula against them.
+	$(call require-tool,gh,Install the GitHub CLI: https://cli.github.com (`brew install gh`).)
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	set -x; \
+	gh release download "$(RELEASE_VERSION)" --repo "$(GITHUB_REPO)" --clobber \
+		--dir "$(RELEASE_DIR)" \
+		--pattern "$(notdir $(RELEASE_BREW_FORMULA))" \
+		--pattern "$(notdir $(RELEASE_CHECKSUMS))" \
+		--pattern "$(notdir $(RELEASE_CHECKSUMS_BUNDLE))"
+	@# The signature first, then the line. A formula that matched a checksums.txt
+	@# nobody signed would prove only that two files arrived together.
+	@set -e; \
+	set -x; \
+	"$(COSIGN)" verify-blob \
+		--bundle "$(RELEASE_CHECKSUMS_BUNDLE)" \
+		--certificate-oidc-issuer "$(COSIGN_ISSUER)" \
+		--certificate-identity "$(COSIGN_IDENTITY)" \
+		"$(RELEASE_CHECKSUMS)"
+	@set -e; cd "$(RELEASE_DIR)"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum --ignore-missing -c checksums.txt; \
+	else \
+		shasum -a 256 -c checksums.txt 2>/dev/null | grep ': OK$$'; \
+	fi
+	@echo "release: $(RELEASE_BREW_FORMULA) is the formula $(RELEASE_VERSION) published, and the"
+	@echo "  checksums naming it were signed by $(COSIGN_IDENTITY)"
+
+# Replace the tap's formula with this release's, and push it.
+#
+# HOMEBREW_TAP_TOKEN comes from the environment because the workflow's own
+# GITHUB_TOKEN cannot write to another repository, and it is never echoed: the
+# clone URL carries it, so the recipe runs without `set -x` and prints what it did
+# rather than how.
+#
+# A prerelease is refused rather than pushed. `brew install kuberecord/tap/kuberecord`
+# has no way to ask for a stable version, so a tap carrying an rc serves it to
+# everybody — and says nothing about being a candidate for anything.
+.PHONY: release-brew-push
+release-brew-push: ## Push this release's formula to BREW_TAP_REPO (needs HOMEBREW_TAP_TOKEN).
+	@set -e; \
+	case "$(RELEASE_VERSION)" in \
+	*-*) \
+		echo "release: $(RELEASE_VERSION) is a prerelease, and the tap serves stable releases only."; \
+		echo "  \`brew install $(BREW_TAP_NAME)/$(CLI_STANDALONE_NAME)\` cannot ask for a stable version, so a"; \
+		echo "  formula pointing at a candidate would hand it to everyone. Nothing was pushed."; \
+		exit 0 ;; \
+	esac; \
+	if [ ! -f "$(RELEASE_BREW_FORMULA)" ]; then \
+		echo "release: $(RELEASE_BREW_FORMULA) does not exist; run release-brew-formula or"; \
+		echo "  release-brew-fetch first."; \
+		exit 1; \
+	fi; \
+	if [ -z "$${HOMEBREW_TAP_TOKEN:-}" ]; then \
+		echo "release: HOMEBREW_TAP_TOKEN is not set, and the workflow's own GITHUB_TOKEN cannot"; \
+		echo "  write to $(BREW_TAP_REPO) — a token is scoped to the repository it was issued for."; \
+		echo "  Set the repository secret HOMEBREW_TAP_TOKEN to a fine-grained token with"; \
+		echo "  Contents: write on $(BREW_TAP_REPO) and nothing else."; \
+		exit 1; \
+	fi; \
+	rm -rf "$(BREW_TAP_DIR)"; \
+	mkdir -p "$(dir $(BREW_TAP_DIR))"; \
+	git clone --depth 1 --quiet \
+		"https://x-access-token:$${HOMEBREW_TAP_TOKEN}@github.com/$(BREW_TAP_REPO).git" \
+		"$(BREW_TAP_DIR)"; \
+	mkdir -p "$(BREW_TAP_DIR)/$(dir $(BREW_FORMULA_PATH))"; \
+	cp "$(RELEASE_BREW_FORMULA)" "$(BREW_TAP_DIR)/$(BREW_FORMULA_PATH)"; \
+	cd "$(BREW_TAP_DIR)"; \
+	if git diff --quiet -- "$(BREW_FORMULA_PATH)"; then \
+		echo "release: $(BREW_TAP_REPO) already carries this formula; nothing to push."; \
+		exit 0; \
+	fi; \
+	git config user.name "$(BREW_TAP_COMMIT_NAME)"; \
+	git config user.email "$(BREW_TAP_COMMIT_EMAIL)"; \
+	git add "$(BREW_FORMULA_PATH)"; \
+	git commit --quiet -m "$(CLI_STANDALONE_NAME) $(RELEASE_VERSION)" \
+		-m "Generated by $(BREW_FORMULA_SCRIPT) from the $(RELEASE_VERSION) release archives of"  \
+		-m "https://github.com/$(GITHUB_REPO)/releases/tag/$(RELEASE_VERSION)"; \
+	git push --quiet origin HEAD; \
+	echo "release: pushed $(BREW_FORMULA_PATH) for $(RELEASE_VERSION) to $(BREW_TAP_REPO)."; \
+	echo "  brew install $(BREW_TAP_NAME)/$(CLI_STANDALONE_NAME)"
+
+# The krew-index submission (Task 12.2).
+#
+# Never called by the release workflow, and that is the point: this opens a pull
+# request against somebody else's repository, and a tag push must not do that on
+# its own. A maintainer runs it once the release is published and its assets are
+# actually downloadable — krew-index's own CI fetches every URI in the manifest
+# and checks its digest, so a PR opened before the tag exists fails on arrival and
+# spends weeks of review latency getting nowhere.
+#
+# What it submits is the manifest the release published, downloaded back, not the
+# one in this working tree.
+.PHONY: krew-index-pr
+krew-index-pr: ## Open the kubernetes-sigs/krew-index pull request for RELEASE_VERSION.
+	$(call require-tool,gh,Install the GitHub CLI: https://cli.github.com (`brew install gh`).)
+	@set -e; \
+	case "$(RELEASE_VERSION)" in \
+	*-*) \
+		echo "release: $(RELEASE_VERSION) is a prerelease. krew-index carries the version a user"; \
+		echo "  gets from \`kubectl krew install $(KREW_PLUGIN_NAME)\`, which is not a candidate."; \
+		exit 1 ;; \
+	esac
+	@mkdir -p "$(RELEASE_DIR)"
+	@set -e; \
+	set -x; \
+	gh release download "$(RELEASE_VERSION)" --repo "$(GITHUB_REPO)" --clobber \
+		--dir "$(RELEASE_DIR)" --pattern "$(notdir $(RELEASE_KREW_MANIFEST))"
+	@# krew-index will do this itself and reject the PR if it disagrees. Finding out
+	@# here costs a minute; finding out there costs a review cycle.
+	$(MAKE) release-krew-verify-published
+	@# `--clone` is a boolean and the destination is a git flag, which is why the
+	@# directory is after the `--`. `--remote=false` keeps gh from adding a remote
+	@# to *this* repository — it is run from inside one, and forking somebody
+	@# else's project should not rewire ours. The push is forced so a second
+	@# attempt at the same tag updates the branch instead of failing; the branch
+	@# name carries the version, so it can only ever collide with itself.
+	@set -e; \
+	branch="$(KREW_PLUGIN_NAME)-$(RELEASE_VERSION)"; \
+	rm -rf "$(KREW_INDEX_DIR)"; \
+	mkdir -p "$(dir $(KREW_INDEX_DIR))"; \
+	set -x; \
+	gh repo fork "$(KREW_INDEX_REPO)" --clone --default-branch-only --remote=false \
+		-- "$(KREW_INDEX_DIR)"; \
+	cd "$(KREW_INDEX_DIR)"; \
+	git checkout -b "$$branch"; \
+	cp "$(CURDIR)/$(RELEASE_KREW_MANIFEST)" "plugins/$(KREW_PLUGIN_NAME).yaml"; \
+	git add "plugins/$(KREW_PLUGIN_NAME).yaml"; \
+	git commit -m "$(KREW_PLUGIN_NAME): $(RELEASE_VERSION)"; \
+	git push --force --set-upstream origin "$$branch"; \
+	gh pr create --repo "$(KREW_INDEX_REPO)" \
+		--title "$(KREW_PLUGIN_NAME): $(RELEASE_VERSION)" \
+		--body "$$(printf '%s\n' \
+			"Adds \`$(KREW_PLUGIN_NAME)\` at $(RELEASE_VERSION)." \
+			"" \
+			"\`kubectl kuberecord\` answers questions about recorded Kubernetes state changes —" \
+			"who changed what, when, and what the object looked like before — reading history a" \
+			"kuberecord operator streamed to a sink." \
+			"" \
+			"The manifest is generated from the release archives by" \
+			"[\`hack/krew-manifest.sh\`](https://github.com/$(GITHUB_REPO)/blob/$(RELEASE_VERSION)/$(KREW_MANIFEST_SCRIPT))" \
+			"and is published as a release asset, covered by \`checksums.txt\` and by a keyless" \
+			"cosign signature over it:" \
+			"https://github.com/$(GITHUB_REPO)/releases/tag/$(RELEASE_VERSION)")"
 
 # The CLI's SBOM, scanned from the binary rather than from a source tree: what is
 # published is what is described. syft reads the module list the Go toolchain
@@ -1221,6 +1611,7 @@ release-checksums: ## Hash every asset in RELEASE_DIR into checksums.txt.
 	@# directory, so `sha256sum -c checksums.txt` works wherever the assets land.
 	@set -e; cd "$(RELEASE_DIR)"; \
 	assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz $(RELEASE_CLI_ARCHIVES)"; \
+	assets="$$assets $(notdir $(RELEASE_KREW_MANIFEST)) $(notdir $(RELEASE_BREW_FORMULA))"; \
 	for f in $$assets; do \
 		[ -f "$$f" ] || { \
 			echo "release: $(RELEASE_DIR)/$$f is missing; run release-artifacts first."; \
@@ -1594,6 +1985,12 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@# binary a release would ship.
 	$(MAKE) release-cli-sbom
 	$(MAKE) release-checksums
+	@# The second checksum run changed the file the two distribution documents were
+	@# cross-checked against, so they are checked again against the finished one.
+	@# Neither document changed — they hash archives, not checksums.txt — which is
+	@# exactly the invariant worth re-asserting after the file they agree with is
+	@# rewritten.
+	$(MAKE) release-krew-verify
 	@echo
 	$(MAKE) release-chart-rehearse
 	@echo
@@ -1606,6 +2003,7 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@echo "  cli        $(words $(CLI_PLATFORMS)) archives in $(RELEASE_DIR), both binary names in each"
 	@echo "  chart      $(CHART_OCI_REF):$(RELEASE_CHART_VERSION) (pushed to a throwaway registry, discarded)"
 	@echo "  sbom       $(RELEASE_SBOM), $(RELEASE_CLI_SBOM)"
+	@echo "  krew/brew  $(RELEASE_KREW_MANIFEST), $(RELEASE_BREW_FORMULA) (digests re-derived, tap untouched)"
 	@echo "  unsigned   a rehearsal signs nothing and attests nothing; see docs/VERIFYING.md"
 
 ##@ Deployment
