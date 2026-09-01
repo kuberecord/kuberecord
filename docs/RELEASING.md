@@ -316,7 +316,7 @@ runs for real, need cosign (and syft, and `gh` for the provenance half):
 make release-image-digest RELEASE_VERSION=v0.2.0     # what the push actually produced
 make release-sign RELEASE_VERSION=v0.2.0             # keyless, so it needs an OIDC identity
 make release-verify RELEASE_VERSION=v0.2.0           # the commands VERIFYING.md publishes
-make release-chart-login                             # CHART_REGISTRY_USER/_TOKEN from the environment
+make release-chart-login                             # helm *and* cosign; CHART_REGISTRY_USER/_TOKEN from the environment
 make release-chart-push RELEASE_VERSION=v0.2.0       # the packaged chart, into the registry
 make release-chart-sign RELEASE_VERSION=v0.2.0       # over the digest the push reported
 make release-chart-verify RELEASE_VERSION=v0.2.0     # the chart command VERIFYING.md publishes

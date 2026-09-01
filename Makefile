@@ -1837,10 +1837,32 @@ release-verify: ## Verify the published signature and provenance the way a user 
 # The token arrives in the environment and is fed through stdin, never as an
 # argument: arguments are visible to every process on the machine, and a release
 # token that leaks is a token that can push over a published chart.
+#
+# It logs in **twice, to two different credential stores**, and that is the whole
+# point of this target rather than an accident of it. `helm registry login` writes
+# to helm's own registry configuration ($HELM_REGISTRY_CONFIG, by default
+# ~/.config/helm/registry/config.json). cosign resolves registry credentials
+# through go-containerregistry's default keychain, which reads the *Docker*
+# configuration ($DOCKER_CONFIG/config.json, by default ~/.docker/config.json) and
+# has never looked at helm's. Authenticating only helm therefore produces exactly
+# one symptom, and it is a confusing one: `helm push` succeeds, the digest is
+# recorded, and the very next command — `cosign sign`, which has to POST the
+# signature layer as a *write* to the same repository — fails with
+#
+#     UNAUTHORIZED: unauthenticated: User cannot be authenticated with the token provided
+#
+# against a registry the previous step demonstrably just wrote to. `cosign login`
+# populates the Docker keychain from the same token, which is what the image job
+# gets for free from its `docker login` and what this job had no equivalent of.
+#
+# Both are done here rather than one here and one in the workflow so that the two
+# cannot drift, and so that a maintainer running the release by hand authenticates
+# for the whole sequence with the one command the runbook names.
 CHART_REGISTRY_HOST ?= $(firstword $(subst /, ,$(CHART_OCI_NAMESPACE)))
 
 .PHONY: release-chart-login
-release-chart-login: helm ## Authenticate to CHART_REGISTRY_HOST (CHART_REGISTRY_USER/CHART_REGISTRY_TOKEN from the environment).
+release-chart-login: helm ## Authenticate helm *and* cosign to CHART_REGISTRY_HOST (CHART_REGISTRY_USER/CHART_REGISTRY_TOKEN from the environment).
+	$(call require-tool,$(COSIGN),Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/ (`brew install cosign`).)
 	@set -e; \
 	if [ -z "$$CHART_REGISTRY_TOKEN" ]; then \
 		echo "release: CHART_REGISTRY_TOKEN is not set, so there is nothing to authenticate with."; \
@@ -1854,6 +1876,8 @@ release-chart-login: helm ## Authenticate to CHART_REGISTRY_HOST (CHART_REGISTRY
 		exit 1; \
 	fi; \
 	printf '%s' "$$CHART_REGISTRY_TOKEN" | "$(HELM)" registry login "$(CHART_REGISTRY_HOST)" \
+		--username "$$CHART_REGISTRY_USER" --password-stdin; \
+	printf '%s' "$$CHART_REGISTRY_TOKEN" | "$(COSIGN)" login "$(CHART_REGISTRY_HOST)" \
 		--username "$$CHART_REGISTRY_USER" --password-stdin
 
 # The chart, as an OCI artifact (Task 8.1). The `.tgz` on the Release page keeps

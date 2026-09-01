@@ -1032,6 +1032,82 @@ func TestReleasePushesTheChartItPackaged(t *testing.T) {
 	}
 }
 
+// TestChartLoginAuthenticatesCosignToo is the regression guard for a release that
+// failed between two steps that both looked correct.
+//
+// `helm registry login` writes to helm's own registry configuration
+// ($HELM_REGISTRY_CONFIG). cosign resolves registry credentials through
+// go-containerregistry's default keychain, which reads the *Docker* configuration
+// ($DOCKER_CONFIG/config.json) and has never looked at helm's. Authenticating only
+// helm therefore produces one symptom and it is a misleading one: `helm push`
+// succeeds, the digest is recorded, and the next command — `cosign sign`, which
+// must POST the signature layer as a write to the same repository — fails with
+// "UNAUTHORIZED: unauthenticated" against a registry the previous step
+// demonstrably just wrote to. That is how v0.3.0's first attempt died.
+//
+// The image job never had the problem because it authenticates with `docker
+// login`, which populates exactly the store cosign reads. This job has no image to
+// build and so had no equivalent, and nothing noticed: the workflow_dispatch
+// rehearsal pushes to a throwaway registry with no authentication at all, so the
+// one path that would have caught it is the one path a rehearsal cannot exercise.
+//
+// Hence a test rather than a comment. The two logins have to stay together in the
+// one target the workflow and the runbook both call, because a maintainer running
+// the release by hand follows the same sequence and would hit the same wall.
+func TestChartLoginAuthenticatesCosignToo(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	login := makeRecipe(t, makefile, "release-chart-login")
+
+	if !strings.Contains(login, `"$(HELM)" registry login`) {
+		t.Error("release-chart-login no longer logs helm in, so `helm push` cannot authenticate")
+	}
+	if !strings.Contains(login, `"$(COSIGN)" login`) {
+		t.Error("release-chart-login no longer logs cosign in. `helm registry login` writes to " +
+			"helm's own store and cosign reads the Docker one, so signing the chart it just " +
+			"pushed would fail with UNAUTHORIZED against a registry helm had authenticated to")
+	}
+
+	// Both must be told about the same registry, from the same credentials. Two
+	// logins that disagreed about the host would be worse than one login: the
+	// failure would move to whichever command the drift did not cover.
+	for _, want := range []string{
+		`"$(HELM)" registry login "$(CHART_REGISTRY_HOST)"`,
+		`"$(COSIGN)" login "$(CHART_REGISTRY_HOST)"`,
+	} {
+		if !strings.Contains(login, want) {
+			t.Errorf("release-chart-login no longer runs %s; the two logins must name one host", want)
+		}
+	}
+	if strings.Count(login, "--password-stdin") != 2 {
+		t.Error("both logins must take the token on stdin. An argument is visible to every " +
+			"process on the machine, and a release token that leaks is one that can push " +
+			"over a published chart")
+	}
+	if strings.Contains(login, "--password ") || strings.Contains(login, "-p ") {
+		t.Error("release-chart-login passes a password as an argument")
+	}
+
+	// The workflow must reach both through this target rather than acquiring a
+	// second login of its own, which is how the two would drift apart again.
+	workflow := readFile(t, releaseWorkflowPath)
+	if !strings.Contains(workflow, "make release-chart-login") {
+		t.Error("the release workflow no longer calls release-chart-login before pushing the chart")
+	}
+
+	// Ordering: the login has to come before the push, and the push before the
+	// signature. A correct target called in the wrong order fails the same way.
+	loginAt := strings.Index(workflow, "make release-chart-login")
+	pushAt := strings.Index(workflow, "make release-chart-push")
+	signAt := strings.Index(workflow, "make release-chart-sign")
+	if loginAt < 0 || pushAt < 0 || signAt < 0 {
+		t.Fatal("the release workflow no longer runs login, push and sign for the chart")
+	}
+	if loginAt >= pushAt || pushAt >= signAt {
+		t.Error("the chart steps are out of order; login must precede the push and the push " +
+			"must precede the signature over the digest it reports")
+	}
+}
+
 // makeRecipe returns the recipe lines of one target: everything from the target
 // line to the first line that is neither indented nor blank. Enough to ask what a
 // single target does without parsing make.
