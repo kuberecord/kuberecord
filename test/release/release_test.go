@@ -1108,6 +1108,27 @@ func TestChartLoginAuthenticatesCosignToo(t *testing.T) {
 	}
 }
 
+// makeRecipeCommands is makeRecipe with the recipe's own comment lines removed.
+//
+// A make recipe carries its reasoning inline as `@#` lines, and in this file that
+// reasoning routinely quotes the very flag or command a check is asserting is
+// gone — the comment explaining why `--ignore-missing` was removed contains
+// `--ignore-missing`. Asserting over the prose makes such a check unfalsifiable in
+// one direction and unwritable in the other, so the checks that ask "does this
+// target still run X" ask it of the commands alone.
+func makeRecipeCommands(t *testing.T, makefile, target string) string {
+	t.Helper()
+	var commands []string
+	for line := range strings.SplitSeq(makeRecipe(t, makefile, target), "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "@#") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		commands = append(commands, line)
+	}
+	return strings.Join(commands, "\n")
+}
+
 // makeRecipe returns the recipe lines of one target: everything from the target
 // line to the first line that is neither indented nor blank. Enough to ask what a
 // single target does without parsing make.
@@ -2254,6 +2275,100 @@ func TestDistributionDocumentsAreReleaseAssets(t *testing.T) {
 			t.Errorf("%s is not both uploaded to the workflow run and attached to the Release",
 				asset)
 		}
+	}
+}
+
+// TestBrewFetchVerifiesOnlyWhatItDownloaded pins the scope of the formula's
+// checksum check.
+//
+// release-brew-fetch downloads three files — the formula, checksums.txt and its
+// signature bundle — and then has to establish one thing: that this formula is the
+// one the release signed. It used to ask `sha256sum --ignore-missing -c
+// checksums.txt`, which reads as "check every line whose file happens to be
+// present". In CI that is the three files just fetched and the answer is right by
+// accident. In a working tree it is those plus whatever an earlier release left in
+// RELEASE_DIR, under the same names and hashing to different values, and the
+// target fails on findings that are true and have nothing to do with the formula.
+//
+// That matters because this is the by-hand recovery path docs/RELEASING.md points
+// a maintainer at when the tap needs fixing, so it is reached precisely when
+// something has already gone wrong and a spurious failure costs the most.
+//
+// The whole-directory check is not being weakened, it is being put where it
+// belongs: release-artifacts-verify runs over a directory where every asset is
+// supposed to be present, and there a missing or mismatched one is a finding
+// rather than a leftover. That target is asserted here too, so a future
+// simplification cannot collapse the two into the loose version of either.
+func TestBrewFetchVerifiesOnlyWhatItDownloaded(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	fetch := makeRecipeCommands(t, makefile, "release-brew-fetch")
+
+	if strings.Contains(fetch, "--ignore-missing") {
+		t.Error("release-brew-fetch still verifies with --ignore-missing, which checks every " +
+			"line of checksums.txt whose file happens to be in RELEASE_DIR — including " +
+			"artifacts left there by an earlier release, whose mismatch has nothing to do " +
+			"with the formula this target downloaded")
+	}
+
+	// The line is selected by an exact field comparison. A filename used as a
+	// pattern is a different question from a filename used as a name, and a
+	// checksum check that verified the wrong line would be worse than none.
+	if !strings.Contains(fetch, `awk -v f="$$formula" '$$2 == f' checksums.txt`) {
+		t.Error("release-brew-fetch no longer selects the formula's checksum line by exact " +
+			"name; it must compare the field, not match a pattern")
+	}
+
+	// Selecting a line makes "no such line" a possible state, and it is the one
+	// that must never pass quietly: an empty selection hashed against nothing
+	// verifies nothing at all.
+	if !strings.Contains(fetch, "checksums.txt names no") {
+		t.Error("release-brew-fetch does not refuse a checksums.txt with no line for the " +
+			"formula. An empty selection would verify nothing while looking like a pass")
+	}
+	if !strings.Contains(fetch, "on more than one line") {
+		t.Error("release-brew-fetch does not refuse a checksums.txt naming the formula twice; " +
+			"it would hash against whichever line came first")
+	}
+
+	// Both arms must let the checker's own exit status decide. The macOS arm used
+	// to pipe through `grep ': OK$'`, which takes the pipeline's status from grep:
+	// a FAILED formula beside any one matching file exits 0.
+	if strings.Contains(fetch, "grep ': OK") {
+		t.Error("release-brew-fetch pipes the checksum result through grep, which masks the " +
+			"checker's exit status — a FAILED formula beside one matching file would pass")
+	}
+	for _, arm := range []string{
+		`printf '%s\n' "$$line" | sha256sum -c -`,
+		`printf '%s\n' "$$line" | shasum -a 256 -c -`,
+	} {
+		if !strings.Contains(fetch, arm) {
+			t.Errorf("release-brew-fetch no longer runs %q; both platforms must check the "+
+				"selected line and nothing else", arm)
+		}
+	}
+
+	// The signature is what makes the checksum mean anything, and it has to be
+	// checked over the whole file before any line of it is trusted.
+	bundle := strings.Index(fetch, "verify-blob")
+	selected := strings.Index(fetch, "awk -v f=")
+	if bundle < 0 {
+		t.Fatal("release-brew-fetch no longer verifies the signature over checksums.txt")
+	}
+	if bundle > selected {
+		t.Error("release-brew-fetch reads a line out of checksums.txt before verifying the " +
+			"signature over it; a formula matching an unsigned checksums.txt proves only " +
+			"that two files arrived together")
+	}
+
+	// And the counterpart, unweakened: the whole-release check still checks the
+	// whole release.
+	full := makeRecipeCommands(t, makefile, "release-artifacts-verify")
+	if strings.Contains(full, "--ignore-missing") || strings.Contains(full, "awk -v f=") {
+		t.Error("release-artifacts-verify has been narrowed to a subset. It runs where every " +
+			"asset is supposed to be present, and there a missing one is a finding")
+	}
+	if !strings.Contains(full, "-c checksums.txt") {
+		t.Error("release-artifacts-verify no longer checks checksums.txt in full")
 	}
 }
 

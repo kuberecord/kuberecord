@@ -1406,11 +1406,45 @@ release-brew-fetch: ## Download the published formula and checksums, and verify 
 		--certificate-oidc-issuer "$(COSIGN_ISSUER)" \
 		--certificate-identity "$(COSIGN_IDENTITY)" \
 		"$(RELEASE_CHECKSUMS)"
+	@# One line of checksums.txt, for the one file this target downloaded.
+	@#
+	@# checksums.txt covers every asset the release attached, and `--ignore-missing`
+	@# reads that as "check every line whose file happens to be sitting here". In CI
+	@# that is the three files just fetched. In a working tree it is those plus
+	@# whatever an earlier release left in RELEASE_DIR — an install.yaml and a
+	@# kuberecord.yaml from the version before, under the same names, hashing to
+	@# different values. Those mismatches are perfectly true and entirely
+	@# irrelevant, and they fail the target: a maintainer following the runbook by
+	@# hand gets "2 computed checksums did NOT match" about files nobody asked
+	@# about, over a formula that verified fine.
+	@#
+	@# So the line is selected rather than filtered. This target downloads one
+	@# artifact and one artifact is all it is entitled to conclude anything about;
+	@# the whole-directory check belongs to release-artifacts-verify, which runs
+	@# where every asset is supposed to be present and where a missing one is a
+	@# finding rather than a leftover.
+	@#
+	@# awk compares the name field for equality instead of matching a pattern,
+	@# because a filename is not a regular expression: `kuberecord.rb` as a pattern
+	@# also matches `kuberecord-rb`, and a checksum check that verified the wrong
+	@# line would be worse than none.
 	@set -e; cd "$(RELEASE_DIR)"; \
+	formula="$(notdir $(RELEASE_BREW_FORMULA))"; \
+	line="$$(awk -v f="$$formula" '$$2 == f' checksums.txt)"; \
+	if [ -z "$$line" ]; then \
+		echo "release: checksums.txt names no $$formula, so nothing signed attests the"; \
+		echo "  formula the tap is about to serve. Refusing to continue."; \
+		exit 1; \
+	fi; \
+	if [ "$$(printf '%s\n' "$$line" | wc -l)" -ne 1 ]; then \
+		echo "release: checksums.txt names $$formula on more than one line; refusing to"; \
+		echo "  guess which of them the formula is supposed to match."; \
+		exit 1; \
+	fi; \
 	if command -v sha256sum >/dev/null 2>&1; then \
-		sha256sum --ignore-missing -c checksums.txt; \
+		printf '%s\n' "$$line" | sha256sum -c -; \
 	else \
-		shasum -a 256 -c checksums.txt 2>/dev/null | grep ': OK$$'; \
+		printf '%s\n' "$$line" | shasum -a 256 -c -; \
 	fi
 	@echo "release: $(RELEASE_BREW_FORMULA) is the formula $(RELEASE_VERSION) published, and the"
 	@echo "  checksums naming it were signed by $(COSIGN_IDENTITY)"
