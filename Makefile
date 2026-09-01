@@ -5,7 +5,7 @@ IMG ?= controller:latest
 # IMG's default — IMG is a developer's local build tag, VERSION is what a user
 # installs — and it is the one place a release bump has to happen (see
 # deploy/charts/kuberecord/Chart.yaml, which must carry the same value).
-VERSION ?= 0.2.1
+VERSION ?= 0.3.0
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
