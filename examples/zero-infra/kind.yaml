@@ -1,0 +1,16 @@
+# The kind cluster the zero-infrastructure quickstart runs on.
+#
+# One control-plane node and nothing else — identical in shape to
+# examples/quickstart/kind.yaml, and for the same reasons. This path stands up
+# strictly less than that one does: an object store instead of a database, and
+# nothing else changes about the cluster.
+#
+# The node image is deliberately not pinned. kind's default node image is the one
+# built for the kind binary you have; pinning one here would break the quickstart
+# for anyone whose kind is older or newer than whatever was current when this
+# file was last touched — the opposite of what an evaluation path needs.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kuberecord-zero-infra
+nodes:
+- role: control-plane

@@ -1,12 +1,21 @@
-# The ten-minute claim, tested (Task 3.4).
+# The ten-minute claims, tested (Tasks 3.4 and 12.3).
 #
-# README.md tells a stranger they can go from a fresh clone to rows in ClickHouse
-# in under ten minutes. This job is what stops that from being marketing: it runs
-# examples/quickstart/quickstart.sh exactly as a user would, on a runner that is
-# slower than most laptops, and the run fails if either half of the claim breaks —
-# the script exits non-zero when no rows reach ClickHouse, and
-# QUICKSTART_BUDGET_SECONDS=600 fails it when the whole thing overruns ten
-# minutes.
+# README.md makes the same promise twice, on two paths, and this workflow is what
+# stops either from being marketing. Both jobs run the committed script exactly as
+# a user would, on a runner slower than most laptops, and both fail if either half
+# of the claim breaks — the script exits non-zero when nothing was recorded, and a
+# 600-second budget fails it when the whole thing overruns ten minutes.
+#
+# The two paths are deliberately different installs, not one install twice:
+#
+#   quickstart             kustomize, a single-node ClickHouse, rows read back
+#                          with SQL. The path a reader who wants a queryable
+#                          timeline follows.
+#   quickstart-zero-infra  helm, an object store, and the answer read back with
+#                          `kuberecord timeline` — no database anywhere. The path
+#                          that removes ClickHouse from the evaluation entirely
+#                          (D18), and the one that exercises the CLI end to end
+#                          against a real archive.
 #
 # The budget is enforced here and not in the Makefile on purpose: a developer
 # whose laptop is busy compiling something else should not be told their install
@@ -67,3 +76,49 @@ jobs:
       - name: Tear the cluster down
         if: always()
         run: make quickstart-down
+
+  zero-infra:
+    permissions:
+      contents: read
+    name: git clone to an answered timeline, with no database, in under 10 minutes
+    runs-on: ubuntu-latest
+    # A ceiling well above the budget, for the same reason the job above has one:
+    # a hang somewhere the script does not measure should still end the job, and
+    # end it as a failure rather than as a runner timeout with no output.
+    timeout-minutes: 25
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      # Bootstrapping helm into bin/ is a prerequisite, not part of the
+      # quickstart, so it runs as its own step and outside the measured window.
+      # Everything the budget covers — the operator image build and the CLI build
+      # included — is in the step below.
+      - name: Bootstrap helm
+        run: make helm
+
+      # The assertion is the CLI's, not the object store's: the script fails if
+      # `kuberecord timeline` reads no changes out of the archive. An archive with
+      # objects in it that the CLI cannot answer from would be the more
+      # interesting failure, and this is where it would surface.
+      - name: Run the zero-infrastructure quickstart and assert the CLI answers
+        env:
+          ZERO_INFRA_BUDGET_SECONDS: "600"
+        run: make quickstart-zero-infra
+
+      - name: Tear the cluster down
+        if: always()
+        run: make quickstart-zero-infra-down

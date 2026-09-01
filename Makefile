@@ -426,6 +426,38 @@ quickstart: kustomize ## Stand up kind + ClickHouse + the operator and query the
 quickstart-down: ## Delete the quickstart kind cluster and everything in it.
 	@KIND=$(KIND) QUICKSTART_CLUSTER=$(QUICKSTART_CLUSTER) ./$(QUICKSTART_SCRIPT) down
 
+# The zero-infrastructure evaluation path (Task 12.3): a kind cluster, a
+# `helm install`, an object store, and an answered `kuberecord timeline` — with no
+# ClickHouse and no database of any kind, in under ten minutes.
+#
+# It is a second target rather than a flag on the first because the two scripts
+# are transcripts a reader follows by hand, and a branchy transcript stops reading
+# as one. They share nothing but their shape: this one installs strictly less.
+#
+# Same division of labour as `quickstart`: the script asserts that the CLI read
+# real changes out of the archive and exits non-zero if it did not, which is what
+# makes .github/workflows/quickstart.yml a test of the claim rather than a
+# restatement of it. ZERO_INFRA_BUDGET_SECONDS is what CI sets to enforce the time
+# half; it is unset here on purpose, because a slow laptop is not a failed install.
+#
+# helm is bootstrapped into bin/ the same way kustomize is for the other path, and
+# the CLI is built from this clone by the script itself.
+ZERO_INFRA_CLUSTER ?= kuberecord-zero-infra
+ZERO_INFRA_BUDGET_SECONDS ?=
+ZERO_INFRA_SCRIPT := examples/zero-infra/zero-infra.sh
+
+.PHONY: quickstart-zero-infra
+quickstart-zero-infra: helm ## Stand up kind + MinIO + the operator via helm, then read the archive with the CLI. No database.
+	@KIND=$(KIND) KUBECTL=$(KUBECTL) HELM="$(HELM)" \
+		CONTAINER_TOOL=$(CONTAINER_TOOL) MAKE="$(MAKE)" \
+		ZERO_INFRA_CLUSTER=$(ZERO_INFRA_CLUSTER) \
+		ZERO_INFRA_BUDGET_SECONDS=$(ZERO_INFRA_BUDGET_SECONDS) \
+		./$(ZERO_INFRA_SCRIPT)
+
+.PHONY: quickstart-zero-infra-down
+quickstart-zero-infra-down: ## Delete the zero-infrastructure kind cluster and everything in it.
+	@KIND=$(KIND) ZERO_INFRA_CLUSTER=$(ZERO_INFRA_CLUSTER) ./$(ZERO_INFRA_SCRIPT) down
+
 ##@ Build
 
 .PHONY: build

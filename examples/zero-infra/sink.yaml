@@ -1,0 +1,101 @@
+# Where the zero-infrastructure quickstart's state history goes: an object store,
+# and nothing else.
+#
+# This is the whole point of the example. An `S3Sink` is a `Writer`-only archive
+# tier (D12): it cannot read its own history back, so dedup cache warm-up, zombie
+# garbage collection and boot reconciliation of scope epochs are switched off for
+# it, and it says so in `HistoryUnavailable=True/WriterOnlySink` while staying
+# `Ready` — a declared capability limit, not a fault. Nothing about *recording* is
+# reduced by it, which is why an archive alone is a complete evaluation of the
+# capture path. docs/CRDS.md#historyunavailable--a-limit-not-a-fault is the limit
+# itself; docs/TEE.md is what it means when a ClickHouse is sitting next to it.
+#
+# kuberecord never creates the bucket. Retention, encryption, lifecycle and Object
+# Lock all belong to whoever owns the account, and Object Lock in particular is
+# irreversible once enabled and implies versioning — docs/RETENTION.md is what to
+# read before turning it on. The script creates this example's bucket with `mc`
+# inside the MinIO pod, which is also how you would inspect it by hand.
+apiVersion: kuberecord.io/v1alpha1
+kind: S3Sink
+metadata:
+  name: archive
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: zero-infra-example
+spec:
+  bucket: kuberecord-zero-infra
+  # A path fragment, never a path: no leading or trailing slash. Keys are built as
+  # <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<sha256>.jsonl.zst
+  # — a versioned public contract (D15). It is what the CLI's objectsource backend
+  # partitions on, and it is why `kuberecord timeline --source s3://…/audit` can
+  # read this archive with nothing else installed.
+  prefix: audit
+  # MinIO ignores the region and the SDK insists on one. This is the CRD's
+  # default, spelled out so a reader need not look up what the client was built
+  # with — and it is the same value the CLI assumes when a --source names none.
+  region: us-east-1
+  # endpoint + forcePathStyle are what point this at an in-cluster MinIO rather
+  # than at AWS. Delete both for real S3. Path style is required here because a
+  # bucket-as-subdomain URL only resolves where DNS (and any TLS certificate)
+  # covers *.<endpoint>, which a Service name does not — and it is why the CLI is
+  # given AWS_S3_FORCE_PATH_STYLE=true when it reads back through the
+  # port-forward.
+  endpoint: http://minio.kuberecord-zero-infra.svc:9000
+  forcePathStyle: true
+  credentials:
+    secretRef:
+      # No namespace: it resolves to the operator's own, the only namespace the
+      # operator holds Secret read rights in. See examples/zero-infra/secret.yaml.
+      name: kuberecord-zero-infra-s3-credentials
+  format: jsonl-v1-zstd
+  rotation:
+    # The object *is* the batch: whichever of these fires first closes it and PUTs
+    # it. Both are tuned for watching rather than for running — 20 seconds means
+    # an object closes while the script is still running, where the shipped
+    # default of 5m would put the first readable object five minutes past the
+    # ten-minute budget this example is measured against.
+    #
+    # A real archive wants the defaults or larger: every engine reading this
+    # layout pays per object, so a cluster rotating every 20s is buying latency
+    # with the small-file explosion that makes an archive expensive to query.
+    # config/samples/kuberecord.io_v1alpha1_s3sink.yaml is the production shape.
+    maxObjectBytes: 8388608
+    maxObjectAge: 20s
+  writer:
+    queueSize: 1000
+    # Each worker accumulates an object of its own, so this sink's steady-state
+    # memory ceiling is workers x maxObjectBytes — 16Mi here. The CRD enforces a
+    # 4Gi bound on that product, which is why `workers` is not the plain
+    # throughput knob it is on a ClickHouseSink.
+    workers: 2
+    enqueueTimeout: 2s
+    # The drain closes and PUTs each worker's partial object rather than waiting
+    # for rotation, so this budget covers a request per worker.
+    drainTimeout: 8s
+  # `objectLock` is deliberately absent. This example's MinIO has no Object Lock
+  # configuration, and a sink asking for retention against a bucket that cannot
+  # provide it reports BucketReachable=False/BucketIncompatible — permanent until
+  # a human changes the bucket or the spec. Enabling it is the subject of
+  # docs/RETENTION.md, not of this example.
+  policy:
+    # Exactly the two kinds the rule streams. Omitting `allowedGVKs` entirely
+    # would admit everything except the hard deny-list (v1/Secret is never
+    # watchable, and no policy can re-enable it), but naming them means a rule
+    # that asks for anything else fails loudly as PolicyAllowed=False instead of
+    # quietly archiving objects you did not expect.
+    allowedGVKs:
+    - group: apps
+      version: v1
+      kinds:
+      - Deployment
+    - group: ""
+      version: v1
+      kinds:
+      - ConfigMap
+    # The redaction floor for everything written to this sink. Values on these
+    # paths are replaced with "[REDACTED]" after normalization and *before*
+    # hashing, so a redacted value reaches neither the payload, nor a diff, nor
+    # the sha256. There is more at stake on an archive than on a database,
+    # because an archived value cannot be scrubbed after the fact.
+    redaction:
+    - fieldPath: data.password

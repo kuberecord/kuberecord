@@ -1,0 +1,167 @@
+# The object store the zero-infrastructure quickstart archives into.
+#
+# This is an *evaluation* fixture, not a deployment recipe. A real archive is S3,
+# or a MinIO somebody else operates with real storage, real credentials and Object
+# Lock enabled on the bucket — none of which this file has. What it is for is
+# making `make quickstart-zero-infra` produce a working, readable archive on a
+# laptop with no database anywhere in the picture.
+#
+# It is deliberately the same shape as examples/tee/minio.yaml, which is the cold
+# half of the tee pattern. The two examples answer different questions — that one
+# is "one watch, two backends", this one is "no backend to run at all" — so they
+# are kept separate and self-contained rather than sharing a manifest that would
+# have to serve both.
+#
+# Four choices are worth explaining, because three of them are shortcuts and one
+# is not:
+#
+#   - Its own namespace, so `kubectl delete namespace kuberecord-zero-infra`
+#     removes the whole store in one command, and so the restricted Pod Security
+#     Standard the operator's namespace carries does not have to be relaxed for a
+#     third-party image.
+#   - Storage is an emptyDir. Deleting this pod deletes the archive, which is the
+#     exact opposite of what an archive is for — but durability here would mean a
+#     StorageClass dependency and a slower teardown, and the point being
+#     demonstrated is that the CLI can read the archive, not that it survives.
+#   - The root credentials are committed in plain text, in the Secret below and
+#     again in examples/zero-infra/secret.yaml. See that file for why, and for
+#     what a real install does instead.
+#   - $HOME is a writable emptyDir. That one is not a shortcut: the MinIO image
+#     ships `mc`, so a writable home is what lets the script create the bucket
+#     with `kubectl exec` instead of requiring an S3 client on your machine.
+#
+# There is no console. `server /data` alone serves the S3 API on 9000, which is
+# the only interface anything here uses — the operator writing through it, and the
+# CLI reading back through a port-forward to it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kuberecord-zero-infra
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: zero-infra-example
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: kuberecord-zero-infra
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: zero-infra-example
+type: Opaque
+stringData:
+  # The server side of the key pair. examples/zero-infra/secret.yaml carries the
+  # same two values beside the operator, and a test in test/docs asserts that the
+  # two files still agree — an archive whose writer cannot authenticate would
+  # report BucketReachable=False and record nothing, which is a confusing first
+  # experience to debug.
+  accessKeyId: "kuberecord"
+  secretAccessKey: "kuberecord-zero-infra"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: kuberecord-zero-infra
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two servers must never share the emptyDir, and
+  # there is nothing to keep available during a restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # Any non-root uid will do — the image bakes none in — and fsGroup is what
+        # makes the emptyDir volumes writable for it without a root init
+        # container. MinIO refuses to start against a /data it cannot write, so
+        # this pairing is load bearing rather than decorative.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+        # The image is side-loaded into the kind node by the script, so it must
+        # never be re-pulled from a registry mid-run.
+        imagePullPolicy: IfNotPresent
+        args:
+        - server
+        - /data
+        env:
+        # `mc` writes a config directory under $HOME, and the image's default home
+        # is not writable by the uid above. /tmp is (see the volumes below).
+        - name: HOME
+          value: /tmp
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: accessKeyId
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: secretAccessKey
+        ports:
+        - name: s3
+          containerPort: 9000
+        # /minio/health/ready answers only once the server will actually serve
+        # object requests, which is the edge not to race: the S3Sink's first
+        # health probe *writes* an object.
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: s3
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          failureThreshold: 90
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: kuberecord-zero-infra
+  labels:
+    app: minio
+spec:
+  selector:
+    app: minio
+  ports:
+  - name: s3
+    port: 9000
+    targetPort: s3

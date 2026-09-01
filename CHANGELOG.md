@@ -18,6 +18,147 @@ than a summary of them.
 
 ### Added
 
+- **`kubectl kuberecord`: the recorded history is now readable without SQL.** The
+  operator has written a queryable audit trail since v0.1.0 and nobody could use
+  it without a ClickHouse client and a query. This release ships the client — one
+  binary under two names, `kubectl-kuberecord` for `kubectl kuberecord …` and
+  `kuberecord` for running standalone against an archive with no cluster at all.
+
+  Six commands, each answering a question somebody actually asks at 3am:
+
+  | Command | The question |
+  |---|---|
+  | `timeline` | What changed on this object, who changed it, and — with `--with-events` — what Kubernetes said about it. |
+  | `diff` | The same changes with the **old value beside the new one**, recovered by replaying state rather than read from a column, because the recorded patch does not carry it. |
+  | `get --at` | What the object looked like at an instant, reconstructed from a recorded full state plus the patches after it, with the base row and the patch count in the header so the answer can be judged rather than trusted. `--verify` re-hashes it against the recorded digest. |
+  | `blame` | Which change last wrote each field, and who made it — attributed by replaying the patches in order, so a field written by a change that replaced the block above it is credited to that change rather than left looking untouched. |
+  | `scopes` | What was being recorded, and when. |
+  | `version` | The build, and the query backends compiled into it. |
+
+  Four properties are the reason it is not a thin SQL wrapper, and each of them is
+  a way of being quietly wrong that the CLI refuses to be:
+
+  - **An empty answer is never presented on its own** (Invariant 9). Every empty
+    result is explained against the watch scopes that were open at the time, and
+    "nothing changed" and "nothing was watching" are different findings — the
+    second exits **`3`**, which is the code worth scripting against. Every other
+    tool in this space collapses the two into one successful empty result, and
+    they send an engineer in opposite directions.
+  - **A name that has been reused is never spliced.** A `(namespace, name)` pair
+    may span several UIDs (Invariant 7); the newest incarnation is chosen, the
+    others are named, and `--all-incarnations` shows them all with a `UID` column.
+    A coherent-looking account of something that never happened is worse than no
+    timeline.
+  - **A capability a backend lacks is reported, never worked around.** An object
+    archive records no deletions, so a timeline over one that simply stops carries
+    an explicit notice saying the object may have been deleted unobserved. No
+    `Deleted` row is ever synthesized to close the gap.
+  - **`get` output is evidence, not a manifest.** Volatile metadata was stripped
+    at capture, redacted fields carry `[REDACTED]`, and the document describes a
+    past somebody deliberately moved the object out of. The header says so in
+    those words, and `metadata.reconstruction.not_deployable` says so to a script.
+
+  Where it reads from is a four-step chain — `--source`, `--sink`, the active
+  profile, then a discovered sink custom resource — and **the chosen source is
+  always printed on stderr**, because a tool that silently picked between four
+  sources would eventually read the wrong one and be believed. Data goes to
+  stdout and every banner, notice and explanation to stderr, so `-o json | jq`
+  never receives a warning.
+
+  The configuration file
+  (`${XDG_CONFIG_HOME:-~/.config}/kuberecord/config.yaml`, mode `0600`) holds
+  profiles and a kubeconfig-context → cluster-identity mapping. **It never holds a
+  password**: a ClickHouse profile names an environment variable or a file, an
+  inline `password` is refused with an explanation, and S3 credentials are not in
+  it at all — they come from the AWS chain. The recommended posture is a read-only
+  ClickHouse user, and [`docs/CLI.md`](docs/CLI.md#the-read-only-clickhouse-user)
+  has the grants: handing an engineer the operator's own credential would give
+  them the ability to insert rows into an audit trail, which is the one thing an
+  audit trail must be able to rule out.
+
+  Two naming decisions are permanent and worth knowing: `--cluster-id` is
+  kuberecord's cluster identity and `--cluster` remains kubectl's kubeconfig entry
+  (D21), and the CLI may not import the operator's runtime packages — enforced by
+  depguard and by a transitive-closure test — because it is a client of the frozen
+  schema, not of the pipeline (D20).
+
+  Installation, every command, every flag, the exit codes, the output formats and
+  the configuration schema are [`docs/CLI.md`](docs/CLI.md).
+- **The CLI's structured output is a public contract, stable from
+  `cli.kuberecord.io/v1alpha1`.** `-o json`, `-o jsonl` and `-o yaml` produce a
+  versioned envelope, and it carries the same promise the ClickHouse schema does:
+  **within one `apiVersion`, fields may be added and are never renamed, removed or
+  repurposed.** Consumers must ignore what they do not recognize; anything else is
+  a new `apiVersion`. People script against `-o json`, and a field renamed a
+  release later breaks a runbook silently — `jq` reports nothing for a path that no
+  longer exists, and the pipeline keeps running while producing empty findings.
+
+  Five envelope kinds — `Timeline`, `Diff`, `Object`, `Coverage` and `Blame` —
+  each with `items` always a list, and `metadata` carrying `cluster_id`, `backend`
+  and `coverage`. Two further documents carry the same `apiVersion` and therefore
+  the same policy without being envelopes: `Version` and `Config`, neither of
+  which is the answer to a query and neither of which would have anything true to
+  put in an envelope's `metadata`. **Item field names are the schema's column
+  names** (D19): `ts`, `event_type`, `actors`, `uid`,
+  `resource_version`, `api_version`, `data`, `diff`, `sha256`, `labels`, spelled
+  exactly as [`docs/SCHEMA.md`](docs/SCHEMA.md) spells them, so a `jq` recipe
+  written against a SQL result transfers to CLI output unchanged. That is the
+  point of the mirroring rather than a detail of it.
+
+  `-o jsonl` streams: the envelope head on the first line and one item per line as
+  it arrives, so memory does not scale with the result and a six-figure timeline
+  can be piped into something that reads it a line at a time. The head line
+  carries the full `metadata`, coverage included, so a consumer already knows
+  whether an empty stream means "nothing changed" or "nothing was watching". See
+  [`docs/CLI.md`](docs/CLI.md#structured-output).
+- **A read-plane query contract, and two backends held to it.** `internal/query`
+  defines `QueryEngine` — timelines, state at an instant, incarnations, coverage,
+  Events — as a contract separate from the operator's own `sink.StateReader`
+  (D16). The sink's reader serves warm-up and garbage collection and sits on the
+  hot path's dependency graph; growing it to serve analyst queries would have put
+  read-plane concerns there too.
+
+  Two engines implement it. `clickhouse` reads the frozen v1 tables. `objectsource`
+  reads a `format=jsonl-v1` archive, reached either as `s3` (any S3-compatible
+  bucket, MinIO included) or as `local` (a directory) — one engine, two ways of
+  getting bytes, so they answer identically. It is **pure Go with no cgo** (D18),
+  which is what keeps the CLI a static cross-compile to six platforms from one
+  `make`, and it is why a zero-infrastructure evaluation needs no database.
+
+  Every engine **declares** what its storage can express — `deletions`,
+  `server_side_filter`, `point_query`, `time_bound_required` — and the CLI keys its
+  behaviour on the declaration rather than on the backend's name (D17), so a future
+  indexed backend inherits the right treatment by declaring it. A
+  **backend-agnostic conformance suite** holds both engines to the same properties
+  and checks each declaration against detected behaviour **in both directions**, so
+  a backend can neither claim a capability it lacks nor quietly gain one it never
+  declared (D11). An agreement suite then runs one corpus through both engines and
+  requires the same answer, because a divergence between two backends is a
+  correctness defect in one of them rather than a difference of opinion.
+  [`docs/CLI.md`](docs/CLI.md#backend-capability-differences) is what each
+  difference costs a reader.
+- **A zero-infrastructure quickstart: `make quickstart-zero-infra`.** A kind
+  cluster, a `helm install`, an `S3Sink` pointed at a single-node MinIO, and the
+  history read back with `kuberecord timeline` — **no ClickHouse and no database
+  of any kind**. Standing up a database to decide whether a tool is worth having
+  is a bad trade, and this removes it from the evaluation path entirely.
+
+  Same discipline as the existing quickstart: CI runs the committed script on
+  every push with a hard 600-second budget, and the run fails if the CLI reads no
+  changes out of the archive or if the whole thing overruns ten minutes. The last
+  step repeats the query with no kubeconfig at all, because an archive needs no
+  cluster to be read. [`examples/zero-infra/`](examples/zero-infra/) documents
+  every step, including which parts are evaluation shortcuts and which are exactly
+  how a production install works.
+- **The README now leads with the output.** It used to open with an architecture
+  description, which answers a question nobody has yet. The first screen is now
+  the 3am incident — the change, the actor who made it, and the correlated
+  Kubernetes Event, in one `kuberecord timeline` — and `test/docs` fails the build
+  if that block sinks below the fold or loses one of the three.
+  [`docs/QUERIES.md`](docs/QUERIES.md#cli-or-sql) now routes between the two
+  halves: the CLI for one object, the SQL for anything wider, with each section
+  saying which it is. They are complements, and the page says so rather than
+  leaving a reader to work it out.
 - **`kubectl krew install kuberecord` and `brew install kuberecord/tap/kuberecord`.**
   Two channels, one build: both install the archives the release already
   publishes, so neither is a second artifact with its own provenance.

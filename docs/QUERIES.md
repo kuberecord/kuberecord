@@ -6,6 +6,12 @@ correctly](#reading-event-history-correctly) read a `ClickHouseSink`'s tables; t
 ones under [The S3 archive](#the-s3-archive) read an `S3Sink`'s objects with
 DuckDB — the same objects [the CLI reads](#what-the-cli-reads) without it.
 
+**This page is the wide half.** Questions about *one* object — what changed on it,
+what it looked like at an instant, who last wrote a field — are
+[`kubectl kuberecord`](CLI.md)'s, and it answers them with no query, no client and
+no database. [CLI or SQL?](#cli-or-sql) is the split, and it is a division of
+labour rather than two ways of doing the same thing.
+
 Every ClickHouse query here uses only frozen columns, so it keeps working across
 operator upgrades — and that is a tested claim rather than an intention: `make
 test-integration` runs on every push and executes every statement on this page
@@ -24,6 +30,48 @@ the dashboard that covers it.
 > differ only in a redacted value produce **one** row, not two, so a "what
 > changed?" query cannot see a change confined to a redacted path. See
 > [Redaction](SCHEMA.md#redaction).
+
+## CLI or SQL?
+
+This page and [`kubectl kuberecord`](CLI.md) answer overlapping questions, and the
+overlap is deliberate rather than accidental. They are complements, and the split
+between them is the same one their designs are built around:
+
+| | The CLI | This page |
+|---|---|---|
+| **Shape of question** | One object. One window, or one instant. | Many objects, or many changes reduced to a number. |
+| **What you get** | A rendered answer, or a versioned JSON envelope. | A result set. |
+| **What it needs** | One static binary. No engine, no client, and against an archive no cluster either. | A ClickHouse client, or DuckDB, or Athena. |
+| **Where it stops** | It is not a query engine. It cannot group, join or aggregate, and it does not pretend to. | It cannot resolve an incarnation, replay a bounded window, or tell you a scope was never watched — not without you writing all three, correctly, every time. |
+
+**Reach for the CLI for the single-object questions**, because the parts that are
+easy to get wrong are already in it: incarnation resolution before filtering
+(Invariant 7), a replay that starts from a full state rather than from the window's
+edge, prior values recovered rather than left blank, and an empty answer explained
+against the watch scopes instead of presented as silence (Invariant 9).
+
+| The question | The command | The SQL here |
+|---|---|---|
+| What changed on this object, and who changed it? | `kuberecord timeline deploy/x -n ns` | [Incident window](#incident-window--everything-that-changed-in-a-namespace), narrowed by name |
+| What exactly moved — old value beside new? | `kuberecord diff deploy/x -n ns --since 2h` | — the diffs are inlined, but reconstructing the *old* side is a replay |
+| What did it look like at 14:05? | `kuberecord get deploy/x -n ns --at 2026-08-28T14:05:00Z` | [Reconstructing an object's state at an instant](#reconstructing-an-objects-state-at-an-instant) |
+| Who last wrote each field? | `kuberecord blame deploy/x -n ns` | — no single-statement equivalent |
+| What did this deleted object contain? | `kuberecord timeline deploy/x -n ns --since 30d` | [What did this deleted object look like?](#what-did-this-deleted-object-look-like) |
+| What was Kubernetes saying about it? | `kuberecord timeline pod/x -n ns --with-events` | [Events for object X around time T](#events-for-object-x-around-time-t) |
+| Was anybody watching this scope? | `kuberecord scopes -n ns` | [Was anybody watching?](#was-anybody-watching) |
+
+**Reach for the SQL for everything wider than one object.** Drift across a fleet,
+flap counts, activity by namespace, "which objects cover this window", anything
+grouped or joined — none of it is a shape the CLI has, and putting it there would
+be building a worse query engine next to the one you already have (D18). The
+sections below are that half, and every statement in them is executed against a
+real backend in CI.
+
+Both read the same frozen contract, so the two transfer: the CLI's `-o json`
+envelope spells its item fields with **the schema's own column names** (D19), which
+is what lets a `jq` recipe written against a SQL result work unchanged against CLI
+output. Where the CLI's answer and a query here disagree, that is a bug in one of
+them rather than a difference of opinion.
 
 ## Parameters
 
@@ -79,6 +127,11 @@ The first question of every post-mortem: *"the payments namespace broke between
 13:45 and 14:30 — what moved?"* Diffs are inlined, so this is the whole answer in
 one result set rather than a list of things to go and look up.
 
+> **This one stays SQL.** It is a whole namespace over a window, which is more
+> than one object, and the CLI has no shape for it. Once the result has named a
+> suspect, `kuberecord timeline <kind>/<name> -n <ns> --since …` is where the
+> old-value-beside-new detail lives.
+
 Dashboard: **Namespace Activity** for the shape of the window, **Object Timeline**
 once you know which object to read.
 
@@ -113,6 +166,10 @@ at the time is recorded separately, in `watch_scopes` — see [Reading the
 log](SCHEMA.md#reading-the-log).
 
 ## Drift your GitOps controller did not cause
+
+> **This one stays SQL** — it is a fleet question, grouped and counted. For one
+> object's version of it, `kuberecord timeline <kind>/<name> --exclude-actor
+> argocd-application-controller` applies the same predicate to one timeline.
 
 *"What changed in this cluster that Git does not know about?"* Every row carries
 the field managers that owned parts of the object at write time, so excluding the
@@ -155,6 +212,10 @@ self-declared: `kubectl` clients pick their own, so a human edit may arrive as
 
 ## Top flappers
 
+> **This one stays SQL.** `flapping` is deliberately out of scope for the CLI in
+> v0.3.0: it is an aggregate over many objects, which is exactly what this page is
+> for.
+
 *"What in this cluster will not hold still?"* Flapping is usually two controllers
 fighting over one field, and it is expensive twice: apiserver load, and rows here.
 
@@ -186,6 +247,19 @@ flap by nature — add `AND kind NOT IN ('Event', 'Lease', 'EndpointSlice')` bef
 concluding anything about the top of the list.
 
 ## Reconstructing an object's state at an instant
+
+> **The CLI answers this**, on either backend, in one command:
+>
+> ```sh
+> kuberecord get deploy/checkout -n payments --at 2026-08-28T14:05:00Z
+> ```
+>
+> It does the replay below, prints the base row and the patch count in the header
+> so the answer can be judged rather than trusted, and `--verify` re-hashes the
+> result against the recorded digest. It also refuses to blend two incarnations of
+> a reused name, which the SQL here will happily do if you forget `uid`. Use the
+> SQL when you need the replay inside something else — a pipeline, a notebook, a
+> report over many objects. See [`docs/CLI.md`](CLI.md#get---at).
 
 *"What did this object actually look like at 14:05?"* `Modified` rows carry diffs
 rather than full state, so the answer is a replay: take the newest row that
@@ -258,6 +332,14 @@ and it is why the reconstruction above keys on `ts` throughout.
 
 ## What did this deleted object look like?
 
+> **For one object the CLI answers this**: `kuberecord timeline <kind>/<name> -n
+> <ns> --since 30d` ends at the `Deleted` row, and `kuberecord get <kind>/<name>
+> -n <ns> --at <just before it>` reconstructs what it held. The query below is the
+> wide version — *every* deletion in a window, which is the sweep you run when you
+> do not yet know which object to ask about. On an object archive there are no
+> `Deleted` rows to find at all (D12), and the CLI says so rather than reporting
+> the object as still present.
+
 *"Somebody deleted it and nobody admits to it — what was in it?"* The object is
 gone from the cluster, but its last recorded state is not gone from here. This
 finds every deletion in a window and pairs each with the newest full state
@@ -324,6 +406,19 @@ no longer one to inspect, so "who deleted it" is a question this schema
 deliberately does not answer.
 
 ## Events for object X around time T
+
+> **The CLI answers this**, and interleaves the Events with the object's own
+> changes in one table — which is the reading you actually want, since the point
+> is which change the Event followed:
+>
+> ```sh
+> kuberecord timeline deploy/checkout -n payments --with-events
+> ```
+>
+> Both Event API groups are correlated for you, which is the fiddly half of the
+> SQL below. The queries here are still the right tool for the aggregate versions:
+> [noisiest reasons in a window](#noisiest-reasons-in-a-window), or Events across
+> many objects at once.
 
 The other post-mortem question: *"this Deployment broke at 14:05 — what was
 Kubernetes saying about it and its pods?"*
@@ -709,6 +804,12 @@ LIMIT 200;
 
 ### One object's timeline
 
+> **This is the one recipe the CLI replaces outright.** `kuberecord timeline
+> <kind>/<name> -n <ns> --source s3://bucket/prefix` reads these same objects with
+> no DuckDB installed, resolves the incarnation before filtering, and explains an
+> empty result against the scope log. Keep the recipe for a session that is already
+> in DuckDB, or for joining this timeline to something else.
+
 *"Show me everything this Deployment did."* The archive's answer to [Object
 Timeline](DASHBOARDS.md), and the recipe that shows most plainly what a
 `Writer`-only sink costs: there is no sort key on identity, so this is a scan of
@@ -864,6 +965,13 @@ ORDER BY object_key;
 ```
 
 ### Was anybody watching?
+
+> **The CLI answers this on either backend**: `kuberecord scopes`, which reads the
+> same log and renders one row per period. It also consults it *automatically*
+> behind every other command, so an empty timeline is never presented as silence —
+> "nothing changed" and "nothing was watching" are different findings and the
+> second exits `3` (Invariant 9). The query below is for reading the log directly,
+> or for pulling it into something else.
 
 *"There are no records for this object after Tuesday — did nothing change, or was
 nobody looking?"* On this backend that question has an answer inside the bucket,
