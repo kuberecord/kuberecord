@@ -2257,6 +2257,69 @@ func TestDistributionDocumentsAreReleaseAssets(t *testing.T) {
 	}
 }
 
+// TestTapPushSeesAFormulaTheTapDoesNotYetHave is the regression guard for a job
+// that reported success and pushed nothing.
+//
+// release-brew-push copies the formula into a clone of the tap and asks whether
+// the tap already carries it, so that re-running a release is not a stream of
+// empty commits. The question was asked with `git diff -- <path>`, which compares
+// the working tree against the *index* and therefore cannot see an untracked file
+// at all. On a tap that does not yet carry the formula — a new tap, holding a
+// LICENSE and nothing else — the copy is untracked, `git diff` reports no
+// difference, the guard concludes there is nothing to push, and the job goes
+// green having pushed nothing.
+//
+// The failure is exactly inverted: a guard whose whole purpose is to make a repeat
+// push a no-op worked for every release except the first one into a new tap, which
+// is the only push that cannot be recovered by "it will be right next time" —
+// there is no formula there for `brew install` to find until somebody notices.
+//
+// Staging first and asking `git diff --cached` compares the index against HEAD,
+// where a file absent from the last commit is a difference. That is what the
+// question meant all along, and it stays correct for the three other states: an
+// identical formula is still no-op, a changed one still pushes, and an unborn HEAD
+// diffs against the empty tree rather than erroring.
+func TestTapPushSeesAFormulaTheTapDoesNotYetHave(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	push := makeRecipe(t, makefile, "release-brew-push")
+
+	// The bug, named so it cannot come back by being retyped: a working-tree diff
+	// is blind to the file this target has just created.
+	if regexp.MustCompile(`git diff --quiet -- "\$\(BREW_FORMULA_PATH\)"`).MatchString(push) {
+		t.Error("release-brew-push decides whether to push with a working-tree `git diff`, " +
+			"which does not see an untracked file. On a tap that does not yet carry the " +
+			"formula it reports no change and the job pushes nothing while succeeding")
+	}
+	if !strings.Contains(push, `git diff --cached --quiet -- "$(BREW_FORMULA_PATH)"`) {
+		t.Error("release-brew-push no longer compares the staged formula against HEAD; " +
+			"a file absent from the last commit has to read as a difference")
+	}
+
+	// --cached only sees what has been staged, so the order is the check.
+	add := strings.Index(push, `git add "$(BREW_FORMULA_PATH)"`)
+	diff := strings.Index(push, "git diff --cached")
+	if add < 0 {
+		t.Fatal("release-brew-push no longer stages the formula")
+	}
+	if add > diff {
+		t.Error("release-brew-push stages the formula after asking `git diff --cached` about " +
+			"it, so the check sees an empty index and concludes there is nothing to push")
+	}
+
+	// The two behaviours the guard exists for, still intact around it.
+	if !strings.Contains(push, "already carries this formula; nothing to push") {
+		t.Error("release-brew-push no longer short-circuits an unchanged formula; a re-run " +
+			"would push an empty commit")
+	}
+	if !strings.Contains(push, "is a prerelease, and the tap serves stable releases only") {
+		t.Error("release-brew-push no longer refuses a prerelease. `brew install` cannot ask " +
+			"for a stable version, so a formula naming a candidate hands it to everyone")
+	}
+	if !strings.Contains(push, "git push --quiet origin HEAD") {
+		t.Error("release-brew-push no longer pushes")
+	}
+}
+
 // TestDistributionDigestsAreVerifiedInCI is the acceptance criterion's "a CI check
 // asserts the manifest's digests match the published archives", and it is two
 // checks because they are two different claims.
