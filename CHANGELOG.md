@@ -14,6 +14,8 @@ it, the release workflow refuses to publish a tag that lacks one, and what it
 reads becomes the GitHub Release body — so this file *is* the release notes rather
 than a summary of them.
 
+## [Unreleased]
+
 ## [0.3.0] - 2026-09-01
 
 ### Added
