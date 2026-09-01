@@ -1233,7 +1233,8 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kuberecord/kuberecord/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kuberecord/kuberecord/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kuberecord/kuberecord/releases/tag/v0.1.0
