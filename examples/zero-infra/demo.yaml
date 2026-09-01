@@ -1,0 +1,85 @@
+# Something for the zero-infrastructure quickstart to record.
+#
+# A cluster you just created has no history, so the quickstart makes some: this
+# namespace is what examples/zero-infra/rule.yaml selects, and the script changes
+# both objects below after they are streamed so the archive holds `Added` rows
+# *and* a `Modified` row carrying an RFC 6902 diff of the change — which is what
+# `kuberecord timeline` renders as one line with the old value beside the new.
+#
+# Nothing here is kuberecord-specific. Point the rule at your own namespace and
+# your own workloads and the result is the same.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zero-infra-demo
+  labels:
+    # The label examples/zero-infra/rule.yaml's namespaceSelector matches.
+    kuberecord.io/zero-infra: "true"
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: zero-infra-example
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: zero-infra-demo
+  labels:
+    app: checkout-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+    spec:
+      containers:
+      - name: app
+        # `pause` does nothing, which is the point: this example is about
+        # recording a Deployment's spec changing, not about running an
+        # application. Every kind node already has this image, and the script
+        # side-loads it anyway, so no registry is on the critical path.
+        image: registry.k8s.io/pause:3.10
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            cpu: 10m
+            # The script raises this to 64Mi, which is the change
+            # `kuberecord diff` shows with the old value beside the new one. It
+            # goes up rather than down on purpose: a limit below the 8Mi request
+            # above is rejected outright, and a demonstration whose one edit the
+            # API server refuses demonstrates nothing.
+            memory: 16Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65535
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkout-config
+  namespace: zero-infra-demo
+data:
+  feature_flags: "new-checkout=off"
+  # Deliberately named `password`, because examples/zero-infra/sink.yaml sets
+  # `data.password` as the sink's redaction floor. Reconstruct this ConfigMap
+  # with `kuberecord get` afterwards and the value is `[REDACTED]` — scrubbed
+  # after normalization and before hashing, so it is absent from the payload,
+  # absent from every diff, and not recoverable from the sha256 either. It never
+  # reached the archive at all, which matters more here than it does against a
+  # database: an archived value cannot be scrubbed after the fact. See
+  # docs/SCHEMA.md#redaction.
+  password: "hunter2"

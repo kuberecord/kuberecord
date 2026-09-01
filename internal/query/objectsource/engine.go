@@ -67,7 +67,7 @@ var (
 	_ query.ScanProgressReporter = (*Engine)(nil)
 )
 
-// backendName is what this engine calls itself in structured output.
+// BackendName is what this engine calls itself in structured output.
 //
 // It is surfaced as metadata.backend so a scripted consumer can attribute a result
 // to the engine that produced it. It names the *seam* rather than a storage
@@ -75,7 +75,12 @@ var (
 // directory with identical code, and a name that picked one of them would be wrong
 // half the time it was read. People pin scripts to it, so a release must not
 // rename it.
-const backendName = "objectsource"
+//
+// It is exported because `kuberecord version` lists the engines a binary was
+// built with (Task 12.1). A CLI that spelled the name a second time would
+// eventually spell it differently from what metadata.backend carries, and the
+// reader comparing the two would have no way to tell which was the typo.
+const BackendName = "objectsource"
 
 // The defaults, each with a consequence worth reading before it is changed.
 const (
@@ -301,7 +306,7 @@ func resolveObjectSpan(span time.Duration) (time.Duration, error) {
 // kinder outcome.
 func (e *Engine) Capabilities() query.Capabilities {
 	return query.Capabilities{
-		Backend:           backendName,
+		Backend:           BackendName,
 		Deletions:         false,
 		ServerSideFilter:  false,
 		PointQuery:        false,

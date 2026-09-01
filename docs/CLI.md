@@ -13,19 +13,133 @@ naming themselves correctly in their own help text.
 This page is the reference for **the commands**, **where the CLI reads from** and
 **how it is configured**.
 
+- [Installing](#installing)
+- [Global flags](#global-flags)
 - [`timeline`](#timeline)
 - [`diff`](#diff)
 - [`get --at`](#get---at)
 - [`blame`](#blame)
 - [`scopes`](#scopes)
+- [`version`](#version)
+- [Output formats](#output-formats)
 - [Structured output](#structured-output)
 - [Where the data comes from](#where-the-data-comes-from)
+- [Backend capability differences](#backend-capability-differences)
 - [The cluster identity](#the-cluster-identity)
 - [The configuration file](#the-configuration-file)
 - [The read-only ClickHouse user](#the-read-only-clickhouse-user)
 - [What the CLI asks of Kubernetes](#what-the-cli-asks-of-kubernetes)
 - [Evaluation mode](#evaluation-mode)
 - [Exit codes](#exit-codes)
+
+## Installing
+
+Four channels, one build. Whichever you use, the bytes come from the archives a
+tagged release publishes — krew, Homebrew and `go install` are three ways of
+getting a copy of the same artifact, not three builds of the same source.
+
+```sh
+# 1. krew, which is how a kubectl user finds a plugin.
+kubectl krew install kuberecord
+kubectl kuberecord version
+
+# 2. Homebrew, on macOS and on Linux. The one channel that installs both names.
+brew install kuberecord/tap/kuberecord
+
+# 3. The release archive, directly. Verifiable, and the only way to install on
+#    Windows.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord_v0.3.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
+
+# 4. From source, with a Go toolchain.
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.0
+```
+
+They do not all give you the same thing, and the difference is the two names:
+
+| | `kubectl kuberecord …` | `kuberecord …` | Version stamp | Signature you can check |
+|---|---|---|---|---|
+| `kubectl krew install` | yes | no | yes | krew checks the `sha256` |
+| `brew install` | yes | yes | yes | brew checks the `sha256` |
+| Release archive | yes | yes | yes | yes — cosign, [`VERIFYING.md`](VERIFYING.md#the-cli-archives) |
+| `go install` | yes | no | module version only | no — you are building it |
+
+**krew installs the plugin only**, because that is what krew is: a plugin
+manager. `kubectl kuberecord …` works; the standalone `kuberecord`, which is what
+an auditor reading an archive with no cluster wants, comes from Homebrew or from
+the release archive. They are the same bytes either way — one compilation, copied
+into the second name (Task 12.1), so the two can never be built from different
+trees.
+
+**`go install` builds rather than downloads.** It gets you `kubectl-kuberecord`
+and nothing else, it reports the module version rather than the release stamp —
+`commit` and `buildDate` come out of what the Go toolchain recorded — and there is
+no signature over a binary you compiled yourself. Pin a tag rather than `@latest`
+if you want to know what you got.
+
+**Windows** is release archives only: `kuberecord_v0.3.0_windows_amd64.zip`, which
+carries `kubectl-kuberecord.exe` and `kuberecord.exe`. krew supports Windows and
+the plugin manifest declares it; Homebrew does not run there.
+
+The manifest krew consumes (`kuberecord.yaml`) and the Homebrew formula
+(`kuberecord.rb`) are themselves release assets, generated from the archives and
+listed in `checksums.txt` — so the digests they publish are covered by the same
+signature as everything else a release attaches.
+
+## Global flags
+
+Every command carries the same two sets of persistent flags, and the split
+between them is worth knowing: the first set is kuberecord's, the second is
+`kubectl`'s own, inherited unchanged so that a plugin behaves like the thing it
+plugs into.
+
+### kuberecord's own
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). |
+| `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
+| `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
+| `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity) (D21). |
+| `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
+| `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
+| `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
+| `--max-objects <n>` | `0` (no limit) | Abort a scan that fetches more than this many stored objects, naming this flag. It bounds the *work*, which `--limit` cannot do without an index — see [Cold scans](#cold-scans). |
+| `--yes` | assumed off a terminal | Answer the confirmation a wide or unmeasurable scan of an unindexed backend asks for. Assumed when the output is not a terminal, so a script never waits on a prompt. |
+| `-v`, `--v <n>` | `0` | Verbosity of the diagnostics written to **stderr**. It never changes what goes to stdout, so raising it cannot disturb a pipe. |
+| `-h`, `--help` | — | Help for the command it is given to. |
+
+`--source`, `--sink` and `--profile` are the three ways of naming a backend, and
+they are tried in that order. Whichever wins is announced on stderr, always.
+
+### Inherited from `kubectl`
+
+These come from `genericclioptions.ConfigFlags` — the same code `kubectl` itself
+uses — and mean exactly what they mean there. They are listed rather than
+described, because a divergent description of somebody else's flag is a lie
+waiting to happen:
+
+`--as`, `--as-group`, `--as-uid`, `--as-user-extra`, `--cache-dir`,
+`--certificate-authority`, `--client-certificate`, `--client-key`, `--cluster`,
+`--context`, `--disable-compression`, `--insecure-skip-tls-verify`,
+`--kubeconfig`, `-n`/`--namespace`, `--request-timeout`, `-s`/`--server`,
+`--tls-server-name`, `--token`, `--user`.
+
+Three notes on how they interact with the rest:
+
+- **`--cluster` is kubectl's, `--cluster-id` is kuberecord's.** The first selects
+  a kubeconfig cluster entry; the second selects whose recorded history you are
+  reading. They are unrelated, and the collision is why the second flag carries
+  the suffix (D21).
+- **`-n`/`--namespace` narrows an object address**, and for [`scopes`](#scopes)
+  alone it does *not* default to the kubeconfig's current namespace: a compliance
+  question about what was being recorded means the whole cluster unless you say
+  otherwise.
+- **Every one of them is inert under `--source`.** Reading an archive contacts no
+  API server, so a kubeconfig flag has nothing to configure — with one exception,
+  [resolving a short name like `deploy`](#reading-an-archive-without-a-cluster),
+  which is server-side discovery data.
 
 ## `timeline`
 
@@ -150,7 +264,8 @@ that silence reads as "the object is still there":
 ```
 
 The same backend cannot answer an unbounded question either, so a window is
-supplied — the last seven days — and announced. `--since` widens it.
+supplied — the last 24 hours — and announced. `--since` widens it, and a window
+wider than seven days is [confirmed first](#cold-scans).
 
 ### Colour, width and paging
 
@@ -601,6 +716,137 @@ A backend with no scope log at all cannot answer this command — there is no ot
 half of the question to fall back to — so it exits `1` naming the backend, rather
 than printing an empty table that would read as "nothing was watching".
 
+## `version`
+
+Which build is running, and what it can read.
+
+```console
+$ kuberecord version
+kuberecord v0.3.0
+  commit  77514b632925
+  built   2026-08-31T21:04:11Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+```
+
+The version, the commit and the build date are stamped into the binary at release
+time, so they identify the artifact rather than a source tree that resembles it. A
+build made any other way reports what the Go toolchain recorded — a module version
+for `go install`, the revision and its `-dirty` mark for a build from a checkout —
+and prints `unknown` where nothing could say. A commit with no `-dirty` on it was
+built from exactly that tree.
+
+**The backend list is what this build can read**, not what the project supports,
+and it is the first thing to check when a `--source` or a profile is refused. The
+`engine` column is the value that appears as `metadata.backend` in
+[structured output](#structured-output), so an answer you are holding can be
+matched to the row that produced it — `s3` and `local` are two ways of reaching one
+engine, which is why the column is not redundant.
+
+It contacts nothing: no cluster, no sink, no network. That is deliberate — the
+reason to run it is usually that something else already failed.
+
+`-o json` and `-o yaml` render the same facts as a document. It carries the same
+`apiVersion` as every other structured answer and the same additive-only promise,
+with a `kind` of its own:
+
+```console
+$ kuberecord version -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Version",
+  "version": "v0.3.0",
+  "commit": "77514b632925",
+  "buildDate": "2026-08-31T21:04:11Z",
+  "goVersion": "go1.25.7",
+  "platform": "linux/amd64",
+  "backends": [
+    {
+      "name": "clickhouse",
+      "engine": "clickhouse",
+      "description": "schema v1 in ClickHouse"
+    },
+    {
+      "name": "s3",
+      "engine": "objectsource",
+      "description": "jsonl-v1 archive in an S3-compatible bucket"
+    },
+    {
+      "name": "local",
+      "engine": "objectsource",
+      "description": "jsonl-v1 archive in a directory"
+    }
+  ]
+}
+```
+
+`-o jsonl` and `-o diff` are refused by name rather than quietly rendered as
+something else: this is one document, not a stream, and there are no change
+operations in it to diff.
+
+There is no `--version` flag. kubectl has none either, and cobra's built-in one is
+handled before any command runs — so it could not honour `-o`, and
+`kuberecord --version -o json` would print a table while appearing to have been
+asked for JSON.
+
+How to check that the binary this reports on is the one you verified:
+[`VERIFYING.md`](VERIFYING.md#the-cli-archives).
+
+## Output formats
+
+Six values for `-o`, three of them renderings and three of them serializations:
+
+| Format | What it is |
+|--------|-----------|
+| `table` | The default. A header block on the object, then one row per item, laid out to the terminal's width or to 120 columns when stdout is not a terminal. |
+| `wide` | The same table with nothing elided: full UIDs, resource versions, and timestamps at the nanosecond precision the schema records. |
+| `diff` | The hunk rendering — path, old value, new value — which is [`diff`](#diff)'s own shape. |
+| `json` | One [envelope](#structured-output) document, complete before it is written. |
+| `yaml` | The same document in YAML. |
+| `jsonl` | The envelope head on the first line, then one item per line as it arrives. Memory does not scale with the result. |
+
+**Not every command accepts every one**, and a command that cannot produce a
+format **refuses it by name** rather than quietly rendering something else. A user
+who asked for one shape and received another has been answered in a form their eye
+or their script cannot read, and finding that out at the `jq` is worse than finding
+it out here.
+
+| | `table` | `wide` | `diff` | `json` | `yaml` | `jsonl` |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| [`timeline`](#timeline) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
+| [`diff`](#diff) | ✅ default | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [`get`](#get---at) | ❌ | ❌ | ❌ | ✅ | ✅ default | ✅ |
+| [`blame`](#blame) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
+| [`scopes`](#scopes) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
+| [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| `config view` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+
+Each ❌ has a reason, and the error says it:
+
+- **`timeline`, `blame` and `scopes` refuse `diff`.** Their rows are one line each
+  by design — a change, a field, a period — and `diff` is a whole command that
+  spends the whole page on the same changes with the old value beside the new one.
+  A second entrance to that rendering would be a second place for the two to drift.
+- **`get` refuses `table` and `wide`.** A reconstructed object is a document rather
+  than a row, and there is nothing for a tabular format to lay out. Its default is
+  `yaml`, which is the shape people want and the one that carries the **NOT A
+  DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
+- **`version` and `config view` refuse `jsonl`.** It is a streaming format for a
+  result larger than memory, and each of these is exactly one document.
+- **`config view` renders YAML for `table` and `wide`** rather than refusing them,
+  because a configuration file *is* YAML and `table` is the global default a user
+  who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
+
+For `table`, `wide` and `diff` the header, the notices and every explanation go to
+**stderr** and the rows go to **stdout**. For `json`, `jsonl` and `yaml` the
+envelope carries the same facts as fields, so a parser gets on one stream what a
+reader gets on two. **There is no pager** in either case: output goes to stdout and
+stays there, so `| less -R` is yours to choose.
+
 ## Structured output
 
 `-o json`, `-o jsonl` and `-o yaml` produce a **versioned envelope**, and it is a
@@ -660,6 +906,15 @@ exists and the pipeline keeps running while producing empty findings.
 `items` is always a list, including when it is empty. `metadata` carries
 `cluster_id`, `backend` and `coverage` on every kind, and `reconstruction` on
 `Object` alone.
+
+**Two documents carry the same `apiVersion` without being envelopes**, and the
+difference is deliberate. [`version`](#version) renders a `Version` document and
+`config view` renders a `Config` one; neither is the answer to a query, so neither
+has a `metadata` block or an `items` list. A `Version` carrying `cluster_id: ""`
+and an empty coverage report would be inviting a consumer to read three fields
+that could never mean anything. What they do share is the contract those five
+kinds are governed by — the same `apiVersion`, and therefore the same
+[additive-only policy](#the-additive-only-policy).
 
 ### Item field names are the schema's column names
 
@@ -895,6 +1150,56 @@ The namespace it looks in is `--operator-namespace`, then `operatorNamespace` in
 the configuration file, then the namespace of the operator's Deployment if it can
 be found by label, then `kuberecord-system`.
 
+## Backend capability differences
+
+Three names, two engines. `kuberecord version` prints the mapping, and it is the
+first thing to check when a `--source` or a profile is refused:
+
+```console
+$ kuberecord version
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+```
+
+`s3` and `local` are the **same engine** reaching the same `format=jsonl-v1`
+layout through two different ways of getting bytes, so they answer identically and
+degrade identically. Only the engine matters below, and it is what
+`metadata.backend` reports in [structured output](#structured-output).
+
+Every engine **declares** what its storage can express, and the CLI keys its
+behaviour on the declaration rather than on the backend's name (D17) — so a future
+indexed backend inherits the right treatment by declaring it, and a backend cannot
+quietly gain a capability it never claimed. The conformance suite checks the
+declaration against detected behaviour in both directions, so neither half can
+drift.
+
+| Capability | `clickhouse` | `objectsource` | What the difference costs you |
+|---|:---:|:---:|---|
+| `deletions` | ✅ | ❌ | An object archive holds no `Deleted` rows at all (D12). A timeline over one that simply stops carries an **explicit notice** saying the object may have been deleted without the deletion ever being recorded. No `Deleted` row is ever synthesized to close the gap — history with no deletions in it is otherwise indistinguishable from history of a cluster where nothing was deleted. |
+| `server_side_filter` | ✅ | ❌ | **No consequence for the content.** `--actor` and `--field` produce an identical result either way, which is the agreement property the conformance suite pins. The consequence is cost: without pushdown, `--limit` does not bound the work, so a wide window is estimated, confirmed and reported on. |
+| `point_query` | ✅ | ❌ | ClickHouse seeks to one object's rows. The archive has no index, so a single-object question costs every object in the partitions its window lands in — see [Cold scans](#cold-scans) for the estimate, the confirmation and `--max-objects`. |
+| `time_bound_required` | ❌ | ✅ | An unbounded question against the archive is refused up front, naming the flag that fixes it, rather than started and never finished. With neither end given the CLI supplies **24 hours** and announces it; `--since` widens it. |
+
+Two things are the same on both, and are worth stating because they are the ones
+people assume are the difference:
+
+- **The answer's content.** Same envelope, same field names, same items, same
+  ordering. That is what the query conformance suite exists to hold, and what makes
+  a `jq` recipe transfer between a ClickHouse profile and an archive on a laptop.
+- **The scope log.** Both record `watch_scopes` — `scopes/` in the archive — so
+  both can tell "nothing changed" from "nothing was watching", and both exit `3`
+  for the second. `scopes` needs no window against either, because the scope log is
+  one small object per day rather than one per hour.
+
+Nothing here is hidden or worked around. A question the backend cannot answer is
+reported as a capability gap, never as an empty result (Invariant 4), and a command
+that can answer half of it answers half and says which half (Invariant 5). What the
+archive's reader does about each of these, in more detail and beside the DuckDB
+recipes that cover what the CLI deliberately does not, is
+[`docs/QUERIES.md`](QUERIES.md#what-the-cli-reads).
+
 ## The cluster identity
 
 Every recorded row carries a `cluster_id`: a string chosen when the operator was
@@ -969,6 +1274,62 @@ contexts:
   kind-kuberecord: local-kind-cluster
 ```
 
+### The schema, field by field
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `apiVersion` | string | stamped on every write | `cli.kuberecord.io/v1alpha1`. Empty in a hand-written file is read as the current version; a value that is *present and wrong* is refused, because that one is a real disagreement about what the fields mean. |
+| `kind` | string | stamped on every write | `Config`. Same rule. |
+| `currentProfile` | string | none | The profile used when `--profile` is not given. Empty is an ordinary state: a cluster with a sink custom resource needs no profile at all. |
+| `operatorNamespace` | string | searched, then `kuberecord-system` | Where discovery looks for the operator's Deployment and for a sink's credentials Secret. |
+| `profiles` | map[string]Profile | none | The configured places to read history from, by name. |
+| `contexts` | map[string]string | none | kubeconfig context name → kuberecord cluster identity. Step 2 of [the cluster-id chain](#the-cluster-identity), and what makes a long-lived multi-cluster setup zero-flag. |
+
+A **profile** is one place to read from. `backend` is named explicitly rather than
+inferred from which stanza is filled in, so a profile with the wrong stanza is a
+validation error naming both halves rather than a silent switch to whichever one
+was found:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `backend` | `clickhouse` \| `s3` \| `local` | yes | Which stanza below describes this profile. Exactly the matching one must be present. |
+| `clickhouse` | stanza | with `backend: clickhouse` | See below. |
+| `s3` | stanza | with `backend: s3` | See below. |
+| `local` | stanza | with `backend: local` | See below. |
+
+**`clickhouse`** — the frozen v1 tables in a ClickHouse:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `addr` | string | — | Native-protocol endpoint, `host:port`. Required. |
+| `database` | string | the server's own | Holds the frozen v1 tables. Rarely right to omit — the operator's own default is `kuberecord`. |
+| `username` | string | the server's own | A [read-only user](#the-read-only-clickhouse-user) is the recommended posture. |
+| `passwordEnv` | string | none | Name of an environment variable holding the password. |
+| `passwordFile` | string | none | Path to a file holding it, trailing newline trimmed. |
+| `tls` | bool | `false` | Connect over TLS with the platform's trust store and a TLS 1.2 floor. A private CA belongs in that store, where every other client on the machine will also find it. |
+| `password` | — | — | **Refused by name**, with an explanation pointing at the two fields above. |
+
+At most one of `passwordEnv` and `passwordFile` may be set. Neither means no
+password, which is what a local evaluation server usually wants.
+
+**`s3`** — an archive in an S3-compatible bucket:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `bucket` | string | — | Holds the archive. Required. |
+| `prefix` | string | none | The archive's key prefix — the sink's `spec.prefix` — with no leading or trailing slash. Empty is ordinary: a bucket dedicated to one archive. |
+| `region` | string | `us-east-1` | The SDK requires one even against MinIO, which ignores it. A wrong region cannot resolve to somebody else's bucket, because S3 bucket names are global — it fails loudly instead. |
+| `endpoint` | string | AWS | The S3 API endpoint, **scheme mandatory**. This is how MinIO and other S3-compatible stores are addressed. |
+| `forcePathStyle` | bool | `false` | Address the bucket as `<endpoint>/<bucket>/<key>`, which most in-cluster MinIO deployments need. |
+| `accessKeyId`, `secretAccessKey`, `sessionToken` | — | — | **Refused by name.** Credentials come from the AWS chain. |
+
+**`local`** — an archive in a directory:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `path` | string | — | The directory containing `format=jsonl-v1/`. Required. |
+| `prefix` | string | none | If the archive was written under one. |
+
 A few rules the file enforces rather than documents:
 
 - **A password is never stored inline.** `clickhouse.password` is refused with an
@@ -1007,6 +1368,37 @@ $ kuberecord config set-context-cluster-id prod-eu prod-eu-1  # a named one
 $ kuberecord config view
 $ kuberecord config view -o json | jq .profiles
 ```
+
+Four subcommands, and only one of them has flags of its own:
+
+| Subcommand | Arguments | Flags |
+|---|---|---|
+| `config set-profile` | `NAME` | the table below |
+| `config use-profile` | `NAME` | none |
+| `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
+| `config view` | none | none — `-o yaml` (the default) or `-o json` |
+
+`config set-profile` carries one flag per field of the stanza its `--backend`
+selects. A flag belonging to a different backend is a validation error naming
+both halves, for the same reason the file refuses a mismatched stanza:
+
+| Flag | Backend | Writes |
+|------|---------|--------|
+| `--backend <kind>` | — | `backend`. One of `clickhouse`, `s3`, `local`. Required. |
+| `--addr <host:port>` | `clickhouse` | `clickhouse.addr` |
+| `--database <name>` | `clickhouse` | `clickhouse.database` |
+| `--username <user>` | `clickhouse` | `clickhouse.username` |
+| `--password-env <VAR>` | `clickhouse` | `clickhouse.passwordEnv` |
+| `--password-file <path>` | `clickhouse` | `clickhouse.passwordFile` |
+| `--tls` | `clickhouse` | `clickhouse.tls` |
+| `--bucket <name>` | `s3` | `s3.bucket` |
+| `--region <region>` | `s3` | `s3.region`. Defaults to `us-east-1`, which MinIO ignores. |
+| `--endpoint <url>` | `s3` | `s3.endpoint`. Scheme mandatory. |
+| `--force-path-style` | `s3` | `s3.forcePathStyle` |
+| `--path <dir>` | `local` | `local.path` — the directory containing `format=jsonl-v1/`. |
+| `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
+
+There is no `--password`. That is not an omission: see the first rule above.
 
 ## The read-only ClickHouse user
 
@@ -1067,6 +1459,15 @@ Pointing `--source` at a directory or a bucket removes ClickHouse from the pictu
 entirely: an archive synced to a laptop answers the same questions through the same
 commands, with no infrastructure and no credentials beyond the ones you already
 have for the bucket.
+
+The whole path — `helm install`, an `S3Sink`, and these commands against the
+archive it writes, with no database anywhere — is runnable in one command and
+documented step by step at
+[`examples/zero-infra/`](../examples/zero-infra/):
+
+```sh
+make quickstart-zero-infra
+```
 
 The trade is query performance, and it is a real one. The object archive has no
 index, so a single-object question over a wide window lists and decompresses every

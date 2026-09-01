@@ -38,6 +38,8 @@ package release
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -517,12 +519,22 @@ func TestReleaseTargetsExist(t *testing.T) {
 // TestReleaseScriptIsExecutable guards the same class of mistake the quickstart
 // checks guard: the Makefile runs the script directly.
 func TestReleaseScriptIsExecutable(t *testing.T) {
-	info, err := os.Stat(repoPath(changelogScript))
-	if err != nil {
-		t.Fatalf("stat %s: %v", changelogScript, err)
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Errorf("%s is not executable; `make release-notes` runs it directly", changelogScript)
+	// Every hack/ script a release target invokes directly. A missing +x is
+	// invisible in review — the diff shows the file, not the mode — and shows up
+	// as "Permission denied" in the middle of a tag build.
+	for script, why := range map[string]string{
+		changelogScript: "`make release-notes` runs it directly",
+		krewScript:      "`make release-krew-manifest` runs it directly",
+		brewScript:      "`make release-brew-formula` runs it directly",
+		digestsScript:   "`make release-krew-verify` runs it directly",
+	} {
+		info, err := os.Stat(repoPath(script))
+		if err != nil {
+			t.Fatalf("stat %s: %v", script, err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Errorf("%s is not executable; %s", script, why)
+		}
 	}
 }
 
@@ -561,6 +573,17 @@ func TestReleaseWorkflow(t *testing.T) {
 		{"the chart is signed", "make release-chart-sign", "an unsigned chart is an unsigned operator by another route"},
 		{"the chart verifies itself", "make release-chart-verify", "a signature that does not verify must fail the release"},
 		{"the chart push is rehearsed", "make release-chart-rehearse", "a push is the step with something to get wrong"},
+		// Task 12.1. The CLI ships from this run rather than from a pipeline of
+		// its own, so each half of that has to still be wired up here.
+		{"the CLI is described", "make release-cli-sbom", "a binary with a different dependency set needs its own SBOM"},
+		{"the artifacts are signed", "make release-artifacts-sign",
+			"an archive on a Release page has no digest, so the checksums carry the signature"},
+		{"the signature verifies itself", "make release-artifacts-verify",
+			"a signature that does not verify must fail the release"},
+		{"the CLI archives are attached", "dist/release/kuberecord_*.tar.gz", "archives nobody can download install nothing"},
+		{"the Windows archive is attached", "dist/release/kuberecord_*.zip", "krew's windows selector points at it"},
+		{"the signature is attached", "dist/release/checksums.txt.sigstore.json",
+			"a signature nobody can fetch verifies nothing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -628,8 +651,14 @@ func TestVersioningPolicyIsDocumented(t *testing.T) {
 // for one tag and would otherwise show up as untracked noise in every release
 // rehearsal — the state in which somebody is most likely to `git add -A`.
 func TestReleaseArtifactsAreIgnored(t *testing.T) {
-	if !strings.Contains(readFile(t, ".gitignore"), "dist/release/") {
+	gitignore := readFile(t, ".gitignore")
+	if !strings.Contains(gitignore, "dist/release/") {
 		t.Error(".gitignore does not ignore dist/release/, which `make release-artifacts` fills")
+	}
+	// dist/cli/ holds ten binaries of sixty megabytes each. A commit of one would
+	// be noticed by whoever cloned next rather than by whoever made it.
+	if !strings.Contains(gitignore, "dist/cli/") {
+		t.Error(".gitignore does not ignore dist/cli/, which `make build-cli` fills")
 	}
 }
 
@@ -650,6 +679,11 @@ type releaseWorkflow struct {
 	// which is the whole point of the top-level one.
 	Permissions *map[string]string `json:"permissions"`
 	Jobs        map[string]struct {
+		// Needs is a string or a list of them, depending on how the job spells
+		// it, so it is read as `any` and compared as text. Only one test looks at
+		// it, and what it asks is "does this ordering constraint mention that
+		// job", which does not need the distinction.
+		Needs       any                `json:"needs"`
 		Permissions *map[string]string `json:"permissions"`
 		Steps       []struct {
 			Name string `json:"name"`
@@ -662,12 +696,24 @@ type releaseWorkflow struct {
 
 func parseReleaseWorkflow(t *testing.T) releaseWorkflow {
 	t.Helper()
+	return parseWorkflow(t, releaseWorkflowPath)
+}
+
+// parseWorkflow is the same parse for any workflow in the directory.
+//
+// It exists because a `strings.Contains` over a workflow's raw text cannot tell a
+// step from a comment about a step, and this file's comments deliberately quote
+// the commands they explain — so a text search for `make build-cli` matches the
+// paragraph saying why it runs even after the step running it is gone. That is
+// not hypothetical: it happened to the assertion in TestCLICrossCompilesCgoFree.
+func parseWorkflow(t *testing.T, path string) releaseWorkflow {
+	t.Helper()
 	var wf releaseWorkflow
-	if err := yaml.Unmarshal([]byte(readFile(t, releaseWorkflowPath)), &wf); err != nil {
-		t.Fatalf("parse %s: %v", releaseWorkflowPath, err)
+	if err := yaml.Unmarshal([]byte(readFile(t, path)), &wf); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
 	}
 	if len(wf.Jobs) == 0 {
-		t.Fatalf("%s parsed with no jobs", releaseWorkflowPath)
+		t.Fatalf("%s parsed with no jobs", path)
 	}
 	return wf
 }
@@ -827,6 +873,14 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-sign") },
 			"a signature is a registry write and a public transparency-log entry",
 		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-artifacts-sign") },
+			"sign-blob writes a public transparency-log entry, whatever it is over",
+		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-brew-push") },
+			"a commit pushed to the public Homebrew tap is what `brew install` serves",
+		},
 	}
 
 	found := make([]int, len(publishing))
@@ -901,6 +955,9 @@ func TestSupplyChainTargetsExist(t *testing.T) {
 		// Task 8.1's four, which break the same way.
 		"release-chart-login:", "release-chart-push:", "release-chart-sign:",
 		"release-chart-verify:", "release-chart-rehearse:",
+		// Task 12.1's, likewise: rename one and CI stays green until somebody tags.
+		"build-cli:", "verify-cli:", "release-cli:", "release-cli-sbom:",
+		"release-artifacts-sign:", "release-artifacts-verify:",
 	} {
 		if !strings.Contains(makefile, "\n"+target) {
 			t.Errorf("the Makefile no longer defines %s", strings.TrimSuffix(target, ":"))
@@ -1026,6 +1083,12 @@ var verifyingPageClaims = []struct {
 	// getting it have to be stated as one thing, not two.
 	{"ghcr.io/kuberecord/charts/kuberecord", "the chart's reference, which is the address and the whole address"},
 	{"helm pull", "a reader who cannot fetch the chart cannot check it"},
+	// The CLI is a third signed artifact (Task 12.1), and it is verified
+	// differently — a file, not a registry reference — so its command has to be on
+	// the page in full rather than left to be inferred from the image's.
+	{"cosign verify-blob", "the archives are files, and a file is verified with a bundle rather than a digest"},
+	{"checksums.txt.sigstore.json", "the bundle's name, which is the argument a reader passes"},
+	{"kubectl-kuberecord", "both names ship in every archive, and which one is installed decides how it is invoked"},
 }
 
 // TestVerifyingPageCoversItsSubject is the positive half of the pair: a page that
@@ -1278,5 +1341,1122 @@ func TestNoUnreliableDigestTemplate(t *testing.T) {
 				"prose where it expected a digest. Hash the raw manifest instead: "+
 				"`imagetools inspect --raw <ref> | sha256sum`.", f, i+1, banned)
 		}
+	}
+}
+
+//
+// The CLI is built, packaged and signed by this pipeline (Task 12.1)
+//
+
+// cliPlatforms reads the platform list out of the Makefile, so every test below
+// measures what the release actually builds rather than a list restated here.
+//
+// A test carrying its own copy would keep passing after a platform was dropped,
+// which is the failure that matters: the archive simply stops being attached, and
+// the person who finds out is whoever runs `krew install` on that platform.
+func cliPlatforms(t *testing.T) []string {
+	t.Helper()
+
+	match := regexp.MustCompile(`(?m)^CLI_PLATFORMS \?= (.+)$`).FindStringSubmatch(readFile(t, "Makefile"))
+	if match == nil {
+		t.Fatal("the Makefile no longer defines CLI_PLATFORMS, so nothing decides what the CLI is built for")
+	}
+	platforms := strings.Fields(match[1])
+	if len(platforms) == 0 {
+		t.Fatal("CLI_PLATFORMS is empty; a release would attach no CLI archives and fail nowhere")
+	}
+	return platforms
+}
+
+// TestCLICrossCompilesCgoFree is the acceptance criterion that would regress
+// silently, so it is asserted three ways: the build sets it, the build reads it
+// back, and CI runs the build.
+//
+// The middle one is the point. `CGO_ENABLED=0` on a command line is a request; the
+// Go toolchain records the value it actually used in the binary, and that is the
+// only witness that survives an environment exporting CGO_ENABLED=1 or a
+// dependency that quietly needs cgo on one platform. D18 makes this property
+// load-bearing for krew: a cgo build is dynamically linked against the machine it
+// was built on and cannot cross-compile at all.
+func TestCLICrossCompilesCgoFree(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	if !strings.Contains(makefile, "CGO_ENABLED=0 GOOS=") {
+		t.Error("build-cli no longer sets CGO_ENABLED=0 for the cross-compile; D18's " +
+			"static build is what makes krew distribution five archives from one make")
+	}
+	// The read-back. `go version -m` is what prints the recorded build settings.
+	if !strings.Contains(makefile, `go version -m "$$binary"`) {
+		t.Error("verify-cli no longer reads the build settings back out of the binaries. " +
+			"Trusting the command line asserts that the recipe was written correctly, " +
+			"not that the artifact is what it claims")
+	}
+	if !strings.Contains(makefile, `grep -qE 'build[[:space:]]+CGO_ENABLED=0'`) {
+		t.Error("verify-cli no longer matches CGO_ENABLED=0 in the recorded build settings, so " +
+			"the read-back above is reading something other than the setting it exists for")
+	}
+
+	// And the third: a property nothing runs is a comment. Read out of the parsed
+	// steps rather than the file's text, because the file's text also contains the
+	// comment explaining the step.
+	if !workflowRuns(t, ".github/workflows/test.yml", "make build-cli") {
+		t.Error("no step in .github/workflows/test.yml runs `make build-cli`, so the cgo-free " +
+			"cross-compile is asserted only at tag time — which is after the release it " +
+			"would have stopped")
+	}
+}
+
+// workflowRuns reports whether any step of any job runs a command containing want.
+func workflowRuns(t *testing.T, path, want string) bool {
+	t.Helper()
+	for _, job := range parseWorkflow(t, path).Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestCLIBuildsBothNamesForEveryPlatform is the other half of the build criterion.
+//
+// Both names come from one compilation rather than two builds of the same source,
+// which is what makes them the same bytes: a plugin and a standalone binary that
+// could differ would be two products with one version number.
+func TestCLIBuildsBothNamesForEveryPlatform(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	for _, want := range []string{
+		"CLI_PLUGIN_NAME ?= kubectl-kuberecord",
+		"CLI_STANDALONE_NAME ?= kuberecord",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("the Makefile no longer defines %q; kubectl finds a plugin by file name "+
+				"alone, so one of these names is not a choice", want)
+		}
+	}
+	// Copied, not compiled twice.
+	if !strings.Contains(makefile, `cp "$$staged/$(CLI_PLUGIN_NAME)$$suffix" "$$staged/$(CLI_STANDALONE_NAME)$$suffix"`) {
+		t.Error("build-cli no longer copies one compilation into the second name. Two builds " +
+			"could differ — in flags, in the tree they saw, in the moment they ran — and " +
+			"nothing downstream would notice")
+	}
+
+	// The five the acceptance criterion names. D18's prose says six; the task's
+	// list is five and is what ships, so this pins the list that exists.
+	want := []string{"linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64", "windows/amd64"}
+	if got := cliPlatforms(t); !slices.Equal(got, want) {
+		t.Errorf("CLI_PLATFORMS is %v, want %v. krew's plugin manifest has one entry per "+
+			"platform here, so dropping one silently stops shipping to those users", got, want)
+	}
+}
+
+// TestCLIPlatformsAreDocumented is the anti-drift check between what is built and
+// what a reader is told is built.
+//
+// It is the same class as the signing identity's: prose nobody can run, describing
+// machinery that moved. A reader deciding whether their architecture is supported
+// reads the page, not the Makefile.
+func TestCLIPlatformsAreDocumented(t *testing.T) {
+	page := readFile(t, "docs/RELEASING.md")
+	for _, platform := range cliPlatforms(t) {
+		if !strings.Contains(page, platform) {
+			t.Errorf("docs/RELEASING.md does not name %s, which the release builds a CLI "+
+				"archive for", platform)
+		}
+	}
+}
+
+// TestCLIArchivesAreChecksummedAndAttached is the property that ties the archives
+// into the evidence the rest of the release already carries.
+//
+// checksums.txt is the attestation's subject list and, since this task, the thing
+// the signature is over. An archive missing from it is an archive with no
+// provenance and no signature — published, and backed by nothing — and nothing
+// else in the release would fail.
+func TestCLIArchivesAreChecksummedAndAttached(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	// Required by name, on the same argument install.yaml is: a checksums file
+	// that silently omits an asset is worse than none, because it looks complete.
+	const required = `assets="install.yaml kuberecord-$(RELEASE_CHART_VERSION).tgz $(RELEASE_CLI_ARCHIVES)"`
+	if !strings.Contains(makefile, required) {
+		t.Error("release-checksums no longer requires the CLI archives by name. Made optional, " +
+			"a release that failed to build them would publish a complete-looking checksums " +
+			"file describing a release missing its CLI")
+	}
+	// And they have to exist before the first checksum run, which is why
+	// release-artifacts builds them rather than a separate workflow step.
+	artifacts := strings.Index(makefile, "release-artifacts: release-verify-version")
+	if artifacts < 0 {
+		t.Fatal("the Makefile no longer defines release-artifacts")
+	}
+	recipe := makefile[artifacts:]
+	buildsCLI := strings.Index(recipe, "$(MAKE) release-cli")
+	checksums := strings.Index(recipe, "$(MAKE) release-checksums")
+	if buildsCLI < 0 {
+		t.Fatal("release-artifacts no longer builds the CLI, so checksums.txt would require " +
+			"archives nothing produced")
+	}
+	if checksums < 0 || buildsCLI > checksums {
+		t.Error("release-artifacts computes the checksums before it builds the CLI archives, " +
+			"so the first run would fail on assets that arrive afterwards")
+	}
+}
+
+// TestArtifactSignatureCoversTheChecksums pins how the archives are signed, which
+// is the one part of this task that had to differ from what the release already
+// did.
+//
+// The image and the chart are signed by digest because a registry has one. A file
+// on a Release page does not, so the subject is checksums.txt — and the
+// consequence, which is worth a test rather than a comment, is that the signature
+// covers every asset in that file. Signing an archive individually instead would
+// leave install.yaml and the chart where they were.
+func TestArtifactSignatureCoversTheChecksums(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	if !strings.Contains(makefile,
+		`"$(COSIGN)" sign-blob --yes --bundle "$(RELEASE_CHECKSUMS_BUNDLE)" "$(RELEASE_CHECKSUMS)"`) {
+		t.Error("release-artifacts-sign no longer signs checksums.txt into a bundle. A bundle " +
+			"carries the certificate, the signature and the log proof together, which is what " +
+			"lets a reader verify with nothing but the file and the bundle")
+	}
+	// Verification pins both halves of the identity, exactly as the image's does.
+	// A `verify-blob` without them answers "is this signed by anybody?", which
+	// anyone who can obtain a Sigstore certificate can satisfy.
+	for _, want := range []string{
+		`--certificate-oidc-issuer "$(COSIGN_ISSUER)"`,
+		`--certificate-identity "$(COSIGN_IDENTITY)"`,
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("release-artifacts-verify does not pass %s, so it would accept a signature "+
+				"from any workflow the issuer serves", want)
+		}
+	}
+	// And the digests themselves. A valid signature over a list nothing was
+	// checked against proves the list authentic and says nothing about the bytes.
+	if !strings.Contains(makefile, "sha256sum -c checksums.txt") {
+		t.Error("release-artifacts-verify no longer checks the assets against the list it just " +
+			"verified the signature of")
+	}
+}
+
+// TestTheRehearsalExercisesTheCLI is the acceptance criterion about
+// `workflow_dispatch`, and the line it draws is the one the rest of this workflow
+// already draws.
+//
+// A cross-compile publishes nothing, so a rehearsal does it for real — and the
+// CLI's SBOM too, since that is scanned from a local binary rather than from
+// something pushed. The signature is the only half that cannot be rehearsed,
+// because `sign-blob` writes to a public transparency log, so it is printed
+// instead.
+func TestTheRehearsalExercisesTheCLI(t *testing.T) {
+	wf := parseReleaseWorkflow(t)
+
+	var buildsArtifacts, describesCLI bool
+	for _, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			// `release-artifacts` is what builds the archives, and it must not be
+			// gated on the dry run: building them is the half of the CLI story a
+			// rehearsal exists to exercise.
+			if strings.Contains(step.Run, "make release-artifacts ") {
+				buildsArtifacts = true
+				if step.If != "" {
+					t.Errorf("the artifacts (and with them the CLI archives) are built under "+
+						"`if: %s`, so a rehearsal would not exercise the cross-compile", step.If)
+				}
+			}
+			if strings.Contains(step.Run, "make release-cli-sbom") {
+				describesCLI = true
+				if step.If != "" {
+					t.Errorf("the CLI SBOM is produced under `if: %s`, though it is scanned from "+
+						"a local binary and needs nothing published", step.If)
+				}
+			}
+		}
+	}
+	if !buildsArtifacts {
+		t.Error("no step runs `make release-artifacts`, so nothing builds the CLI archives")
+	}
+	if !describesCLI {
+		t.Error("no step runs `make release-cli-sbom`")
+	}
+
+	// The printed half. A rehearsal must say what it is deliberately not doing,
+	// or the difference between it and a release is invisible in its log.
+	makefile := readFile(t, "Makefile")
+	if !strings.Contains(makefile, "release-artifacts-sign release-artifacts-verify \\") {
+		t.Error("release-rehearse-publishing no longer prints the artifact signing commands, " +
+			"so a rehearsal is silent about the one step it cannot perform")
+	}
+}
+
+// TestCLISBOMIsValidated keeps the CLI's SBOM to the standard the image's is held
+// to: syft succeeds on a file whose contents it could not read, and the result is
+// a valid SPDX document describing nothing.
+func TestCLISBOMIsValidated(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	start := strings.Index(makefile, "release-cli-sbom: ##")
+	if start < 0 {
+		t.Fatal("the Makefile no longer defines release-cli-sbom")
+	}
+	recipe := makefile[start:]
+	if end := strings.Index(recipe, "\n.PHONY:"); end > 0 {
+		recipe = recipe[:end]
+	}
+
+	for want, why := range map[string]string{
+		`"spdxVersion"`:             "a document that is not SPDX is not the artifact that was promised",
+		"SBOM_MIN_PACKAGES":         "a scan that read no modules produces a valid, useless document",
+		"github.com/$(GITHUB_REPO)": "an SBOM that does not mention this module is describing something else",
+	} {
+		if !strings.Contains(recipe, want) {
+			t.Errorf("release-cli-sbom no longer checks %s: %s", want, why)
+		}
+	}
+}
+
+//
+// Distribution: krew and Homebrew (Task 12.2)
+//
+
+// The two generators and the extractor that reads their output back.
+//
+// They are shell scripts for the same reason hack/changelog-section.sh is: the
+// release workflow calls make targets, a make target shelling out to a script is
+// one fewer thing between a tag and an artifact, and the script is then testable
+// from here exactly as the changelog extractor is.
+const (
+	krewScript    = "hack/krew-manifest.sh"
+	brewScript    = "hack/homebrew-formula.sh"
+	digestsScript = "hack/manifest-digests.sh"
+)
+
+// The names krew and kubectl between them fix. kubectl finds a plugin by file
+// name, krew requires the manifest's file name, its `metadata.name` and the part
+// of the binary after `kubectl-` to be one string — so none of these three is a
+// choice this repository made, and a test that let them drift would be permitting
+// a rename nothing else could catch.
+const (
+	krewPluginName  = "kuberecord"
+	krewPluginBin   = "kubectl-" + krewPluginName
+	krewAPIVersion  = "krew.googlecontainertools.github.com/v1alpha2"
+	brewPlatformSet = 4 // darwin and linux, arm64 and amd64
+)
+
+// runHack invokes one of the hack/ scripts and returns stdout, stderr and the
+// exit code. A signal or a failure to start is fatal — that is a broken test
+// environment, not a result to interpret.
+func runHack(t *testing.T, script string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+
+	cmd := exec.Command(repoPath(script), args...) // #nosec G204 -- test-controlled arguments
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		exitCode = 0
+	case asExitError(err, &exitErr):
+		exitCode = exitErr.ExitCode()
+	default:
+		t.Fatalf("run %s %v: %v", script, args, err)
+	}
+	return out.String(), errOut.String(), exitCode
+}
+
+// githubRepo reads <owner>/<name> out of go.mod, the way the Makefile's
+// GITHUB_REPO does. Reading it rather than writing it down is what makes the URI
+// assertions below say "this repository" instead of "the repository whose name I
+// typed" — a fork that renamed itself must not keep publishing URLs here.
+func githubRepo(t *testing.T) string {
+	t.Helper()
+
+	for line := range strings.SplitSeq(readFile(t, "go.mod"), "\n") {
+		if after, found := strings.CutPrefix(strings.TrimSpace(line), "module github.com/"); found {
+			return after
+		}
+	}
+	t.Fatal("go.mod declares no github.com/ module path, so nothing decides where the URIs point")
+	return ""
+}
+
+// fixtureVersion is the tag the stand-in archives below are named for. It is
+// deliberately not a version this project has released or will: a test that
+// happened to agree with the committed VERSION would keep passing after the
+// generators started ignoring the version they were handed.
+const fixtureVersion = "v9.9.9"
+
+// distFixture writes one stand-in archive per platform into a temp directory and
+// returns the directory, the <os/arch>=<archive> pairs the generators take, and
+// the sha256 each archive really hashes to.
+//
+// The bytes are distinct per platform on purpose. Identical fixtures would hash
+// identically, and "every platform got a digest" would pass for a generator that
+// hashed one archive five times.
+//
+// The file names look like the real ones for readability only. Nothing here
+// depends on the naming convention: the generators are handed the pairing, which
+// is exactly the property that keeps a second copy of that convention out of
+// them, and out of this file.
+func distFixture(t *testing.T, platforms []string) (dir string, pairs []string,
+	digests map[string]string) {
+	t.Helper()
+
+	dir = t.TempDir()
+	digests = make(map[string]string, len(platforms))
+	pairs = make([]string, 0, len(platforms))
+
+	for _, platform := range platforms {
+		goos, arch, ok := strings.Cut(platform, "/")
+		if !ok {
+			t.Fatalf("CLI_PLATFORMS carries %q, which is not <os>/<arch>", platform)
+		}
+		extension := ".tar.gz"
+		if goos == "windows" {
+			extension = ".zip"
+		}
+		name := fmt.Sprintf("kuberecord_%s_%s_%s%s", fixtureVersion, goos, arch, extension)
+		body := []byte("stand-in archive for " + platform)
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+		sum := sha256.Sum256(body)
+		digests[platform] = hex.EncodeToString(sum[:])
+		pairs = append(pairs, platform+"="+name)
+	}
+	return dir, pairs, digests
+}
+
+// krewPlugin is the part of the generated manifest these tests reason about.
+// Parsed rather than grepped: "the file contains this digest" and "the entry for
+// darwin/arm64 carries this digest" are different claims, and only the second one
+// is worth making.
+type krewPlugin struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Metadata   struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		Version          string `json:"version"`
+		Homepage         string `json:"homepage"`
+		ShortDescription string `json:"shortDescription"`
+		Description      string `json:"description"`
+		Caveats          string `json:"caveats"`
+		Platforms        []struct {
+			Selector struct {
+				MatchLabels map[string]string `json:"matchLabels"`
+			} `json:"selector"`
+			URI    string `json:"uri"`
+			SHA256 string `json:"sha256"`
+			Bin    string `json:"bin"`
+			Files  []struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			} `json:"files"`
+		} `json:"platforms"`
+	} `json:"spec"`
+}
+
+// TestKrewManifestIsGeneratedFromTheArchives is the acceptance criterion's first
+// half, and the reason the manifest is generated at all.
+//
+// krew refuses an archive whose bytes do not hash to what the manifest says, so
+// the digests are the whole of its integrity story. A hand-maintained manifest is
+// wrong exactly once — and it then stays wrong until somebody's install fails on
+// a platform nobody here runs, which is four of the five.
+func TestKrewManifestIsGeneratedFromTheArchives(t *testing.T) {
+	const version = fixtureVersion
+	repo := githubRepo(t)
+	platforms := cliPlatforms(t)
+	dir, pairs, digests := distFixture(t, platforms)
+
+	stdout, stderr, code := runHack(t, krewScript, append([]string{version, repo, dir}, pairs...)...)
+	if code != 0 {
+		t.Fatalf("%s exited %d: %s", krewScript, code, stderr)
+	}
+
+	var plugin krewPlugin
+	if err := yaml.Unmarshal([]byte(stdout), &plugin); err != nil {
+		t.Fatalf("the generated manifest is not YAML krew could read: %v\n%s", err, stdout)
+	}
+
+	if plugin.APIVersion != krewAPIVersion {
+		t.Errorf("apiVersion is %q, want %q", plugin.APIVersion, krewAPIVersion)
+	}
+	if plugin.Kind != "Plugin" {
+		t.Errorf("kind is %q, want Plugin", plugin.Kind)
+	}
+	if plugin.Metadata.Name != krewPluginName {
+		t.Errorf("metadata.name is %q, want %q. krew requires the manifest's file name, this "+
+			"field and the part of the binary name after `kubectl-` to be one string",
+			plugin.Metadata.Name, krewPluginName)
+	}
+	if plugin.Spec.Version != version {
+		t.Errorf("spec.version is %q, want %q", plugin.Spec.Version, version)
+	}
+	if want := "https://github.com/" + repo; plugin.Spec.Homepage != want {
+		t.Errorf("spec.homepage is %q, want %q", plugin.Spec.Homepage, want)
+	}
+
+	if len(plugin.Spec.Platforms) != len(platforms) {
+		t.Fatalf("the manifest declares %d platforms, but the release builds %d (%v). krew "+
+			"installs nothing on a platform the manifest omits, and says so to the user "+
+			"rather than to us", len(plugin.Spec.Platforms), len(platforms), platforms)
+	}
+
+	for i, platform := range platforms {
+		t.Run(platform, func(t *testing.T) {
+			goos, arch, _ := strings.Cut(platform, "/")
+			entry := plugin.Spec.Platforms[i]
+
+			if got := entry.Selector.MatchLabels["os"]; got != goos {
+				t.Errorf("selector os is %q, want %q", got, goos)
+			}
+			if got := entry.Selector.MatchLabels["arch"]; got != arch {
+				t.Errorf("selector arch is %q, want %q", got, arch)
+			}
+
+			// The digest is the archive's own, not any other platform's. The
+			// fixtures differ per platform precisely so this can fail.
+			if entry.SHA256 != digests[platform] {
+				t.Errorf("sha256 is %s, but the %s archive hashes to %s",
+					entry.SHA256, platform, digests[platform])
+			}
+
+			_, archive, _ := strings.Cut(pairs[i], "=")
+			wantURI := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, archive)
+			if entry.URI != wantURI {
+				t.Errorf("uri is\n  %s\nwant\n  %s", entry.URI, wantURI)
+			}
+
+			// Windows binaries carry the extension, and krew installs the file it
+			// is told to: an extensionless `bin` installs a plugin Windows cannot
+			// execute.
+			wantBin := krewPluginBin
+			if goos == "windows" {
+				wantBin += ".exe"
+			}
+			if entry.Bin != wantBin {
+				t.Errorf("bin is %q, want %q", entry.Bin, wantBin)
+			}
+
+			// `files` is narrowed on purpose. The archive also carries the
+			// standalone name, which is the same bytes; letting krew copy
+			// everything would put a second sixty-megabyte copy of one binary in
+			// every user's krew store, under a name krew cannot invoke.
+			var from []string
+			for _, f := range entry.Files {
+				from = append(from, f.From)
+			}
+			if want := []string{wantBin, "LICENSE"}; !slices.Equal(from, want) {
+				t.Errorf("files copies %v, want %v", from, want)
+			}
+		})
+	}
+}
+
+// TestKrewManifestSuitsTheIndex covers the conventions krew-index review applies,
+// which are cheap to satisfy and expensive to find out about: the latency there is
+// measured in weeks, so a manifest bounced for a trailing full stop costs a
+// release cycle.
+func TestKrewManifestSuitsTheIndex(t *testing.T) {
+	const version = fixtureVersion
+	platforms := cliPlatforms(t)
+	dir, pairs, _ := distFixture(t, platforms)
+
+	stdout, stderr, code := runHack(t, krewScript,
+		append([]string{version, githubRepo(t), dir}, pairs...)...)
+	if code != 0 {
+		t.Fatalf("%s exited %d: %s", krewScript, code, stderr)
+	}
+
+	var plugin krewPlugin
+	if err := yaml.Unmarshal([]byte(stdout), &plugin); err != nil {
+		t.Fatalf("parse the generated manifest: %v", err)
+	}
+
+	// krew renders this in a column of `kubectl krew search`.
+	const shortDescriptionLimit = 50
+	short := plugin.Spec.ShortDescription
+	if short == "" {
+		t.Error("spec.shortDescription is empty; it is the line `kubectl krew search` prints")
+	}
+	if len(short) > shortDescriptionLimit {
+		t.Errorf("spec.shortDescription is %d characters (%q); krew-index asks for at most %d",
+			len(short), short, shortDescriptionLimit)
+	}
+	if strings.HasSuffix(short, ".") {
+		t.Errorf("spec.shortDescription ends with a full stop (%q); krew-index asks that it "+
+			"does not, because it is a label rather than a sentence", short)
+	}
+	if plugin.Spec.Description == "" {
+		t.Error("spec.description is empty; it is the whole of what `kubectl krew info` shows")
+	}
+
+	// The caveat that matters, because it is the one thing about this plugin a
+	// user is likely to get wrong: krew installs the plugin name only, and the
+	// standalone binary — the one an auditor with an archive and no cluster
+	// wants — is not on their PATH afterwards.
+	if !strings.Contains(plugin.Spec.Caveats, "brew install") {
+		t.Error("spec.caveats no longer points at the Homebrew tap. krew installs the plugin " +
+			"name only, so a user who wanted the standalone `kuberecord` gets no hint of " +
+			"where it is")
+	}
+}
+
+// TestGeneratorsRefuseAnIncompleteRelease is the non-vacuity proof for both
+// generators.
+//
+// A generator that quietly skipped what it could not find would emit a shorter
+// document, and a shorter document is not a smaller release — it is a release
+// that installs on some platforms and 404s on others, with nothing having failed.
+func TestGeneratorsRefuseAnIncompleteRelease(t *testing.T) {
+	const version = fixtureVersion
+	repo := githubRepo(t)
+	platforms := cliPlatforms(t)
+
+	tests := []struct {
+		name   string
+		script string
+		// remove is the platform whose archive is deleted before the run.
+		remove string
+		// names is what the refusal must mention, so the failure is diagnosable.
+		names string
+	}{
+		{
+			name:   "krew, with the linux/arm64 archive missing",
+			script: krewScript,
+			remove: "linux/arm64",
+			names:  "linux/arm64",
+		},
+		{
+			name:   "homebrew, with the darwin/arm64 archive missing",
+			script: brewScript,
+			remove: "darwin/arm64",
+			names:  "darwin/arm64",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, pairs, _ := distFixture(t, platforms)
+
+			kept := make([]string, 0, len(pairs))
+			for _, pair := range pairs {
+				platform, archive, _ := strings.Cut(pair, "=")
+				if platform == tc.remove {
+					if err := os.Remove(filepath.Join(dir, archive)); err != nil {
+						t.Fatalf("remove the %s fixture: %v", tc.remove, err)
+					}
+				}
+				kept = append(kept, pair)
+			}
+
+			_, stderr, code := runHack(t, tc.script, append([]string{version, repo, dir}, kept...)...)
+			if code == 0 {
+				t.Fatalf("%s succeeded with the %s archive missing; it would have published a "+
+					"document naming a URL that 404s for exactly those users",
+					tc.script, tc.remove)
+			}
+			if !strings.Contains(stderr, tc.names) {
+				t.Errorf("%s refused, but without naming %s:\n%s", tc.script, tc.names, stderr)
+			}
+		})
+	}
+}
+
+// TestHomebrewFormulaCoversEveryPlatformBrewRunsOn is the formula's half of the
+// acceptance criterion.
+//
+// Homebrew picks the block matching the machine it is on, so a missing block is
+// not a smaller formula: it is one that fails for a quarter of its users and works
+// perfectly for whoever tested it.
+func TestHomebrewFormulaCoversEveryPlatformBrewRunsOn(t *testing.T) {
+	const version = fixtureVersion
+	repo := githubRepo(t)
+	dir, pairs, digests := distFixture(t, cliPlatforms(t))
+
+	stdout, stderr, code := runHack(t, brewScript, append([]string{version, repo, dir}, pairs...)...)
+	if code != 0 {
+		t.Fatalf("%s exited %d: %s", brewScript, code, stderr)
+	}
+
+	// Windows has no brew, and the generator says so rather than narrowing the
+	// release without comment.
+	if !strings.Contains(stderr, "windows/amd64") {
+		t.Errorf("the formula generator dropped the Windows archive silently. Its stderr was:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "windows") {
+		t.Error("the formula names a Windows archive; brew does not run there, and a URL " +
+			"nothing can select is a URL nothing checks")
+	}
+
+	for want, why := range map[string]string{
+		"class Kuberecord < Formula":          "brew derives the class name from the file name",
+		`version "9.9.9"`:                     "a Homebrew version is plain semver; the `v` is a tag convention",
+		`license "Apache-2.0"`:                "the licence the archives carry",
+		`bin.install "kuberecord"`:            "the standalone name, which is what brew is the channel for",
+		`bin.install "` + krewPluginBin + `"`: "kubectl finds a plugin by file name, so both names ship",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the formula does not contain %q: %s", want, why)
+		}
+	}
+
+	// The one check that catches a formula pointing at the wrong tag's archive:
+	// the version is stamped into the binary, so a stale URL reports a version
+	// that is not this formula's.
+	if !strings.Contains(stdout, `shell_output("#{bin}/kuberecord version")`) {
+		t.Error("the formula's `test do` block no longer runs `kuberecord version`, so a URL " +
+			"left pointing at the previous release would install cleanly and be wrong")
+	}
+
+	// Every brew platform, with its own archive's digest.
+	pairsOut, stderr, code := runHack(t, digestsScript, writeTemp(t, "formula.rb", stdout))
+	if code != 0 {
+		t.Fatalf("%s could not read the formula (%d): %s", digestsScript, code, stderr)
+	}
+	got := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(pairsOut), "\n") {
+		url, digest, _ := strings.Cut(line, " ")
+		got[url] = digest
+	}
+	if len(got) != brewPlatformSet {
+		t.Fatalf("the formula names %d downloads, want %d (darwin and linux, arm64 and amd64)",
+			len(got), brewPlatformSet)
+	}
+	for _, platform := range []string{"darwin/arm64", "darwin/amd64", "linux/arm64", "linux/amd64"} {
+		archive := archiveFor(t, pairs, platform)
+		url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, archive)
+		if got[url] != digests[platform] {
+			t.Errorf("%s: the formula serves %s with digest %q, want %q",
+				platform, url, got[url], digests[platform])
+		}
+	}
+}
+
+// archiveFor returns the archive one <os/arch>=<archive> pair names.
+func archiveFor(t *testing.T, pairs []string, platform string) string {
+	t.Helper()
+	for _, pair := range pairs {
+		if p, archive, _ := strings.Cut(pair, "="); p == platform {
+			return archive
+		}
+	}
+	t.Fatalf("no pair for %s", platform)
+	return ""
+}
+
+// writeTemp puts content in a temp file with the given name and returns its path.
+// The name matters: hack/manifest-digests.sh picks its shape from the extension.
+func writeTemp(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// TestManifestDigestsRefusesAnUnpairedDownload is the extractor's non-vacuity
+// proof, and it guards the verification rather than the generation.
+//
+// A url with no sha256 beside it must be an error. Dropped, it would be a download
+// the release never checks — and the verify target would report a smaller number
+// and call it a pass.
+func TestManifestDigestsRefusesAnUnpairedDownload(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		content string
+	}{
+		{
+			name: "a krew platform with no digest",
+			file: "kuberecord.yaml",
+			content: "  platforms:\n" +
+				"  - uri: https://example.invalid/a.tar.gz\n" +
+				"    bin: kubectl-kuberecord\n" +
+				"  - uri: https://example.invalid/b.tar.gz\n" +
+				"    sha256: " + strings.Repeat("a", 64) + "\n",
+		},
+		{
+			name: "a formula url with no digest",
+			file: "kuberecord.rb",
+			content: "  on_macos do\n" +
+				`      url "https://example.invalid/a.tar.gz"` + "\n" +
+				`      url "https://example.invalid/b.tar.gz"` + "\n" +
+				`      sha256 "` + strings.Repeat("a", 64) + `"` + "\n",
+		},
+		{
+			name:    "a document naming nothing at all",
+			file:    "kuberecord.yaml",
+			content: "apiVersion: krew.googlecontainertools.github.com/v1alpha2\nkind: Plugin\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runHack(t, digestsScript, writeTemp(t, tc.file, tc.content))
+			if code == 0 {
+				t.Fatalf("%s accepted %s. A download it silently drops is one the release "+
+					"never checks, and the verify target would count fewer and pass",
+					digestsScript, tc.name)
+			}
+			if stderr == "" {
+				t.Error("it refused without saying why")
+			}
+		})
+	}
+}
+
+// TestDistributionDocumentsAreReleaseAssets is the wiring: generated in the right
+// place, checksummed by name, and attached.
+//
+// Being lines in checksums.txt is the whole of why they need no evidence of their
+// own — the artifact attestation takes its subjects from that file and the one
+// cosign signature is over it, so both documents inherit both.
+func TestDistributionDocumentsAreReleaseAssets(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	// Required by name, on the same argument install.yaml and the CLI archives
+	// are: a checksums file that silently omits an asset is worse than none.
+	const required = `assets="$$assets $(notdir $(RELEASE_KREW_MANIFEST)) $(notdir $(RELEASE_BREW_FORMULA))"`
+	if !strings.Contains(makefile, required) {
+		t.Error("release-checksums no longer requires the krew manifest and the Homebrew " +
+			"formula by name, so a release that failed to generate one would publish a " +
+			"complete-looking checksums file with no way to install the CLI in it")
+	}
+
+	// And they have to exist before the first checksum run, for the same reason
+	// the archives do.
+	start := strings.Index(makefile, "release-artifacts: release-verify-version")
+	if start < 0 {
+		t.Fatal("the Makefile no longer defines release-artifacts")
+	}
+	recipe := makefile[start:]
+	order := []string{
+		"$(MAKE) release-cli",
+		"$(MAKE) release-krew-manifest",
+		"$(MAKE) release-brew-formula",
+		"$(MAKE) release-checksums",
+		"$(MAKE) release-krew-verify",
+	}
+	previous := -1
+	for _, step := range order {
+		at := strings.Index(recipe, step)
+		if at < 0 {
+			t.Fatalf("release-artifacts no longer runs `%s`", step)
+		}
+		if at < previous {
+			t.Errorf("release-artifacts runs `%s` out of order; the sequence must be %v",
+				step, order)
+		}
+		previous = at
+	}
+
+	// Stale copies from an earlier version in the same directory would be
+	// checksummed and published, like every other per-tag output.
+	if !strings.Contains(makefile, `"$(RELEASE_KREW_MANIFEST)" "$(RELEASE_BREW_FORMULA)" \`) {
+		t.Error("release-artifacts no longer removes the previous run's krew manifest and " +
+			"formula, so a failed generation would leave the last version's in place")
+	}
+
+	// Attached to the Release, and to a rehearsal's workflow run — on a rehearsal
+	// that is the only place they exist, and diffing a candidate's manifest
+	// against the last release's is most of the value of rehearsing.
+	workflow := readFile(t, releaseWorkflowPath)
+	for _, asset := range []string{"dist/release/kuberecord.yaml", "dist/release/kuberecord.rb"} {
+		if strings.Count(workflow, asset) < 2 {
+			t.Errorf("%s is not both uploaded to the workflow run and attached to the Release",
+				asset)
+		}
+	}
+}
+
+// TestDistributionDigestsAreVerifiedInCI is the acceptance criterion's "a CI check
+// asserts the manifest's digests match the published archives", and it is two
+// checks because they are two different claims.
+//
+// The local one says the documents describe what was built; the published one says
+// the URLs in them resolve to it. Only the second catches an asset that never
+// uploaded or a Release page that spells a file name differently, and only the
+// first can run before there is anything published.
+func TestDistributionDigestsAreVerifiedInCI(t *testing.T) {
+	wf := parseReleaseWorkflow(t)
+
+	var local, published int
+	for jobName, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			switch {
+			case strings.Contains(step.Run, "make release-krew-verify-published"):
+				published++
+				if step.If != "env.DRY_RUN == 'false'" {
+					t.Errorf("%s/%q fetches published assets under `if: %s`; a rehearsal has "+
+						"nothing published to fetch", jobName, step.Name, step.If)
+				}
+			case strings.Contains(step.Run, "make release-krew-verify"):
+				local++
+				if step.If != "" {
+					t.Errorf("%s/%q re-derives the digests under `if: %s`. Hashing a local file "+
+						"publishes nothing, and a manifest that stopped describing the "+
+						"archives is what a rehearsal exists to find", jobName, step.Name, step.If)
+				}
+			}
+		}
+	}
+	if local == 0 {
+		t.Error("no step runs `make release-krew-verify`, so nothing checks that the two " +
+			"documents describe the archives that were built")
+	}
+	if published == 0 {
+		t.Error("no step runs `make release-krew-verify-published`, so nothing checks that " +
+			"the URLs krew and brew hand out actually serve those archives")
+	}
+
+	// The published check has to come after the Release exists — the assets are
+	// not downloadable until then.
+	workflow := readFile(t, releaseWorkflowPath)
+	create := strings.Index(workflow, "gh release create")
+	verify := strings.Index(workflow, "make release-krew-verify-published")
+	if create < 0 || verify < 0 {
+		t.Fatal("release.yml no longer both creates the Release and verifies the published URLs")
+	}
+	if verify < create {
+		t.Error("release.yml verifies the published URLs before it creates the Release, so " +
+			"every one of them would 404")
+	}
+
+	// And the cheap half runs on every pull request, not only at tag time. The
+	// drift it catches — an archive renamed in the Makefile, URIs generated from
+	// the old name — passes every other check in the repository.
+	if !workflowRuns(t, ".github/workflows/test.yml", "make release-krew-verify") {
+		t.Error("no step in .github/workflows/test.yml runs `make release-krew-verify`, so " +
+			"the manifest is only ever checked at tag time — which is after the release " +
+			"it would have stopped")
+	}
+}
+
+// TestHomebrewTapIsUpdatedByTheRelease pins the shape of the one job in this
+// workflow that writes to another repository.
+func TestHomebrewTapIsUpdatedByTheRelease(t *testing.T) {
+	wf := parseReleaseWorkflow(t)
+
+	tap, ok := wf.Jobs["tap"]
+	if !ok {
+		t.Fatal("release.yml has no tap job, so `brew install kuberecord/tap/kuberecord` " +
+			"serves whatever version somebody last pushed by hand")
+	}
+
+	// It must not start before the Release exists: the formula it pushes is
+	// downloaded off the Release page.
+	needs := fmt.Sprint(tap.Needs)
+	if !strings.Contains(needs, "publish") {
+		t.Errorf("the tap job needs %v, which does not include publish — so it could run "+
+			"before the Release it downloads the formula from exists", tap.Needs)
+	}
+
+	// The token is the whole reason this is a job of its own, and it is the only
+	// place in the workflow that a secret other than GITHUB_TOKEN appears.
+	workflow := readFile(t, releaseWorkflowPath)
+	if !strings.Contains(workflow, "secrets.HOMEBREW_TAP_TOKEN") {
+		t.Error("nothing supplies HOMEBREW_TAP_TOKEN. A workflow's own GITHUB_TOKEN is scoped " +
+			"to this repository and cannot write to the tap")
+	}
+
+	var fetches, pushes bool
+	for _, step := range tap.Steps {
+		if strings.Contains(step.Run, "make release-brew-fetch") {
+			fetches = true
+		}
+		if strings.Contains(step.Run, "make release-brew-push") {
+			pushes = true
+		}
+	}
+	if !fetches {
+		t.Error("the tap job does not run `make release-brew-fetch`, so the formula it pushes " +
+			"is one it built rather than the one the release signed")
+	}
+	if !pushes {
+		t.Error("the tap job does not run `make release-brew-push`")
+	}
+}
+
+// TestTapRefusesWhatItMustRefuse runs the target rather than reading it. Both
+// guards fire before anything is cloned, so this needs no token and no network.
+//
+// It does need a formula, and it supplies one rather than using whatever is in
+// dist/release/. The token guard is the *last* of three, so a run that reached it
+// only because an earlier `make release-artifacts` had left a file behind is a
+// test that passes on the machine that generated one and fails on a clean
+// checkout — which is exactly what it did. RELEASE_BREW_FORMULA is `?=` in the
+// Makefile, so pointing it at a temporary file is enough to make the precondition
+// the test's own.
+func TestTapRefusesWhatItMustRefuse(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		wantOK  bool
+		says    string
+	}{
+		{
+			// `brew install` cannot ask for a stable version, so a tap carrying a
+			// candidate hands it to everybody. Exit 0, because the release
+			// happened and this is not a failure of it — but loudly.
+			name:    "a prerelease is not pushed",
+			version: "v9.9.9-rc.1",
+			wantOK:  true,
+			says:    "prerelease",
+		},
+		{
+			// Absent, the push would silently do nothing, and the tap would stop
+			// updating with nothing red anywhere.
+			name:    "a missing token is a failure, not a skip",
+			version: "v9.9.9",
+			wantOK:  false,
+			says:    "HOMEBREW_TAP_TOKEN",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			formula := writeTemp(t, "kuberecord.rb", "# a stand-in; no guard below reads it\n")
+
+			cmd := exec.Command("make", "release-brew-push",
+				"RELEASE_VERSION="+tc.version, "RELEASE_BREW_FORMULA="+formula)
+			cmd.Dir = repoPath()
+			// An inherited token would turn the second case into a real clone.
+			cmd.Env = append(os.Environ(), "HOMEBREW_TAP_TOKEN=")
+
+			out, err := cmd.CombinedOutput()
+			if gotOK := err == nil; gotOK != tc.wantOK {
+				t.Fatalf("`make release-brew-push RELEASE_VERSION=%s` succeeded=%v, want %v:\n%s",
+					tc.version, gotOK, tc.wantOK, out)
+			}
+			if !strings.Contains(string(out), tc.says) {
+				t.Errorf("it did not mention %q:\n%s", tc.says, out)
+			}
+		})
+	}
+}
+
+// TestKrewIndexSubmissionIsAMaintainersCommand is the boundary this task drew on
+// purpose.
+//
+// Submitting to krew-index is a pull request against a repository this project
+// does not own, and a tag push must not open one. It also could not work: krew-index
+// CI fetches every URI in the manifest, so a PR raised before the assets exist
+// fails on arrival and spends weeks of review latency getting nowhere.
+func TestKrewIndexSubmissionIsAMaintainersCommand(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	if !strings.Contains(makefile, "krew-index-pr: ##") {
+		t.Fatal("the Makefile no longer defines krew-index-pr, so submitting to krew-index is " +
+			"a sequence of commands somebody retypes each release")
+	}
+	if !strings.Contains(makefile, "KREW_INDEX_REPO ?= kubernetes-sigs/krew-index") {
+		t.Error("krew-index-pr no longer names kubernetes-sigs/krew-index")
+	}
+
+	// Never called by a workflow. Not any workflow — the point is that no
+	// automated trigger in this repository opens a pull request on another one.
+	//
+	// It looks for an *invocation* rather than the string, because release.yml's
+	// step summary tells a maintainer to run this and would otherwise be indicted
+	// by the test that exists to keep it a maintainer's job. A line that starts
+	// with `make` runs it; a line that mentions it does not.
+	dir := repoPath(".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Join(".github", "workflows", entry.Name()))
+		for _, job := range parseWorkflow(t, path).Jobs {
+			for _, step := range job.Steps {
+				for line := range strings.SplitSeq(step.Run, "\n") {
+					line = strings.TrimSpace(line)
+					if !strings.HasPrefix(line, "make ") && !strings.HasPrefix(line, "$(MAKE) ") {
+						continue
+					}
+					if strings.Contains(line, "krew-index-pr") {
+						t.Errorf("%s runs `%s`. A tag push must not open a pull request against "+
+							"somebody else's repository, and it would fail anyway: krew-index "+
+							"fetches every URI, and the assets do not exist until the release "+
+							"is published", path, line)
+					}
+				}
+			}
+		}
+	}
+
+	// And the procedure is written down, because it is the one release step a
+	// maintainer has to remember.
+	releasing := readFile(t, "docs/RELEASING.md")
+	for _, want := range []string{"make krew-index-pr", "kubernetes-sigs/krew-index", "HOMEBREW_TAP_TOKEN"} {
+		if !strings.Contains(releasing, want) {
+			t.Errorf("docs/RELEASING.md does not mention %q", want)
+		}
+	}
+}
+
+// TestInstallPathsAreDocumentedInOrder is the acceptance criterion about the
+// documentation, and it checks the order rather than the wording.
+//
+// The order is the recommendation. krew first because it is how a kubectl user
+// finds a plugin and the one that needs no decision; `go install` last because it
+// gets you one of the two names, no release stamp and nothing signed. A page that
+// listed them the other way round would be recommending the worst channel.
+func TestInstallPathsAreDocumentedInOrder(t *testing.T) {
+	paths := []struct{ name, marker string }{
+		{"krew", "kubectl krew install kuberecord"},
+		{"Homebrew", "brew install kuberecord/tap/kuberecord"},
+		{"the release archive", "releases/download/"},
+		{"go install", "go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord"},
+	}
+
+	pages := []struct{ page, heading string }{
+		{"README.md", "## Installing the CLI"},
+		{"docs/CLI.md", "## Installing"},
+	}
+
+	for _, p := range pages {
+		t.Run(p.page, func(t *testing.T) {
+			// Scoped to the section, not the whole page: both documents name a
+			// release download elsewhere, for the operator's install manifest.
+			body := readFile(t, p.page)
+			start := strings.Index(body, p.heading+"\n")
+			if start < 0 {
+				t.Fatalf("%s has no %q section, so it does not tell a reader how to install "+
+					"the CLI at all", p.page, p.heading)
+			}
+			section := body[start+len(p.heading):]
+			if end := strings.Index(section, "\n## "); end > 0 {
+				section = section[:end]
+			}
+
+			previous := -1
+			for _, path := range paths {
+				at := strings.Index(section, path.marker)
+				if at < 0 {
+					t.Errorf("%s does not show %s (%q)", p.page, path.name, path.marker)
+					continue
+				}
+				if at < previous {
+					t.Errorf("%s shows %s out of order; the four channels are listed krew, "+
+						"Homebrew, direct download, go install", p.page, path.name)
+				}
+				previous = at
+			}
+		})
 	}
 }

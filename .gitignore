@@ -35,7 +35,17 @@ kuberecord-backlog-*.md
 # Per-tag release artifacts (`make release-artifacts`). dist/install.yaml is
 # committed on purpose; these are built for one tag and belong to the release.
 dist/release/
+# The cross-compiled CLI binaries (`make build-cli`). Per-tag artifacts like
+# everything else under dist/release/, and large enough that a stray commit of one
+# would be noticed only by whoever cloned afterwards.
+dist/cli/
 # The chart the OCI install smoke packages before pushing it to its throwaway
 # registry. Removed by the smoke's own teardown; ignored so an interrupted run
 # does not leave the working tree looking dirty.
 dist/e2e-oci/
+# The Homebrew tap and the krew plugin index, cloned by `make release-brew-push`
+# and `make krew-index-pr` (Task 12.2). They are other repositories' working
+# trees, checked out here for the length of one command; a commit of one would put
+# a second git history inside this one.
+dist/homebrew-tap/
+dist/krew-index/

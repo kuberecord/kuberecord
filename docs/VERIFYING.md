@@ -18,6 +18,7 @@ is where that limit is spelled out.
 - [Which identity verifies which release](#which-identity-verifies-which-release)
 - [The image signature](#the-image-signature)
 - [The chart signature](#the-chart-signature)
+- [The CLI archives](#the-cli-archives)
 - [The build provenance](#the-build-provenance)
 - [The checksums](#the-checksums)
 - [The SBOM](#the-sbom)
@@ -33,13 +34,20 @@ is where that limit is spelled out.
 | `oci://ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` | A keyless **cosign signature** over its manifest. Its layer is byte-for-byte the `.tgz` below, so that row's provenance covers this one too. |
 | `install.yaml` | Its `sha256` in `checksums.txt`, and a **SLSA build provenance** attestation naming that digest. |
 | `kuberecord-X.Y.Z.tgz` | The same. |
+| `kuberecord_vX.Y.Z_<os>_<arch>.tar.gz` (`.zip` for Windows) | The same. Five archives, one per platform, each carrying both `kubectl-kuberecord` and `kuberecord`. |
+| `kuberecord.yaml` | The same. It is the krew plugin manifest, and every `sha256` in it is one of the archive rows above, computed a second time from the archive itself. |
+| `kuberecord.rb` | The same, for the Homebrew formula. It is the file the release pushes to the tap, so what `brew install` runs is an asset this release signed. |
 | `kuberecord-X.Y.Z-sbom.spdx.json` | The same, and it is itself the inventory of the image. |
-| `checksums.txt` | The provenance attestation's subject list *is* this file's contents, so the two cannot disagree. |
+| `kuberecord-cli-X.Y.Z-sbom.spdx.json` | The same, for the CLI binary. |
+| `checksums.txt` | A keyless **cosign signature** over the file (`checksums.txt.sigstore.json`), and the provenance attestation's subject list *is* this file's contents — so the two cannot disagree, and one signature covers every asset above it. |
 
-Releases from **v0.2.0** onward carry all of it except the chart in the registry,
-which starts at **v0.3.0** — before that the chart shipped only as a release
-asset. `v0.1.0` predates the whole scheme and has `checksums.txt` only. In both
-cases the absence of a signature is expected, not a failure to investigate.
+Releases from **v0.2.0** onward carry all of it except four things that start at
+**v0.3.0**: the chart in the registry (before that the chart shipped only as a
+release asset), the CLI archives, the krew manifest and Homebrew formula that
+describe them, and the signature over `checksums.txt`. `v0.1.0`
+predates the whole scheme and has `checksums.txt` only. In every case the absence
+of a signature is expected, not a failure to investigate — there is nothing to
+verify because there was nothing published to verify.
 
 **The chart is published twice, and both copies are the same bytes.** The
 registry artifact's single layer is the exact archive attached to the Release
@@ -84,12 +92,12 @@ This repository moved from the personal account `yelzhy` to the `kuberecord`
 organization after v0.2.0 was published. **Two identities are therefore correct,
 and which one to pin depends on the tag you are verifying:**
 
-| Tag | `--certificate-identity` / `--repo` | Image | Chart |
-|---|---|---|---|
-| `v0.1.0` | *none* — predates signing, `checksums.txt` only | `ghcr.io/yelzhy/kuberecord:v0.1.0` | release asset only |
-| `v0.2.0` | `https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0` | `ghcr.io/yelzhy/kuberecord:v0.2.0` | release asset only |
-| `v0.2.1` | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1` | `ghcr.io/kuberecord/kuberecord:v0.2.1` | release asset only |
-| `v0.3.0` and later | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/vX.Y.Z` | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | `ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` |
+| Tag | `--certificate-identity` / `--repo` | Image | Chart | CLI |
+|---|---|---|---|---|
+| `v0.1.0` | *none* — predates signing, `checksums.txt` only | `ghcr.io/yelzhy/kuberecord:v0.1.0` | release asset only | not published |
+| `v0.2.0` | `https://github.com/yelzhy/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.0` | `ghcr.io/yelzhy/kuberecord:v0.2.0` | release asset only | not published |
+| `v0.2.1` | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1` | `ghcr.io/kuberecord/kuberecord:v0.2.1` | release asset only | not published |
+| `v0.3.0` and later | `https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/vX.Y.Z` | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | `ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` | archives, signed through `checksums.txt` |
 
 **The old identity is not a mistake, and it is not evidence of anything wrong
 with those releases.** A keyless signature binds to the Fulcio certificate that
@@ -112,6 +120,12 @@ publishing the chart to a registry started at `v0.3.0`, after the move. What it
 *is* split on is existence — there is nothing at
 `ghcr.io/kuberecord/charts/kuberecord` for any earlier tag, and the `.tgz` on those
 Releases is the whole of what was published.
+
+The CLI archives split the same way and for the same reason: they start at
+`v0.3.0`, so the identity that signs them is the current one and always will be.
+There is no `kubectl-kuberecord` in any earlier release to verify, and a `krew`
+or `brew` installation that reports an older version came from somewhere this
+page cannot vouch for.
 
 The commands in the rest of this page are written for the current identity. To
 verify `v0.2.0`, substitute both halves — the identity *and* the image path, since
@@ -224,6 +238,87 @@ is redirected above. It is the manifest digest — the same string cosign signs,
 not the same as the `sha256` of the `.tgz` those commands write to disk. That one
 is the artifact's *layer*, and it is what `checksums.txt` lists.
 
+## The CLI archives
+
+`kubectl kuberecord` ships as five archives — one per platform, each carrying both
+binary names — and they are the one kind of asset a release publishes that has no
+digest a registry could name. So they are signed the way a file is: `cosign
+sign-blob` over `checksums.txt`, which lists every asset by its `sha256`.
+
+**That makes verification two commands, and both of them matter.** The first says
+who published the list; the second says the bytes you hold are the ones on it. The
+first alone proves nothing about your download, and the second alone proves only
+that a file agrees with a list that arrived beside it.
+
+```sh
+# 1. The list was published by this release, and by nothing else.
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  checksums.txt
+
+# 2. What you downloaded is what the list describes.
+sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
+```
+
+`sha256sum -c` reports `No such file or directory` for every asset you did not
+download, and that is expected rather than a failure — it checks what is present
+and says `OK` for each. Use `--ignore-missing` (GNU) if the noise is in your way.
+
+The `.sigstore.json` bundle carries the certificate, the signature and the
+transparency-log proof together, so those two commands need nothing on disk but
+the bundle, `checksums.txt` and the archive itself.
+
+**One signature covers every attached asset**, not only the CLI: `install.yaml`,
+the packaged chart and both SBOMs are lines in the same file. Before `v0.3.0` those
+assets carried provenance but no signature, which is why the row above starts
+where it does.
+
+Then unpack it. Both names are in every archive, and which one you install decides
+how you invoke it:
+
+```sh
+tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+
+# As a kubectl plugin: kubectl finds it by file name alone.
+install -m 0755 kubectl-kuberecord ~/.local/bin/kubectl-kuberecord
+kubectl kuberecord version
+
+# Or on its own.
+install -m 0755 kuberecord ~/.local/bin/kuberecord
+kuberecord version
+```
+
+`kuberecord version` prints the version, the commit and the build date that were
+stamped into the binary at release time, so it is also how you check that the
+binary on your PATH is the archive you just verified — and not an older one
+further up it.
+
+### What krew and Homebrew check, and what they do not
+
+Both channels check a `sha256`, and both take it from a document this release
+published: `kuberecord.yaml` for krew, `kuberecord.rb` for Homebrew. Each is
+generated from the archives, and each is a line in `checksums.txt` — so the two
+commands above cover the documents as well as the archives they describe.
+
+That gets you integrity, not provenance. krew and brew verify that the bytes they
+downloaded are the bytes their manifest names; neither knows who signed the
+manifest, and neither would notice a manifest that was authentic for a *different*
+release. If that distinction matters to you, verify the document you were served
+against the release:
+
+```sh
+# What krew was told, checked against what this release signed.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord.yaml
+sha256sum kuberecord.yaml          # the line checksums.txt carries for it
+```
+
+The release itself does not take this on trust either. Every URI in both documents
+is fetched and re-hashed after the Release is created — `make
+release-krew-verify-published`, run by the release workflow — so a manifest naming
+an asset that never uploaded fails the release rather than reaching a user.
+
 ## The build provenance
 
 Provenance answers a different question from the signature: not "who signed
@@ -276,12 +371,16 @@ verify against the original registry.
 sha256sum -c checksums.txt      # macOS: shasum -a 256 -c checksums.txt
 ```
 
-`checksums.txt` covers `install.yaml`, the packaged chart and the SBOM. It is the
-weakest of the three checks on its own — it proves the files agree with a list
-that was published beside them, not who published either — and it is the fastest.
-Its real value is that the provenance attestation for the artifacts is generated
-*from this exact file*, so the set of things checksummed and the set of things
-attested cannot drift apart.
+`checksums.txt` covers `install.yaml`, the packaged chart, the five CLI archives
+and both SBOMs. It used to be the weakest of the checks on its own — a file
+agreeing with a list that was published beside it says nothing about who published
+either — and since `v0.3.0` it is not, because the list itself is signed:
+[the CLI archives](#the-cli-archives) is where that command is, and it applies to
+every asset in the file rather than only to the archives.
+
+Its other value is structural. The provenance attestation for the artifacts is
+generated *from this exact file*, so the set of things checksummed and the set of
+things attested cannot drift apart.
 
 ## The SBOM
 
@@ -296,11 +395,20 @@ from the same `go.mod` into the same `gcr.io/distroless/static` base, differing
 only in the architecture it was compiled for. Four near-identical documents would
 imply a difference that is not there.
 
-Read it, or hand it to a scanner (`grype` is a separate install):
+`kuberecord-cli-X.Y.Z-sbom.spdx.json` is the same kind of document for the CLI,
+produced from the **`linux/amd64` binary** the release built — the module list the
+Go toolchain embeds, read out of the executable rather than out of `go.mod`. It is
+separate from the image's because it is a genuinely different inventory: the CLI
+carries no controller-runtime and the operator image carries no read-plane S3
+source, and one document claiming to describe both would be wrong about each. One
+document again covers all five platforms, which differ in `GOOS` and `GOARCH` and
+in nothing else.
+
+Read either one, or hand it to a scanner (`grype` is a separate install):
 
 ```sh
-syft convert kuberecord-0.2.1-sbom.spdx.json -o table
-grype sbom:./kuberecord-0.2.1-sbom.spdx.json
+syft convert kuberecord-0.3.0-sbom.spdx.json -o table
+grype sbom:./kuberecord-cli-0.3.0-sbom.spdx.json
 ```
 
 ## Pinning what you verified
@@ -385,6 +493,8 @@ A failure is a reason to stop, not a reason to reach for
 | `manifest unknown` for a chart tag that should exist | Almost always the leading `v`. The chart's tag is `0.3.0`; only the certificate identity carries `v0.3.0`, because that is the git tag the workflow ran on. |
 | `gh attestation verify` finds no attestation | The same two causes, plus: `--repo` names the repository the attestation was recorded against, which is not necessarily the registry namespace. |
 | A checksum mismatch | Re-download before concluding anything; a truncated download is far more likely than a tampered asset. Then verify the provenance, which does not depend on `checksums.txt` being honest. |
+| `sha256sum -c` reports `No such file or directory` for assets you did not download | Expected. `checksums.txt` covers everything a release attaches; it checks what is present. `--ignore-missing` silences it on GNU coreutils. |
+| `verify-blob` cannot find `checksums.txt.sigstore.json` | The signature over the checksums starts at `v0.3.0`, with the CLI archives. Earlier releases publish `checksums.txt` unsigned, backed by the artifact provenance alone. |
 | Verification of a *tag* passes but a digest fails | You are verifying a different image than you resolved. Resolve the digest once and use it in both places. |
 
 If a signature that should exist does not verify, that is worth reporting as a

@@ -1,0 +1,45 @@
+# What the zero-infrastructure quickstart streams.
+#
+# A ClusterStreamRule rather than a namespaced StreamRule, because that is the
+# type an operator's owner writes: it can name cluster-scoped kinds and it can
+# select namespaces. A team that wants to opt only its own namespace in — without
+# holding cluster-level privileges — writes a StreamRule instead; see
+# config/samples/kuberecord.io_v1alpha1_streamrule.yaml.
+#
+# `sink` names the backend by kind and name — a name is only unique within a kind,
+# so both halves are the reference. The pair is immutable: moving a rule to
+# another sink is delete and recreate, because re-pointing a live rule would
+# strand the dedup and diff baselines the pipeline built for every object in
+# scope. That immutability is also why the tee pattern is two rules rather than
+# one clever sink (D14, docs/TEE.md) — adding a ClickHouse to this cluster later
+# means adding a second rule beside this one, not editing this one.
+apiVersion: kuberecord.io/v1alpha1
+kind: ClusterStreamRule
+metadata:
+  name: zero-infra
+  labels:
+    app.kubernetes.io/name: kuberecord
+    app.kubernetes.io/component: zero-infra-example
+spec:
+  sink:
+    kind: S3Sink
+    name: archive
+  resources:
+  # `kind` is the Kind, not the plural resource: Deployment, not deployments.
+  - group: apps
+    version: v1
+    kind: Deployment
+  - group: ""
+    version: v1
+    kind: ConfigMap
+  # Namespace *labels*, not object labels. This one narrows the example to the
+  # demo namespace (examples/zero-infra/demo.yaml carries the label) so the
+  # archive holds a handful of objects you can read at a glance rather than every
+  # ConfigMap in kube-system — which matters more here than against a database,
+  # because an unindexed archive charges by the object scanned.
+  #
+  # Delete the whole `namespaceSelector` block to stream every namespace,
+  # including ones created later — no restart, the watch pool follows the rule.
+  namespaceSelector:
+    matchLabels:
+      kuberecord.io/zero-infra: "true"

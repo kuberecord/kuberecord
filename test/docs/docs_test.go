@@ -37,12 +37,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
+	"github.com/kuberecord/kuberecord/internal/cli"
 )
 
 // repoPath resolves a repository-relative path from this test's own source
@@ -910,6 +915,7 @@ func publishedPages(t *testing.T) []string {
 		"SECURITY.md",
 		"examples/quickstart/README.md",
 		"examples/tee/README.md",
+		"examples/zero-infra/README.md",
 		"deploy/charts/kuberecord/README.md",
 	}
 	entries, err := os.ReadDir(repoPath("docs"))
@@ -978,5 +984,699 @@ func TestMarkdownLinksResolve(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+//
+// The CLI reference is complete, and the README leads with what the CLI prints
+// (Task 12.3)
+//
+
+// commandTree returns every command of the real CLI, in the order cobra holds
+// them, with the auto-generated `help` entry dropped.
+//
+// It builds the actual tree rather than a list of names, which is the whole point
+// of the two checks below: a command or a flag added in internal/cli appears here
+// the moment it is added, with no second list to keep in step. A hand-maintained
+// table would document the flags somebody remembered, which is precisely the set
+// that needs no reminding.
+func commandTree(t *testing.T) []*cobra.Command {
+	t.Helper()
+
+	root, _ := cli.NewRootCommand("kuberecord", genericiooptions.NewTestIOStreamsDiscard())
+
+	var walk func(*cobra.Command)
+	var all []*cobra.Command
+	walk = func(cmd *cobra.Command) {
+		all = append(all, cmd)
+		for _, child := range cmd.Commands() {
+			// `help` is cobra's own, is not part of the surface this project
+			// designed, and is not what a reference page is for.
+			if child.Name() == "help" {
+				continue
+			}
+			walk(child)
+		}
+	}
+	walk(root)
+	return all
+}
+
+// commandPath is a command's address without the binary name — "timeline",
+// "config set-profile" — which is how docs/CLI.md refers to one.
+func commandPath(root, cmd *cobra.Command) string {
+	return strings.TrimPrefix(strings.TrimPrefix(cmd.CommandPath(), root.CommandPath()), " ")
+}
+
+// TestCLIReferenceDocumentsEveryCommand is Task 12.3's "every command" criterion,
+// checked against the binary rather than against a memory of it.
+//
+// The reference is allowed to spell a command however reads best — `get --at`
+// rather than `get`, `kuberecord config` rather than `config` — so several
+// spellings are accepted. What is not allowed is silence: a command a user can
+// type and cannot look up is a command that will be discovered by accident, and
+// its flags with it.
+func TestCLIReferenceDocumentsEveryCommand(t *testing.T) {
+	reference := readFile(t, "docs/CLI.md")
+	all := commandTree(t)
+	root := all[0]
+
+	documented := 0
+	for _, cmd := range all[1:] {
+		path := commandPath(root, cmd)
+		t.Run(path, func(t *testing.T) {
+			spellings := []string{
+				"`" + path + "`",
+				// `get --at`, `config set-profile …` — a backticked name that
+				// carries something after it.
+				"`" + path + " ",
+				"`kuberecord " + path + "`",
+				"`kubectl kuberecord " + path + "`",
+			}
+			if !slices.ContainsFunc(spellings, func(s string) bool { return strings.Contains(reference, s) }) {
+				t.Errorf("docs/CLI.md never names the %q command; tried %v", path, spellings)
+				return
+			}
+			documented++
+		})
+	}
+
+	// Non-vacuity. A walk that found nothing would pass every subtest above by
+	// running none of them, and a reference test that certifies an empty set is
+	// worse than no test: it reports that the page is complete.
+	if documented < 7 {
+		t.Fatalf("the command walk found only %d documented commands; the CLI has more than that, "+
+			"so this check is measuring nothing", documented)
+	}
+}
+
+// TestCLIReferenceDocumentsEveryFlag is the "every flag" half.
+//
+// It includes the flags kuberecord inherits from genericclioptions.ConfigFlags,
+// deliberately and at the cost of a little churn: docs/CLI.md enumerates that set
+// under "Inherited from kubectl", so a client-go bump that adds one to the tree
+// leaves the page's list wrong, and a page that claims to list them all is worth
+// only as much as that claim. Adding the name to the list is the fix, and it is a
+// one-line one.
+func TestCLIReferenceDocumentsEveryFlag(t *testing.T) {
+	reference := readFile(t, "docs/CLI.md")
+	all := commandTree(t)
+	root := all[0]
+
+	// Collected across the whole tree first, because the same flag is reachable
+	// from several commands and one undocumented name should be one failure.
+	owners := map[string][]string{}
+	collect := func(cmd *cobra.Command, set *pflag.FlagSet) {
+		set.VisitAll(func(f *pflag.Flag) {
+			path := commandPath(root, cmd)
+			if path == "" {
+				path = "(global)"
+			}
+			if !slices.Contains(owners[f.Name], path) {
+				owners[f.Name] = append(owners[f.Name], path)
+			}
+		})
+	}
+	for _, cmd := range all {
+		collect(cmd, cmd.LocalFlags())
+		collect(cmd, cmd.PersistentFlags())
+	}
+
+	names := make([]string, 0, len(owners))
+	for name := range owners {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(reference, "--"+name) {
+				t.Errorf("docs/CLI.md never names --%s, which %s accepts",
+					name, strings.Join(owners[name], ", "))
+			}
+		})
+	}
+
+	// Non-vacuity, as above. The tree carries well over forty flags; a run that
+	// found a handful has walked something other than the CLI.
+	if len(names) < 40 {
+		t.Fatalf("the flag walk found only %d flags (%v); the CLI has far more, "+
+			"so this check is measuring nothing", len(names), names)
+	}
+}
+
+// fencedBlocks returns every fenced code block in a Markdown document, paired
+// with the 1-based line its opening fence sits on.
+func fencedBlocks(content string) []struct {
+	Line int
+	Body string
+} {
+	var out []struct {
+		Line int
+		Body string
+	}
+	lines := strings.Split(content, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !strings.HasPrefix(lines[i], "```") {
+			continue
+		}
+		start := i
+		i++
+		var body []string
+		for i < len(lines) && !strings.HasPrefix(lines[i], "```") {
+			body = append(body, lines[i])
+			i++
+		}
+		out = append(out, struct {
+			Line int
+			Body string
+		}{start + 1, strings.Join(body, "\n")})
+	}
+	return out
+}
+
+// headingLineNumber returns the 1-based line an exact heading sits on, or 0.
+func headingLineNumber(content, heading string) int {
+	for i, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == heading {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// firstScreenful is how many lines of README.md count as "the first screen" for
+// the check below.
+//
+// It is a budget rather than a measurement: nobody's terminal is exactly this
+// tall, and the number exists so that the ordering requirement cannot be met by a
+// timeline block that is technically before the installation section and
+// practically three scrolls down.
+const firstScreenful = 45
+
+// TestREADMELeadsWithTheTimeline is Task 12.3's central criterion.
+//
+// The README's job in its first screen is to show what the tool prints. It used
+// to lead with an architecture description, which answers a question nobody has
+// yet: a stranger deciding whether to keep reading wants the output, and the 3am
+// incident — the change, the actor, and the Event it caused — is the output that
+// makes the case in one screen.
+//
+// The check is structural rather than about wording. Prose should be free to
+// improve; what must not drift is the ordering, because every restructure of a
+// README is an opportunity for the flagship block to sink below the fold.
+func TestREADMELeadsWithTheTimeline(t *testing.T) {
+	readme := readFile(t, "README.md")
+
+	var flagship struct {
+		Line int
+		Body string
+	}
+	for _, block := range fencedBlocks(readme) {
+		if strings.Contains(block.Body, "kuberecord timeline") {
+			flagship = block
+			break
+		}
+	}
+	if flagship.Line == 0 {
+		t.Fatal("README.md contains no code block showing `kuberecord timeline` output; " +
+			"the flagship output is what the first screen is for")
+	}
+
+	if flagship.Line > firstScreenful {
+		t.Errorf("the timeline block starts on line %d, past the %d-line first screenful",
+			flagship.Line, firstScreenful)
+	}
+
+	// Before installation and before architecture, which is the ordering the
+	// criterion names. A section that is absent scores 0 and cannot fail this.
+	for _, heading := range []string{"## Installing", "## Installing the CLI", "## Architecture", "## Why"} {
+		if line := headingLineNumber(readme, heading); line != 0 && line < flagship.Line {
+			t.Errorf("%q is on line %d, above the timeline block on line %d", heading, line, flagship.Line)
+		}
+	}
+
+	// The 3am framing is three facts in one table, and a block that has lost one
+	// of them has lost the argument it was making.
+	for _, want := range []struct{ substring, why string }{
+		{"--with-events", "the correlated Kubernetes Event is half the story"},
+		{"Modified", "the change"},
+		{"Event", "the Event it caused"},
+		{"→", "an old value beside a new one, which is what makes a row an answer"},
+	} {
+		if !strings.Contains(flagship.Body, want.substring) {
+			t.Errorf("the timeline block no longer shows %q — %s", want.substring, want.why)
+		}
+	}
+
+	// And the actor column, which is the "who" the tagline promises.
+	if !strings.Contains(flagship.Body, "ACTOR") {
+		t.Error("the timeline block no longer shows the ACTOR column; " +
+			"\"git blame for your cluster\" is a claim about who, not only about what")
+	}
+}
+
+//
+// The zero-infrastructure quickstart (Task 12.3)
+//
+
+var zeroInfraFiles = []string{
+	"examples/zero-infra/README.md",
+	"examples/zero-infra/kind.yaml",
+	"examples/zero-infra/minio.yaml",
+	"examples/zero-infra/secret.yaml",
+	"examples/zero-infra/sink.yaml",
+	"examples/zero-infra/rule.yaml",
+	"examples/zero-infra/demo.yaml",
+	"examples/zero-infra/zero-infra.sh",
+}
+
+func TestZeroInfraFilesExist(t *testing.T) {
+	for _, rel := range zeroInfraFiles {
+		t.Run(rel, func(t *testing.T) {
+			info, err := os.Stat(repoPath(rel))
+			if err != nil {
+				t.Fatalf("%s is promised by the zero-infrastructure quickstart but missing: %v", rel, err)
+			}
+			if info.Size() == 0 {
+				t.Fatalf("%s is empty", rel)
+			}
+		})
+	}
+
+	script := repoPath("examples/zero-infra/zero-infra.sh")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("stat zero-infra.sh: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("examples/zero-infra/zero-infra.sh is not executable; " +
+			"`make quickstart-zero-infra` runs it directly")
+	}
+}
+
+// TestZeroInfraIsWhatItClaims pins the two halves of the criterion that make this
+// a *different* path rather than a second copy of the first one: it installs with
+// helm, it reads back with the CLI, and there is no ClickHouse in it anywhere.
+//
+// The last of those is the one worth a test. "No infrastructure" is easy to lose
+// by accident — a debugging session that adds a ClickHouse to compare against, a
+// copied block from the other quickstart — and the resulting script would still
+// pass every other check here while no longer demonstrating the thing it exists
+// to demonstrate.
+func TestZeroInfraIsWhatItClaims(t *testing.T) {
+	script := readFile(t, "examples/zero-infra/zero-infra.sh")
+
+	for _, want := range []struct{ substring, why string }{
+		{"upgrade --install", "the criterion is a `helm install`, not a kustomize apply"},
+		{"timeline", "the path ends in an answered `kuberecord timeline`"},
+		{"go build", "the CLI is built from this clone, so the run tests this tree"},
+		{"ZERO_INFRA_BUDGET_SECONDS", "the ten-minute claim is enforced by a budget, not asserted"},
+	} {
+		if !strings.Contains(script, want.substring) {
+			t.Errorf("examples/zero-infra/zero-infra.sh no longer contains %q — %s", want.substring, want.why)
+		}
+	}
+
+	// No database, in the script or in anything it applies. Prose may name
+	// ClickHouse — the example's README contrasts the two paths on purpose — so
+	// this checks what is executed and what is applied, not what is explained.
+	for _, rel := range []string{
+		"examples/zero-infra/zero-infra.sh",
+		"examples/zero-infra/sink.yaml",
+		"examples/zero-infra/rule.yaml",
+		"examples/zero-infra/minio.yaml",
+		"examples/zero-infra/demo.yaml",
+		"examples/zero-infra/secret.yaml",
+	} {
+		content := readFile(t, rel)
+		for _, banned := range []string{"kind: ClickHouseSink", "clickhouse-client", "clickhouse/clickhouse-server"} {
+			if strings.Contains(content, banned) {
+				t.Errorf("%s contains %q; the zero-infrastructure path must stand up no database",
+					rel, banned)
+			}
+		}
+	}
+}
+
+// TestZeroInfraIsCITested is the seam the "CI-tested end to end like the existing
+// quickstart, and asserted to complete in under ten minutes" criterion hangs on.
+//
+// Nothing but these three lines connects the committed script, the make target a
+// reader is told to run, and the job that runs it on every push with a budget.
+// Break any of them and the example still looks tested.
+func TestZeroInfraIsCITested(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	for _, want := range []string{
+		"examples/zero-infra/zero-infra.sh",
+		"quickstart-zero-infra:",
+		"quickstart-zero-infra-down:",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("the Makefile no longer contains %q; the documented command does not exist", want)
+		}
+	}
+
+	workflow := readFile(t, ".github/workflows/quickstart.yml")
+	if !strings.Contains(workflow, "make quickstart-zero-infra") {
+		t.Error(".github/workflows/quickstart.yml no longer runs the zero-infrastructure quickstart")
+	}
+	if !strings.Contains(workflow, "make quickstart-zero-infra-down") {
+		t.Error(".github/workflows/quickstart.yml no longer tears the zero-infrastructure cluster down; " +
+			"a failed run would leave a kind cluster on the runner")
+	}
+
+	// The budget is the ten-minute claim. A job that runs the script without one
+	// tests that it works, not that it works in time — and the README promises
+	// both.
+	budget := regexp.MustCompile(`ZERO_INFRA_BUDGET_SECONDS:\s*"?(\d+)"?`).FindStringSubmatch(workflow)
+	if budget == nil {
+		t.Fatal(".github/workflows/quickstart.yml sets no ZERO_INFRA_BUDGET_SECONDS; " +
+			"the under-ten-minutes claim is then untested")
+	}
+	if budget[1] != "600" {
+		t.Errorf("the CI budget is %ss, but the README promises under ten minutes", budget[1])
+	}
+}
+
+// TestZeroInfraCredentialsAgree is TestTeeExampleCredentialsAgree's twin, for the
+// same failure and the same reason: the object store's root credentials are
+// written down twice, and if the two drift the S3Sink reports
+// BucketReachable=False and archives nothing — leaving a reader with a healthy
+// operator, a healthy MinIO, and an empty bucket.
+func TestZeroInfraCredentialsAgree(t *testing.T) {
+	server := readFile(t, "examples/zero-infra/minio.yaml")
+	operator := readFile(t, "examples/zero-infra/secret.yaml")
+
+	for _, key := range teeKeyPair {
+		t.Run(key, func(t *testing.T) {
+			pattern := stringDataValue(key)
+			serverMatch := pattern.FindStringSubmatch(server)
+			operatorMatch := pattern.FindStringSubmatch(operator)
+			if serverMatch == nil {
+				t.Fatalf("examples/zero-infra/minio.yaml sets no %s", key)
+			}
+			if operatorMatch == nil {
+				t.Fatalf("examples/zero-infra/secret.yaml sets no %s", key)
+			}
+			if serverMatch[1] != operatorMatch[1] {
+				t.Errorf("%s is %q in minio.yaml but %q in secret.yaml; the sink could not authenticate",
+					key, serverMatch[1], operatorMatch[1])
+			}
+			if serverMatch[1] == "" {
+				t.Errorf("%s is empty in both files", key)
+			}
+		})
+	}
+
+	// And the third copy, which the tee example does not have: the CLI reads the
+	// archive back with the same key pair, exported into the AWS credential chain
+	// by the script. A drift here fails at the last step of the run, after
+	// everything else has worked.
+	script := readFile(t, "examples/zero-infra/zero-infra.sh")
+	for _, pair := range []struct{ key, variable string }{
+		{"accessKeyId", "AWS_ACCESS_KEY_ID"},
+		{"secretAccessKey", "AWS_SECRET_ACCESS_KEY"},
+	} {
+		want := stringDataValue(pair.key).FindStringSubmatch(server)
+		if want == nil {
+			t.Fatalf("examples/zero-infra/minio.yaml sets no %s", pair.key)
+		}
+		exported := regexp.MustCompile(`export ` + pair.variable + `="([^"]*)"`).FindStringSubmatch(script)
+		if exported == nil {
+			t.Fatalf("zero-infra.sh exports no %s; the CLI could not read the archive", pair.variable)
+		}
+		if exported[1] != want[1] {
+			t.Errorf("%s is %q in minio.yaml but the script exports %s=%q",
+				pair.key, want[1], pair.variable, exported[1])
+		}
+	}
+}
+
+// TestZeroInfraSinkMatchesItsObjectStore is the seam between the declarative half
+// and the one imperative step, as TestTeeBucketScriptMatchesTheSink is for the
+// tee example — plus the two joins that example does not have, because there the
+// archive is only written and here it is also read.
+//
+// Four names have to agree, and nothing but this connects them: the bucket the
+// script creates and the sink writes to, the endpoint the sink dials and the
+// Service that answers it, the prefix the sink writes under and the `--source`
+// the CLI reads, and the cluster identity the helm install stamps and the
+// standalone read asks for.
+func TestZeroInfraSinkMatchesItsObjectStore(t *testing.T) {
+	script := readFile(t, "examples/zero-infra/zero-infra.sh")
+	sinkSpec := readFile(t, "examples/zero-infra/sink.yaml")
+	minio := readFile(t, "examples/zero-infra/minio.yaml")
+
+	shellDefault := func(name string) string {
+		m := regexp.MustCompile(`(?m)^` + name + `="([^"]*)"`).FindStringSubmatch(script)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	yamlField := func(content, field string) string {
+		m := regexp.MustCompile(`(?m)^\s*` + field + `:\s*(\S+)`).FindStringSubmatch(content)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+
+	bucket := yamlField(sinkSpec, "bucket")
+	if bucket == "" {
+		t.Fatal("examples/zero-infra/sink.yaml sets no spec.bucket")
+	}
+	if got := shellDefault("BUCKET"); got != bucket {
+		t.Errorf("the S3Sink archives to bucket %q but the script creates %q", bucket, got)
+	}
+
+	prefix := yamlField(sinkSpec, "prefix")
+	if prefix == "" {
+		t.Fatal("examples/zero-infra/sink.yaml sets no spec.prefix")
+	}
+	if got := shellDefault("PREFIX"); got != prefix {
+		t.Errorf("the S3Sink writes under prefix %q but the CLI reads %q", prefix, got)
+	}
+
+	// The endpoint is a Service DNS name, and the Service has to exist.
+	endpoint := yamlField(sinkSpec, "endpoint")
+	host := strings.TrimPrefix(strings.TrimPrefix(endpoint, "http://"), "https://")
+	host, _, _ = strings.Cut(host, ":")
+	service, namespace, ok := strings.Cut(strings.TrimSuffix(host, ".svc"), ".")
+	if !ok {
+		t.Fatalf("spec.endpoint %q is not a <service>.<namespace>.svc name", endpoint)
+	}
+	if !strings.Contains(minio, "name: "+namespace) {
+		t.Errorf("the sink dials namespace %q, which examples/zero-infra/minio.yaml does not create", namespace)
+	}
+	if !strings.Contains(minio, "name: "+service) {
+		t.Errorf("the sink dials Service %q, which examples/zero-infra/minio.yaml does not create", service)
+	}
+	if got := shellDefault("MINIO_NAMESPACE"); got != namespace {
+		t.Errorf("the sink dials namespace %q but the script execs into %q", namespace, got)
+	}
+
+	// The cluster identity is stamped by the helm install and asked for by the
+	// standalone read, and there is no cluster in that step to reconcile the two.
+	clusterID := shellDefault("CLUSTER_ID")
+	if clusterID == "" {
+		t.Fatal("zero-infra.sh declares no CLUSTER_ID")
+	}
+	if !strings.Contains(script, `--set clusterID="${CLUSTER_ID}"`) {
+		t.Error("zero-infra.sh no longer installs the chart with the CLUSTER_ID it later queries by")
+	}
+	if !strings.Contains(script, `--cluster-id "${CLUSTER_ID}"`) {
+		t.Error("zero-infra.sh no longer reads the archive with the cluster identity it stamped")
+	}
+
+	// And the Secret the script reads the key pair out of.
+	if !strings.Contains(minio, "name: minio-credentials") {
+		t.Error("examples/zero-infra/minio.yaml no longer ships the Secret the script reads its credentials from")
+	}
+}
+
+// zeroInfraCustomResources are the example's custom resources and the types they
+// must decode into. See TestTeeExampleCustomResourcesDecode for why a decode is
+// worth doing at all: a CRD prunes an unknown field silently, so a typo in a
+// hand-written example applies cleanly and behaves as the default.
+var zeroInfraCustomResources = []struct {
+	file    string
+	objects func() []any
+}{
+	{"examples/zero-infra/sink.yaml", func() []any { return []any{&v1alpha1.S3Sink{}} }},
+	{"examples/zero-infra/rule.yaml", func() []any { return []any{&v1alpha1.ClusterStreamRule{}} }},
+}
+
+func TestZeroInfraCustomResourcesDecode(t *testing.T) {
+	for _, tc := range zeroInfraCustomResources {
+		t.Run(tc.file, func(t *testing.T) {
+			documents := splitYAML(t, readFile(t, tc.file))
+			targets := tc.objects()
+			if len(documents) != len(targets) {
+				t.Fatalf("%s holds %d documents, expected %d", tc.file, len(documents), len(targets))
+			}
+			for i, doc := range documents {
+				if err := yaml.UnmarshalStrict(doc, targets[i]); err != nil {
+					t.Errorf("%s document %d does not decode into %T: %v", tc.file, i+1, targets[i], err)
+				}
+			}
+		})
+	}
+}
+
+// TestREADMEOffersTheZeroInfraPath keeps the path reachable from where somebody
+// deciding whether to try kuberecord is standing. An evaluation path nobody is
+// told about is a test fixture.
+func TestREADMEOffersTheZeroInfraPath(t *testing.T) {
+	readme := readFile(t, "README.md")
+	for _, want := range []struct{ substring, why string }{
+		{"make quickstart-zero-infra", "the one command the path is"},
+		{"examples/zero-infra/", "where the steps are documented"},
+		{"helm install", "the criterion names helm, and the reader should see which install this is"},
+	} {
+		if !strings.Contains(readme, want.substring) {
+			t.Errorf("README.md no longer contains %q — %s", want.substring, want.why)
+		}
+	}
+}
+
+//
+// The query library and the CLI are complements, and say so (Task 12.3)
+//
+
+// TestQueriesRoutesBetweenTheCLIAndSQL keeps docs/QUERIES.md honest about what it
+// is now for.
+//
+// Before the CLI existed, this page was the only way to ask any of these
+// questions and the reader had no choice to make. Now there is one, and the page
+// that answers a single-object question in twenty lines of SQL without mentioning
+// the one-line command is not merely incomplete — it is actively sending people
+// the long way round.
+func TestQueriesRoutesBetweenTheCLIAndSQL(t *testing.T) {
+	queries := readFile(t, "docs/QUERIES.md")
+
+	if !strings.Contains(queries, "\n## CLI or SQL?\n") {
+		t.Fatal("docs/QUERIES.md has no \"CLI or SQL?\" section; the two are complements and the doc must say which is which")
+	}
+
+	// Every command the routing table is supposed to route to.
+	for _, command := range []string{"timeline", "diff", "get", "blame", "scopes"} {
+		if !strings.Contains(queries, "kuberecord "+command) {
+			t.Errorf("docs/QUERIES.md never names `kuberecord %s`", command)
+		}
+	}
+
+	// And the single-object sections each have to name the command that answers
+	// them, in the section itself — a reader who arrived by anchor or by search
+	// never sees the routing table at the top.
+	sections := map[string]string{}
+	var current string
+	for line := range strings.SplitSeq(queries, "\n") {
+		if strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") {
+			current = strings.TrimSpace(strings.TrimLeft(line, "# "))
+			continue
+		}
+		if current != "" {
+			sections[current] += line + "\n"
+		}
+	}
+	for _, heading := range []string{
+		"Reconstructing an object's state at an instant",
+		"What did this deleted object look like?",
+		"Events for object X around time T",
+		"Was anybody watching?",
+		"One object's timeline",
+	} {
+		body, ok := sections[heading]
+		if !ok {
+			t.Errorf("docs/QUERIES.md no longer has a %q section", heading)
+			continue
+		}
+		if !strings.Contains(body, "kuberecord ") {
+			t.Errorf("the %q section answers a single-object question but never names the CLI command that does it in one line",
+				heading)
+		}
+	}
+
+	// The converse, which is the half that stops this from becoming a page that
+	// deprecates itself: the wide questions have to say they stay in SQL.
+	staysSQL := 0
+	for _, heading := range []string{
+		"Incident window — everything that changed in a namespace",
+		"Drift your GitOps controller did not cause",
+		"Top flappers",
+	} {
+		if strings.Contains(sections[heading], "stays SQL") {
+			staysSQL++
+		}
+	}
+	if staysSQL < 3 {
+		t.Errorf("only %d of the three fleet-level sections say they stay in SQL; "+
+			"a query library that does not say what it is still for reads as a deprecated one", staysSQL)
+	}
+}
+
+// TestCLIReferenceCoversItsRequiredSubjects is the rest of Task 12.3's first
+// criterion — the parts of the reference that are not a command or a flag, and
+// that a page can quietly lose while still looking complete.
+//
+// Presence, not wording. Each entry is a subject a reader arrives needing and
+// cannot get from `--help`.
+func TestCLIReferenceCoversItsRequiredSubjects(t *testing.T) {
+	reference := readFile(t, "docs/CLI.md")
+
+	for _, tc := range []struct{ want, why string }{
+		{"\n## Global flags\n", "the flags every command carries, and which of them are kubectl's"},
+		{"\n## Output formats\n", "which command renders which format, and what a refusal means"},
+		{"\n## Exit codes\n", "the four codes, and why 3 is the one worth scripting against"},
+		{"cli.kuberecord.io/v1alpha1", "the structured output contract (D19)"},
+		{"\n## Backend capability differences\n", "what each backend can and cannot answer (D17)"},
+		{"\n### Cold scans\n", "what a scan of an unindexed archive costs, which is the trade D18 buys"},
+		{"\n## The configuration file\n", "the file schema, including the fields it refuses by name"},
+		{"\n### The schema, field by field\n", "a reference needs the fields, not only an annotated example"},
+	} {
+		if !strings.Contains(reference, tc.want) {
+			t.Errorf("docs/CLI.md no longer contains %q — %s", tc.want, tc.why)
+		}
+	}
+
+	// The capability table has to name every field of the declared contract. A
+	// backend that gains one and a page that does not mention it is exactly the
+	// silent degradation Invariant 4 exists to prevent.
+	for _, capability := range []string{"deletions", "server_side_filter", "point_query", "time_bound_required"} {
+		if !strings.Contains(reference, capability) {
+			t.Errorf("docs/CLI.md never names the %q capability, which changes what the output means",
+				capability)
+		}
+	}
+
+	// The four exit codes, each spelled as the page's table spells them.
+	for _, code := range []string{"| `0` |", "| `1` |", "| `2` |", "| `3` |"} {
+		if !strings.Contains(reference, code) {
+			t.Errorf("docs/CLI.md's exit-code table no longer has a row %s", code)
+		}
+	}
+
+	// And the install channels, in the order Task 12.2 requires.
+	channels := []string{"kubectl krew install kuberecord", "brew install", "releases/download", "go install"}
+	at := 0
+	for _, channel := range channels {
+		index := strings.Index(reference[at:], channel)
+		if index < 0 {
+			t.Fatalf("docs/CLI.md no longer shows %q, or shows it out of order (expected order: %v)",
+				channel, channels)
+		}
+		at += index + len(channel)
+	}
+}
+
+// TestZeroInfraExampleIsLinked keeps the new page reachable. An orphan under
+// examples/ is a page only its author will ever open.
+func TestZeroInfraExampleIsLinked(t *testing.T) {
+	for _, page := range []string{"README.md", "docs/CLI.md"} {
+		if !strings.Contains(readFile(t, page), "examples/zero-infra/") {
+			t.Errorf("%s does not link examples/zero-infra/", page)
+		}
 	}
 }

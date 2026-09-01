@@ -2,32 +2,55 @@
 
 **Git blame for your Kubernetes cluster.**
 
-A Kubernetes operator that streams every observed state change of the resources
-you name — `Added`, `Modified`, `Deleted` — into the sink you choose, as
-immutable, append-only records. So "what did this look like five minutes before
-it broke?" has an answer, and answering it is a query rather than an archaeology
-project.
+It is 02:47. `checkout` is throwing 5xx. Nobody deployed, and
+`kubectl get events` has already forgotten why.
 
 ```console
-$ make quickstart
-...
-==> [01:36] Rows recorded (cluster_id = 'kuberecord-quickstart')
-   ┌─event_type─┬─kind───────┬─namespace───────┬─name────────────┬────────────────────────────ts─┐
-1. │ Snapshot   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:56.199673090 │
-2. │ Snapshot   │ Deployment │ quickstart-demo │ checkout-api    │ 2026-08-03 00:59:56.199748632 │
-3. │ Modified   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:58.458432966 │
-   └────────────┴────────────┴─────────────────┴─────────────────┴───────────────────────────────┘
+$ kubectl kuberecord timeline deploy/checkout -n payments --with-events
+→ discovered ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+→ cluster-id prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-==> [01:37] The feature-flag change, as a diff
-diff: [{"value":"new-checkout=on","op":"replace","path":"/data/feature_flags"}]
-
-==> [01:37] Redaction: the ConfigMap's password never reached the database
-   ┌─name────────────┬─feature_flags────┬─password───┐
-1. │ checkout-config │ new-checkout=off │ [REDACTED] │
-   └─────────────────┴──────────────────┴────────────┘
-
-kuberecord is streaming. 8 rows in 96s.
+TIME (UTC)               EVENT     ACTOR                      CHANGE
+2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+2026-08-28 14:06:44.020  Event     replicaset-controller      ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: excee…
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:03:20.310  Event     kube-controller-manager    ScalingReplicaSet: Scaled up replica set checkout-7d4f to…
+2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
 ```
+
+At 14:03 an apply cut the memory limit from 2Gi to 512Mi. Ninety seconds later
+the controller scaled the replica set, and the pods it created stopped fitting.
+**The change, the actor who made it, and the Event it caused — one command, one
+screen.** No SQL, no dashboard, and no guessing which of six controllers touched
+the object.
+
+Then narrow it to exactly what moved, or pull the object back as it stood before
+any of it happened:
+
+```console
+$ kubectl kuberecord diff deploy/checkout -n payments --since 30m
+2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+  ~ spec.template.spec.containers[0].resources.limits.memory
+      - 2Gi
+      + 512Mi
+
+$ kubectl kuberecord get deploy/checkout -n payments --at 2026-08-28T14:00:00Z
+```
+
+KubeRecord is a Kubernetes operator that streams every observed state change of
+the resources you name — `Added`, `Modified`, `Deleted` — into the sink you
+choose, as immutable, append-only records. `kubectl kuberecord`, above, is how
+you read them back: [four ways to install it](#installing-the-cli), and it also
+runs standalone against an object-store archive with no cluster at all.
+
+So "what did this look like five minutes before it broke?" has an answer, and
+answering it is a query rather than an archaeology project.
 
 ---
 
@@ -106,11 +129,65 @@ The ten-minute claim is tested rather than asserted: CI runs the same script wit
 a hard 600-second budget on every push, and the run fails if no rows arrive or if
 it overruns.
 
+```console
+$ make quickstart
+...
+==> [01:36] Rows recorded (cluster_id = 'kuberecord-quickstart')
+   ┌─event_type─┬─kind───────┬─namespace───────┬─name────────────┬────────────────────────────ts─┐
+1. │ Snapshot   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:56.199673090 │
+2. │ Snapshot   │ Deployment │ quickstart-demo │ checkout-api    │ 2026-08-03 00:59:56.199748632 │
+3. │ Modified   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:58.458432966 │
+   └────────────┴────────────┴─────────────────┴─────────────────┴───────────────────────────────┘
+
+==> [01:37] The feature-flag change, as a diff
+diff: [{"value":"new-checkout=on","op":"replace","path":"/data/feature_flags"}]
+
+==> [01:37] Redaction: the ConfigMap's password never reached the database
+   ┌─name────────────┬─feature_flags────┬─password───┐
+1. │ checkout-config │ new-checkout=off │ [REDACTED] │
+   └─────────────────┴──────────────────┴────────────┘
+
+kuberecord is streaming. 8 rows in 96s.
+```
+
 Every step is an ordinary `kubectl apply` you can run by hand, and
 [`examples/quickstart/`](examples/quickstart/) documents each one — including
 which parts are evaluation shortcuts (`emptyDir` storage, a committed password)
 and which are exactly how a production install works (all of the RBAC, all of the
 pipeline).
+
+### Or without a database at all
+
+Standing up a database to decide whether a tool is worth having is a bad trade.
+This path removes it: one `helm install`, an object store, and the answer read
+back with `kubectl kuberecord` — no ClickHouse anywhere.
+
+```sh
+make quickstart-zero-infra
+```
+
+It stands up a kind cluster, **installs the operator with Helm**, applies an
+`S3Sink` pointed at a single-node MinIO, records a demo workload changing, and
+then reads that history back with the CLI — `scopes`, `timeline`, `diff` and a
+reconstruction proving a redacted value never reached the archive. The last step
+runs the same query again with no kubeconfig at all, because an archive needs no
+cluster to be read. `make quickstart-zero-infra-down` deletes all of it.
+
+Same ten-minute claim, tested the same way: CI runs this script too, on every
+push, with a hard 600-second budget, and the run fails if the CLI reads no changes
+out of the archive or if the whole thing overruns.
+
+Nothing about the *capture* path is reduced by it — an `S3Sink` records what a
+`ClickHouseSink` records. What is different is the read side, it is declared
+rather than discovered, and the CLI says so where it applies: an archive has no
+index, no deletions and needs a time bound, and each of those changes what the
+output tells you. The whole table is
+[`docs/CLI.md`](docs/CLI.md#backend-capability-differences), and
+[`examples/zero-infra/`](examples/zero-infra/) documents every step of this one.
+
+Adding a queryable timeline later is not a migration: a rule targets exactly one
+sink permanently, so it is a `ClickHouseSink` and a **second rule** beside this
+one — the tee pattern, [`docs/TEE.md`](docs/TEE.md).
 
 ## Your first five queries
 
@@ -214,6 +291,13 @@ HAVING modifications >= {threshold:UInt32}
 ORDER BY modifications DESC
 LIMIT 20;
 ```
+
+These five are **fleet questions** — many objects, one window — and SQL is the
+right tool for them. For the questions about *one* object, the CLI at the top of
+this page answers them without a query: `timeline` for query 1 narrowed to an
+object, `diff` for query 2, `get --at` for query 3, and `blame` for "who last set
+this field". Which is which, and why the two are complements rather than
+alternatives, is [`docs/QUERIES.md`](docs/QUERIES.md#cli-or-sql).
 
 The full library — reconstructing an object's exact state at an instant, what a
 deleted object last contained, Kubernetes Events for an object around a time — is
@@ -403,6 +487,41 @@ make undeploy                                    # kustomize: operator + CRDs
 Deleting the CRDs deletes every sink and rule, but not a single row: the sink is
 the durable store, and nothing in an uninstall touches ClickHouse.
 
+## Installing the CLI
+
+The operator writes the rows; `kubectl kuberecord` is how you read them. It ships
+as one binary under two names — `kubectl-kuberecord`, which makes
+`kubectl kuberecord …` work, and `kuberecord`, which runs standalone against an
+object-store archive with no cluster at all.
+
+```sh
+# 1. krew, which is how a kubectl user finds a plugin.
+kubectl krew install kuberecord
+kubectl kuberecord timeline deploy/checkout -n payments
+
+# 2. Homebrew, on macOS and on Linux. The one channel that installs both names.
+brew install kuberecord/tap/kuberecord
+
+# 3. The release archive, directly — five platforms, Windows included.
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord_v0.3.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
+
+# 4. From source, with a Go toolchain.
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.0
+```
+
+krew installs the plugin name only — that is what a plugin manager is for — so
+the standalone `kuberecord` comes from Homebrew or from the archive. `go install`
+compiles rather than downloads: no standalone name, no release stamp, and nothing
+signed. Which channel gives you what is a table in
+[`docs/CLI.md`](docs/CLI.md#installing).
+
+The archives are cross-compiled cgo-free, carry both names from one compilation,
+and are signed through `checksums.txt` — see
+[`docs/VERIFYING.md`](docs/VERIFYING.md#the-cli-archives). The CLI ships from
+v0.3.0 onward; earlier releases have no archives to install.
+
 ## Documentation
 
 | Page | What is in it |
@@ -411,7 +530,7 @@ the durable store, and nothing in an uninstall touches ClickHouse.
 | [`docs/QUERIES.md`](docs/QUERIES.md) | The query library, for both backends. Incident windows, drift by actor, flap reports, state reconstruction, Events for an object, what a deleted object last contained — plus DuckDB recipes and an Athena table for the S3 archive. Every ClickHouse statement is executed against a real ClickHouse in CI, and every DuckDB recipe against a real object store. |
 | [`docs/RBAC.md`](docs/RBAC.md) | The aggregated-ClusterRole model, the no-self-escalation argument, granting a new kind in 30 seconds, and the honest read-flattening caveat. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Measured envelopes per scale profile — throughput, p99 enqueue-block, CPU and RSS at up to 20,000 watched objects — and how to reproduce them. |
-| [`docs/CLI.md`](docs/CLI.md) | The `kubectl kuberecord` plugin: where it reads from (the `--source` / `--sink` / profile / discovered-sink chain), how the `cluster_id` is resolved, the configuration file schema — which references a password and never stores one — and the read-only ClickHouse user that is the recommended posture for querying. |
+| [`docs/CLI.md`](docs/CLI.md) | The `kubectl kuberecord` reference. Every command — `timeline`, `diff`, `get --at`, `blame`, `scopes`, `version`, `config` — with every flag, the exit codes, the output formats, and the `cli.kuberecord.io/v1alpha1` envelope that makes `-o json` a contract rather than a rendering. Then where it reads from (the `--source` / `--sink` / profile / discovered-sink chain), how the `cluster_id` is resolved, what each backend can and cannot answer, what a cold scan of an unindexed archive costs, the configuration file schema — which references a password and never stores one — and the read-only ClickHouse user that is the recommended posture for querying. |
 | [`docs/CRDS.md`](docs/CRDS.md) | Every field of the three custom resources, what each validation rejects and why, and every status condition they report. |
 | [`docs/TEE.md`](docs/TEE.md) | Hot and cold: a queryable ClickHouse timeline and a cheap immutable object-store archive, from one watch. Why the answer is two rules rather than one clever sink, why one informer serves both, why dedup state is per sink — and exactly which guarantees the archive half does not carry. Runnable: [`examples/tee/`](examples/tee/). |
 | [`docs/RETENTION.md`](docs/RETENTION.md) | Tamper-evidence and retention: enabling S3 Object Lock (a bucket prerequisite kuberecord cannot set), what `spec.objectLock` applies per object, `GOVERNANCE` versus `COMPLIANCE`, how lifecycle rules interact with a locked archive — and an explicit limits section, because kuberecord signs nothing and redaction is forward-only. |
@@ -452,6 +571,7 @@ make test-integration     # against throwaway dockerized ClickHouse and MinIO
 make test-e2e             # the acceptance suite on a kind cluster
 make test-chaos           # the failure-mode suite: outages, SIGKILL, saturation
 make quickstart           # the evaluation path above
+make quickstart-zero-infra  # the same, with an object store and no database
 ```
 
 ## Contributing
