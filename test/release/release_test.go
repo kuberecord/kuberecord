@@ -573,6 +573,12 @@ func TestReleaseWorkflow(t *testing.T) {
 		{"the chart is signed", "make release-chart-sign", "an unsigned chart is an unsigned operator by another route"},
 		{"the chart verifies itself", "make release-chart-verify", "a signature that does not verify must fail the release"},
 		{"the chart push is rehearsed", "make release-chart-rehearse", "a push is the step with something to get wrong"},
+		// Artifact Hub reads the ownership claim out of the registry, because an
+		// OCI chart repository has no index.yaml to serve it next to. A release
+		// that stops pushing it does not fail: the listing just stops being
+		// verified, quietly, and nothing else here would say so.
+		{"the Artifact Hub metadata is pushed", "make release-chart-metadata-push",
+			"an OCI repository has no index.yaml, so the ownership claim ships as an artifact"},
 		// Task 12.1. The CLI ships from this run rather than from a pipeline of
 		// its own, so each half of that has to still be wired up here.
 		{"the CLI is described", "make release-cli-sbom", "a binary with a different dependency set needs its own SBOM"},
@@ -872,6 +878,10 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-sign") },
 			"a signature is a registry write and a public transparency-log entry",
+		},
+		{
+			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-metadata-push") },
+			"the metadata claims ownership of a public listing, and it is a registry write",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-artifacts-sign") },
@@ -1318,6 +1328,53 @@ func TestChartOCIReferenceAgreesWithTheMakefile(t *testing.T) {
 		if !slices.ContainsFunc(prefixWarnings, func(w string) bool { return strings.Contains(content, w) }) {
 			t.Errorf("%s shows the chart reference without warning that its tag drops the `v` "+
 				"the operator tag and the signing identity both carry", page)
+		}
+	}
+}
+
+// TestArtifactHubMetadataIsAddressedTheWayArtifactHubReadsIt pins the three
+// strings that decide whether the ownership claim is ever read, none of which
+// this repository can discover it got wrong.
+//
+// Artifact Hub takes the repository URL as registered, appends the tag
+// `artifacthub.io`, pulls that artifact and walks its manifest for a layer of
+// exactly one media type. Every one of those is a silent failure if it drifts:
+// oras pushes happily to the wrong tag, and a layer of the wrong type is simply
+// not the layer being looked for. The push succeeds either way, the release
+// succeeds either way, and the only symptom is a listing that stops being
+// verified — somewhere else, later, where nobody is watching.
+func TestArtifactHubMetadataIsAddressedTheWayArtifactHubReadsIt(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+
+	// The layer media type Artifact Hub searches the manifest for. Written out
+	// here rather than read from the Makefile on purpose: a test that takes the
+	// string from the thing it is testing asserts nothing.
+	const layerType = "application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml"
+	if !strings.Contains(makefile, "CHART_METADATA_LAYER_TYPE ?= "+layerType) {
+		t.Errorf("the Makefile no longer pushes the metadata layer as %q. Artifact Hub "+
+			"ignores every other layer, so the artifact would be published and never read", layerType)
+	}
+	if !strings.Contains(makefile, "CHART_METADATA_TAG ?= artifacthub.io") {
+		t.Error("the Makefile no longer pushes the metadata under the `artifacthub.io` tag, " +
+			"which is the only tag Artifact Hub looks at for an OCI repository")
+	}
+
+	// The reference is built from CHART_OCI_REF rather than spelled out, for the
+	// same reason CHART_OCI_NAMESPACE is derived from IMAGE_REPO: a fork must not
+	// push its ownership claim over somebody else's chart repository.
+	if !strings.Contains(makefile, "CHART_METADATA_REF ?= $(CHART_OCI_REF):$(CHART_METADATA_TAG)") {
+		t.Error("the metadata reference is no longer derived from CHART_OCI_REF, so the chart " +
+			"repository is now named in two places and a fork can claim the wrong one")
+	}
+
+	// The file itself. It is committed rather than generated, so the release can
+	// only publish what is in the tree — and an ownership claim with no ID in it
+	// verifies nothing.
+	metadata := readFile(t, "artifacthub-repo.yml")
+	for _, field := range []string{"repositoryID:", "owners:"} {
+		if !strings.Contains(metadata, field) {
+			t.Errorf("artifacthub-repo.yml declares no %s; Artifact Hub would accept the "+
+				"artifact and verify nothing", strings.TrimSuffix(field, ":"))
 		}
 	}
 }

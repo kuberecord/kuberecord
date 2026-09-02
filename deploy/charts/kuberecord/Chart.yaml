@@ -30,3 +30,10 @@ annotations:
   # but never upgrades or deletes them. Declared here so the constraint is
   # visible to anyone reading the chart metadata rather than only its README.
   kuberecord.io/crd-lifecycle: install-only
+# Chart maintainers, surfaced on the Artifact Hub listing next to the ownership
+# claim in the repository's artifacthub-repo.yml. Kept in step with that file:
+# Helm shows this list, Artifact Hub trusts that one, and a reader who finds
+# them disagreeing has no way to tell which is current.
+maintainers:
+  - name: Yelyzaveta Zhyrova
+    email: zhyrova.yelyzaveta@gmail.com

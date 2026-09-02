@@ -902,16 +902,22 @@ CHANGELOG_SECTION := hack/changelog-section.sh
 # for every attached asset, and an SBOM of the image. What each of those proves —
 # and, just as important, what it does not — is docs/VERIFYING.md.
 #
-# cosign and syft are expected on PATH rather than bootstrapped into bin/, which
-# is the KUBECTL/KIND convention rather than the promtool/duckdb one. The reason
-# is specific to these two: their own installers verify the checksum of the binary
-# they fetch, and hand-rolling a `curl | tar` for them in the task about supply
-# chain integrity would be trading a verified download for an unverified one. CI
-# installs them with the pinned installer actions; a maintainer rehearsing locally
-# installs them once (see docs/DEVELOPMENT.md). Every target below says which one
-# it needs and how to get it.
+# cosign, syft and oras are expected on PATH rather than bootstrapped into bin/,
+# which is the KUBECTL/KIND convention rather than the promtool/duckdb one. The
+# reason is specific to these three: their own installers verify the checksum of
+# the binary they fetch, and hand-rolling a `curl | tar` for them in the task about
+# supply chain integrity would be trading a verified download for an unverified
+# one. CI installs them with the pinned installer actions; a maintainer rehearsing
+# locally installs them once (see docs/DEVELOPMENT.md). Every target below says
+# which one it needs and how to get it.
+#
+# oras is not `go install`ed for a second reason on top of that one: the pin
+# ceiling documented under "Tool Versions" applies to anything bootstrapped
+# through `go install`, and a release tool that stops building the day its module
+# adopts a newer Go directive is a release tool that fails at tag time.
 COSIGN ?= cosign
 SYFT ?= syft
+ORAS ?= oras
 
 # GITHUB_REPO is <owner>/<repo>, read out of the module path rather than written
 # down again. It is what a keyless signature's certificate identity is built from
@@ -2046,6 +2052,78 @@ release-chart-verify: ## Verify the published chart signature the way a user wou
 	@echo "release: the signature on $(CHART_OCI_REF)@$(release-chart-subject) is valid,"
 	@echo "  and it was made by $(COSIGN_IDENTITY)"
 
+# Artifact Hub's repository metadata, published as its own OCI artifact.
+#
+# artifacthub-repo.yml is what proves to Artifact Hub that this project controls
+# the listing — it carries the repositoryID issued when the repository was
+# registered, and it is what the verified-publisher flag and any future ownership
+# transfer are checked against. For an HTTP chart repository the file is simply
+# served next to index.yaml. This chart is published to an OCI registry and has no
+# index.yaml anywhere, so Artifact Hub reads it from the registry instead, and the
+# three details below are not conventions — they are what its code does.
+#
+# The tag is `artifacthub.io`, on the chart's *own* repository. Artifact Hub takes
+# the repository URL exactly as registered (`oci://$(CHART_OCI_REF)`), appends that
+# one tag and pulls it; it does not look at a sibling path and it does not look at
+# `latest`. So this pushes a second tag alongside the version tags rather than a
+# separate artifact, and it is deliberately not per-release: the file is
+# repository-level metadata, so each release overwrites the same tag. Doing it on
+# every release rather than once by hand is what makes it self-healing — a
+# registry that lost the tag gets it back at the next tag, without anyone
+# noticing it was gone.
+#
+# The layer media type is the part with no room for error at all. Artifact Hub
+# walks the artifact's manifest looking for a layer of exactly this type and
+# ignores everything else, so a typo here does not fail: the push succeeds, the
+# artifact exists, and the verification silently never happens. Nothing in this
+# repository would report that — which is the reason the string is written down
+# once, here, and asserted by test/release.
+#
+# The config is /dev/null, because the artifact has no configuration; it is
+# `--config`'d anyway because an OCI manifest requires a config descriptor, and
+# giving it Artifact Hub's own media type is what its documentation publishes.
+# Artifact Hub never inspects it (it pulls by *layer* media type), so this value
+# costs nothing and matches upstream.
+CHART_METADATA_FILE ?= artifacthub-repo.yml
+CHART_METADATA_TAG ?= artifacthub.io
+CHART_METADATA_REF ?= $(CHART_OCI_REF):$(CHART_METADATA_TAG)
+CHART_METADATA_CONFIG_TYPE ?= application/vnd.cncf.artifacthub.config.v1+yaml
+CHART_METADATA_LAYER_TYPE ?= application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+# Passed to every oras command that talks to a registry, and the counterpart of
+# HELM_REGISTRY_FLAGS: empty against ghcr.io, `--plain-http` against the throwaway
+# registry the rehearsal runs.
+ORAS_REGISTRY_FLAGS ?=
+
+.PHONY: release-chart-metadata-push
+release-chart-metadata-push: ## Push artifacthub-repo.yml to CHART_METADATA_REF so Artifact Hub can verify the listing.
+	$(call require-tool,$(ORAS),Install oras: https://oras.land/docs/installation (`brew install oras`).)
+	@# No login of its own. oras resolves registry credentials through the Docker
+	@# configuration ($$DOCKER_CONFIG/config.json), which is the same store
+	@# release-chart-login already populates with `cosign login` — see the comment
+	@# there for why that target authenticates twice. helm's registry
+	@# configuration, the other half of it, is the one oras does not read.
+	@set -e; \
+	if [ ! -f "$(CHART_METADATA_FILE)" ]; then \
+		echo "release: $(CHART_METADATA_FILE) does not exist, so there is no ownership claim to publish."; \
+		echo "  It is a committed file, not a generated one: see docs/RELEASING.md."; \
+		exit 1; \
+	fi; \
+	if ! grep -q '^repositoryID:' "$(CHART_METADATA_FILE)"; then \
+		echo "release: $(CHART_METADATA_FILE) declares no repositoryID."; \
+		echo "  Artifact Hub would accept the artifact and verify nothing, and no error"; \
+		echo "  would appear anywhere. The ID is on the repository's card in the Artifact"; \
+		echo "  Hub control panel."; \
+		exit 1; \
+	fi; \
+	echo "+ $(ORAS) push $(CHART_METADATA_REF) --config /dev/null:$(CHART_METADATA_CONFIG_TYPE) $(CHART_METADATA_FILE):$(CHART_METADATA_LAYER_TYPE) $(ORAS_REGISTRY_FLAGS)"; \
+	"$(ORAS)" push "$(CHART_METADATA_REF)" \
+		--config "/dev/null:$(CHART_METADATA_CONFIG_TYPE)" \
+		"$(CHART_METADATA_FILE):$(CHART_METADATA_LAYER_TYPE)" \
+		$(ORAS_REGISTRY_FLAGS) | sed 's/^/    /'
+	@echo "release: $(CHART_METADATA_REF) now carries the ownership claim in"
+	@echo "  $(CHART_METADATA_FILE). Artifact Hub picks it up the next time it processes"
+	@echo "  the repository; the verified-publisher flag follows from that, not from this push."
+
 # The chart push, rehearsed. Signing and attesting cannot be rehearsed — doing
 # them *is* publishing — but a push can be, against a registry that is not a
 # publication: a throwaway one on this machine, thrown away again afterwards.
@@ -2060,7 +2138,7 @@ release-chart-verify: ## Verify the published chart signature the way a user wou
 # leaving it behind is how a later release-chart-sign would sign a digest from a
 # registry that no longer exists.
 .PHONY: release-chart-rehearse
-release-chart-rehearse: helm ## Push the packaged chart to a throwaway local registry; publish nothing.
+release-chart-rehearse: helm ## Push the packaged chart and the Artifact Hub metadata to a throwaway local registry; publish nothing.
 	@echo "release: rehearsing the chart push against $(LOCAL_REGISTRY_HOST) — nothing is published."
 	$(MAKE) local-registry-up
 	@set -e; \
@@ -2068,10 +2146,16 @@ release-chart-rehearse: helm ## Push the packaged chart to a throwaway local reg
 	$(MAKE) --no-print-directory release-chart-push \
 		CHART_OCI_NAMESPACE=$(LOCAL_REGISTRY_HOST)/charts \
 		HELM_REGISTRY_FLAGS=--plain-http || status=$$?; \
+	if [ "$$status" -eq 0 ]; then \
+		$(MAKE) --no-print-directory release-chart-metadata-push \
+			CHART_OCI_NAMESPACE=$(LOCAL_REGISTRY_HOST)/charts \
+			ORAS_REGISTRY_FLAGS=--plain-http || status=$$?; \
+	fi; \
 	rm -f "$(RELEASE_CHART_DIGEST_FILE)"; \
 	$(MAKE) --no-print-directory local-registry-down; \
 	if [ "$$status" -ne 0 ]; then exit "$$status"; fi; \
-	echo "release: the chart pushed and its digest parsed. Nothing reached $(CHART_OCI_REF)."
+	echo "release: the chart and its Artifact Hub metadata pushed, and the chart's digest"; \
+	echo "  parsed. Nothing reached $(CHART_OCI_REF)."
 
 # What a rehearsal must not do, printed instead of done. Signing writes to a
 # registry and to a public transparency log, and attesting writes a record to
@@ -2136,6 +2220,7 @@ release-dry-run: release-artifacts verify-packaging ## Rehearse a release end to
 	@echo "  artifacts  $(RELEASE_DIR)/install.yaml, $(RELEASE_CHART_TGZ), $(RELEASE_CHECKSUMS)"
 	@echo "  cli        $(words $(CLI_PLATFORMS)) archives in $(RELEASE_DIR), both binary names in each"
 	@echo "  chart      $(CHART_OCI_REF):$(RELEASE_CHART_VERSION) (pushed to a throwaway registry, discarded)"
+	@echo "  metadata   $(CHART_METADATA_REF) (pushed to the same throwaway registry, discarded)"
 	@echo "  sbom       $(RELEASE_SBOM), $(RELEASE_CLI_SBOM)"
 	@echo "  krew/brew  $(RELEASE_KREW_MANIFEST), $(RELEASE_BREW_FORMULA) (digests re-derived, tap untouched)"
 	@echo "  unsigned   a rehearsal signs nothing and attests nothing; see docs/VERIFYING.md"

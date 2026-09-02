@@ -273,22 +273,27 @@ locally. `test/release` covers the extractor and the wiring under `make test`.
 [`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
 cutting one.
 
-The supply-chain half of a release (Task 7.4) needs two tools that are **not**
+The supply-chain half of a release (Task 7.4) needs three tools that are **not**
 bootstrapped into `bin/`, because their own installers verify the binaries they
 fetch and hand-rolling that in the task about supply-chain integrity would be a
 step backwards:
 
 ```sh
-brew install cosign syft    # or each project's own install instructions
+brew install cosign syft oras    # or each project's own install instructions
 ```
+
+`oras` is the newest of the three and the one a rehearsal will miss first: it
+pushes Artifact Hub's repository metadata beside the chart, and
+`make release-chart-rehearse` exercises that push against the throwaway registry
+along with the chart's.
 
 `zip` is needed too, for the Windows CLI archive. It ships with macOS and with
 every ubuntu runner, so this is worth knowing only when a container image turns
 out not to have it.
 
-CI installs both from SHA-pinned vendor actions. Without them the rehearsal fails
-at the SBOM with a message naming the tool and how to get it, rather than at a
-missing binary. Signing and attesting are the two steps a rehearsal cannot
+CI installs all three from SHA-pinned vendor actions. Without them the rehearsal
+fails with a message naming the tool and how to get it, rather than at a missing
+binary. Signing and attesting are the two steps a rehearsal cannot
 perform — doing them *is* publishing — so it prints them instead:
 `make release-rehearse-publishing`. What a release publishes and how anyone checks
 it is [`docs/VERIFYING.md`](VERIFYING.md).

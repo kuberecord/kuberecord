@@ -62,6 +62,7 @@ publishes:
 |---|---|
 | `ghcr.io/kuberecord/kuberecord:vX.Y.Z` | Multi-arch (`linux/amd64`, `linux/arm64`, `linux/s390x`, `linux/ppc64le`), built by `make release-image`, which is the repository's existing buildx target. |
 | `oci://ghcr.io/kuberecord/charts/kuberecord:X.Y.Z` | The same packaged chart as the `.tgz` below, in the registry. Note the tag has no `v` — a Helm chart version is semver, and the chart's is `X.Y.Z`. From v0.3.0 onward (Task 8.1). |
+| `oci://ghcr.io/kuberecord/charts/kuberecord:artifacthub.io` | Not a chart version — the same repository under a fixed tag, holding [`artifacthub-repo.yml`](../artifacthub-repo.yml) as a one-layer OCI artifact. It is the ownership claim [Artifact Hub](https://artifacthub.io) checks for the listing's verified-publisher flag, and an OCI chart repository has no `index.yaml` to serve it beside, so it ships as an artifact. Republished unchanged on every tag, by `make release-chart-metadata-push`. |
 | `install.yaml` | `kubectl apply -f` it: CRDs, RBAC and the manager, with the image above pinned exactly. For a non-prerelease tag it is byte-identical to the committed [`dist/install.yaml`](../dist/install.yaml) — the artifact you download is the file that was reviewed. |
 | `kuberecord-X.Y.Z.tgz` | The packaged Helm chart, `--version X.Y.Z --app-version vX.Y.Z`. |
 | `kuberecord_vX.Y.Z_<os>_<arch>.tar.gz` (`.zip` for Windows) | The CLI, five archives — `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64` — each carrying both `kubectl-kuberecord` and `kuberecord` plus the licence. Cross-compiled cgo-free by `make build-cli`, which asserts `CGO_ENABLED=0` against each produced binary. From v0.3.0 onward (Task 12.1). |
@@ -269,11 +270,12 @@ signature over `checksums.txt` is printed instead of made.
 
 The chart push is the exception, and it is genuinely exercised rather than
 printed: `make release-chart-rehearse` stands up a throwaway OCI registry on this
-machine, performs a real `helm push` of the real packaged chart into it, checks
-that the digest it reports still parses, and destroys the registry again. A push
-to a registry nobody can reach is not a publication, so a rehearsal is free to do
-it — and it catches the failures that would otherwise wait for a tag: a
-malformed reference, a flag that moved, an archive that was never packaged.
+machine, performs a real `helm push` of the real packaged chart into it, pushes
+the Artifact Hub metadata artifact beside it with `oras`, checks that the digest
+the chart push reports still parses, and destroys the registry again. A push to a
+registry nobody can reach is not a publication, so a rehearsal is free to do it —
+and it catches the failures that would otherwise wait for a tag: a malformed
+reference, a flag that moved, an archive that was never packaged.
 
 ```sh
 # Rehearse the committed version.
@@ -320,6 +322,7 @@ make release-chart-login                             # helm *and* cosign; CHART_
 make release-chart-push RELEASE_VERSION=v0.2.0       # the packaged chart, into the registry
 make release-chart-sign RELEASE_VERSION=v0.2.0       # over the digest the push reported
 make release-chart-verify RELEASE_VERSION=v0.2.0     # the chart command VERIFYING.md publishes
+make release-chart-metadata-push                     # artifacthub-repo.yml, under the artifacthub.io tag
 make release-artifacts-sign RELEASE_VERSION=v0.2.0   # sign-blob over checksums.txt, covering every asset
 make release-artifacts-verify RELEASE_VERSION=v0.2.0 # the blob command VERIFYING.md publishes
 make release-krew-verify-published RELEASE_VERSION=v0.2.0  # every krew/brew URI, as GitHub serves it
