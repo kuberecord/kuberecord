@@ -1994,6 +1994,18 @@ func TestKrewManifestSuitsTheIndex(t *testing.T) {
 		t.Errorf("spec.shortDescription ends with a full stop (%q); krew-index asks that it "+
 			"does not, because it is a label rather than a sentence", short)
 	}
+
+	// krew-index review asked for "Kubernetes" out of this line, and it is right
+	// about its own context: every entry in that index is a kubectl plugin, so the
+	// word spends a scarce column on the one thing a reader of that list already
+	// knows. The pull is towards putting it back, because the root command's own
+	// Short string says it and copying that string looks like consistency.
+	if strings.Contains(short, "Kubernetes") {
+		t.Errorf("spec.shortDescription is %q. krew-index review asked for \"Kubernetes\" out: "+
+			"it is a column in a list of kubectl plugins, and the word is the one thing "+
+			"every reader of that list already knows. `kuberecord --help` keeps it, because "+
+			"it is read without that framing", short)
+	}
 	if plugin.Spec.Description == "" {
 		t.Error("spec.description is empty; it is the whole of what `kubectl krew info` shows")
 	}
@@ -2002,10 +2014,24 @@ func TestKrewManifestSuitsTheIndex(t *testing.T) {
 	// user is likely to get wrong: krew installs the plugin name only, and the
 	// standalone binary — the one an auditor with an archive and no cluster
 	// wants — is not on their PATH afterwards.
-	if !strings.Contains(plugin.Spec.Caveats, "brew install") {
-		t.Error("spec.caveats no longer points at the Homebrew tap. krew installs the plugin " +
-			"name only, so a user who wanted the standalone `kuberecord` gets no hint of " +
-			"where it is")
+	for _, want := range []struct{ substring, why string }{
+		{"plugin only", "krew installs the plugin name and nothing else"},
+		{"kuberecord'", "the standalone binary has to be named, or the caveat has no subject"},
+	} {
+		if !strings.Contains(plugin.Spec.Caveats, want.substring) {
+			t.Errorf("spec.caveats no longer contains %q — %s", want.substring, want.why)
+		}
+	}
+
+	// And it makes that point without an install command. krew-index review asked
+	// for the `brew install` line out; a caveat is not a place to advertise another
+	// package manager, and the index is not the project's install page. This is a
+	// negative because the tempting repair for the assertion above is to put the
+	// command back as the way of naming where the binary comes from.
+	if strings.Contains(plugin.Spec.Caveats, "brew install") {
+		t.Error("spec.caveats carries a `brew install` line again. krew-index review asked " +
+			"for it out; name where the standalone binary comes from without instructing " +
+			"the reader to run another package manager")
 	}
 }
 
