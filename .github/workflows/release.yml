@@ -313,10 +313,25 @@ jobs:
       # rehearsal exercises that push too (against a throwaway registry on the
       # runner), and a tool missing only on the dry-run path is a tool whose absence
       # is discovered at tag time. Pinned for the same reason as cosign and syft.
+      #
+      # The version here is not free: this action resolves and checksums the
+      # download from a release list bundled *inside the action*
+      # (src/lib/data/releases.json), so the ceiling is whatever the pinned action
+      # tag knew about, not whatever oras has published. v2.0.1's list ends at
+      # 1.3.3. Naming a newer oras fails the step outright —
+      #
+      #     official ORAS CLI releases does not contain version 1.3.4
+      #
+      # — and it fails at install time on a release run, which is the worst place
+      # to find out. So raising this pin means checking that release list first,
+      # and usually raising the action pin with it. There is no newer *tag* than
+      # v2.0.1 to raise it to; only main carries a longer list, and an untagged
+      # branch commit is worse provenance for a release tool than an oras patch
+      # release is worth.
       - name: Install oras
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
-          version: 1.3.4
+          version: 1.3.3
 
       # This builds the CLI too (Task 12.1): `make release-artifacts` cross-compiles
       # kubectl-kuberecord and kuberecord for every platform in CLI_PLATFORMS, with
