@@ -1545,17 +1545,49 @@ krew-index-pr: ## Open the kubernetes-sigs/krew-index pull request for RELEASE_V
 	@# here costs a minute; finding out there costs a review cycle.
 	$(MAKE) release-krew-verify-published
 	@# `--clone` is a boolean and the destination is a git flag, which is why the
-	@# directory is after the `--`. `--remote=false` keeps gh from adding a remote
-	@# to *this* repository — it is run from inside one, and forking somebody
-	@# else's project should not rewire ours. The push is forced so a second
-	@# attempt at the same tag updates the branch instead of failing; the branch
-	@# name carries the version, so it can only ever collide with itself.
+	@# directory is after the `--`.
+	@#
+	@# There is deliberately no `--remote`. The worry it was spelling out is real —
+	@# this runs from inside a git repository, and forking somebody else's project
+	@# must not rewire ours, which is exactly what gh does when it forks the
+	@# *current* repository: the fork becomes `origin` and the existing origin is
+	@# renamed to `upstream`. But that behaviour belongs to the no-argument form.
+	@# Naming a repository already means the working directory is never touched, and
+	@# gh enforces it by refusing `--remote` alongside a repository argument at
+	@# flag-validation time, before any API call — so passing `--remote=false` did
+	@# not express the intent, it made this target fail unconditionally, for every
+	@# tag, with "the `--remote` flag is unsupported when a repository argument is
+	@# provided". The guarantee is gh's; the flag was the thing standing in its way.
+	@#
+	@# `origin` inside the clone is therefore the fork, by construction — it is what
+	@# was cloned — which is what the push below relies on, since nobody here has
+	@# write access to krew-index itself.
+	@#
+	@# The push is forced so a second attempt at the same tag updates the branch
+	@# instead of failing; the branch name carries the version, so it can only ever
+	@# collide with itself.
+	@#
+	@# `--head` is spelled out rather than inferred. `gh pr create --repo` names the
+	@# *base*, and gh would otherwise work the head out from the current branch and
+	@# the remotes around it — in a clone where `upstream` has deliberately been made
+	@# the default remote repository, which is the one place that inference has a
+	@# wrong answer available to it. The head is not a guess: `gh repo fork` without
+	@# `--org` forks to the authenticated account, so that account and this branch
+	@# are what the pull request comes from, and `<user>:<branch>` is gh's own syntax
+	@# for saying so. It is read from the API rather than from the clone's remotes,
+	@# because `gh repo view` in that clone answers for krew-index.
 	@set -e; \
 	branch="$(KREW_PLUGIN_NAME)-$(RELEASE_VERSION)"; \
+	fork_owner="$$(gh api user --jq .login)"; \
+	if [ -z "$$fork_owner" ]; then \
+		echo "release: could not determine the authenticated GitHub account, which is where"; \
+		echo "  the fork is created and therefore what the pull request's head must name."; \
+		exit 1; \
+	fi; \
 	rm -rf "$(KREW_INDEX_DIR)"; \
 	mkdir -p "$(dir $(KREW_INDEX_DIR))"; \
 	set -x; \
-	gh repo fork "$(KREW_INDEX_REPO)" --clone --default-branch-only --remote=false \
+	gh repo fork "$(KREW_INDEX_REPO)" --clone --default-branch-only \
 		-- "$(KREW_INDEX_DIR)"; \
 	cd "$(KREW_INDEX_DIR)"; \
 	git checkout -b "$$branch"; \
@@ -1563,7 +1595,7 @@ krew-index-pr: ## Open the kubernetes-sigs/krew-index pull request for RELEASE_V
 	git add "plugins/$(KREW_PLUGIN_NAME).yaml"; \
 	git commit -m "$(KREW_PLUGIN_NAME): $(RELEASE_VERSION)"; \
 	git push --force --set-upstream origin "$$branch"; \
-	gh pr create --repo "$(KREW_INDEX_REPO)" \
+	gh pr create --repo "$(KREW_INDEX_REPO)" --head "$$fork_owner:$$branch" \
 		--title "$(KREW_PLUGIN_NAME): $(RELEASE_VERSION)" \
 		--body "$$(printf '%s\n' \
 			"Adds \`$(KREW_PLUGIN_NAME)\` at $(RELEASE_VERSION)." \

@@ -2608,6 +2608,72 @@ func TestTapRefusesWhatItMustRefuse(t *testing.T) {
 // does not own, and a tag push must not open one. It also could not work: krew-index
 // CI fetches every URI in the manifest, so a PR raised before the assets exist
 // fails on arrival and spends weeks of review latency getting nowhere.
+// TestKrewIndexPRInvokesGhCorrectly pins the two gh invocations krew-index-pr
+// depends on, neither of which any test or rehearsal exercises.
+//
+// This target is a maintainer's command by design — no workflow may run it — so
+// nothing executes it between releases, and a wrong flag survives until somebody
+// tries to submit. That is exactly what happened: it passed `--remote=false` to
+// `gh repo fork` alongside a repository argument, which gh rejects at flag
+// validation, before any API call. The intent was sound (this runs from inside a
+// git repository and forking somebody else's project must not rewire ours) but a
+// repository argument already guarantees it, and gh refuses to let you say it
+// twice. The target therefore failed for every tag it was ever run for.
+//
+// The check is on the flags rather than on behaviour because behaviour cannot be
+// tested here: running it forks another organisation's repository and opens a pull
+// request on it.
+func TestKrewIndexPRInvokesGhCorrectly(t *testing.T) {
+	makefile := readFile(t, "Makefile")
+	pr := makeRecipeCommands(t, makefile, "krew-index-pr")
+
+	// `gh repo fork <repo> --remote[=...]` is rejected outright: "the --remote flag
+	// is unsupported when a repository argument is provided".
+	fork := ""
+	for line := range strings.SplitSeq(pr, "\n") {
+		if strings.Contains(line, "gh repo fork") {
+			fork = line
+		}
+	}
+	if fork == "" {
+		t.Fatal("krew-index-pr no longer forks krew-index")
+	}
+	if strings.Contains(fork, "--remote") {
+		t.Error("krew-index-pr passes --remote to `gh repo fork` alongside a repository " +
+			"argument, which gh rejects before it makes any API call. Naming a repository " +
+			"already means the current one is never touched; the flag cannot express that, " +
+			"it can only fail")
+	}
+	if !strings.Contains(fork, "--clone") {
+		t.Error("krew-index-pr no longer clones the fork, so there is nothing to commit into")
+	}
+
+	// The destination is a git flag, so it belongs after the `--`. Before it, gh
+	// reads it as a second repository argument.
+	if !strings.Contains(pr, `-- "$(KREW_INDEX_DIR)"`) {
+		t.Error("the clone destination is no longer passed after `--`, where gh forwards it " +
+			"to git clone")
+	}
+
+	// The pull request's head is named rather than inferred. gh makes `upstream`
+	// the clone's default remote repository, so the one place inference happens is
+	// the one place a wrong answer is available.
+	if !strings.Contains(pr, `--head "$$fork_owner:$$branch"`) {
+		t.Error("krew-index-pr no longer names the pull request's head explicitly. " +
+			"`gh pr create --repo` sets the base; the head would then be inferred inside a " +
+			"clone whose default remote repository is krew-index itself")
+	}
+	if !strings.Contains(pr, "fork_owner=\"$$(gh api user --jq .login)\"") {
+		t.Error("the head owner is no longer read from the authenticated account. " +
+			"`gh repo fork` without --org forks there, and `gh repo view` in that clone " +
+			"answers for krew-index rather than for the fork")
+	}
+	if !strings.Contains(pr, "could not determine the authenticated GitHub account") {
+		t.Error("krew-index-pr does not refuse an empty fork owner; `--head \":branch\"` " +
+			"would be sent to gh as though it meant something")
+	}
+}
+
 func TestKrewIndexSubmissionIsAMaintainersCommand(t *testing.T) {
 	makefile := readFile(t, "Makefile")
 	if !strings.Contains(makefile, "krew-index-pr: ##") {
