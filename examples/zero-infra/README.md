@@ -53,7 +53,7 @@ you already have, it is these:
 ```sh
 # 1. The operator. From a release, this needs no checkout and no download.
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.0 \
+  --version 0.3.1 \
   --namespace kuberecord-system --create-namespace \
   --set clusterID=my-cluster
 

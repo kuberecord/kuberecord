@@ -15,7 +15,7 @@ either one unmodified (`make test-e2e-helm`, `make test-e2e-installer`).
 
 ```sh
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.0 \
+  --version 0.3.1 \
   --namespace kuberecord-system --create-namespace
 ```
 
@@ -25,8 +25,8 @@ the whole address, and helm has needed no extra configuration to install from on
 since v3.8.
 
 **The `--version` is not optional here, and it takes no `v`.** A Helm chart
-version is plain semver, so the artifact's tag is `0.3.0` where the operator's is
-`v0.3.0`. The two always agree otherwise: the chart is **not** versioned
+version is plain semver, so the artifact's tag is `0.3.1` where the operator's is
+`v0.3.1`. The two always agree otherwise: the chart is **not** versioned
 independently of the operator — `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
 both equal to the operator release it installs — see
 [`docs/RELEASING.md`](../../../docs/RELEASING.md).
@@ -37,7 +37,7 @@ Two other ways to get the same chart:
 # The release asset. Attached to every tagged release alongside a checksums.txt,
 # and byte-identical to the artifact above — the release pushes the file it
 # packaged, so both carry the one sha256 that checksums.txt lists.
-helm install kuberecord ./kuberecord-0.3.0.tgz \
+helm install kuberecord ./kuberecord-0.3.1.tgz \
   --namespace kuberecord-system --create-namespace
 
 # This directory, which is what you want when you are changing the chart.
@@ -93,11 +93,11 @@ explicit step first:
 # The CRDs are inside the chart, so pull it once and apply them from the archive
 # rather than from whatever checkout happens to be to hand — the CRDs you install
 # must be the ones the version you are upgrading to ships.
-helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0 --untar
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.1 --untar
 kubectl apply -f kuberecord/crds/
 
 helm upgrade kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.0 --namespace kuberecord-system
+  --version 0.3.1 --namespace kuberecord-system
 ```
 
 `helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —

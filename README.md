@@ -374,7 +374,7 @@ object by object, and the acceptance suite runs against each of them unmodified.
 ```sh
 # Helm, from the chart registry — no checkout, no download
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.0 \
+  --version 0.3.1 \
   --namespace kuberecord-system --create-namespace \
   --set clusterID=prod-eu-west-1
 
@@ -386,14 +386,14 @@ make deploy IMG=<some-registry>/kuberecord:tag
 ```
 
 The chart's tag carries no `v` — a Helm chart version is plain semver — and it
-tracks the operator release exactly, so `--version 0.3.0` installs `v0.3.0`. It is
+tracks the operator release exactly, so `--version 0.3.1` installs `v0.3.1`. It is
 published from v0.3.0 onward; earlier tags ship the chart as a release asset only.
 
 Both artifacts are also attached to every [release](https://github.com/kuberecord/kuberecord/releases),
 with checksums, if you would rather download a tag than pull one:
 
 ```sh
-kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.2.0/install.yaml
+kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.3.1/install.yaml
 ```
 
 And the chart in this repository installs directly, which is what a contributor
@@ -503,12 +503,12 @@ kubectl kuberecord timeline deploy/checkout -n payments
 brew install kuberecord/tap/kuberecord
 
 # 3. The release archive, directly — five platforms, Windows included.
-curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord_v0.3.0_linux_amd64.tar.gz
-tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.1/kuberecord_v0.3.1_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.1_linux_amd64.tar.gz
 install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
 
 # 4. From source, with a Go toolchain.
-go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.0
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.1
 ```
 
 krew installs the plugin name only — that is what a plugin manager is for — so

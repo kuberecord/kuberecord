@@ -16,6 +16,77 @@ than a summary of them.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-03
+
+A distribution-only release. Nothing in the operator, the CLI, the `v1alpha1`
+CRDs or either frozen format changed — v0.3.1 records the same rows v0.3.0 did,
+and an upgrade is the image tag and nothing else. What changed is how the chart
+and the plugin reach people, which v0.3.0 shipped for the first time and which
+therefore met its reviewers for the first time.
+
+### Added
+
+- **The Helm chart is claimable on [Artifact Hub](https://artifacthub.io), and the
+  claim is published by the release rather than by hand.** `artifacthub-repo.yml`
+  in the repository root carries the repository ID and the maintainer, and
+  `make release-chart-metadata-push` publishes it on every tag.
+
+  It is published *into the registry*, which is the part worth knowing. Artifact
+  Hub normally reads that file over HTTP, next to a chart repository's
+  `index.yaml`. This chart has no `index.yaml` anywhere — it is an OCI artifact
+  (v0.3.0, Task 8.1) — so Artifact Hub instead takes the repository URL as
+  registered, appends the fixed tag `artifacthub.io`, and pulls the one-layer
+  artifact it finds there. The claim therefore ships as
+  `oci://ghcr.io/kuberecord/charts/kuberecord:artifacthub.io`: a second tag on the
+  chart's own repository, republished unchanged on every tag so that a registry
+  which lost it gets it back without anyone noticing it was gone.
+
+  Getting the tag or the layer's media type wrong is a **silent** failure — the
+  push succeeds, the artifact exists, and the listing simply stops being verified
+  somewhere else, later. Both strings are asserted by `test/release`, and the push
+  is rehearsed against a throwaway registry by `make release-chart-rehearse` like
+  the chart's own.
+
+  `oras` joins `cosign` and `syft` as a release tool expected on `PATH`; CI
+  installs it from a SHA-pinned action. `Chart.yaml` gained a `maintainers` block,
+  which is what the listing shows beside the claim.
+
+### Fixed
+
+- **The krew plugin manifest says what krew-index review asked it to say.** Three
+  things came back from that review, and all three were right about the context
+  they were reviewing. `shortDescription` is now `Query recorded state changes`:
+  every entry in that index is a kubectl plugin, so the word "Kubernetes" was
+  spending a scarce column on the one thing a reader of that list already knows.
+  The indented block of example commands is gone, and so is the `brew install`
+  pointer — a krew manifest is not the place to advertise a different installer.
+
+  The root command's own `Short` deliberately still reads *Query recorded
+  Kubernetes state changes*. It is read without the index's framing, often by
+  somebody who reached the standalone binary and has no cluster at all, and there
+  the word is the first useful thing in the sentence. Two audiences, two lines;
+  the generator no longer derives one from the other.
+
+- **`make krew-index-pr` opens a pull request GitHub accepts.** The head branch
+  has to name the fork it lives on, so it is now resolved as
+  `<authenticated account>:<branch>` from `gh api user` rather than assumed, and
+  the fork is created with `--clone --default-branch-only`. The command failed at
+  the last step before this, which is the step a maintainer reaches once per
+  release with the Release page already public.
+
+- **The Homebrew formula is checked against the signed checksums before the tap
+  is updated.** `release-brew-fetch` verified whatever `checksums.txt` happened to
+  say about the formula, including nothing at all: a file the signature did not
+  cover could pass. It now refuses a formula that `checksums.txt` does not name,
+  refuses one it names more than once rather than guessing, and no longer loses
+  `shasum -c`'s exit code through a pipeline — a failed comparison reported
+  success.
+
+- **The first push of a formula the tap does not yet have is no longer skipped.**
+  The tap job asked whether the formula had changed before staging it, and an
+  untracked file is not a change: a brand-new formula looked like "nothing to do"
+  and was never pushed. It is staged first, then compared against the index.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added
@@ -1233,7 +1304,8 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kuberecord/kuberecord/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kuberecord/kuberecord/compare/v0.1.0...v0.2.0
