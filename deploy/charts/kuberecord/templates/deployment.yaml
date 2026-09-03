@@ -48,7 +48,7 @@ spec:
           value: {{ . | quote }}
         {{- end }}
         # The namespace a sink's credentialsSecretRef defaults to, and the only
-        # namespace the operator is granted Secret reads in (D7). Taken from the
+        # namespace the operator is granted Secret reads in. Taken from the
         # downward API so it always matches where this pod actually runs — the
         # operator refuses to start if it cannot determine it, rather than
         # guessing and moving a security boundary.

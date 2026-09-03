@@ -79,7 +79,7 @@ duck-typed by the `SinkManager`, so the suite duck-types them too: `RunWriterSui
 type-asserts the `Harness`'s `Writer` and runs `RunStateReaderSuite`,
 `RunScopeEventWriterSuite` and `RunProberSuite` for whichever halves it satisfies.
 A backend that omits one is **skipped, never failed** — a `Writer`-only archive
-tier is a legitimate design (D12) — but the skip names the interface, lists the
+tier is a legitimate design — but the skip names the interface, lists the
 properties that consequently certify nothing, and states what the runtime turns
 off, because a silent skip is indistinguishable from a pass.
 
@@ -165,7 +165,7 @@ another's fixture would pass or fail on the seed.
 | Cluster scope | a `ClusterStreamRule` streams `v1/Node`; a namespaced `StreamRule` naming it reports `ResourceResolved=False` |
 | Events | a rule naming `v1/Event` persists the Event stream past its TTL, with no false `Deleted` rows |
 | Redaction | a configured path is scrubbed before hashing, and neither the payload, the diff nor the hash can reveal it |
-| Archive (S3) | an `S3Sink` over an in-cluster MinIO reports `HistoryUnavailable=True` while staying `Ready`, and its rule mirrors it; a Deployment's lifecycle lands in the bucket as rotated zstd-compressed JSONL at the documented key layout — a full `Snapshot` first (never `Added`), a diff-only `Modified` for a change — and after a restart the live object is re-snapshotted in full while an object deleted during the outage produces **no** `Deleted` record at all (D12). Every assertion reads the bucket, not the operator |
+| Archive (S3) | an `S3Sink` over an in-cluster MinIO reports `HistoryUnavailable=True` while staying `Ready`, and its rule mirrors it; a Deployment's lifecycle lands in the bucket as rotated zstd-compressed JSONL at the documented key layout — a full `Snapshot` first (never `Added`), a diff-only `Modified` for a change — and after a restart the live object is re-snapshotted in full while an object deleted during the outage produces **no** `Deleted` record at all. Every assertion reads the bucket, not the operator |
 | Tee pattern | the published example ([`examples/tee/`](../examples/tee/)) is applied through an overlay that patches one address, and two rules over one resource set — one naming a `ClickHouseSink`, one an `S3Sink` — both reach `Ready` while disagreeing about `HistoryUnavailable`; one Deployment's creation is then recorded as `Added` in ClickHouse and `Snapshot` in the bucket **from the same event**, and its scale as the same `/spec/replicas` diff in both. The tag disagreeing is the assertion: it is only possible because dedup state is per sink |
 
 It needs Docker and [kind] and nothing else — the suite installs everything it
@@ -214,7 +214,7 @@ queries **and** the operator's own `/metrics` endpoint.
 | Poison row | one record made individually un-insertable fails its batch, its blameless batch-mates still land, and the poison key keeps retrying visibly (counted and logged) instead of being dropped |
 | Kill -9 + offline delete | after a `SIGKILL` with writes in flight: exactly one `Deleted` for the offline deletion, the reincarnation closed out exactly once, and `watch_scopes` left consistent — a rule deleted during the outage is closed with a `Stopped` row and **zero** `Deleted` rows, and no scope stays open once its rule is gone |
 
-Every scenario additionally asserts the standing invariant that no object's
+Every scenario additionally asserts the standing guarantee that no object's
 deletion was recorded more than once.
 
 The fixture differs from the e2e one in two ways that the scenarios require: its
@@ -267,13 +267,13 @@ can exercise rather than print.
 The CLI is built for real by any of this, on every platform, and `make build-cli`
 is the same cross-compile on its own — a couple of minutes, and it asserts
 `CGO_ENABLED=0` against each binary it produced rather than against the
-environment it set (D18). It runs on every pull request in its own CI job, since a
+environment it set. It runs on every pull request in its own CI job, since a
 cgo dependency would otherwise break only the four platforms nobody builds
 locally. `test/release` covers the extractor and the wiring under `make test`.
 [`docs/RELEASING.md`](RELEASING.md) is the versioning policy and the checklist for
 cutting one.
 
-The supply-chain half of a release (Task 7.4) needs three tools that are **not**
+The supply-chain half of a release needs three tools that are **not**
 bootstrapped into `bin/`, because their own installers verify the binaries they
 fetch and hand-rolling that in the task about supply-chain integrity would be a
 step backwards:

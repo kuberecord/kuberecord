@@ -41,7 +41,7 @@ API server prunes it. A rule inherited from v0.1.0 therefore decodes with `sink`
 absent, and the reconciler refuses to guess: it parks the rule on
 `Ready=False` with reason `LegacySinkRef`, withdraws its watch targets, and logs
 at `Error` level. kuberecord registers no admission webhooks and needs no
-cert-manager (D4), so there is nothing available to convert the stored object on
+cert-manager, so there is nothing available to convert the stored object on
 the way through. Defaulting the absent name to something plausible would have been
 the alternative, and it is the one outcome worth more than a manual step: it would
 stream a cluster's audit trail to a backend nobody chose, and say nothing.

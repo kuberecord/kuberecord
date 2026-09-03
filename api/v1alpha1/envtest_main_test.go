@@ -182,7 +182,7 @@ func assertAPIResult(t *testing.T, verb string, err error, wantErr string) {
 }
 
 // deleteObject removes a test object, reporting any failure rather than
-// discarding it (Invariant 4: no silent errors, tests included).
+// discarding it — no silent errors, tests included.
 func deleteObject(ctx context.Context, t *testing.T, obj client.Object) {
 	t.Helper()
 	if err := k8sClient.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {

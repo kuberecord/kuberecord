@@ -37,7 +37,7 @@ shared by both sinks
 | [`minio.yaml`](minio.yaml) | Namespace, root credentials, Deployment and Service for a single-node MinIO. **Evaluation only** — `emptyDir` storage, a committed key pair, no Object Lock. |
 | [`secret.yaml`](secret.yaml) | The same key pair beside the operator, in the only namespace it can read Secrets in. |
 | [`hot-sink.yaml`](hot-sink.yaml) | The `ClickHouseSink`. An ordinary one — nothing about it is tee-specific. |
-| [`cold-sink.yaml`](cold-sink.yaml) | The `S3Sink`. `Writer`-only (D12), with the rotation window tuned for watching rather than for running. |
+| [`cold-sink.yaml`](cold-sink.yaml) | The `S3Sink`. `Writer`-only, with the rotation window tuned for watching rather than for running. |
 | [`namespace.yaml`](namespace.yaml) | The namespace the two rules watch. |
 | [`rules.yaml`](rules.yaml) | **The pattern.** Two rules, identical `resources`, different `spec.sink`. |
 | [`workload.yaml`](workload.yaml) | A Deployment and a ConfigMap, applied after the pattern so their creation is recorded as a creation. |

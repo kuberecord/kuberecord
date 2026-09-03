@@ -30,7 +30,7 @@ spec:
         description: |-
           ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 
-          It is cluster-scoped (D6) because rules in any namespace reference it by
+          It is cluster-scoped because rules in any namespace reference it by
           name, and because a sink is infrastructure owned by the platform team rather
           than by whoever owns the namespace a rule lives in. The password is the only
           part not in this object; it lives in the Secret named by
@@ -89,7 +89,7 @@ spec:
 
                           That default is a security property, not a convenience: the operator's
                           aggregated ClusterRole grants Secret read access *only* in its own
-                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          namespace. Sink CRs are cluster-scoped and therefore
                           editable by anyone with cluster-level write access to the CRD, so if this
                           field could freely name any namespace, creating a sink would become a way
                           to make the operator read a Secret its RBAC never intended to expose —
@@ -136,7 +136,7 @@ spec:
                       AllowedGVKs restricts which resource types may be streamed to this sink.
 
                       An empty (or omitted) list allows everything *except* the hard deny-list
-                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      — v1/Secret is never watchable in v1alpha1 and no policy here can
                       re-enable it. Deny is enforced in code, not merely in config, so the
                       permissive default can never become a way to exfiltrate Secrets.
                     items:
@@ -185,7 +185,7 @@ spec:
                   redaction:
                     description: |-
                       Redaction is this sink's redaction floor: value paths scrubbed out of
-                      every object any rule streams here, before hashing (Task 3.3).
+                      every object any rule streams here, before hashing.
 
                       It lives on the sink for the same reason AllowedGVKs does. Whoever owns
                       the backend owns what may land in it, and that authority has to hold
@@ -199,7 +199,7 @@ spec:
                     items:
                       description: |-
                         RedactionRule names one value to scrub out of every streamed object before it
-                        is hashed, diffed and written (Task 3.3).
+                        is hashed, diffed and written.
 
                         Exactly one of the two fields is set. They are separate fields rather than one
                         string with two grammars because an annotation key routinely contains dots and
@@ -339,8 +339,7 @@ spec:
                   Conditions carries Ready, SchemaValid and CredentialsResolved (see the
                   condition-type constants). All three are set by asynchronous probes:
                   a control-plane reconciler never dials ClickHouse on its own goroutine
-                  (Invariant 1), so an unreachable sink slows nothing down — it just
-                  reports here.
+                  so an unreachable sink slows nothing down — it just reports here.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

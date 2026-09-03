@@ -5,11 +5,11 @@ shape).
 
 Each entry's `spec` is passed through verbatim rather than mapped field by field.
 That is what makes one template serve every backend: the CRDs ship in crds/ and
-carry their own structural schema and CEL rules (D4), so this file decides *which*
+carry their own structural schema and CEL rules, so this file decides *which*
 objects exist and the API server decides whether they are valid. Fields left unset
 are simply absent here, so the CRD's own defaults — and only those — apply.
 
-Every sink kind is cluster-scoped (D6): rules in any namespace reference it by
+Every sink kind is cluster-scoped: rules in any namespace reference it by
 name, and a backend is infrastructure owned by the platform team rather than by
 whoever owns a namespace. Hence no namespace below — and the name is deliberately
 *not* release-qualified, because it is the name rules already carry in

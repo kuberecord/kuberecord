@@ -38,7 +38,7 @@ spec:
         description: |-
           ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 
-          It is cluster-scoped (D6) because rules in any namespace reference it by
+          It is cluster-scoped because rules in any namespace reference it by
           name, and because a sink is infrastructure owned by the platform team rather
           than by whoever owns the namespace a rule lives in. The password is the only
           part not in this object; it lives in the Secret named by
@@ -97,7 +97,7 @@ spec:
 
                           That default is a security property, not a convenience: the operator's
                           aggregated ClusterRole grants Secret read access *only* in its own
-                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          namespace. Sink CRs are cluster-scoped and therefore
                           editable by anyone with cluster-level write access to the CRD, so if this
                           field could freely name any namespace, creating a sink would become a way
                           to make the operator read a Secret its RBAC never intended to expose —
@@ -144,7 +144,7 @@ spec:
                       AllowedGVKs restricts which resource types may be streamed to this sink.
 
                       An empty (or omitted) list allows everything *except* the hard deny-list
-                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      — v1/Secret is never watchable in v1alpha1 and no policy here can
                       re-enable it. Deny is enforced in code, not merely in config, so the
                       permissive default can never become a way to exfiltrate Secrets.
                     items:
@@ -193,7 +193,7 @@ spec:
                   redaction:
                     description: |-
                       Redaction is this sink's redaction floor: value paths scrubbed out of
-                      every object any rule streams here, before hashing (Task 3.3).
+                      every object any rule streams here, before hashing.
 
                       It lives on the sink for the same reason AllowedGVKs does. Whoever owns
                       the backend owns what may land in it, and that authority has to hold
@@ -207,7 +207,7 @@ spec:
                     items:
                       description: |-
                         RedactionRule names one value to scrub out of every streamed object before it
-                        is hashed, diffed and written (Task 3.3).
+                        is hashed, diffed and written.
 
                         Exactly one of the two fields is set. They are separate fields rather than one
                         string with two grammars because an annotation key routinely contains dots and
@@ -347,8 +347,7 @@ spec:
                   Conditions carries Ready, SchemaValid and CredentialsResolved (see the
                   condition-type constants). All three are set by asynchronous probes:
                   a control-plane reconciler never dials ClickHouse on its own goroutine
-                  (Invariant 1), so an unreachable sink slows nothing down — it just
-                  reports here.
+                  so an unreachable sink slows nothing down — it just reports here.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -459,7 +458,7 @@ spec:
           ClusterStreamRule declares that the resources it names, across the
           namespaces its selector matches, should be streamed to a ClickHouseSink.
 
-          It is cluster-scoped (D6) and is the only rule type permitted to name
+          It is cluster-scoped, and is the only rule type permitted to name
           cluster-scoped kinds (Nodes, Namespaces, CRDs …), because doing so requires
           cluster-level authority the namespaced StreamRule deliberately does not
           assume. Its status uses the same StreamRuleStatus shape as StreamRule, so a
@@ -488,7 +487,7 @@ spec:
               extraRedaction:
                 description: |-
                   ExtraRedaction adds value paths to scrub, on top of whatever the target
-                  sink's `spec.policy.redaction` already scrubs (Task 3.3).
+                  sink's `spec.policy.redaction` already scrubs.
 
                   It is strictly additive: a rule can add paths, never remove one the sink's
                   owner configured. Values are scrubbed after normalization and *before*
@@ -502,11 +501,11 @@ spec:
                   across a mixed resource list without splitting into two rules.
 
                   Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
-                  remains denied in code (D8) whether or not a policy would scrub it.
+                  remains denied in code whether or not a policy would scrub it.
                 items:
                   description: |-
                     RedactionRule names one value to scrub out of every streamed object before it
-                    is hashed, diffed and written (Task 3.3).
+                    is hashed, diffed and written.
 
                     Exactly one of the two fields is set. They are separate fields rather than one
                     string with two grammars because an annotation key routinely contains dots and
@@ -640,7 +639,7 @@ spec:
                     It is a (group, version, kind) triple plus an optional label selector rather
                     than a plural resource name because the CRD is authored by humans against
                     the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
-                    `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+                    `kind` fields; the plural GVR is derived by the REST mapper, which
                     is also where an unknown kind is detected and parked.
                   properties:
                     group:
@@ -666,7 +665,7 @@ spec:
                         Selectors are applied by the event handler, not by the informer's
                         ListWatch: one informer per (GVR, namespace) is shared by every rule and
                         sink interested in that target, so changing a selector re-filters events
-                        without tearing down and re-listing a watch (Task 1.4). The trade-off is
+                        without tearing down and re-listing a watch. The trade-off is
                         deliberate — informer bandwidth in exchange for a pool that never
                         thrashes on a selector edit.
                       properties:
@@ -717,7 +716,7 @@ spec:
                       description: |-
                         Version is the API version to watch, e.g. "v1" or "v1beta1".
 
-                        The recorded object identity is version-agnostic (Invariant 7), so
+                        The recorded object identity is version-agnostic, so
                         naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
                         objects seen through two different lenses — do not do that; pick the
                         version you want the stored payload rendered in.
@@ -749,7 +748,7 @@ spec:
                   identity is the pair: changing the name and changing the kind are the same
                   mistake with the same consequence, and one rule says so once.
 
-                  A rule targets exactly one sink, permanently (D14). To stream one resource
+                  A rule targets exactly one sink, permanently. To stream one resource
                   set to two backends — a queryable timeline and a cheap immutable archive,
                   say — author two rules naming the same resources and different sinks. That
                   is the supported shape rather than a workaround: each rule then carries its
@@ -822,11 +821,11 @@ spec:
                   Conditions carries Ready, RBACGranted, PolicyAllowed,
                   ResourceResolved and HistoryUnavailable (see the constants above). A
                   rule that cannot run degrades here and only here: the process never
-                  exits and every other rule keeps streaming (Invariant 5).
+                  exits and every other rule keeps streaming.
 
                   HistoryUnavailable is the odd one out, and is mirrored from the sink
                   the rule names rather than decided about the rule: a rule bound to a
-                  Writer-only sink (D12) reports it True, permanently, while staying
+                  Writer-only sink reports it True, permanently, while staying
                   entirely Ready. It is here because the two objects usually have
                   different owners — a rule's author may never read the cluster-scoped
                   sink they named — and an author who sees only Ready=True would have no
@@ -937,19 +936,19 @@ spec:
         description: |-
           S3Sink declares one S3 or MinIO bucket kuberecord may archive to.
 
-          It is cluster-scoped (D6) for the same reasons ClickHouseSink is: rules in any
+          It is cluster-scoped for the same reasons ClickHouseSink is: rules in any
           namespace reference it by name, and a bucket is infrastructure owned by the
           platform team rather than by whoever owns a namespace. Credentials are the only
           part not in this object, and may not be in the cluster at all — see
           S3CredentialsSpec.
 
-          It is the first Writer-only backend (D12). It cannot read its own history, so
+          It is the first Writer-only backend. It cannot read its own history, so
           cache warm-up, zombie garbage collection and boot reconciliation of scope
           epochs are all disabled for it, and every record it receives is a permanent
           Snapshot. That is a declared capability limit rather than a defect, and it is
           reported on the sink itself as HistoryUnavailable=True while Ready stays True.
           The supported way to have both a queryable timeline and a cheap immutable
-          archive is the tee pattern (D14): two rules over the same resources, one naming
+          archive is the tee pattern: two rules over the same resources, one naming
           a ClickHouseSink and one naming this.
 
           The BUCKET printer column shows spec.bucket alone. The prefix is not in it
@@ -1018,7 +1017,7 @@ spec:
 
                           That default is a security property, not a convenience: the operator's
                           aggregated ClusterRole grants Secret read access *only* in its own
-                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          namespace. Sink CRs are cluster-scoped and therefore
                           editable by anyone with cluster-level write access to the CRD, so if this
                           field could freely name any namespace, creating a sink would become a way
                           to make the operator read a Secret its RBAC never intended to expose —
@@ -1073,7 +1072,7 @@ spec:
                   adding `parquet` later is an additive change to a schema authors already
                   spell explicitly, rather than a breaking one that has to invent a default
                   for every S3Sink already in etcd — and it makes every existing CR say, in
-                  its own text, which versioned contract (D15) produced its objects.
+                  its own text, which versioned contract produced its objects.
                 enum:
                 - jsonl-v1-zstd
                 type: string
@@ -1131,7 +1130,7 @@ spec:
                       AllowedGVKs restricts which resource types may be streamed to this sink.
 
                       An empty (or omitted) list allows everything *except* the hard deny-list
-                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      — v1/Secret is never watchable in v1alpha1 and no policy here can
                       re-enable it. Deny is enforced in code, not merely in config, so the
                       permissive default can never become a way to exfiltrate Secrets.
                     items:
@@ -1180,7 +1179,7 @@ spec:
                   redaction:
                     description: |-
                       Redaction is this sink's redaction floor: value paths scrubbed out of
-                      every object any rule streams here, before hashing (Task 3.3).
+                      every object any rule streams here, before hashing.
 
                       It lives on the sink for the same reason AllowedGVKs does. Whoever owns
                       the backend owns what may land in it, and that authority has to hold
@@ -1194,7 +1193,7 @@ spec:
                     items:
                       description: |-
                         RedactionRule names one value to scrub out of every streamed object before it
-                        is hashed, diffed and written (Task 3.3).
+                        is hashed, diffed and written.
 
                         Exactly one of the two fields is set. They are separate fields rather than one
                         string with two grammars because an annotation key routinely contains dots and
@@ -1253,7 +1252,7 @@ spec:
                   no empty segments. The object key is built as
                   `<prefix>/format=jsonl-v1/…`, so a trailing slash would silently produce a
                   `//` in every key this sink ever writes and quietly break the documented
-                  layout (D15) for every reader of the bucket. The permitted characters are
+                  layout for every reader of the bucket. The permitted characters are
                   the conservative subset that needs no escaping in a key, a URL or a query
                   engine's glob; it can be widened later without invalidating anything
                   already written, which is not true in the other direction.
@@ -1345,7 +1344,7 @@ spec:
                   are absent because for S3 the object *is* the batch and spec.rotation
                   governs it, and checkpointEvery is absent because a Writer-only sink cannot
                   warm from history — it re-snapshots on every restart, so a replay is already
-                  bounded by the current process and a cadence would add nothing (D12). See
+                  bounded by the current process and a cadence would add nothing. See
                   S3WriterSpec for the full reasoning — the omissions are deliberate, not
                   pending.
                 properties:
@@ -1419,8 +1418,7 @@ spec:
 
                   The first three follow the usual reading, and are set by asynchronous
                   probes: a control-plane reconciler never talks to S3 on its own goroutine
-                  (Invariant 1), so an unreachable bucket slows nothing down — it just reports
-                  here. HistoryUnavailable does not follow the usual reading: it is True on a
+                  so an unreachable bucket slows nothing down — it just reports here. HistoryUnavailable does not follow the usual reading: it is True on a
                   healthy sink, permanently, and says what this backend cannot do rather than
                   what has gone wrong with it. See ConditionHistoryUnavailable.
                 items:
@@ -1533,7 +1531,7 @@ spec:
           StreamRule declares that the resources it names, *in its own namespace*,
           should be streamed to a ClickHouseSink.
 
-          It is namespaced (D3, D6) so that streaming intent is delegable: a team with
+          It is namespaced so that streaming intent is delegable: a team with
           write access only to their namespace can opt their own workloads into the
           audit trail without cluster-level privileges, and the watch it creates can
           never reach beyond that namespace. Naming a cluster-scoped kind here is
@@ -1563,7 +1561,7 @@ spec:
               extraRedaction:
                 description: |-
                   ExtraRedaction adds value paths to scrub, on top of whatever the target
-                  sink's `spec.policy.redaction` already scrubs (Task 3.3).
+                  sink's `spec.policy.redaction` already scrubs.
 
                   It is strictly additive: a rule can add paths, never remove one the sink's
                   owner configured. Values are scrubbed after normalization and *before*
@@ -1577,11 +1575,11 @@ spec:
                   across a mixed resource list without splitting into two rules.
 
                   Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
-                  remains denied in code (D8) whether or not a policy would scrub it.
+                  remains denied in code whether or not a policy would scrub it.
                 items:
                   description: |-
                     RedactionRule names one value to scrub out of every streamed object before it
-                    is hashed, diffed and written (Task 3.3).
+                    is hashed, diffed and written.
 
                     Exactly one of the two fields is set. They are separate fields rather than one
                     string with two grammars because an annotation key routinely contains dots and
@@ -1657,7 +1655,7 @@ spec:
                     It is a (group, version, kind) triple plus an optional label selector rather
                     than a plural resource name because the CRD is authored by humans against
                     the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
-                    `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+                    `kind` fields; the plural GVR is derived by the REST mapper, which
                     is also where an unknown kind is detected and parked.
                   properties:
                     group:
@@ -1683,7 +1681,7 @@ spec:
                         Selectors are applied by the event handler, not by the informer's
                         ListWatch: one informer per (GVR, namespace) is shared by every rule and
                         sink interested in that target, so changing a selector re-filters events
-                        without tearing down and re-listing a watch (Task 1.4). The trade-off is
+                        without tearing down and re-listing a watch. The trade-off is
                         deliberate — informer bandwidth in exchange for a pool that never
                         thrashes on a selector edit.
                       properties:
@@ -1734,7 +1732,7 @@ spec:
                       description: |-
                         Version is the API version to watch, e.g. "v1" or "v1beta1".
 
-                        The recorded object identity is version-agnostic (Invariant 7), so
+                        The recorded object identity is version-agnostic, so
                         naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
                         objects seen through two different lenses — do not do that; pick the
                         version you want the stored payload rendered in.
@@ -1766,7 +1764,7 @@ spec:
                   identity is the pair: changing the name and changing the kind are the same
                   mistake with the same consequence, and one rule says so once.
 
-                  A rule targets exactly one sink, permanently (D14). To stream one resource
+                  A rule targets exactly one sink, permanently. To stream one resource
                   set to two backends — a queryable timeline and a cheap immutable archive,
                   say — author two rules naming the same resources and different sinks. That
                   is the supported shape rather than a workaround: each rule then carries its
@@ -1839,11 +1837,11 @@ spec:
                   Conditions carries Ready, RBACGranted, PolicyAllowed,
                   ResourceResolved and HistoryUnavailable (see the constants above). A
                   rule that cannot run degrades here and only here: the process never
-                  exits and every other rule keeps streaming (Invariant 5).
+                  exits and every other rule keeps streaming.
 
                   HistoryUnavailable is the odd one out, and is mirrored from the sink
                   the rule names rather than decided about the rule: a rule bound to a
-                  Writer-only sink (D12) reports it True, permanently, while staying
+                  Writer-only sink reports it True, permanently, while staying
                   entirely Ready. It is here because the two objects usually have
                   different owners — a rule's author may never read the cluster-scoped
                   sink they named — and an author who sees only Ready=True would have no

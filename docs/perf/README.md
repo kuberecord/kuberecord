@@ -1,4 +1,4 @@
-# kuberecord — committed pprof profiles (Task 2.3)
+# kuberecord — committed pprof profiles
 
 `before/` and `after/` are the heap and allocation profiles of one full **massive**
 profile run (20,000 objects across ConfigMap + Deployment + ServiceAccount, 500
@@ -55,8 +55,8 @@ call sites, and a real 25 % improvement is then indistinguishable from noise.
 
 ## What the profiles say about memory at 20,000 objects
 
-From `after/top-heap.txt` — the live heap is almost entirely the two caches D2
-predicted, and nothing else is close:
+From `after/top-heap.txt` — the live heap is almost entirely the two caches the
+design predicts, and nothing else is close:
 
 - the **informer caches** (`sigs.k8s.io/json` decode trees, ~40 % of live heap):
   one shrunken copy of every watched object, `managedFields` already stripped by
@@ -64,8 +64,9 @@ predicted, and nothing else is close:
 - the **hashCache diff baselines** (`zstd.(*Encoder).encodeAll` retaining the
   compressed byte slices, ~22 %): one zstd-compressed normalized copy per object.
 
-That is the shape the design intends (see the Task 0.7 and Task 1.4 sections of
-`../PERFORMANCE.md`), which is the useful thing a heap profile can confirm.
+That is the shape the design intends (see the `hashCache` and informer-memory
+sections of `../PERFORMANCE.md`), which is the useful thing a heap profile can
+confirm.
 
 ## The four allocators that were fixed
 
@@ -99,7 +100,7 @@ because this profile also contains an apiserver, a churn generator and a logger.
    evaluated. Extraction is now lazy.
    *Benchmark (`BenchmarkFanOut/match-all`):* 336 B / 2 allocs → **0 / 0** on an
    Add and 672 B / 4 allocs → **0 / 0** on an Update; 350 → 83 ns/op. This is the
-   one path that runs inside an informer's own goroutine (Invariant 1).
+   one path that runs inside an informer's own goroutine.
 
 4. **The per-work-item scope lookup always allocated a combined slice.**
    `interestTable.lookupIdentity` cloned the exact-namespace matches and appended

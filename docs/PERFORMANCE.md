@@ -1,6 +1,6 @@
 # kuberecord — Performance
 
-## Informer memory: the cache transform (Task 1.4)
+## Informer memory: the cache transform
 
 Every informer the watch pool builds installs a `SetTransform` that runs before
 an object is ever cached:
@@ -15,8 +15,9 @@ an object is ever cached:
 and is pure write-provenance bookkeeping. The operator needs exactly one fact
 out of it — who touched the object — so keeping that fact and dropping the rest
 shrinks every cached object in every informer, permanently. Together with the
-compressed diff baselines below, this is the memory half of D2: one shrunken
-copy in the informer cache, one compressed copy in `hashCache`.
+compressed diff baselines below, this is the memory half of running well on tiny
+and massive clusters alike: one shrunken copy in the informer cache, one
+compressed copy in `hashCache`.
 
 The annotation is transport, not content: the pipeline reads it into the record
 and strips it again *before* hashing (see `normalizeObject`), so it cannot
@@ -29,7 +30,7 @@ Two properties are worth knowing:
   untouched, so a re-`Replace` of already-cached objects cannot erase the
   annotation a previous pass wrote.
 - **It never fails.** A transform error would drop the object from the informer
-  entirely, so a malformed object is cached as-is instead (Invariant 5);
+  entirely, so a malformed object is cached as-is instead;
   `ExtractActors` logs whatever it had to skip.
 
 ### No periodic resync
@@ -42,14 +43,14 @@ WatchManager's 30-second pool diff is the level-triggering safety net instead,
 and it costs a registry snapshot plus a few map comparisons rather than a full
 cache sweep.
 
-This is a **recorded decision**, re-confirmed against measurement in Task 2.3 (see
-["Two recorded decisions"](#two-recorded-decisions-task-23) below and the comment
+This is a **recorded decision**, re-confirmed against measurement (see
+["Two recorded decisions"](#two-recorded-decisions) below and the comment
 on `resyncPeriod` in `internal/watch/pool.go`), not an omission.
 
-## `hashCache` memory: compressed diff baselines (Task 0.7)
+## `hashCache` memory: compressed diff baselines
 
 `hashCache` keeps a full normalized-JSON copy of every watched object — the
-diff baseline — *in addition to* the informer cache's own copy. At scale (D2)
+diff baseline — *in addition to* the informer cache's own copy. At scale
 that second copy is the dominant memory cost of the operator. Kubernetes JSON
 compresses extremely well, so each `CacheEntry.JSON` is now stored
 **zstd-compressed** (`klauspost/compress`, `SpeedDefault`) and decompressed
@@ -97,12 +98,12 @@ go test ./internal/pipeline/ -run '^$' -bench BenchmarkHashCacheShortCircuit -be
 
 - **Compression failure** (encoder unavailable): the raw bytes are stored with
   the `encodingRaw` marker and the anomaly is logged at `Error` level
-  (Invariant 5). Diffing still works — it just costs more memory.
+  Diffing still works — it just costs more memory.
 - **Decompression failure on diff** (corrupt/truncated entry): the pipeline
   logs at `Error` level and falls back to a **full-state write**, identical to
   the missing-baseline path. The event is never dropped or mis-recorded.
 
-## S3 writer memory: the `workers` multiplier (Task 6.7)
+## S3 writer memory: the `workers` multiplier
 
 The two sections above describe the operator's two large caches, and both are
 shared by every sink. This one is neither shared nor a cache: it is what a single
@@ -224,7 +225,7 @@ spec.writer.workers × spec.rotation.maxObjectBytes must not exceed 4Gi …
 
 is reading the enforcement of this section. The 4Gi figure is chosen as a bound
 that sits legibly next to a container memory limit, not measured from a benchmark:
-Task 6.6 exercised the write path against MinIO for correctness and recorded no
+The write path was exercised against MinIO for correctness and recorded no
 memory figure, so there is nothing to derive a different number from. It leaves
 every shape that actually helps throughput available — 64 workers at 64Mi is
 exactly 4Gi, and S3 rewards request concurrency rather than object size.
@@ -240,7 +241,7 @@ against a rule that admitted 4. State `spec.writer.workers` on the sink and the
 two agree exactly; that is the shape to prefer on any deployment that has moved
 the flag.
 
-## Load harness + write-path baseline (Task 0.8)
+## Load harness + write-path baseline
 
 `test/loadgen` is a synthetic-churn harness that drives realistic object churn
 through the **real** pipeline — an in-process envtest apiserver → an informer →
@@ -256,14 +257,14 @@ half of these numbers describes. It reports, to stdout:
 - **p50 / p99 enqueue-block** — how long `Enqueue` blocked for queue room (the
   hot-path backpressure a pipeline worker actually feels);
 - **peak `write_queue_depth`** — how close the hand-off queue came to saturation;
-- **peak pipeline backlog** — how far behind the workqueue itself fell (added in
-  Task 2.3: the hand-off queue only describes the last hop);
-- **CPU over the churn window** — user + system CPU, as "cores busy" (Task 2.3);
+- **peak pipeline backlog** — how far behind the workqueue itself fell (the
+  hand-off queue only describes the last hop);
+- **CPU over the churn window** — user + system CPU, as "cores busy";
 - **process RSS** — peak resident set (`getrusage`, unit-normalized per OS), plus
-  the Go heap and runtime totals (Task 2.3), which are attributable where RSS is
+  the Go heap and runtime totals, which are attributable where RSS is
   not;
 - **`hashCache` entries, dedup skips and dropped items** — so a run's figures can
-  be checked against the work it claims to have done (Task 2.3).
+  be checked against the work it claims to have done.
 
 ### Running it
 
@@ -274,9 +275,9 @@ make bench-load PROFILE=massive       # one of the three named scale profiles
 
 `make bench-load` stands up a throwaway ClickHouse container (as
 `make test-integration` does) and provides `KUBEBUILDER_ASSETS` for envtest, then
-runs the harness under the `integration` build tag. Since Task 2.3 the load itself
-comes from a named profile file rather than a command line — see
-[Scale profiles](#scale-profiles-and-published-envelopes-task-23) below.
+runs the harness under the `integration` build tag. The load itself comes from a
+named profile file rather than a command line — see
+[Scale profiles](#scale-profiles-and-published-envelopes) below.
 
 ### Recorded dev-hardware baseline
 
@@ -305,7 +306,7 @@ Pushed harder (`objects=300–400, rate=4000–6000/s, concurrency=16–64`), ac
 throughput plateaued at **~550–565 records/sec** while the write path stayed
 essentially idle — p99 enqueue-block <0.01 ms and peak `write_queue_depth` ≤11.
 
-> **Superseded by Task 2.3 — read that plateau as an estimate, not a
+> **Superseded by later measurement — read that plateau as an estimate, not a
 > measurement.** This section originally attributed it to "the envtest apiserver's
 > own write throughput". It was in fact the harness's own client-side rate limiter
 > (envtest's 1,000-QPS `rest.Config`, two requests per mutation). Two things follow.
@@ -317,7 +318,7 @@ essentially idle — p99 enqueue-block <0.01 ms and peak `write_queue_depth` ≤
 > because ~550–565 is a usable figure. The low-rate table above is unaffected — at
 > 200 mutations/sec the limiter never bound, and the command above reproduces it.
 
-### Initial SLO, and its verdict (Task 2.3)
+### Initial SLO, and its verdict
 
 > **Sustain ≥2,000 records/sec single-replica with p99 enqueue-block <10 ms while
 > ClickHouse is healthy.**
@@ -343,10 +344,10 @@ Reproduce with:
 make bench-load PROFILE=massive LOADGEN_RATE=2000 LOADGEN_DURATION=30s
 ```
 
-Task 0.8 could not validate the throughput half and attributed the ~550
+The first harness could not validate the throughput half and attributed the ~550
 records/sec plateau it saw to "the envtest apiserver's own write throughput". That
 attribution was **wrong**, and finding out why was the single most valuable result
-of Task 2.3's harness work: envtest hands back a `rest.Config` capped at 1,000
+of the later harness work: envtest hands back a `rest.Config` capped at 1,000
 QPS, and an ordinary update costs two requests (a Get and an Update), so the
 harness's *own client-side rate limiter* was the ceiling at almost exactly 500
 mutations/sec. The harness now raises QPS/Burst on the client it churns with (see
@@ -358,9 +359,9 @@ ceiling belongs to the thing under test. That is why the harness now also report
 **dropped generator ticks** — if the load generator cannot keep up, the run says
 so instead of publishing its own limit as the operator's.
 
-## Scale profiles and published envelopes (Task 2.3)
+## Scale profiles and published envelopes
 
-D2 ("production-grade for tiny **and** massive clusters from day one") needs
+"Production-grade for tiny **and** massive clusters from day one" needs
 numbers, not adjectives. The load harness therefore ships three **named scale
 profiles**, as data files in `test/loadgen/profiles/`:
 
@@ -396,7 +397,7 @@ make bench-load PROFILE=massive LOADGEN_DURATION=30s LOADGEN_PAYLOAD_BYTES=8192
 informers are genuinely mixed rather than three flavours of one group, and so the
 per-object overhead of a metadata-only kind (ServiceAccount) shows up next to a
 deeply nested one (Deployment). Two built-ins are deliberately absent: `v1/Secret`
-is hard-denied as a watchable kind (D8) and must never appear in a benchmark that
+is hard-denied as a watchable kind and must never appear in a benchmark that
 claims to describe the real data plane, and `v1/Service` allocates a cluster IP per
 object, which exhausts envtest's default service CIDR after a couple of hundred.
 
@@ -477,7 +478,7 @@ Stated plainly, because an envelope with unstated conditions is not a claim:
   is no controller-manager, no scheduler, and no other client competing for it.
 - **Local ClickHouse.** The backend is a container on the same machine, so
   network latency to the sink is not represented. The write path's own behaviour
-  under an *unhealthy* backend is the chaos suite's subject (Task 2.1), not this
+  under an *unhealthy* backend is the chaos suite's subject, not this
   harness's — every figure here is a healthy-backend figure by construction.
 - **Production logging.** The harness installs the same development-mode zap
   logger `cmd/main.go` does, and the pipeline logs one `Info` line per recorded
@@ -487,7 +488,7 @@ Stated plainly, because an envelope with unstated conditions is not a claim:
   mutations/sec because that is what the acceptance criteria name; it is not the
   write path's ceiling.
 
-## Two recorded decisions (Task 2.3)
+## Two recorded decisions
 
 ### Informer resync period: 0
 
@@ -527,10 +528,10 @@ whenever a key comes back around it writes the object's *current* state, and any
 object that changes again in the meantime is re-enqueued immediately by its own
 informer event through the undelayed `Add` path. Raising the bucket would buy a
 faster tail in exchange for a thundering herd against a backend that has just
-recovered, which is the failure mode the chaos suite (Task 2.1) exists to keep out.
+recovered, which is the failure mode the chaos suite exists to keep out.
 The decision is recorded in code in `pipeline.New`.
 
-## Allocation diet (Task 2.3)
+## Allocation diet
 
 Four avoidable per-event allocation sources in the hot path were measured, then
 fixed. Before/after pprof profiles from a full `massive` run are committed under

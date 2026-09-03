@@ -30,19 +30,19 @@ spec:
         description: |-
           S3Sink declares one S3 or MinIO bucket kuberecord may archive to.
 
-          It is cluster-scoped (D6) for the same reasons ClickHouseSink is: rules in any
+          It is cluster-scoped for the same reasons ClickHouseSink is: rules in any
           namespace reference it by name, and a bucket is infrastructure owned by the
           platform team rather than by whoever owns a namespace. Credentials are the only
           part not in this object, and may not be in the cluster at all — see
           S3CredentialsSpec.
 
-          It is the first Writer-only backend (D12). It cannot read its own history, so
+          It is the first Writer-only backend. It cannot read its own history, so
           cache warm-up, zombie garbage collection and boot reconciliation of scope
           epochs are all disabled for it, and every record it receives is a permanent
           Snapshot. That is a declared capability limit rather than a defect, and it is
           reported on the sink itself as HistoryUnavailable=True while Ready stays True.
           The supported way to have both a queryable timeline and a cheap immutable
-          archive is the tee pattern (D14): two rules over the same resources, one naming
+          archive is the tee pattern: two rules over the same resources, one naming
           a ClickHouseSink and one naming this.
 
           The BUCKET printer column shows spec.bucket alone. The prefix is not in it
@@ -111,7 +111,7 @@ spec:
 
                           That default is a security property, not a convenience: the operator's
                           aggregated ClusterRole grants Secret read access *only* in its own
-                          namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+                          namespace. Sink CRs are cluster-scoped and therefore
                           editable by anyone with cluster-level write access to the CRD, so if this
                           field could freely name any namespace, creating a sink would become a way
                           to make the operator read a Secret its RBAC never intended to expose —
@@ -166,7 +166,7 @@ spec:
                   adding `parquet` later is an additive change to a schema authors already
                   spell explicitly, rather than a breaking one that has to invent a default
                   for every S3Sink already in etcd — and it makes every existing CR say, in
-                  its own text, which versioned contract (D15) produced its objects.
+                  its own text, which versioned contract produced its objects.
                 enum:
                 - jsonl-v1-zstd
                 type: string
@@ -224,7 +224,7 @@ spec:
                       AllowedGVKs restricts which resource types may be streamed to this sink.
 
                       An empty (or omitted) list allows everything *except* the hard deny-list
-                      — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+                      — v1/Secret is never watchable in v1alpha1 and no policy here can
                       re-enable it. Deny is enforced in code, not merely in config, so the
                       permissive default can never become a way to exfiltrate Secrets.
                     items:
@@ -273,7 +273,7 @@ spec:
                   redaction:
                     description: |-
                       Redaction is this sink's redaction floor: value paths scrubbed out of
-                      every object any rule streams here, before hashing (Task 3.3).
+                      every object any rule streams here, before hashing.
 
                       It lives on the sink for the same reason AllowedGVKs does. Whoever owns
                       the backend owns what may land in it, and that authority has to hold
@@ -287,7 +287,7 @@ spec:
                     items:
                       description: |-
                         RedactionRule names one value to scrub out of every streamed object before it
-                        is hashed, diffed and written (Task 3.3).
+                        is hashed, diffed and written.
 
                         Exactly one of the two fields is set. They are separate fields rather than one
                         string with two grammars because an annotation key routinely contains dots and
@@ -346,7 +346,7 @@ spec:
                   no empty segments. The object key is built as
                   `<prefix>/format=jsonl-v1/…`, so a trailing slash would silently produce a
                   `//` in every key this sink ever writes and quietly break the documented
-                  layout (D15) for every reader of the bucket. The permitted characters are
+                  layout for every reader of the bucket. The permitted characters are
                   the conservative subset that needs no escaping in a key, a URL or a query
                   engine's glob; it can be widened later without invalidating anything
                   already written, which is not true in the other direction.
@@ -438,7 +438,7 @@ spec:
                   are absent because for S3 the object *is* the batch and spec.rotation
                   governs it, and checkpointEvery is absent because a Writer-only sink cannot
                   warm from history — it re-snapshots on every restart, so a replay is already
-                  bounded by the current process and a cadence would add nothing (D12). See
+                  bounded by the current process and a cadence would add nothing. See
                   S3WriterSpec for the full reasoning — the omissions are deliberate, not
                   pending.
                 properties:
@@ -512,8 +512,7 @@ spec:
 
                   The first three follow the usual reading, and are set by asynchronous
                   probes: a control-plane reconciler never talks to S3 on its own goroutine
-                  (Invariant 1), so an unreachable bucket slows nothing down — it just reports
-                  here. HistoryUnavailable does not follow the usual reading: it is True on a
+                  so an unreachable bucket slows nothing down — it just reports here. HistoryUnavailable does not follow the usual reading: it is True on a
                   healthy sink, permanently, and says what this backend cannot do rather than
                   what has gone wrong with it. See ConditionHistoryUnavailable.
                 items:

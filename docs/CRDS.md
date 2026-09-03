@@ -149,7 +149,7 @@ Every other condition in this document follows the Kubernetes convention that
 `True` is healthy. This one inverts it deliberately, in the same shape as a Node's
 `NetworkUnavailable`, and the inversion is the point.
 
-An `S3Sink` is a `Writer`-only backend (D12): it cannot read its own history back,
+An `S3Sink` is a `Writer`-only backend: it cannot read its own history back,
 because "what was the last recorded state of every object in this scope?" would
 mean listing and decompressing every object ever written under the prefix — on the
 operator's boot path, growing forever. So three behaviours are off for it:
@@ -182,7 +182,7 @@ handed to the sink runtime at all and `CredentialsResolved` is the condition to
 read.
 
 The supported way to have both a queryable timeline and a cheap immutable archive
-is the tee pattern (D14): two rules over the same resources, one naming a
+is the tee pattern: two rules over the same resources, one naming a
 `ClickHouseSink` and one naming an `S3Sink`. One informer serves both and each
 carries its own dedup state, so the limits above apply to the archiving rule
 alone. See [`docs/TEE.md`](TEE.md).

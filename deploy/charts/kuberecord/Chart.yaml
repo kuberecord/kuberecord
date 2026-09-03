@@ -10,7 +10,7 @@ type: application
 # field). Both must move together with the Makefile's VERSION.
 version: 0.3.1
 appVersion: "v0.3.1"
-# The chart installs no webhooks and no cert-manager (D4): validation is entirely
+# The chart installs no webhooks and no cert-manager: validation is entirely
 # CRD structural schemas plus CEL (x-kubernetes-validations), which is why the
 # floor is 1.29 — the release where CEL validation cost budgets and
 # `x-kubernetes-validations` on all schema nodes are generally available.

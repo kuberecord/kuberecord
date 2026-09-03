@@ -98,7 +98,7 @@ func s3SinkShapeCases() []apiCase {
 
 		// The key prefix. Each rejection below produces a `//` or an unescaped
 		// character in *every* object the sink would ever write, and the object
-		// key layout is a public contract (D15) — so they are caught here rather
+		// key layout is a public contract — so they are caught here rather
 		// than normalised away in the key builder, where the CR would keep saying
 		// something the bucket does not.
 		{

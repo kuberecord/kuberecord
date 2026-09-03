@@ -46,9 +46,9 @@ between them is the same one their designs are built around:
 
 **Reach for the CLI for the single-object questions**, because the parts that are
 easy to get wrong are already in it: incarnation resolution before filtering
-(Invariant 7), a replay that starts from a full state rather than from the window's
-edge, prior values recovered rather than left blank, and an empty answer explained
-against the watch scopes instead of presented as silence (Invariant 9).
+a replay that starts from a full state rather than from the window's edge, prior
+values recovered rather than left blank, and an empty answer explained against
+the watch scopes instead of presented as silence.
 
 | The question | The command | The SQL here |
 |---|---|---|
@@ -63,12 +63,12 @@ against the watch scopes instead of presented as silence (Invariant 9).
 **Reach for the SQL for everything wider than one object.** Drift across a fleet,
 flap counts, activity by namespace, "which objects cover this window", anything
 grouped or joined — none of it is a shape the CLI has, and putting it there would
-be building a worse query engine next to the one you already have (D18). The
+be building a worse query engine next to the one you already have. The
 sections below are that half, and every statement in them is executed against a
 real backend in CI.
 
 Both read the same frozen contract, so the two transfer: the CLI's `-o json`
-envelope spells its item fields with **the schema's own column names** (D19), which
+envelope spells its item fields with **the schema's own column names**, which
 is what lets a `jq` recipe written against a SQL result work unchanged against CLI
 output. Where the CLI's answer and a query here disagree, that is a bug in one of
 them rather than a difference of opinion.
@@ -337,7 +337,7 @@ and it is why the reconstruction above keys on `ts` throughout.
 > -n <ns> --at <just before it>` reconstructs what it held. The query below is the
 > wide version — *every* deletion in a window, which is the sweep you run when you
 > do not yet know which object to ask about. On an object archive there are no
-> `Deleted` rows to find at all (D12), and the CLI says so rather than reporting
+> `Deleted` rows to find at all, and the CLI says so rather than reporting
 > the object as still present.
 
 *"Somebody deleted it and nobody admits to it — what was in it?"* The object is
@@ -581,7 +581,7 @@ zstd-compressed JSON Lines objects an `S3Sink` writes — and the difference is 
 one of dialect but of capability. **An object store has no query engine.** There
 is no index to seek, no sort key to prune on, and no server to push a predicate
 down to; a question is answered by fetching objects and reading them. That is the
-trade D12 makes deliberately: the archive is cheap to write and cheap to keep
+trade the archive tier makes deliberately: it is cheap to write and cheap to keep
 forever, which is exactly what makes it expensive to interrogate.
 
 [DuckDB](https://duckdb.org) is what makes it interrogable anyway, with no
@@ -617,7 +617,7 @@ it.
 `kubectl kuberecord` answers `timeline`, `diff`, `get --at` and `scopes` from these
 same objects, with no DuckDB and no database anywhere: the query backend in
 `internal/query/objectsource` is the read path, and it is **pure Go — no cgo, no
-embedded engine** (D18), because that is what keeps the plugin a static
+embedded engine**, because that is what keeps the plugin a static
 cross-compile. DuckDB is not being replaced by it. The CLI answers *narrow*
 questions — one object, one window, one instant — and the recipes on this page are
 what wide analytics still want.
@@ -644,7 +644,7 @@ wrong the same way:
   this morning, and a clipped read would report "nobody was watching" about it.
 - **It resolves the incarnation before applying any filter.** The identity is
   version-agnostic, and a `(namespace, name)` pair may span several UIDs
-  (Invariant 7). Which incarnation a default query is about is decided from every
+  Which incarnation a default query is about is decided from every
   change in the window, *then* the actor and field-path predicates narrow it —
   the other order lets a filter promote a deleted object's history into the living
   object's timeline.
@@ -659,7 +659,7 @@ equivalent to a database:
 
 | Capability | Value | What the CLI does about it |
 |---|---|---|
-| `deletions` | `false` | A timeline that simply stops carries an explicit notice: the object may have been deleted without the deletion ever being recorded (D12). No `Deleted` row is ever synthesized to close the gap. |
+| `deletions` | `false` | A timeline that simply stops carries an explicit notice: the object may have been deleted without the deletion ever being recorded. No `Deleted` row is ever synthesized to close the gap. |
 | `server_side_filter` | `false` | Predicates are applied to lines already decoded. The *result* is identical to a pushdown backend's — the conformance suite pins that — but a limit does not bound the work. |
 | `point_query` | `false` | A single-object question costs the partitions its window lands in, so the CLI renders a scan estimate (object count and stored bytes, from the listing alone) before it starts. |
 | `time_bound_required` | `true` | An unbounded query is refused up front, naming the flag that fixes it, rather than started and never finished. |
@@ -970,7 +970,7 @@ ORDER BY object_key;
 > same log and renders one row per period. It also consults it *automatically*
 > behind every other command, so an empty timeline is never presented as silence —
 > "nothing changed" and "nothing was watching" are different findings and the
-> second exits `3` (Invariant 9). The query below is for reading the log directly,
+> second exits `3`. The query below is for reading the log directly,
 > or for pulling it into something else.
 
 *"There are no records for this object after Tuesday — did nothing change, or was

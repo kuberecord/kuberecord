@@ -23,7 +23,7 @@ import (
 // StreamRule declares that the resources it names, *in its own namespace*,
 // should be streamed to a ClickHouseSink.
 //
-// It is namespaced (D3, D6) so that streaming intent is delegable: a team with
+// It is namespaced so that streaming intent is delegable: a team with
 // write access only to their namespace can opt their own workloads into the
 // audit trail without cluster-level privileges, and the watch it creates can
 // never reach beyond that namespace. Naming a cluster-scoped kind here is

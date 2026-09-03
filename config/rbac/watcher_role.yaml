@@ -1,4 +1,4 @@
-# The aggregated watch role (D7).
+# The aggregated watch role.
 #
 # This ClusterRole holds no rules of its own: `aggregationRule` tells the
 # controller-manager to keep `rules` equal to the union of every ClusterRole
@@ -13,9 +13,9 @@
 #     nor label an existing role; and even an administrator applying a preset
 #     is bound by Kubernetes' own escalation check, which forbids granting a
 #     permission you do not hold yourself.
-#   - A missing grant is data, not an outage. The rule that wanted it reports
+#   - A missing grant is not an outage. The rule that wanted it reports
 #     `RBACGranted=False/MissingPermissions` and every other rule keeps
-#     streaming (Invariant 5); the grant appearing later flips the condition
+#     streaming; the grant appearing later flips the condition
 #     within one resync, with no restart.
 #
 # `rules` is written as an empty list rather than omitted so that `kubectl diff`

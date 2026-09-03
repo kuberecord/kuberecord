@@ -83,11 +83,10 @@ func unstructuredRule(kind, namespace string, sink map[string]any) clientObject 
 // The sink names and kinds the table below references.
 //
 // defaultSinkKind is the kind an unqualified reference defaults to; otherSinkKind
-// is the second kind this build serves (Task 6.1), which is what makes a *kind*
+// is the second kind this build serves, which is what makes a *kind*
 // change a legal edit to attempt and therefore what finally exercises the sink
 // reference's immutability rule rather than its enum. unknownSinkKind is a kind
-// only a later release serves (D6/D13 put Postgres in v0.3.0), used here to prove
-// that this one refuses to admit it.
+// no release serves yet, used here to prove that this one refuses to admit it.
 const (
 	defaultSinkName = "default"
 	otherSinkName   = "other-sink"
@@ -158,7 +157,7 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			obj:     withResource(WatchedResource{Group: "Apps", Version: "v1", Kind: "Deployment"}),
 			wantErr: "should match",
 		},
-		// The sink reference (Task 4.3). A rule with no sink at all is what a
+		// The sink reference. A rule with no sink at all is what a
 		// v0.1.0 rule looks like once `sinkRef` is an unknown field, so rejecting
 		// it on write is half of the migration story — the other half is the
 		// reconciler guard for the ones already in etcd, which admission cannot
@@ -215,7 +214,7 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			wantErr: "sink is immutable",
 		},
 		{
-			// Now that Task 6.1 has added a second served kind, this edit is
+			// Now that a second sink kind is served, this edit is
 			// structurally valid and the *immutability* rule is what refuses it —
 			// which is the expectation that was unreachable while the enum held one
 			// value and the apiserver rejected the spelling before ever evaluating a
@@ -225,7 +224,7 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			// re-pointing a live rule from a ClickHouseSink to an S3Sink would strand
 			// the dedup baseline the pipeline built for every object in scope, and
 			// silently move that rule onto a backend that can never reconstruct
-			// history (D12).
+			// history.
 			name:    "sink-kind-mutation-is-rejected",
 			obj:     e.build(ruleSpec(deploymentResource())),
 			mutate:  e.setSinkKind,
@@ -236,7 +235,7 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			obj:    e.build(ruleSpec(deploymentResource())),
 			mutate: e.appendResource,
 		},
-		// Redaction path syntax (Task 3.3). The rejections are what stops a
+		// Redaction path syntax. The rejections are what stops a
 		// malformed policy from reaching the data plane, where the only remaining
 		// options would be to degrade the rule silently or to stream unredacted.
 		{

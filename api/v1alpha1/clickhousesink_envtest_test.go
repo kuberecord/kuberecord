@@ -147,7 +147,7 @@ func TestClickHouseSinkValidation(t *testing.T) {
 			obj:     sinkWithPolicy(GVKSelector{Group: "apps", Version: "v1", Kinds: []string{}}),
 			wantErr: "should have at least 1 items",
 		},
-		// Redaction (Task 3.3). The syntax cases are the same ones the rule CRD
+		// Redaction. The syntax cases are the same ones the rule CRD
 		// runs (see ruleValidationCases) — the two fields are the same type, and
 		// a sink's floor is exactly as unforgiving as a rule's addition.
 		{

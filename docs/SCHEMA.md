@@ -5,7 +5,7 @@ three parts, and the split is the architecture's rather than the document's:
 
 - **[The logical record contract](#the-logical-record-contract)** — one `Record`
   per observed state transition, backend-independent. This is the vocabulary every
-  backend adapts to (D9): the event-type state machine, the diff format,
+  backend adapts to: the event-type state machine, the diff format,
   checkpoints, redaction, and the version-agnostic identity rule.
 - **[Physical mapping to ClickHouse](#physical-mapping-to-clickhouse)** — how a
   `Record` becomes a row in `resource_states`, and the **frozen `v1` schema** those
@@ -17,12 +17,12 @@ three parts, and the split is the architecture's rather than the document's:
   watch-scope epoch log.
 - **[Physical mapping to S3 objects](#physical-mapping-to-s3-objects)** — how a
   batch of `Record`s becomes one zstd-compressed JSON Lines object, and the key it
-  is filed under. Its own versioned contract, `format=jsonl-v1` (D15), on its own
+  is filed under. Its own versioned contract, `format=jsonl-v1`, on its own
   timeline.
 
 > **Schema v1 is frozen.** Because kuberecord had no users to keep compatibility
 > with, the schema got exactly one free redesign window, and that window is now
-> **closed**: as of Task 2.6 the two ClickHouse tables are a **public API** with an
+> **closed**: the two ClickHouse tables are a **public API** with an
 > additive-only change policy. Every column of them is deliberate, and none will
 > change meaning, name, or type under `v1`.
 > See [Stability & Versioning](#stability--versioning) for what that guarantees you
@@ -41,7 +41,7 @@ field's name in one mapping is not its name in the other — the record's `group
 one physical form constrains the other. A third backend is a third mapping section,
 not a change here.
 
-**Representational loss is documented, never silent** (D9). Where a backend cannot
+**Representational loss is documented, never silent.** Where a backend cannot
 hold something the contract carries, or cannot produce something the contract
 allows, its mapping section says so in as many words. The S3 archive's absent
 deletions are the case that matters most, and they are stated in three places —
@@ -61,7 +61,7 @@ onto something durable.
 | Field | Identity? | What it holds |
 |---|---|---|
 | `Timestamp` | — | The instant the event occurred, nanosecond precision, UTC. **Event time, not ingestion time** — see [`ts` ordering](#ts-ordering-event-time-not-ingestion-time), which is a property of the contract rather than of one mapping. |
-| `ClusterID` | ✅ | The cluster this operator instance serves. Explicit in both mappings; implicit in process (Invariant 7). |
+| `ClusterID` | ✅ | The cluster this operator instance serves. Explicit in both mappings; implicit in process. |
 | `EventType` | — | `Added \| Modified \| Deleted \| Snapshot \| Checkpoint` — the [state machine](#event-type-state-machine). An **open** enum: a consumer branches on what it knows and passes the rest through. |
 | `APIGroup` | ✅ | API group; `""` is the core group, which is a value and not a wildcard. |
 | `APIVersion` | — | The version observed. Provenance only — [identity is version-agnostic](#identity-is-version-agnostic). |
@@ -76,7 +76,7 @@ onto something durable.
 | `Diff` | — | An RFC 6902 JSON Patch describing the change — see [Diff format](#diff-format). Populated on `Modified` and `Checkpoint`. |
 | `SHA256` | — | Hex SHA-256 of the normalized JSON, the basis of dedup and version gating. Empty on `Deleted`. |
 
-The identity column is the canonical key of Invariant 7:
+The identity column is the canonical object key:
 `(cluster_id, api_group, kind, namespace, name)`, version-agnostic, constructed by
 exactly one function in the codebase. Everything else is either provenance or
 payload.
@@ -296,7 +296,7 @@ turned off.
 
 #### What redaction is not
 
-- **Not a Secrets unlock.** `v1/Secret` is denied in code (D8) and no redaction
+- **Not a Secrets unlock.** `v1/Secret` is denied in code and no redaction
   policy admits one, however thoroughly it would scrub it.
 - **Not a substitute for query-side access control.** Everything not on a path is
   stored verbatim, and the flattening caveat in [`docs/RBAC.md`](RBAC.md) still
@@ -362,7 +362,7 @@ Consequences for a consumer:
   costs nothing: a restarting operator starts from an empty (or history-warmed)
   cache, so its first row for an object is a full-state `Added`/`Snapshot`
   anyway, and the replay window re-baselines there. Nothing durable depends on
-  the counter (Invariant 6), and a reconstruction never needs to know what it
+  the counter, and a reconstruction never needs to know what it
   was — it reads the rows.
 
 #### Reconstructing state at an instant
@@ -584,7 +584,7 @@ already written against `v1`.
 Freezing was gated on confirming that the already-designed Phase 3 features fit
 `v1` as it stands. Both do, so `v1` is frozen with no columns added:
 
-- **Kubernetes Events ingestion (Task 3.1)** — an Event is structurally just
+- **Kubernetes Events ingestion** — an Event is structurally just
   another GVK. It is identified by the ordinary `api_group`/`kind`/`namespace`/
   `name` tuple, its full normalized JSON (including `count`, `involvedObject`,
   `reason`, `type`, `message`) lands in `data`, and `labels`/`actors` populate as
@@ -594,7 +594,7 @@ Freezing was gated on confirming that the already-designed Phase 3 features fit
   differs about Events (suppressing `Deleted` emission, skipping the GC pass,
   never `Snapshot`-tagging) is *pipeline* behavior keyed on the GVK, and pipeline
   behavior needs no column. Scope rows are unchanged.
-- **Redaction (Task 3.3)** — redaction scrubs values *after* normalization and
+- **Redaction** — redaction scrubs values *after* normalization and
   *before* hashing, so it changes the bytes stored in `data` and `diff` and the
   value of `sha256`. Those are three existing columns holding the same kinds of
   values they always held; the redaction sentinel is self-describing where it
@@ -967,9 +967,9 @@ only).
 An `S3Sink` maps a *batch* of `Record`s to one object: JSON Lines, one record per
 line, zstd-compressed, filed under a key that carries its own partitions. This is
 the archive tier — cheap to write, cheap to keep for as long as a regulator asks,
-and expensive to interrogate, in that order of priority (D12).
+and expensive to interrogate, in that order of priority.
 
-**This format is a versioned public contract of its own** (D15), on its own
+**This format is a versioned public contract of its own**, on its own
 timeline and entirely separate from the frozen ClickHouse schema above. Its version
 is stamped into the object key rather than living only on the `S3Sink` CR, because a
 reader handed nothing but a bucket must still be able to tell which contract

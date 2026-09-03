@@ -21,7 +21,7 @@ imagePullSecrets: []
 replicaCount: 1
 
 # CLUSTER_ID: stamped on every row and every scope event this operator writes,
-# and part of an object's identity in the schema (Invariant 7). The default is a
+# and part of an object's identity in the schema. The default is a
 # local/dev placeholder — set it to something that identifies the cluster before
 # installing anywhere real, because rows already written keep the old value.
 clusterID: local-kind-cluster
@@ -61,16 +61,16 @@ rbac:
   # Which watch presets to install (config/rbac/presets/*.yaml, rendered under
   # this release's name). Each is a ClusterRole labelled
   # `kuberecord.io/aggregate-to-watcher: "true"`, so the aggregated `watcher`
-  # role picks it up with no restart and no redeploy (D7).
+  # role picks it up with no restart and no redeploy.
   #
   # core-workloads is the only one enabled by default, because it is what the
   # shipped sample rules watch. A rule naming a kind no enabled preset grants is
   # not an outage: it reports RBACGranted=False/MissingPermissions, every other
   # rule keeps streaming, and enabling the preset later flips the condition
-  # within one resync (Invariant 5).
+  # within one resync.
   #
   # Never grant `secrets` here or in a preset of your own: v1/Secret is
-  # hard-denied as a watchable kind in code (D8), so the grant would be dead
+  # hard-denied as a watchable kind in code, so the grant would be dead
   # privilege.
   presets:
     core-workloads: true
@@ -157,14 +157,14 @@ terminationGracePeriodSeconds: 10
 # Verbatim is the design. Every field of every sink CRD is reachable without this
 # chart growing a value per field, a future backend needs no new chart code, and
 # what is *valid* is decided by the CRD's own structural schema and CEL rules
-# (D4) rather than by a second, drifting copy of them here. Anything omitted
+# rather than by a second, drifting copy of them here. Anything omitted
 # keeps its CRD default, so a spec says only what you are choosing.
 #
-# A sink is identified by the (kind, name) pair, not by the name alone (D10): a
+# A sink is identified by the (kind, name) pair, not by the name alone: a
 # ClickHouseSink and an S3Sink may both be called `hot`. Two entries sharing both
 # halves are refused at render time rather than rendering one object twice.
 #
-# The example below is the tee pattern (D14) — the same resources streamed to a
+# The example below is the tee pattern — the same resources streamed to a
 # queryable ClickHouse timeline and to a cheap immutable S3 archive, by two rules
 # naming these two sinks. See docs/TEE.md, and docs/CRDS.md for every field.
 #
@@ -178,7 +178,7 @@ terminationGracePeriodSeconds: 10
 #           username: kuberecord
 #           credentialsSecretRef:
 #             # No namespace: it defaults to the operator's own, the only
-#             # namespace it holds Secret read rights in (D7).
+#             # namespace it holds Secret read rights in.
 #             name: clickhouse-credentials
 #     - kind: S3Sink
 #       name: cold

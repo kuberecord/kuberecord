@@ -69,7 +69,7 @@ They do not all give you the same thing, and the difference is the two names:
 manager. `kubectl kuberecord …` works; the standalone `kuberecord`, which is what
 an auditor reading an archive with no cluster wants, comes from Homebrew or from
 the release archive. They are the same bytes either way — one compilation, copied
-into the second name (Task 12.1), so the two can never be built from different
+into the second name, so the two can never be built from different
 trees.
 
 **`go install` builds rather than downloads.** It gets you `kubectl-kuberecord`
@@ -101,7 +101,7 @@ plugs into.
 | `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). |
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
-| `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity) (D21). |
+| `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity). |
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
 | `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
 | `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
@@ -131,7 +131,7 @@ Three notes on how they interact with the rest:
 - **`--cluster` is kubectl's, `--cluster-id` is kuberecord's.** The first selects
   a kubeconfig cluster entry; the second selects whose recorded history you are
   reading. They are unrelated, and the collision is why the second flag carries
-  the suffix (D21).
+  the suffix.
 - **`-n`/`--namespace` narrows an object address**, and for [`scopes`](#scopes)
   alone it does *not* default to the kubeconfig's current namespace: a compliance
   question about what was being recorded means the whole cluster unless you say
@@ -383,7 +383,7 @@ exists for. `--full` prints everything.
 beside the document says so.
 
 Exit `3` still outranks it. A script told "no changes" when nothing was ever
-watching has been given the one answer [Invariant 9](#an-empty-result-is-never-presented-on-its-own)
+watching has been given the one answer [the empty-result rule](#an-empty-result-is-never-presented-on-its-own)
 exists to prevent, so a scope nobody watched is reported as such whatever
 `--exit-code` asked for.
 
@@ -710,7 +710,7 @@ being recorded to change
 ```
 
 (For `Secret` specifically the answer is permanent: it is hard-denied as a
-watchable kind, D8.)
+watchable kind.)
 
 A backend with no scope log at all cannot answer this command — there is no other
 half of the question to fall back to — so it exits `1` naming the backend, rather
@@ -850,7 +850,7 @@ stays there, so `| less -R` is yours to choose.
 ## Structured output
 
 `-o json`, `-o jsonl` and `-o yaml` produce a **versioned envelope**, and it is a
-public contract (D19). People script against this; a field renamed a release later
+public contract. People script against this; a field renamed a release later
 breaks a runbook silently, because `jq` reports nothing for a path that no longer
 exists and the pipeline keeps running while producing empty findings.
 
@@ -959,7 +959,7 @@ the literal sentinel `[REDACTED]`.
 
 ### `metadata.coverage` on every command that queries changes
 
-This is Invariant 9 in a form a script can branch on. Two answers with zero items
+This is the empty-result rule in a form a script can branch on. Two answers with zero items
 mean opposite things, and one field tells them apart without a second query:
 
 | `available` | `intervals` | What it means |
@@ -1169,7 +1169,7 @@ degrade identically. Only the engine matters below, and it is what
 `metadata.backend` reports in [structured output](#structured-output).
 
 Every engine **declares** what its storage can express, and the CLI keys its
-behaviour on the declaration rather than on the backend's name (D17) — so a future
+behaviour on the declaration rather than on the backend's name — so a future
 indexed backend inherits the right treatment by declaring it, and a backend cannot
 quietly gain a capability it never claimed. The conformance suite checks the
 declaration against detected behaviour in both directions, so neither half can
@@ -1177,7 +1177,7 @@ drift.
 
 | Capability | `clickhouse` | `objectsource` | What the difference costs you |
 |---|:---:|:---:|---|
-| `deletions` | ✅ | ❌ | An object archive holds no `Deleted` rows at all (D12). A timeline over one that simply stops carries an **explicit notice** saying the object may have been deleted without the deletion ever being recorded. No `Deleted` row is ever synthesized to close the gap — history with no deletions in it is otherwise indistinguishable from history of a cluster where nothing was deleted. |
+| `deletions` | ✅ | ❌ | An object archive holds no `Deleted` rows at all. A timeline over one that simply stops carries an **explicit notice** saying the object may have been deleted without the deletion ever being recorded. No `Deleted` row is ever synthesized to close the gap — history with no deletions in it is otherwise indistinguishable from history of a cluster where nothing was deleted. |
 | `server_side_filter` | ✅ | ❌ | **No consequence for the content.** `--actor` and `--field` produce an identical result either way, which is the agreement property the conformance suite pins. The consequence is cost: without pushdown, `--limit` does not bound the work, so a wide window is estimated, confirmed and reported on. |
 | `point_query` | ✅ | ❌ | ClickHouse seeks to one object's rows. The archive has no index, so a single-object question costs every object in the partitions its window lands in — see [Cold scans](#cold-scans) for the estimate, the confirmation and `--max-objects`. |
 | `time_bound_required` | ❌ | ✅ | An unbounded question against the archive is refused up front, naming the flag that fixes it, rather than started and never finished. With neither end given the CLI supplies **24 hours** and announces it; `--since` widens it. |
@@ -1194,8 +1194,8 @@ people assume are the difference:
   one small object per day rather than one per hour.
 
 Nothing here is hidden or worked around. A question the backend cannot answer is
-reported as a capability gap, never as an empty result (Invariant 4), and a command
-that can answer half of it answers half and says which half (Invariant 5). What the
+reported as a capability gap, never as an empty result, and a command that can
+answer half of it answers half and says which half. What the
 archive's reader does about each of these, in more detail and beside the DuckDB
 recipes that cover what the CLI deliberately does not, is
 [`docs/QUERIES.md`](QUERIES.md#what-the-cli-reads).
@@ -1475,7 +1475,7 @@ object in that window's partitions — every object, not only the ones belonging
 the object you asked about. Ninety days of a busy cluster is thousands of objects
 and gigabytes off the wire for a table with four rows in it.
 
-That is the deliberate price of having no database to run (D18), and the CLI states
+That is the deliberate price of having no database to run, and the CLI states
 it rather than hiding it: the cost is bounded, reported and interruptible. **For
 wide analytics over an archive** — aggregations, joins, anything that reads more
 than one object's history — **use the DuckDB and Athena recipes in

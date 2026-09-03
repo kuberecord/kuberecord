@@ -138,13 +138,13 @@ Validate the `sinks` list, per entry, before any of it is rendered.
 
 Only four things are checked, and the boundary is deliberate. Everything about
 whether a *spec* is valid belongs to the CRD's structural schema and its CEL
-rules (D4) — duplicating any of it here would mean two validators to keep in
+rules — duplicating any of it here would mean two validators to keep in
 step, and the chart's copy would be the stale one. What the API server cannot
 catch in time, or cannot phrase usefully, is what is checked:
 
   - an unknown `kind`, which fails as a missing CRD rather than as a typo;
   - a missing `name`, which is what rules name in spec.sink.name;
-  - a duplicated (kind, name) identity — the pair is a sink's identity (D10), so
+  - a duplicated (kind, name) identity — the pair is a sink's identity, so
     two entries sharing both are one object rendered twice, and Helm would apply
     the second over the first with no warning;
   - the one connection field per backend that has no default and cannot be

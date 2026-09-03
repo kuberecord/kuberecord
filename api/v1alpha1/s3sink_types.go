@@ -33,7 +33,7 @@ const (
 	// JSON tags, nothing reordered and nothing omitted.
 	//
 	// The version is *inside* the value rather than alongside it because the
-	// object format is its own public, versioned contract (D15) — separate from
+	// object format is its own public, versioned contract — separate from
 	// the ClickHouse physical schema and frozen on its own timeline. A reader
 	// pointed at a bucket must be able to tell which contract produced the bytes
 	// from the sink's spec alone, and the same "jsonl-v1" token is what appears in
@@ -166,7 +166,7 @@ type S3RotationSpec struct {
 // obvious reading of it is wrong. Object Lock requires versioning, so a bucket
 // that can hold a retained object is always a versioned one — and on a versioned
 // bucket S3 has no idempotent PUT. A retried PUT of an identical batch produces
-// the same key and the same bytes (Task 6.2) and is *accepted*: it creates a
+// the same key and the same bytes, and is *accepted*: it creates a
 // second, byte-identical version, and the retained one keeps its own retention.
 // Nothing is refused and nothing appears in the sink's logs. So the key's
 // deduplication is reader-visible rather than storage-level: the key has exactly
@@ -204,7 +204,7 @@ type S3ObjectLockSpec struct {
 //   - checkpointEvery bounds how far a replay has to walk back to the last
 //     full-state record, and for this backend that walk is already bounded. A
 //     Writer-only sink cannot warm from its own history, so it re-snapshots
-//     everything in scope on every restart (D12) and no replay reaches further back
+//     everything in scope on every restart, and no replay reaches further back
 //     than the current process's first sighting. A cadence on top of that would buy
 //     nothing. Diffs themselves are written as usual — an object changed while this
 //     process is watching produces a Modified carrying a patch, identically to the
@@ -268,12 +268,12 @@ type S3WriterSpec struct {
 // maxObjectBytes is measured on the encoded payload and each worker accumulates
 // an object of its own. Both fields' own bounds are individually reasonable and
 // compose into something that is not: 64 workers at 1Gi each is 64Gi, which no
-// node survives, and under the tee pattern (D14) two sinks' ceilings sum on top
+// node survives, and under the tee pattern two sinks' ceilings sum on top
 // of the informer cache and each sink's hashCache.
 //
 // 4Gi is chosen as a bound an operator can hold in their head next to a
-// container memory limit rather than measured from a benchmark: Task 6.6 measured
-// the write path against MinIO for correctness (key layout, retry idempotency,
+// container memory limit rather than measured from a benchmark: the write path
+// was measured against MinIO for correctness (key layout, retry idempotency,
 // rotation counts, Object Lock headers) and recorded no memory figure, so there
 // is nothing to justify a different number from. It leaves every shape that
 // actually helps throughput available — 64 workers at 64Mi is exactly 4Gi, and S3
@@ -334,7 +334,7 @@ type S3SinkSpec struct {
 	// no empty segments. The object key is built as
 	// `<prefix>/format=jsonl-v1/…`, so a trailing slash would silently produce a
 	// `//` in every key this sink ever writes and quietly break the documented
-	// layout (D15) for every reader of the bucket. The permitted characters are
+	// layout for every reader of the bucket. The permitted characters are
 	// the conservative subset that needs no escaping in a key, a URL or a query
 	// engine's glob; it can be widened later without invalidating anything
 	// already written, which is not true in the other direction.
@@ -398,7 +398,7 @@ type S3SinkSpec struct {
 	// adding `parquet` later is an additive change to a schema authors already
 	// spell explicitly, rather than a breaking one that has to invent a default
 	// for every S3Sink already in etcd — and it makes every existing CR say, in
-	// its own text, which versioned contract (D15) produced its objects.
+	// its own text, which versioned contract produced its objects.
 	// +optional
 	// +kubebuilder:default="jsonl-v1-zstd"
 	// +kubebuilder:validation:Enum=jsonl-v1-zstd
@@ -429,7 +429,7 @@ type S3SinkSpec struct {
 	// are absent because for S3 the object *is* the batch and spec.rotation
 	// governs it, and checkpointEvery is absent because a Writer-only sink cannot
 	// warm from history — it re-snapshots on every restart, so a replay is already
-	// bounded by the current process and a cadence would add nothing (D12). See
+	// bounded by the current process and a cadence would add nothing. See
 	// S3WriterSpec for the full reasoning — the omissions are deliberate, not
 	// pending.
 	// +optional
@@ -454,8 +454,7 @@ type S3SinkStatus struct {
 	//
 	// The first three follow the usual reading, and are set by asynchronous
 	// probes: a control-plane reconciler never talks to S3 on its own goroutine
-	// (Invariant 1), so an unreachable bucket slows nothing down — it just reports
-	// here. HistoryUnavailable does not follow the usual reading: it is True on a
+	// so an unreachable bucket slows nothing down — it just reports here. HistoryUnavailable does not follow the usual reading: it is True on a
 	// healthy sink, permanently, and says what this backend cannot do rather than
 	// what has gone wrong with it. See ConditionHistoryUnavailable.
 	// +optional
@@ -472,19 +471,19 @@ type S3SinkStatus struct {
 
 // S3Sink declares one S3 or MinIO bucket kuberecord may archive to.
 //
-// It is cluster-scoped (D6) for the same reasons ClickHouseSink is: rules in any
+// It is cluster-scoped for the same reasons ClickHouseSink is: rules in any
 // namespace reference it by name, and a bucket is infrastructure owned by the
 // platform team rather than by whoever owns a namespace. Credentials are the only
 // part not in this object, and may not be in the cluster at all — see
 // S3CredentialsSpec.
 //
-// It is the first Writer-only backend (D12). It cannot read its own history, so
+// It is the first Writer-only backend. It cannot read its own history, so
 // cache warm-up, zombie garbage collection and boot reconciliation of scope
 // epochs are all disabled for it, and every record it receives is a permanent
 // Snapshot. That is a declared capability limit rather than a defect, and it is
 // reported on the sink itself as HistoryUnavailable=True while Ready stays True.
 // The supported way to have both a queryable timeline and a cheap immutable
-// archive is the tee pattern (D14): two rules over the same resources, one naming
+// archive is the tee pattern: two rules over the same resources, one naming
 // a ClickHouseSink and one naming this.
 //
 // The BUCKET printer column shows spec.bucket alone. The prefix is not in it

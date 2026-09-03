@@ -2,8 +2,8 @@
 // the tables idempotently when --ch-auto-create-schema is set. Embedding the
 // reviewed .sql files — rather than duplicating the DDL as Go string literals —
 // guarantees the statements the operator executes are byte-identical to the
-// files that are documented in docs/SCHEMA.md and frozen as a public API in
-// Task 2.6, so the two can never silently drift apart.
+// files that are documented in docs/SCHEMA.md and frozen as a public API, so
+// the two can never silently drift apart.
 package schema
 
 import "embed"

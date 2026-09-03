@@ -102,7 +102,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"\n            - bucket\n",
 				"minLength: 1",
 				// The object-key prefix: no leading slash, no trailing slash, no
-				// empty segment. It is the authored half of a public contract (D15).
+				// empty segment. It is the authored half of a public contract.
 				"pattern: " + S3PrefixPattern,
 				// The format enum is deliberately one member wide; widening it is an
 				// additive release decision, so it is matched with its list item.
@@ -167,7 +167,7 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"pattern: ^[A-Z][A-Za-z0-9]{0,62}$",
 				`pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$`,
 				`pattern: ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
-				// The sink reference (Task 4.3): required as a whole, its kind
+				// The sink reference: required as a whole, its kind
 				// defaulted and restricted to the kinds this build serves, its name
 				// non-empty, and the pair immutable. The enum is matched with its
 				// list item so that widening it — which is a release decision, not a
@@ -319,7 +319,8 @@ var ruleCRDFiles = []string{
 // on read instead. Every legacy rule then binds to a backend nobody chose, inherits
 // that sink's dedup and warm state, reports Ready=True, and the guard becomes dead
 // code that nothing exercises. Silent rebinding to the wrong backend is precisely the
-// failure D10 exists to prevent, and it is invisible from the rule's status.
+// failure the required sink reference exists to prevent, and it is invisible
+// from the rule's status.
 //
 // `spec.sink.name` is held to the same rule for the compounding case rather than the
 // immediate one. A default on `name` alone cannot fire for a legacy rule — its parent
@@ -363,7 +364,7 @@ func TestSinkReferenceHasNoMaterializingDefault(t *testing.T) {
 					"warm state, and reports Ready=True while doing it.\n"+
 					"It also makes RuleReconciler.plan's `spec.Sink == (v1alpha1.SinkReference{})` guard "+
 					"(ReasonLegacySinkRef) unreachable, so nothing anywhere would report the rebinding. "+
-					"This is the failure D10 exists to prevent.",
+					"Silent rebinding to the wrong backend is what a required sink reference prevents.",
 					file, got)
 			}
 
@@ -463,7 +464,7 @@ const (
 // sharedWriterKnobs are the writer knobs every sink CRD carries, and
 // clickHouseOnlyWriterKnobs are the ones only ClickHouse's does.
 //
-// The split is the API promise Task 6.1 makes: an author who has tuned one sink's
+// The split is a deliberate API promise: an author who has tuned one sink's
 // write path has tuned the other's, and the fields that are missing are missing
 // for a stated reason rather than by oversight.
 var (
@@ -569,7 +570,7 @@ func TestS3SinkWorkerMemoryRuleIsGenerated(t *testing.T) {
 // The absence half matters just as much. batchMaxRows and batchMaxWait would be a
 // second set of controls over a decision spec.rotation already owns, and
 // checkpointEvery would be a cadence over diffs a Writer-only sink never writes
-// (D12) — a knob that silently does nothing is worse than no knob, so their
+// — a knob that silently does nothing is worse than no knob, so their
 // absence is asserted rather than assumed.
 func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 	chWriter := schemaNode(t, clickHouseSinkCRDFile,
@@ -610,7 +611,7 @@ func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 				t.Errorf("spec.writer.%s appeared on the S3Sink (%v).\n"+
 					"batchMaxRows and batchMaxWait would be a second set of controls over what "+
 					"spec.rotation already decides, and checkpointEvery a cadence over diffs a "+
-					"Writer-only sink never writes (D12). A knob that does nothing is worse than "+
+					"Writer-only sink never writes. A knob that does nothing is worse than "+
 					"no knob.", knob, got)
 			}
 		})

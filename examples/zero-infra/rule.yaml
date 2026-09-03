@@ -11,7 +11,7 @@
 # another sink is delete and recreate, because re-pointing a live rule would
 # strand the dedup and diff baselines the pipeline built for every object in
 # scope. That immutability is also why the tee pattern is two rules rather than
-# one clever sink (D14, docs/TEE.md) — adding a ClickHouse to this cluster later
+# one clever sink (see docs/TEE.md) — adding a ClickHouse to this cluster later
 # means adding a second rule beside this one, not editing this one.
 apiVersion: kuberecord.io/v1alpha1
 kind: ClusterStreamRule

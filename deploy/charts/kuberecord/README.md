@@ -1,17 +1,27 @@
-# kuberecord Helm chart
+# KubeRecord Helm Chart
+
+A Helm chart for deploying the [kuberecord operator](https://github.com/kuberecord/kuberecord)
+on Kubernetes, a tool that streams cluster state changes to ClickHouse and to
+S3-compatible object storage for audit, GitOps forensics and change intelligence.
+
+Source code can be found here:
+
+<https://github.com/kuberecord/kuberecord>
 
 Installs the kuberecord operator: the CRDs, its RBAC (including the aggregated
 watch role and whichever watch presets you enable), the manager Deployment and,
 optionally, the sinks you list — `ClickHouseSink`, `S3Sink`, or both.
 
-This chart is one of two supported install paths. The other is the single-file
-`dist/install.yaml` built by `make build-installer`. They install **the same
-operator** — the same object names, the same permissions rule for rule, the same
-container arguments — and `test/chart` asserts that, object by object, against
-`kustomize build config/default`. The project's acceptance suite runs against
-either one unmodified (`make test-e2e-helm`, `make test-e2e-installer`).
+## Prerequisites
 
-## Install
+| | |
+|---|---|
+| **Kubernetes** | 1.29 or newer. Validation is CRD structural schemas plus CEL, which is what sets the floor — the chart installs no webhooks and no cert-manager. |
+| **Helm** | 3.8 or newer, for the OCI registry support the install below relies on. |
+| **A sink endpoint** | A reachable ClickHouse, or an S3-compatible bucket, or both. Neither has to exist at install time — the operator boots healthy and idle without one. |
+| **Cluster-admin, once** | The chart installs CRDs and ClusterRoles. |
+
+## Installation
 
 ```sh
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
@@ -29,40 +39,44 @@ version is plain semver, so the artifact's tag is `0.3.1` where the operator's i
 `v0.3.1`. The two always agree otherwise: the chart is **not** versioned
 independently of the operator — `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
 both equal to the operator release it installs — see
-[`docs/RELEASING.md`](../../../docs/RELEASING.md).
-
-Two other ways to get the same chart:
-
-```sh
-# The release asset. Attached to every tagged release alongside a checksums.txt,
-# and byte-identical to the artifact above — the release pushes the file it
-# packaged, so both carry the one sha256 that checksums.txt lists.
-helm install kuberecord ./kuberecord-0.3.1.tgz \
-  --namespace kuberecord-system --create-namespace
-
-# This directory, which is what you want when you are changing the chart.
-helm install kuberecord deploy/charts/kuberecord \
-  --namespace kuberecord-system --create-namespace
-```
+[`docs/RELEASING.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/RELEASING.md).
 
 The chart in the registry is signed with cosign, and pinning by digest is
-supported — [`docs/VERIFYING.md`](../../../docs/VERIFYING.md#the-chart-signature)
+supported — [`docs/VERIFYING.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/VERIFYING.md#the-chart-signature)
 has both commands.
 
-Use the release name `kuberecord`: it matches the chart name, so every object
-comes out named exactly as the kustomize install names it
-(`kuberecord-controller-manager`, `kuberecord-metrics-reader`, …). Any other
-release name works, but the names gain a prefix and anything referring to them —
-a scrape config, a ClusterRoleBinding for metrics readers — has to follow.
-
 The operator boots healthy and **idle**: it streams nothing until a sink and at
-least one `StreamRule` or `ClusterStreamRule` exist. The
-post-install notes walk through those three steps; the project
-[README](../../../README.md#installing) covers them in full, and
-[`examples/quickstart/`](../../../examples/quickstart/) runs the whole sequence
-end to end on a kind cluster.
+least one `StreamRule` or `ClusterStreamRule` exist. The post-install notes walk
+through those three steps; the
+[project README](https://github.com/kuberecord/kuberecord/blob/main/README.md#installing)
+covers them in full, and
+[`examples/quickstart/`](https://github.com/kuberecord/kuberecord/tree/main/examples/quickstart/)
+runs the whole sequence end to end on a kind cluster.
 
-### Credentials are yours to create
+## Upgrades and CRDs
+
+The CRDs live in `crds/`, per Helm convention, which means Helm **installs** them
+but never upgrades or deletes them. A chart upgrade that ships changed CRDs
+therefore needs one explicit step first — see
+[`docs/UPGRADING.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/UPGRADING.md)
+for the version-specific instructions:
+
+```sh
+# Apply the CRDs from the chart archive, not from a local checkout: they must be
+# the ones the version you are upgrading to ships.
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.1 --untar
+kubectl apply -f kuberecord/crds/
+
+helm upgrade kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
+  --version 0.3.1 --namespace kuberecord-system
+```
+
+`helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —
+in place. Deleting them deletes every CR of those kinds; the rows already in
+ClickHouse and the objects already in S3 are untouched, since the sink is the
+durable store.
+
+## Credentials are yours to create
 
 The chart never creates or templates a Secret. A credential passed as a Helm value
 would be stored in the release's manifest and echoed by `helm get values`, so a
@@ -83,29 +97,20 @@ kubectl create secret generic s3-credentials \
   --from-literal=secretAccessKey='<key>'
 ```
 
-### Upgrades and CRDs
+## Values
 
-The CRDs live in `crds/`, per Helm convention. Helm **installs** them and never
-upgrades or deletes them, so a chart upgrade that ships changed CRDs needs one
-explicit step first:
+Every value has a working default, with one exception worth stating up front:
+**`clusterID` is stamped on every row this operator writes and forms part of an
+object's identity in the schema, so set it before installing anywhere real** —
+rows already written keep the old value. A minimum viable install is one line:
 
-```sh
-# The CRDs are inside the chart, so pull it once and apply them from the archive
-# rather than from whatever checkout happens to be to hand — the CRDs you install
-# must be the ones the version you are upgrading to ships.
-helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.1 --untar
-kubectl apply -f kuberecord/crds/
-
-helm upgrade kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.1 --namespace kuberecord-system
+```yaml
+# values.yaml — everything else can stay defaulted.
+clusterID: prod-eu-west-1
 ```
 
-`helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —
-in place. Deleting them deletes every CR of those kinds; the rows already in
-ClickHouse and the objects already in S3 are untouched, since the sink is the
-durable store (Invariant 6).
-
-## Values
+Add a sink to it when you are ready to stream somewhere (see
+[Sinks](#sinks-optional)); the operator runs healthy and idle until you do.
 
 ### Image
 
@@ -124,7 +129,7 @@ durable store (Invariant 6).
 | `clusterID` | string | `local-kind-cluster` | `CLUSTER_ID`: stamped on every row and scope event this operator writes, and part of an object's identity in the schema. **Change it before installing anywhere real** — rows already written keep the old value. Empty leaves the binary's own default in force. |
 | `replicaCount` | int | `1` | Manager replicas. More than one buys faster failover, not throughput: the leader owns every informer and the whole pipeline. Requires `leaderElection.enabled=true`; the chart refuses to render otherwise. |
 | `leaderElection.enabled` | bool | `true` | Pass `--leader-elect` and install the lease `Role`/`RoleBinding`. What makes `replicaCount: 2` safe, and what stops an operator left behind by a half-finished upgrade from double-writing every row. |
-| `resources` | object | `500m`/`128Mi` limits, `10m`/`64Mi` requests | Manager resources, sized for the *small* profile in [`docs/PERFORMANCE.md`](../../../docs/PERFORMANCE.md). Raise them to match the profile you actually run: the `hashCache` and the write queues grow with the watched-object count. |
+| `resources` | object | `500m`/`128Mi` limits, `10m`/`64Mi` requests | Manager resources, sized for the *small* profile in [`docs/PERFORMANCE.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/PERFORMANCE.md). Raise them to match the profile you actually run: the `hashCache` and the write queues grow with the watched-object count. |
 | `terminationGracePeriodSeconds` | int | `10` | Shutdown grace period. A sink whose `spec.writer.drainTimeout` exceeds this is cut short mid-drain, so raise it if you raise that. |
 
 ### Metrics
@@ -164,7 +169,7 @@ repository is a starting point if you run the Prometheus Operator.
 | `rbac.presets.batch` | bool | `false` | Watch `batch` `jobs` and `cronjobs`. |
 | `rbac.presets.networking` | bool | `false` | Watch `ingresses`, `ingressclasses`, `networkpolicies`, `endpointslices` and `endpoints`. |
 | `rbac.presets.storage` | bool | `false` | Watch `persistentvolumes`, `persistentvolumeclaims`, `storageclasses`, `volumeattachments`, `csidrivers`, `csinodes`. |
-| `rbac.presets.rbac-read` | bool | `false` | Watch `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`. The highest-value audit trail kuberecord can produce, and the one preset worth a second thought: it puts the cluster's whole authorization graph in ClickHouse. See [`docs/RBAC.md`](../../../docs/RBAC.md). |
+| `rbac.presets.rbac-read` | bool | `false` | Watch `roles`, `rolebindings`, `clusterroles`, `clusterrolebindings`. The highest-value audit trail kuberecord can produce, and the one preset worth a second thought: it puts the cluster's whole authorization graph in ClickHouse. See [`docs/RBAC.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/RBAC.md). |
 
 Each enabled preset renders one `ClusterRole` labelled
 `kuberecord.io/aggregate-to-watcher: "true"`, which the aggregated
@@ -172,9 +177,9 @@ Each enabled preset renders one `ClusterRole` labelled
 verbatim from `config/rbac/presets/`, so a Helm-installed preset and a
 `kubectl apply -f config/rbac/presets/networking.yaml` grant the same thing.
 
-Two consequences worth stating plainly:
+Two consequences:
 
-- **A missing grant is data, not an outage.** A rule naming a kind no enabled
+- **A missing grant is not an outage.** A rule naming a kind no enabled
   preset covers reports `RBACGranted=False/MissingPermissions` while every other
   rule keeps streaming, and flips to `True` on its own within one resync once the
   grant appears.
@@ -184,7 +189,7 @@ Two consequences worth stating plainly:
 
 For a kind no preset covers (a CRD, typically), copy any preset, change the rules
 and keep the label — `helm upgrade` is not involved. Never grant `secrets`:
-`v1/Secret` is hard-denied as a watchable kind in code (D8), so the grant would be
+`v1/Secret` is hard-denied as a watchable kind in code, so the grant would be
 dead privilege.
 
 ### Service account, labels, scheduling
@@ -203,9 +208,8 @@ dead privilege.
 | `podSecurityContext` | object | `runAsNonRoot`, `RuntimeDefault` seccomp | Pod-level security context. |
 | `containerSecurityContext` | object | read-only root FS, no privilege escalation, all capabilities dropped | Container security context. |
 
-The two security contexts satisfy the `restricted` Pod Security Standard, and the
-e2e suite installs this chart into a namespace that *enforces* it — so they are
-tested, not aspirational. Relaxing them is supported but is on you.
+The two security contexts satisfy the `restricted` Pod Security Standard.
+Relaxing them is supported but is on you.
 
 ### Operator flags and environment
 
@@ -222,7 +226,7 @@ extraArgs:
 ```
 
 The full flag list is in
-[`docs/CONFIGURATION.md`](../../../docs/CONFIGURATION.md);
+[`docs/CONFIGURATION.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/CONFIGURATION.md);
 `--ch-auto-create-schema` is the one
 most installs want to decide about explicitly, since it is what lets the operator
 create the schema v1 tables itself instead of you applying the DDL.
@@ -233,34 +237,34 @@ create the schema v1 tables itself instead of you applying the DDL.
 |---|---|---|---|
 | `sinks` | list | `[]` | The sink CRs this release creates. Empty means the chart creates none — apply your own, or add entries here. |
 | `sinks[].kind` | string | — | `ClickHouseSink` or `S3Sink`: the sink CRDs this chart ships. Any other kind fails the render. |
-| `sinks[].name` | string | — | The sink's name — what a rule names in `spec.sink.name`. A name is unique only *within* a kind (D10), so a `ClickHouseSink` and an `S3Sink` may share one. |
-| `sinks[].spec` | object | — | The CR's `spec`, passed through **verbatim**. Every field of the kind's CRD is reachable; see the [`ClickHouseSink`](../../../docs/CRDS.md#clickhousesink) and [`S3Sink`](../../../docs/CRDS.md#s3sink) condition and field references. |
+| `sinks[].name` | string | — | The sink's name — what a rule names in `spec.sink.name`. A name is unique only *within* a kind, so a `ClickHouseSink` and an `S3Sink` may share one. |
+| `sinks[].spec` | object | — | The CR's `spec`, passed through **verbatim**. Every field of the kind's CRD is reachable; see the [`ClickHouseSink`](https://github.com/kuberecord/kuberecord/blob/main/docs/CRDS.md#clickhousesink) and [`S3Sink`](https://github.com/kuberecord/kuberecord/blob/main/docs/CRDS.md#s3sink) condition and field references. |
 
-`spec` is passed through rather than mapped field by field, which is what lets one
-value serve every backend and a future one arrive without a chart change. What is
-*valid* is decided by the CRD's own structural schema and CEL rules (D4) — not by
-a second copy of them here that could drift. Every unset field is simply absent
-from the rendered CR rather than written out with a copy of its default, so the
-CRD's defaults — and only those — apply, and a future change to one of them
-reaches existing installs.
+`spec` is passed through rather than mapped field by field, so every field of the
+kind's CRD is reachable and what counts as *valid* is decided by the CRD itself.
+An unset field is left out of the rendered CR entirely, so the CRD's own defaults
+apply — and a later change to one of them reaches existing installs.
 
-The chart refuses, at render time, what the API server would either reject too
-late or explain badly: an unknown `kind` (which would otherwise fail as a missing
-CRD rather than as a typo), a missing `name` or `spec`, two entries sharing one
-(kind, name) identity, and the one connection field per backend that cannot be
-defaulted — `spec.connection.addr` and `spec.connection.credentialsSecretRef.name`
-for a `ClickHouseSink`, `spec.bucket` for an `S3Sink`.
+The chart still fails the render on four things, rather than leaving them to
+surface later as a confusing API error:
 
-**The chart never creates a Secret**, at any values, and no sink spec carries a
-credential inline — a password given as a value would land in the release's stored
+- an unknown `kind` (which would otherwise fail as a missing CRD, not as a typo);
+- a missing `name` or `spec`;
+- two entries sharing one `(kind, name)` identity;
+- the one connection field per backend that cannot be defaulted —
+  `spec.connection.addr` and `spec.connection.credentialsSecretRef.name` for a
+  `ClickHouseSink`, `spec.bucket` for an `S3Sink`.
+
+**The chart never creates a Secret**, at any values, and no sink spec should carry
+a credential inline — a password given as a value lands in the release's stored
 manifest and in every `helm get values` output. Create it yourself in the release
-namespace, which is the only namespace the operator can read Secrets in (D7). An
-`S3Sink` on a cloud provider needs no Secret at all: omit `spec.credentials` and it
+namespace, the only namespace the operator can read Secrets in. An `S3Sink` on a
+cloud provider needs no Secret at all: omit `spec.credentials` and it
 authenticates from the ambient chain (IRSA, workload identity, an instance role).
 
-The two-sink example below is the tee pattern (D14) — one queryable ClickHouse
+The two-sink example below is the tee pattern — one queryable ClickHouse
 timeline and one immutable S3 archive, fed by two rules over the same resources.
-See [`docs/TEE.md`](../../../docs/TEE.md).
+See [`docs/TEE.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/TEE.md).
 
 ```yaml
 sinks:
@@ -278,7 +282,7 @@ sinks:
       region: eu-west-1
 ```
 
-An `S3Sink` is a `Writer`-only archive tier (D12): it reports
+An `S3Sink` is a `Writer`-only archive tier: it reports
 `HistoryUnavailable=True` permanently while `Ready` stays `True`, cannot warm its
 dedup cache from its own history, and records every object as a full `Snapshot` on
 each restart. That is a declared capability limit, not a fault.
@@ -289,24 +293,3 @@ each restart. That is a declared capability limit, not a fault.
 |---|---|---|---|
 | `nameOverride` | string | `""` | Override the chart name in labels and generated names. |
 | `fullnameOverride` | string | `""` | Override the generated name prefix entirely. |
-
-## Development
-
-```sh
-make helm-sync           # refresh crds/ and files/presets/ from config/ (run after `make manifests`)
-make helm-lint           # helm lint --strict, default values and every ci/ values file
-make helm-kubeconform    # helm template | kubeconform, against the pinned Kubernetes version
-make helm-template       # render to stdout (VALUES=<file> for one of the ci/ files)
-go test ./test/chart/    # the template tests, including parity with kustomize build config/default
-make test-e2e-helm       # install this chart on kind and run the Phase 1 happy path against it
-```
-
-`crds/` and `files/presets/` are **generated copies** of `config/crd/bases/` and
-`config/rbac/presets/`. Helm requires the CRDs inside the chart and the preset
-templates read those files at render time, so copies are unavoidable — a stale
-copy is not: `go test ./test/chart/` compares them byte for byte and names
-`make helm-sync` as the fix.
-
-`ci/minimal-values.yaml` and `ci/all-features-values.yaml` are the two extremes
-lint and validation run against: nothing optional enabled, and everything at
-once.

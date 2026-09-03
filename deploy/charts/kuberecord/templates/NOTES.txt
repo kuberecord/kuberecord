@@ -69,7 +69,7 @@ credentials are the recommended shape on a cloud provider.
 {{- if $s3Sinks }}
 
    On an S3Sink, HistoryUnavailable=True is expected and permanent, on a healthy
-   sink: it is a Writer-only archive tier (D12) that cannot read back what it
+   sink: it is a Writer-only archive tier that cannot read back what it
    wrote, so cache warm-up, zombie GC and boot reconciliation are disabled for it
    and every record is a full Snapshot. Ready=True is still the health signal.
    BucketReachable=False names a bucket that does not exist, cannot be
@@ -124,7 +124,7 @@ credentials are the recommended shape on a cloud provider.
 
      kubectl get streamrule -A
 
-A rule names exactly one sink, permanently (D14). To stream the same resources to
+A rule names exactly one sink, permanently. To stream the same resources to
 two backends — a queryable timeline and an immutable archive — write two rules,
 one per sink: that is the tee pattern, and it is documented in docs/TEE.md.
 {{- if $chSinks }}
@@ -138,7 +138,7 @@ written keep the old value{{ end }}.
 {{- else }}
 
 CLUSTER_ID is stamped on every row and every object this operator writes, and is
-part of an object's identity (Invariant 7).
+part of an object's identity.
 {{- if eq .Values.clusterID "local-kind-cluster" }}
 It is still the shipped placeholder `{{ .Values.clusterID }}` — set `clusterID` to
 something that identifies this cluster before it matters, because rows already

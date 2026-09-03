@@ -26,7 +26,7 @@ this path removes it:
   redaction. A bucket you already have works just as well as the MinIO this
   example stands up.
 - **The read side is one binary.** `kubectl kuberecord` reads those objects
-  directly. It is **pure Go with no cgo** (D18), so there is no engine to install,
+  directly. It is **pure Go with no cgo**, so there is no engine to install,
   nothing to run as a service, and nothing to keep up to date.
 - **Nothing about the capture path is reduced.** An `S3Sink` records what a
   `ClickHouseSink` records. The difference is on the read side, it is declared,
@@ -110,7 +110,7 @@ reports a gap as a gap rather than as an empty result. Four differences from
 ClickHouse are visible here, and all four are stated in the output when they
 apply:
 
-- **No deletions.** An object archive holds no `Deleted` records at all (D12), so
+- **No deletions.** An object archive holds no `Deleted` records at all, so
   a timeline that simply stops carries an explicit notice saying the object may
   have been deleted without the deletion ever being recorded. Nothing is
   synthesized to close the gap.
@@ -142,7 +142,7 @@ pipeline, the whole sink runtime — is exactly how a production install works.
 
 ## Adding a database later
 
-You do not migrate. A rule targets exactly one sink, permanently (D14), so a
+You do not migrate. A rule targets exactly one sink, permanently, so a
 queryable timeline beside this archive is a `ClickHouseSink` and a **second rule**
 naming it — one watch, two backends, no extra load on the API server. That is the
 tee pattern: [`docs/TEE.md`](../../docs/TEE.md), runnable at
