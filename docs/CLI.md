@@ -48,12 +48,12 @@ brew install kuberecord/tap/kuberecord
 
 # 3. The release archive, directly. Verifiable, and the only way to install on
 #    Windows.
-curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.1/kuberecord_v0.3.1_linux_amd64.tar.gz
-tar -xzf kuberecord_v0.3.1_linux_amd64.tar.gz
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.2/kuberecord_v0.3.2_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.3.2_linux_amd64.tar.gz
 install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
 
 # 4. From source, with a Go toolchain.
-go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.1
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.2
 ```
 
 They do not all give you the same thing, and the difference is the two names:
@@ -78,7 +78,7 @@ and nothing else, it reports the module version rather than the release stamp â€
 no signature over a binary you compiled yourself. Pin a tag rather than `@latest`
 if you want to know what you got.
 
-**Windows** is release archives only: `kuberecord_v0.3.1_windows_amd64.zip`, which
+**Windows** is release archives only: `kuberecord_v0.3.2_windows_amd64.zip`, which
 carries `kubectl-kuberecord.exe` and `kuberecord.exe`. krew supports Windows and
 the plugin manifest declares it; Homebrew does not run there.
 

@@ -1345,9 +1345,9 @@ func TestChartOCIReferenceAgreesWithTheMakefile(t *testing.T) {
 // `version`/`appVersion` pair, and every `--version` argument the chart's README
 // publishes.
 //
-// Nothing structural catches this. `helm install --version 0.3.0` against a
-// registry that only has 0.3.1 fails with `manifest unknown` and no hint that
-// the documentation is what is wrong, and a Chart.yaml whose appVersion lags
+// Nothing structural catches this. A README pinning a chart tag that was never
+// pushed fails with `manifest unknown` and no hint that the documentation is
+// what is wrong, and a Chart.yaml whose appVersion lags
 // installs the *previous* operator image while every render test still passes —
 // because values.yaml leaves image.tag empty on purpose, so appVersion is what
 // picks the image.

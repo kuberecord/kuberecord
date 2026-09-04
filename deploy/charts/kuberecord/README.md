@@ -25,7 +25,7 @@ optionally, the sinks you list — `ClickHouseSink`, `S3Sink`, or both.
 
 ```sh
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.1 \
+  --version 0.3.2 \
   --namespace kuberecord-system --create-namespace
 ```
 
@@ -35,8 +35,8 @@ the whole address, and helm has needed no extra configuration to install from on
 since v3.8.
 
 **The `--version` is not optional here, and it takes no `v`.** A Helm chart
-version is plain semver, so the artifact's tag is `0.3.1` where the operator's is
-`v0.3.1`. The two always agree otherwise: the chart is **not** versioned
+version is plain semver, so the artifact's tag is `0.3.2` where the operator's is
+`v0.3.2`. The two always agree otherwise: the chart is **not** versioned
 independently of the operator — `version` is `X.Y.Z` and `appVersion` is `vX.Y.Z`,
 both equal to the operator release it installs — see
 [`docs/RELEASING.md`](https://github.com/kuberecord/kuberecord/blob/main/docs/RELEASING.md).
@@ -64,11 +64,11 @@ for the version-specific instructions:
 ```sh
 # Apply the CRDs from the chart archive, not from a local checkout: they must be
 # the ones the version you are upgrading to ships.
-helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.1 --untar
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.2 --untar
 kubectl apply -f kuberecord/crds/
 
 helm upgrade kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.1 --namespace kuberecord-system
+  --version 0.3.2 --namespace kuberecord-system
 ```
 
 `helm uninstall` likewise leaves the CRDs — and therefore your sinks and rules —
