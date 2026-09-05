@@ -22,8 +22,8 @@ import (
 
 // Condition types shared by every kuberecord CRD.
 //
-// They are string constants rather than inline literals because reconcilers
-// (Task 1.7) and the e2e suite both assert on them: a typo in one place would
+// They are string constants rather than inline literals because the reconcilers
+// and the e2e suite both assert on them: a typo in one place would
 // otherwise silently produce a condition nobody is watching for. Every type
 // listed here follows the Kubernetes convention that `True` is the healthy
 // state, so a `False` value always means "this specific thing is wrong" and
@@ -34,10 +34,10 @@ const (
 	// object is fully realised (a sink is connected and schema-checked, a rule
 	// has all its watches running). It is False whenever any of the more
 	// specific conditions below is False, so a single `kubectl get` column can
-	// summarise health (Invariant 5: one bad rule degrades only itself).
+	// summarise health — one bad rule degrades only itself.
 	//
 	// ConditionHistoryUnavailable is the one condition it does not roll up. A
-	// Writer-only sink (D12) reports that condition True forever and is
+	// Writer-only sink reports that condition True forever and is
 	// nonetheless entirely healthy: a declared capability limit is not a fault,
 	// and folding it into Ready would leave an operator permanently unable to
 	// tell a working archive from a broken one.
@@ -62,7 +62,7 @@ const (
 	// history back, so the behaviours that depend on reading it — dedup cache
 	// warm-up, zombie garbage collection, and boot reconciliation of scope
 	// epochs — are disabled for it, and every record it receives is a permanent
-	// Snapshot (D12).
+	// Snapshot.
 	//
 	// It inverts this file's convention on purpose: `True` is the abnormal-sounding
 	// value and yet the sink is healthy, in the same shape as a Node's
@@ -84,7 +84,7 @@ const (
 	// from Ready because a schema mismatch is operator-actionable in a
 	// completely different way from an unreachable host, and because the probe
 	// that sets it is asynchronous — control-plane reconcilers never dial
-	// ClickHouse on the reconcile path (Invariant 1).
+	// ClickHouse on the reconcile path.
 	ConditionSchemaValid = "SchemaValid"
 )
 
@@ -94,7 +94,7 @@ const (
 	// answered, and answered to a *write*. It is deliberately not a HEAD: a
 	// read-only credential passes a HEAD and then fails every PUT, which would
 	// produce a sink reporting Ready while archiving nothing — the exact silent
-	// degradation this backend must not ship with (Invariant 5).
+	// degradation this backend must not ship with.
 	ConditionBucketReachable = "BucketReachable"
 )
 
@@ -102,15 +102,15 @@ const (
 const (
 	// ConditionRBACGranted reports whether the operator's own ServiceAccount is
 	// actually permitted to list/watch every resource this rule names, as
-	// answered by SelfSubjectAccessReview (Task 1.9). It exists because the
-	// operator can never self-escalate (D7): a rule asking for a resource
+	// answered by SelfSubjectAccessReview. It exists because the operator can
+	// never self-escalate: a rule asking for a resource
 	// outside the aggregated ClusterRole must degrade visibly on the rule
 	// rather than crash the process or silently stream nothing.
 	ConditionRBACGranted = "RBACGranted"
 
 	// ConditionPolicyAllowed reports whether every resource this rule names is
 	// permitted by the target sink's spec.policy.allowedGVKs and is not on the
-	// hard deny-list (D8: v1/Secret is never watchable in v1alpha1). Sink
+	// hard deny-list — v1/Secret is never watchable in v1alpha1. Sink
 	// policy is enforced rule-side so the rule's owner — not the sink's — sees
 	// why their rule is inert.
 	ConditionPolicyAllowed = "PolicyAllowed"
@@ -146,7 +146,7 @@ const (
 	GroupPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 
 	// VersionPattern matches a Kubernetes API version: `v1`, `v2beta1`,
-	// `v1alpha1`. The identity key is version-agnostic (Invariant 7), but the
+	// `v1alpha1`. The identity key is version-agnostic, but the
 	// version is still required here because it is what the REST mapper and the
 	// dynamic client need to build a concrete GVR.
 	VersionPattern = `^v[0-9]+((alpha|beta)[0-9]+)?$`
@@ -185,7 +185,7 @@ const (
 	// What it forbids is as load-bearing as what it admits. A leading slash, a
 	// trailing slash and an empty segment all produce a `//` in every key the sink
 	// writes, because the key is built by joining this prefix to a fixed layout
-	// (`<prefix>/format=jsonl-v1/…`) — and that layout is a public contract (D15)
+	// (`<prefix>/format=jsonl-v1/…`) — and that layout is a public contract
 	// whose readers glob on it. The character set is the conservative subset that
 	// needs no escaping in a key, a URL or a query engine's glob; it can be widened
 	// later without invalidating a single object already written, which is not true
@@ -194,7 +194,7 @@ const (
 )
 
 // RedactionRule names one value to scrub out of every streamed object before it
-// is hashed, diffed and written (Task 3.3).
+// is hashed, diffed and written.
 //
 // Exactly one of the two fields is set. They are separate fields rather than one
 // string with two grammars because an annotation key routinely contains dots and
@@ -244,7 +244,7 @@ type RedactionRule struct {
 // It is a (group, version, kind) triple plus an optional label selector rather
 // than a plural resource name because the CRD is authored by humans against
 // the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
-// `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+// `kind` fields; the plural GVR is derived by the REST mapper, which
 // is also where an unknown kind is detected and parked.
 type WatchedResource struct {
 	// Group is the API group, e.g. "apps" or "networking.k8s.io". Empty means
@@ -257,7 +257,7 @@ type WatchedResource struct {
 
 	// Version is the API version to watch, e.g. "v1" or "v1beta1".
 	//
-	// The recorded object identity is version-agnostic (Invariant 7), so
+	// The recorded object identity is version-agnostic, so
 	// naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
 	// objects seen through two different lenses — do not do that; pick the
 	// version you want the stored payload rendered in.
@@ -277,7 +277,7 @@ type WatchedResource struct {
 	// Selectors are applied by the event handler, not by the informer's
 	// ListWatch: one informer per (GVR, namespace) is shared by every rule and
 	// sink interested in that target, so changing a selector re-filters events
-	// without tearing down and re-listing a watch (Task 1.4). The trade-off is
+	// without tearing down and re-listing a watch. The trade-off is
 	// deliberate — informer bandwidth in exchange for a pool that never
 	// thrashes on a selector edit.
 	// +optional
@@ -330,7 +330,7 @@ type GVKSelector struct {
 // logs to say so. Naming the kind makes that unrepresentable rather than merely
 // unlikely.
 //
-// Sink CRs are cluster-scoped (D6), so a kind and a name are a complete
+// Sink CRs are cluster-scoped, so a kind and a name are a complete
 // reference: there is no namespace to carry, and a rule names its sink the same
 // way from any namespace.
 type SinkReference struct {
@@ -390,7 +390,7 @@ type StreamRuleSpec struct {
 	// identity is the pair: changing the name and changing the kind are the same
 	// mistake with the same consequence, and one rule says so once.
 	//
-	// A rule targets exactly one sink, permanently (D14). To stream one resource
+	// A rule targets exactly one sink, permanently. To stream one resource
 	// set to two backends — a queryable timeline and a cheap immutable archive,
 	// say — author two rules naming the same resources and different sinks. That
 	// is the supported shape rather than a workaround: each rule then carries its
@@ -424,7 +424,7 @@ type StreamRuleSpec struct {
 	Resources []WatchedResource `json:"resources"`
 
 	// ExtraRedaction adds value paths to scrub, on top of whatever the target
-	// sink's `spec.policy.redaction` already scrubs (Task 3.3).
+	// sink's `spec.policy.redaction` already scrubs.
 	//
 	// It is strictly additive: a rule can add paths, never remove one the sink's
 	// owner configured. Values are scrubbed after normalization and *before*
@@ -438,7 +438,7 @@ type StreamRuleSpec struct {
 	// across a mixed resource list without splitting into two rules.
 	//
 	// Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
-	// remains denied in code (D8) whether or not a policy would scrub it.
+	// remains denied in code whether or not a policy would scrub it.
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
 	ExtraRedaction []RedactionRule `json:"extraRedaction,omitempty"`
@@ -450,11 +450,11 @@ type StreamRuleStatus struct {
 	// Conditions carries Ready, RBACGranted, PolicyAllowed,
 	// ResourceResolved and HistoryUnavailable (see the constants above). A
 	// rule that cannot run degrades here and only here: the process never
-	// exits and every other rule keeps streaming (Invariant 5).
+	// exits and every other rule keeps streaming.
 	//
 	// HistoryUnavailable is the odd one out, and is mirrored from the sink
 	// the rule names rather than decided about the rule: a rule bound to a
-	// Writer-only sink (D12) reports it True, permanently, while staying
+	// Writer-only sink reports it True, permanently, while staying
 	// entirely Ready. It is here because the two objects usually have
 	// different owners — a rule's author may never read the cluster-scoped
 	// sink they named — and an author who sees only Ready=True would have no
@@ -501,7 +501,7 @@ type SinkPolicy struct {
 	// AllowedGVKs restricts which resource types may be streamed to this sink.
 	//
 	// An empty (or omitted) list allows everything *except* the hard deny-list
-	// — v1/Secret is never watchable in v1alpha1 (D8) and no policy here can
+	// — v1/Secret is never watchable in v1alpha1 and no policy here can
 	// re-enable it. Deny is enforced in code, not merely in config, so the
 	// permissive default can never become a way to exfiltrate Secrets.
 	// +optional
@@ -509,7 +509,7 @@ type SinkPolicy struct {
 	AllowedGVKs []GVKSelector `json:"allowedGVKs,omitempty"`
 
 	// Redaction is this sink's redaction floor: value paths scrubbed out of
-	// every object any rule streams here, before hashing (Task 3.3).
+	// every object any rule streams here, before hashing.
 	//
 	// It lives on the sink for the same reason AllowedGVKs does. Whoever owns
 	// the backend owns what may land in it, and that authority has to hold
@@ -541,7 +541,7 @@ type SecretReference struct {
 	//
 	// That default is a security property, not a convenience: the operator's
 	// aggregated ClusterRole grants Secret read access *only* in its own
-	// namespace (Task 1.9, D7). Sink CRs are cluster-scoped and therefore
+	// namespace. Sink CRs are cluster-scoped and therefore
 	// editable by anyone with cluster-level write access to the CRD, so if this
 	// field could freely name any namespace, creating a sink would become a way
 	// to make the operator read a Secret its RBAC never intended to expose —

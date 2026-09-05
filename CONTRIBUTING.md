@@ -125,7 +125,7 @@ makes the changelog cheap to write.
 3. Make sure CI is green. Every workflow that runs on your PR is listed in
    [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#ci); a red one is a request for
    changes from the machine.
-4. Expect review comments about invariants rather than style — whether a write can
+4. Expect review comments about correctness guarantees rather than style — whether a write can
    block the hot path, whether a commit still fires exactly once, whether a
    degraded sink degrades *visibly*. Those questions are the reason this project
    works.

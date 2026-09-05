@@ -76,7 +76,7 @@ spec:
         - name: CLUSTER_ID
           value: "local-kind-cluster"
         # The namespace a ClickHouseSink's credentialsSecretRef defaults to, and
-        # the only namespace the operator is granted Secret reads in (Task 1.9).
+        # the only namespace the operator is granted Secret reads in.
         # Taken from the downward API so it always matches where this Deployment
         # actually runs.
         - name: POD_NAMESPACE

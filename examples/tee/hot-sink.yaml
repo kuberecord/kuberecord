@@ -44,7 +44,7 @@ spec:
     # Checkpoint instead — the full state as well as the diff — so reconstructing
     # "state at time T" replays at most 50 diffs. The cold half has no twin for
     # this field and could not use one: a Writer-only sink emits no diffs to
-    # checkpoint (D12). See docs/TEE.md and docs/SCHEMA.md#checkpoint-rows.
+    # checkpoint. See docs/TEE.md and docs/SCHEMA.md#checkpoint-rows.
     checkpointEvery: 50
   policy:
     # Exactly the two kinds examples/tee/rules.yaml streams, and deliberately the

@@ -5,7 +5,7 @@ queryable timeline with real deletions, diffs and state reconstruction. An
 object store gives you a cheap, immutable, WORM-capable archive that cannot
 answer a question at all. Most people who want one eventually want both.
 
-The supported way to have both is **two rules, not one clever sink** (D14):
+The supported way to have both is **two rules, not one clever sink**:
 
 ```yaml
 spec:
@@ -66,7 +66,7 @@ What it *does* add is one queue slot, one hash and one write per event per sink,
 and one `hashCache` per sink — so budget the second backend's write path and its
 dedup memory, not a second watch. [`docs/PERFORMANCE.md`](PERFORMANCE.md) has the
 per-sink envelopes, and
-[its S3 section](PERFORMANCE.md#s3-writer-memory-the-workers-multiplier-task-67)
+[its S3 section](PERFORMANCE.md#s3-writer-memory-the-workers-multiplier)
 works a defaults-everywhere tee's memory total end to end.
 
 **Two dedup caches, decided independently.** The `hashCache` is per sink
@@ -99,7 +99,7 @@ duplicate a write on the other. A sink that is down loses nothing: its failed
 writes revert their reserved cache versions, their keys go back on the workqueue,
 and each key is written when it comes round again — at the object's *current*
 state, because the pipeline is level-triggered rather than event-replaying. Every
-job still settles exactly one `commit(ok)`, on every path (Invariant 3). Nothing
+job still settles exactly one `commit(ok)`, on every path. Nothing
 below qualifies any of that.
 
 **What is not isolated.** The data plane has **one** workqueue and **one** worker
@@ -168,7 +168,7 @@ whereas a short enqueue timeout costs the archive's recovery time.
 
 This is the part to read before you rely on the archive.
 
-An `S3Sink` is a `Writer`-only backend (D12): it cannot read its own history
+An `S3Sink` is a `Writer`-only backend: it cannot read its own history
 back, because "what was the last recorded state of every object in this scope?"
 would mean listing and decompressing every object ever written under the prefix,
 on the operator's boot path, forever. So three behaviours are off for it, and the
@@ -238,12 +238,12 @@ ClickHouse cluster, and it survives it without a backup schedule: the objects
 were written once, are immutable, and are keyed by content hash, so a retried PUT
 lands on its own key and no reader ever sees a duplicate. Rebuilding a queryable
 timeline from it is a bulk load, not a restore — the objects are line-delimited
-records of the same logical shape every backend stores (D9), so nothing is lost,
+records of the same logical shape every backend stores, so nothing is lost,
 but there is no supported tool that does the load for you. Treat this as "the
 data survived", not "the service survives".
 
 **Data-lake integration.** `format=jsonl-v1/cluster_id=…/date=…/hour=…` is a
-Hive-style layout on purpose (D15), so the bucket is directly readable by DuckDB,
+Hive-style layout on purpose, so the bucket is directly readable by DuckDB,
 Athena, Spark, Trino and anything else that globs partitions — no export job, no
 ETL, no second copy. Joining cluster state against billing, CI or incident data
 is then a query in whatever engine already holds those, rather than a pipeline
@@ -376,7 +376,7 @@ Write down why, next to the rules.
 
 - [`examples/tee/`](../examples/tee/) — this page, runnable.
 - [`docs/CRDS.md`](CRDS.md#historyunavailable--a-limit-not-a-fault) — the
-  `HistoryUnavailable` condition and the D12 argument in full.
+  `HistoryUnavailable` condition and the archive-tier argument in full.
 - [`docs/RETENTION.md`](RETENTION.md) — making the cold half immutable: Object
   Lock, the two retention modes, lifecycle rules, and what the WORM claim does
   and does not cover.

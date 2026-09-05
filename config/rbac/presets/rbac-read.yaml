@@ -12,7 +12,7 @@
 # check binds the operator exactly as it binds any other subject, so this grant
 # cannot become a privilege-escalation path.
 #
-# `get,list,watch` only, and never `secrets` (D8) — see presets/core-workloads.yaml.
+# `get,list,watch` only, and never `secrets` — see presets/core-workloads.yaml.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

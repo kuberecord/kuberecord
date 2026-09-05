@@ -94,7 +94,7 @@ refusal.
 
 ### `safe_mode` on a `Writer`-only sink
 
-An `S3Sink` cannot read its own history back (D12), so no scope on it is ever
+An `S3Sink` cannot read its own history back, so no scope on it is ever
 marked warm and `kuberecord_safe_mode` stays at **1** for every one of its scopes,
 permanently. That is the intended reading, not a stuck warm-up, and it is the only
 metric that reports it: there is deliberately **no** parallel "writer-only" series

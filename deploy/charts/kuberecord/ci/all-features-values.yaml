@@ -88,12 +88,12 @@ affinity:
 priorityClassName: system-cluster-critical
 terminationGracePeriodSeconds: 30
 
-# Both sink kinds at once, which is the tee pattern (D14) rendered by the chart:
+# Both sink kinds at once, which is the tee pattern rendered by the chart:
 # the same resources would be streamed to a queryable ClickHouse timeline and to
 # an immutable S3 archive by two rules, one naming each. Two kinds in one list is
 # also the case that exercises the per-kind branches of the render and of
 # `kuberecord.validateSinks` — and the `hot`/`hot` pair below is deliberate: a
-# name is unique only *within* a kind (D10), so two sinks may share one.
+# name is unique only *within* a kind, so two sinks may share one.
 sinks:
   - kind: ClickHouseSink
     name: hot

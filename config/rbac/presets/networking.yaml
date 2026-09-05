@@ -1,7 +1,7 @@
 # Watch preset: networking. Not installed by default — apply it to stream
 # Ingresses, NetworkPolicies and the endpoint objects behind Services.
 #
-# `get,list,watch` only, and never `secrets` (D8) — see presets/core-workloads.yaml
+# `get,list,watch` only, and never `secrets` — see presets/core-workloads.yaml
 # and docs/RBAC.md for why.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

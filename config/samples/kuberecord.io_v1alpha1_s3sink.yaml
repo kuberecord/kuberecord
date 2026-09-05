@@ -22,7 +22,7 @@ spec:
     secretRef:
       # namespace is omitted on purpose: it defaults to the operator's own
       # namespace, which is the only place the operator holds Secret read
-      # rights (Task 1.9, D7).
+      # rights.
       name: kuberecord-s3-credentials
   # Remove the whole `credentials` block to authenticate from the ambient chain
   # instead — IRSA, workload identity or an instance role. That is the preferred
@@ -52,10 +52,10 @@ spec:
     drainTimeout: 15s
   # batchMaxRows/batchMaxWait/checkpointEvery have no twin here on purpose: for
   # S3 the object is the batch (spec.rotation governs it), and a Writer-only
-  # sink emits no diffs to checkpoint (D12).
+  # sink emits no diffs to checkpoint.
   policy:
     # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
-    # entirely to admit everything except the hard deny-list (D8: v1/Secret).
+    # entirely to admit everything except the hard deny-list (v1/Secret).
     allowedGVKs:
     - group: apps
       version: v1

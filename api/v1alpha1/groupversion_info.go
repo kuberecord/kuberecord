@@ -15,13 +15,13 @@ limitations under the License.
 */
 
 // Package v1alpha1 contains the kuberecord.io/v1alpha1 API types: the three
-// CRDs (D6) that replace the operator's env-var configuration with declarative,
+// CRDs that replace the operator's env-var configuration with declarative,
 // two-tier intent — a ClickHouseSink says *where* state goes, a StreamRule /
 // ClusterStreamRule says *what* to stream there.
 //
 // These types are the operator's public UX and are validated entirely by CRD
 // structural schemas and CEL (`x-kubernetes-validations`) — never by an
-// admission webhook (D4), so kuberecord installs with zero external
+// admission webhook, so kuberecord installs with zero external
 // dependencies and no cert-manager. Every rule that a webhook would normally
 // enforce either lives on a field marker in this package or is explicitly
 // documented as reconciler-validated.

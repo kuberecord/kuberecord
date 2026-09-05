@@ -267,7 +267,7 @@ instance), which is not a verdict about the rule.
 
 Degradation is per-rule and, wherever it can be, per-target — a rule naming five
 kinds of which one is ungranted streams the other four. Other rules are entirely
-unaffected: the process never exits over one bad rule (Invariant 5).
+unaffected: the process never exits over one bad rule.
 
 ## Caveat: ClickHouse read access flattens namespace RBAC
 
@@ -320,7 +320,7 @@ $ kubectl get role kuberecord-manager-role -n kuberecord-system
 $ kubectl get clusterrole kuberecord-manager-role -o yaml | grep secrets
 ```
 
-The same invariants are asserted at build time against the manifests in
+The same guarantees are asserted at build time against the manifests in
 `internal/controller/rbacmanifests_test.go`, so a weakening edit fails `make
 test` before it reaches a cluster.
 

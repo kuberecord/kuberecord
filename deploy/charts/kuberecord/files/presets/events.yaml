@@ -12,7 +12,7 @@
 # Not enabled by default. Events are by far the highest-volume kind in a cluster,
 # so the storage bill belongs to somebody who asked for it.
 #
-# `get,list,watch` only, and never `secrets` (D8) — see presets/core-workloads.yaml
+# `get,list,watch` only, and never `secrets` — see presets/core-workloads.yaml
 # and docs/RBAC.md.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

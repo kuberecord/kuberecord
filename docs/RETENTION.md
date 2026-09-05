@@ -138,8 +138,8 @@ itself and the request does not ask for it.
 
 There is deliberately no `s3:ListBucket`, no `s3:GetObject` and no
 `s3:DeleteObject` here. kuberecord cannot list the archive, cannot read it back
-(that is [D12](CRDS.md#historyunavailable--a-limit-not-a-fault), the whole reason
-an `S3Sink` reports `HistoryUnavailable=True`) and cannot delete from it. Reading
+(that is [a declared limit of the archive tier](CRDS.md#historyunavailable--a-limit-not-a-fault),
+the whole reason an `S3Sink` reports `HistoryUnavailable=True`) and cannot delete from it. Reading
 the archive is a **separate consumer with separate rights** — the DuckDB and
 Athena recipes in [`docs/QUERIES.md`](QUERIES.md#the-s3-archive), or an auditor,
 who needs rather more than the operator does:
@@ -380,7 +380,7 @@ created at `00:03Z` can be filed under yesterday's `date=`.
 
 It does not skew further than that. Records dated from history exist in this
 project — a warm-up close-out is dated from what the backend already recorded —
-but reading history back is precisely what a `Writer`-only sink cannot do (D12),
+but reading history back is precisely what a `Writer`-only sink cannot do,
 so no such record is ever written to an archive. Every record an `S3Sink`
 receives is stamped when the operator observes the change.
 
@@ -509,7 +509,7 @@ otherwise have to be granted to a process running in a cluster.
 - [`docs/CRDS.md`](CRDS.md#s3sink) — the `S3Sink` conditions, including
   `BucketIncompatible` and `HistoryUnavailable`.
 - [`docs/SCHEMA.md`](SCHEMA.md#physical-mapping-to-s3-objects) — the object
-  format and key layout as a versioned public contract (D15).
+  format and key layout as a versioned public contract.
 - [`docs/QUERIES.md`](QUERIES.md#the-s3-archive) — reading the archive, which is
   a separate consumer with separate rights.
 - [`docs/TEE.md`](TEE.md) — running a queryable timeline and an immutable

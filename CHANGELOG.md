@@ -16,6 +16,78 @@ than a summary of them.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-04
+
+A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`
+CRD *schemas* or either frozen format changed — v0.3.2 records the same rows
+v0.3.1 did, watches the same resources under the same RBAC, and an upgrade is the
+image tag and nothing else. What changed is what a reader is told, in the two
+places most people meet this project before they run it: the chart's listing on
+[Artifact Hub](https://artifacthub.io), and the field descriptions
+`kubectl explain` prints.
+
+### Changed
+
+- **The chart's README is written for the page it actually appears on.** Artifact
+  Hub renders it as the listing's front page, out of the repository tree and in
+  front of people deciding whether to install at all — so it now opens with what
+  the chart is, links to its source, and states its prerequisites (Kubernetes
+  1.29+, Helm 3.8+, a sink endpoint, cluster-admin once) before the install
+  command rather than leaving them to be inferred.
+
+  `Values` leads with the one value that is not safely defaulted: `clusterID` is
+  stamped on every row and forms part of an object's identity, and rows already
+  written keep the old value, so a minimum-viable `values.yaml` is shown up front
+  instead of being reachable only by reading a table row. The duplicated
+  explanation of Helm's CRD-upgrade behaviour is now stated once, and the four
+  render-time refusals a bad `sinks` entry hits are a list rather than a
+  six-line sentence.
+
+- **Internal design shorthand is gone from everything a user reads.** This
+  repository tracks its decisions as numbered records and its work as numbered
+  tasks, and 215 of those references — `(D12)`, `Invariant 7`, `(Task 1.9)` and
+  their like — had leaked into published documentation, where they name nothing
+  the reader can look up. They are removed from the chart (README, `values.yaml`,
+  `Chart.yaml`, the post-install `NOTES.txt`, the templates and the RBAC presets),
+  from `docs/`, from `examples/`, from the sample custom resources in `config/`,
+  and from `CONTRIBUTING.md`.
+
+  Each was rewritten rather than deleted, so the guarantee it pointed at is still
+  stated in plain words: "a `Writer`-only backend cannot read its own history"
+  says what `(D12)` did, to a reader who has no registry to consult.
+
+- **CRD field descriptions say the same thing without the shorthand.** The
+  descriptions `kubectl explain clickhousesink.spec` and its siblings print are
+  generated from doc comments in `api/v1alpha1`, so the sweep above reaches them
+  too. **Only description text changed** — no field was added, removed, renamed
+  or re-defaulted, and no structural or CEL validation rule was touched. Applying
+  the new CRDs changes what the API server stores as documentation and nothing
+  else; every existing custom resource remains valid exactly as written.
+
+### Fixed
+
+- **The chart README's links work on Artifact Hub.** Eleven of them were
+  repository-relative (`../../../docs/RELEASING.md`), which resolves in a git
+  checkout and 404s on the listing — the one place the file is most read. They
+  are absolute now. One of them also pointed at `UPGRADE.md`, which has never
+  existed in this repository; the file is `docs/UPGRADING.md`.
+
+- **Eight headings in `docs/PERFORMANCE.md` carried a task number**, and removing
+  it changes the anchor those headings generate. The five inbound links that
+  targeted them were updated in the same change, and every intra-repository
+  markdown anchor was re-checked.
+
+### Added
+
+- **A guard against the version drifting between the places that publish it.**
+  `TestChartVersionsAgreeWithTheMakefile` pins `Chart.yaml`'s `version` and
+  `appVersion`, and every `--version` the chart's README publishes, to the
+  Makefile's `VERSION`. Nothing structural caught this before: a README pinning a
+  chart tag that was never pushed fails with `manifest unknown` and blames the
+  registry, and a lagging `appVersion` installs the previous operator image while
+  every render test still passes — because `values.yaml` leaves `image.tag` empty
+  on purpose, so `appVersion` is what picks the image.
+
 ## [0.3.1] - 2026-09-03
 
 A distribution-only release. Nothing in the operator, the CLI, the `v1alpha1`
@@ -1304,7 +1376,8 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/kuberecord/kuberecord/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/kuberecord/kuberecord/compare/v0.2.0...v0.2.1

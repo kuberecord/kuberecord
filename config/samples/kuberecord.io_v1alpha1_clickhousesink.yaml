@@ -13,7 +13,7 @@ spec:
     credentialsSecretRef:
       # namespace is omitted on purpose: it defaults to the operator's own
       # namespace, which is the only place the operator holds Secret read
-      # rights (Task 1.9). The name matches the Secret the deployment ships
+      # rights. The name matches the Secret the deployment ships
       # (config/manager/clickhouse-secret.yaml).
       name: clickhouse-credentials
     dialTimeout: 5s
@@ -31,7 +31,7 @@ spec:
     checkpointEvery: 50
   policy:
     # Admit all of apps/v1, plus two specific core kinds. Omit allowedGVKs
-    # entirely to admit everything except the hard deny-list (D8: v1/Secret).
+    # entirely to admit everything except the hard deny-list (v1/Secret).
     allowedGVKs:
     - group: apps
       version: v1

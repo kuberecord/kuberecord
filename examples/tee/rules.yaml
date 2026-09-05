@@ -1,4 +1,4 @@
-# The tee itself. This file is the whole pattern (D14).
+# The tee itself. This file is the whole pattern.
 #
 # Two rules. Identical `resources`. Different `spec.sink`. That is all there is to
 # it — there is no multi-sink field, no fan-out mode, and no clever sink that

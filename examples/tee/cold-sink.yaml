@@ -1,6 +1,6 @@
 # The cold half of the tee: the immutable archive.
 #
-# A `Writer`-only backend (D12). It cannot read its own history back, so three
+# A `Writer`-only backend. It cannot read its own history back, so three
 # behaviours are switched off for it — dedup cache warm-up, zombie garbage
 # collection, and boot reconciliation of scope epochs — and it says so in
 # `HistoryUnavailable=True/WriterOnlySink` while staying `Ready`, because this is
@@ -25,7 +25,7 @@ spec:
   bucket: kuberecord-tee
   # A path fragment, never a path: no leading or trailing slash. Keys are built as
   # <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<sha256>.jsonl.zst
-  # — a versioned public contract (D15), which is what makes the DuckDB and Athena
+  # — a versioned public contract, which is what makes the DuckDB and Athena
   # recipes in docs/QUERIES.md possible.
   prefix: audit
   # MinIO ignores the region and the SDK insists on one. This is the CRD's

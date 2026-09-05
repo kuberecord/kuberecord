@@ -49,7 +49,7 @@ type ClusterStreamRuleSpec struct {
 // ClusterStreamRule declares that the resources it names, across the
 // namespaces its selector matches, should be streamed to a ClickHouseSink.
 //
-// It is cluster-scoped (D6) and is the only rule type permitted to name
+// It is cluster-scoped, and is the only rule type permitted to name
 // cluster-scoped kinds (Nodes, Namespaces, CRDs …), because doing so requires
 // cluster-level authority the namespaced StreamRule deliberately does not
 // assume. Its status uses the same StreamRuleStatus shape as StreamRule, so a

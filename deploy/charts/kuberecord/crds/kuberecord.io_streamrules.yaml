@@ -37,7 +37,7 @@ spec:
           StreamRule declares that the resources it names, *in its own namespace*,
           should be streamed to a ClickHouseSink.
 
-          It is namespaced (D3, D6) so that streaming intent is delegable: a team with
+          It is namespaced so that streaming intent is delegable: a team with
           write access only to their namespace can opt their own workloads into the
           audit trail without cluster-level privileges, and the watch it creates can
           never reach beyond that namespace. Naming a cluster-scoped kind here is
@@ -67,7 +67,7 @@ spec:
               extraRedaction:
                 description: |-
                   ExtraRedaction adds value paths to scrub, on top of whatever the target
-                  sink's `spec.policy.redaction` already scrubs (Task 3.3).
+                  sink's `spec.policy.redaction` already scrubs.
 
                   It is strictly additive: a rule can add paths, never remove one the sink's
                   owner configured. Values are scrubbed after normalization and *before*
@@ -81,11 +81,11 @@ spec:
                   across a mixed resource list without splitting into two rules.
 
                   Redaction is not a way to stream something otherwise forbidden: `v1/Secret`
-                  remains denied in code (D8) whether or not a policy would scrub it.
+                  remains denied in code whether or not a policy would scrub it.
                 items:
                   description: |-
                     RedactionRule names one value to scrub out of every streamed object before it
-                    is hashed, diffed and written (Task 3.3).
+                    is hashed, diffed and written.
 
                     Exactly one of the two fields is set. They are separate fields rather than one
                     string with two grammars because an annotation key routinely contains dots and
@@ -161,7 +161,7 @@ spec:
                     It is a (group, version, kind) triple plus an optional label selector rather
                     than a plural resource name because the CRD is authored by humans against
                     the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
-                    `kind` fields; the plural GVR is derived by the REST mapper (Task 1.3), which
+                    `kind` fields; the plural GVR is derived by the REST mapper, which
                     is also where an unknown kind is detected and parked.
                   properties:
                     group:
@@ -187,7 +187,7 @@ spec:
                         Selectors are applied by the event handler, not by the informer's
                         ListWatch: one informer per (GVR, namespace) is shared by every rule and
                         sink interested in that target, so changing a selector re-filters events
-                        without tearing down and re-listing a watch (Task 1.4). The trade-off is
+                        without tearing down and re-listing a watch. The trade-off is
                         deliberate — informer bandwidth in exchange for a pool that never
                         thrashes on a selector edit.
                       properties:
@@ -238,7 +238,7 @@ spec:
                       description: |-
                         Version is the API version to watch, e.g. "v1" or "v1beta1".
 
-                        The recorded object identity is version-agnostic (Invariant 7), so
+                        The recorded object identity is version-agnostic, so
                         naming `apps/v1` and `apps/v2` for the same Kind describes the *same*
                         objects seen through two different lenses — do not do that; pick the
                         version you want the stored payload rendered in.
@@ -270,7 +270,7 @@ spec:
                   identity is the pair: changing the name and changing the kind are the same
                   mistake with the same consequence, and one rule says so once.
 
-                  A rule targets exactly one sink, permanently (D14). To stream one resource
+                  A rule targets exactly one sink, permanently. To stream one resource
                   set to two backends — a queryable timeline and a cheap immutable archive,
                   say — author two rules naming the same resources and different sinks. That
                   is the supported shape rather than a workaround: each rule then carries its
@@ -343,11 +343,11 @@ spec:
                   Conditions carries Ready, RBACGranted, PolicyAllowed,
                   ResourceResolved and HistoryUnavailable (see the constants above). A
                   rule that cannot run degrades here and only here: the process never
-                  exits and every other rule keeps streaming (Invariant 5).
+                  exits and every other rule keeps streaming.
 
                   HistoryUnavailable is the odd one out, and is mirrored from the sink
                   the rule names rather than decided about the rule: a rule bound to a
-                  Writer-only sink (D12) reports it True, permanently, while staying
+                  Writer-only sink reports it True, permanently, while staying
                   entirely Ready. It is here because the two objects usually have
                   different owners — a rule's author may never read the cluster-scoped
                   sink they named — and an author who sees only Ready=True would have no

@@ -2,7 +2,7 @@
 # and nothing else.
 #
 # This is the whole point of the example. An `S3Sink` is a `Writer`-only archive
-# tier (D12): it cannot read its own history back, so dedup cache warm-up, zombie
+# tier: it cannot read its own history back, so dedup cache warm-up, zombie
 # garbage collection and boot reconciliation of scope epochs are switched off for
 # it, and it says so in `HistoryUnavailable=True/WriterOnlySink` while staying
 # `Ready` — a declared capability limit, not a fault. Nothing about *recording* is
@@ -26,7 +26,7 @@ spec:
   bucket: kuberecord-zero-infra
   # A path fragment, never a path: no leading or trailing slash. Keys are built as
   # <prefix>/format=jsonl-v1/cluster_id=<id>/date=<YYYY-MM-DD>/hour=<HH>/<sha256>.jsonl.zst
-  # — a versioned public contract (D15). It is what the CLI's objectsource backend
+  # — a versioned public contract. It is what the CLI's objectsource backend
   # partitions on, and it is why `kuberecord timeline --source s3://…/audit` can
   # read this archive with nothing else installed.
   prefix: audit

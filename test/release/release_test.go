@@ -74,6 +74,13 @@ func readFile(t *testing.T, relPath string) string {
 	return string(raw)
 }
 
+// chartDir is the chart's location in the tree. The chart ships from this
+// repository, so its pages are checked here alongside the release's own.
+const chartDir = "deploy/charts/kuberecord"
+
+// chartPath names a file inside the chart, so the directory is spelled once.
+func chartPath(name string) string { return chartDir + "/" + name }
+
 const changelogScript = "hack/changelog-section.sh"
 
 // runScript invokes the extractor and returns stdout, stderr and the exit code.
@@ -1328,6 +1335,65 @@ func TestChartOCIReferenceAgreesWithTheMakefile(t *testing.T) {
 		if !slices.ContainsFunc(prefixWarnings, func(w string) bool { return strings.Contains(content, w) }) {
 			t.Errorf("%s shows the chart reference without warning that its tag drops the `v` "+
 				"the operator tag and the signing identity both carry", page)
+		}
+	}
+}
+
+// TestChartVersionsAgreeWithTheMakefile is the anti-drift check for the version
+// a reader copies. The chart is not versioned independently of the operator, so
+// three places have to say the same thing: the Makefile's VERSION, Chart.yaml's
+// `version`/`appVersion` pair, and every `--version` argument the chart's README
+// publishes.
+//
+// Nothing structural catches this. A README pinning a chart tag that was never
+// pushed fails with `manifest unknown` and no hint that the documentation is
+// what is wrong, and a Chart.yaml whose appVersion lags
+// installs the *previous* operator image while every render test still passes —
+// because values.yaml leaves image.tag empty on purpose, so appVersion is what
+// picks the image.
+//
+// Only the pinned literals are asserted. A README is free to name an older
+// release historically ("published as an OCI artifact from v0.3.0 onward"); what
+// may not drift is the version somebody pastes into a shell.
+func TestChartVersionsAgreeWithTheMakefile(t *testing.T) {
+	version := committedVersion(t)
+
+	// Chart.yaml carries the chart version bare and the operator version with the
+	// `v`, which is the whole reason the README has to warn about the difference.
+	chart := readFile(t, chartPath("Chart.yaml"))
+	for _, want := range []string{"version: " + version, "appVersion: \"v" + version + "\""} {
+		if !strings.Contains(chart, want) {
+			t.Errorf("Chart.yaml does not contain %q. The chart is not versioned independently "+
+				"of the operator, so both fields move with the Makefile's VERSION %s",
+				want, version)
+		}
+	}
+
+	// Every `--version` the README publishes is a string a reader pastes into a
+	// shell, so every one of them has to name the release that exists.
+	readme := readFile(t, chartPath("README.md"))
+	pins := regexp.MustCompile(`--version\s+(\S+)`).FindAllStringSubmatch(readme, -1)
+	if len(pins) == 0 {
+		t.Fatalf("%s publishes no `--version` at all. The flag is not optional for an OCI "+
+			"install, so a reader following the page would get whatever tag helm defaults to",
+			chartPath("README.md"))
+	}
+	for _, pin := range pins {
+		if pin[1] != version {
+			t.Errorf("%s pins `--version %s`, but the tree is prepared to release %s. A chart "+
+				"tag that does not exist fails with `manifest unknown` and blames the registry",
+				chartPath("README.md"), pin[1], version)
+		}
+	}
+
+	// The page also explains, in prose, that the chart tag drops the `v` the
+	// operator tag keeps. That explanation names both spellings, so both go stale
+	// together with the release if nothing checks them.
+	for _, want := range []string{"`" + version + "`", "`v" + version + "`"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("%s no longer names %s, so the paragraph explaining that the chart tag "+
+				"drops the `v` is describing a different release than the one it installs",
+				chartPath("README.md"), want)
 		}
 	}
 }

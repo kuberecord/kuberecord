@@ -74,7 +74,7 @@ type ConnectionSpec struct {
 // operator already tuned against.
 //
 // None of these knobs can make a write block the hot path — Enqueue is a
-// bounded hand-off in every configuration (Invariant 1). They trade memory
+// bounded hand-off in every configuration. They trade memory
 // (QueueSize) and end-to-end latency (BatchMaxWait) against insert efficiency
 // (BatchMaxRows) and backpressure sensitivity (EnqueueTimeout).
 type WriterSpec struct {
@@ -170,8 +170,7 @@ type ClickHouseSinkStatus struct {
 	// Conditions carries Ready, SchemaValid and CredentialsResolved (see the
 	// condition-type constants). All three are set by asynchronous probes:
 	// a control-plane reconciler never dials ClickHouse on its own goroutine
-	// (Invariant 1), so an unreachable sink slows nothing down — it just
-	// reports here.
+	// so an unreachable sink slows nothing down — it just reports here.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -186,7 +185,7 @@ type ClickHouseSinkStatus struct {
 
 // ClickHouseSink declares one ClickHouse instance kuberecord may write to.
 //
-// It is cluster-scoped (D6) because rules in any namespace reference it by
+// It is cluster-scoped because rules in any namespace reference it by
 // name, and because a sink is infrastructure owned by the platform team rather
 // than by whoever owns the namespace a rule lives in. The password is the only
 // part not in this object; it lives in the Secret named by

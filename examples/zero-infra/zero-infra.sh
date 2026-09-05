@@ -12,7 +12,7 @@
 # What makes this path different from `make quickstart` is what it does *not*
 # stand up. There is one object store, the archive is a handful of compressed
 # JSON Lines objects in it, and the whole read side is one static binary reading
-# those objects directly (D18). Nothing here is a reduced demonstration of the
+# those objects directly. Nothing here is a reduced demonstration of the
 # capture path: an S3Sink records exactly what a ClickHouseSink records, and the
 # CLI answers the same questions from either. What it costs is stated where it is
 # paid — see step 9 and docs/CLI.md#cold-scans.
@@ -72,7 +72,7 @@ RELEASE="kuberecord"
 CLUSTER_ID="kuberecord-zero-infra"
 
 # Where the CLI is built to. Both shipped names come from one compilation
-# (Task 12.1); this builds the one name a script needs.
+# this builds the one name a script needs.
 CLI="${REPO_ROOT}/bin/kuberecord"
 
 log() { printf '\n\033[1m==> [%02d:%02d] %s\033[0m\n' $((SECONDS / 60)) $((SECONDS % 60)) "$*"; }
@@ -256,7 +256,7 @@ log "Creating the S3Sink"
 # Ready=True means: credentials resolved and the bucket answered a write probe.
 "${KUBECTL}" wait --for=condition=Ready s3sink/archive --timeout=3m
 # HistoryUnavailable=True is expected and is not a fault: an S3Sink is Writer-only
-# (D12), so it cannot read its own history back. Printing it here rather than
+# so it cannot read its own history back. Printing it here rather than
 # leaving it to be discovered in `kubectl describe` is the point.
 "${KUBECTL}" get s3sink archive \
 	-o 'jsonpath={range .status.conditions[*]}{.type}={.status}/{.reason}{"\n"}{end}' |
@@ -318,7 +318,7 @@ note "${after} object(s) in ${BUCKET}/${PREFIX}."
 ##
 ## 8. The CLI, built from this clone
 ##
-# Cross-compiled, cgo-free and static in a release (Task 12.1); here it is one
+# Cross-compiled, cgo-free and static in a release; here it is one
 # `go build` for this host. Nothing it needs is installed anywhere: no database
 # client, no DuckDB, no engine.
 log "Building the CLI"
