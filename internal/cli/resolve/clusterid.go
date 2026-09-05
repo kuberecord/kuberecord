@@ -52,24 +52,89 @@ import (
 // it is the most expensive question in the read plane on an archive backend, and
 // paying for it when the user already said --cluster-id would be charging for an
 // answer nobody asked for.
-func (r *BackendResolver) resolveClusterID(ctx context.Context, engine query.QueryEngine) (string, string, error) {
+//
+// unaskable, when set, is recorded in place of that step and stops the walk from
+// taking it — the identity is then undetermined rather than unresolvable, which
+// is a different thing and is reported as one. It is nil on every path that is
+// about to run a query. See Inspect.
+func (r *BackendResolver) resolveClusterID(
+	ctx context.Context, engine query.QueryEngine, unaskable *ChainStep,
+) (string, string, error) {
 	if id := r.Flags.ClusterID; id != "" {
+		record(&r.clusterIDSteps, stepClusterIDFlag, StepAnswered, "%s", id)
 		return id, "from --" + options.FlagClusterID, nil
 	}
+	record(&r.clusterIDSteps, stepClusterIDFlag, StepSilent, "not given")
 
-	if id, contextName := r.clusterIDFromContext(); id != "" {
+	id, contextName := r.clusterIDFromContext()
+	if id != "" {
+		record(&r.clusterIDSteps, stepContextMapping, StepAnswered, "%s", id)
 		return id, fmt.Sprintf("from %s, which maps the context %q", r.ConfigPath, contextName), nil
 	}
+	record(&r.clusterIDSteps, stepContextMapping, StepSilent, "%s",
+		r.noContextMappingDetail(contextName))
 
 	id, source, err := r.clusterIDFromOperator(ctx)
 	if err != nil {
+		record(&r.clusterIDSteps, stepOperatorDeployment, StepFailed, "%v", err)
 		return "", "", err
 	}
 	if id != "" {
+		record(&r.clusterIDSteps, stepOperatorDeployment, StepAnswered, "%s", id)
 		return id, source, nil
 	}
+	record(&r.clusterIDSteps, stepOperatorDeployment, StepSilent, "%s", r.operatorSilenceDetail())
 
-	return r.clusterIDFromSink(ctx, engine)
+	if unaskable != nil {
+		r.clusterIDSteps = append(r.clusterIDSteps, *unaskable)
+		return "", "", nil
+	}
+
+	id, source, err = r.clusterIDFromSink(ctx, engine)
+	recordResult(&r.clusterIDSteps, stepSink, err, "%s", id)
+	return id, source, err
+}
+
+// operatorSilenceDetail says why the operator's Deployment named no identity.
+//
+// Four nothings that are not the same nothing. No cluster to ask is an archive
+// being read on a laptop, and is the shape D18 exists to serve; a search that was
+// refused or could not reach the API server is a permission or a network, and is
+// the one worth acting on; no Deployment at all is a cluster whose operator has
+// been removed, or one this tool is pointed at by mistake; and a Deployment that
+// exists without naming an identity is an operator running on the flag's own
+// default, which cannot be reported as a fact about the data it wrote.
+//
+// It reads what findOperatorDeployment memoized rather than searching again, so
+// asking why costs nothing.
+func (r *BackendResolver) operatorSilenceDetail() string {
+	switch {
+	case r.clientsBuilt && r.clientErr != nil:
+		return "there is no Kubernetes cluster to ask"
+	case r.operatorUnseen != "":
+		return r.operatorUnseen
+	case r.operator == nil:
+		return "no Deployment labelled as kuberecord's operator was found"
+	}
+	return fmt.Sprintf("the operator Deployment %s/%s does not name one",
+		r.operator.namespace, r.operator.name)
+}
+
+// noContextMappingDetail says why the configuration file had no identity for this
+// invocation's kubeconfig context.
+//
+// The three cases are worth telling apart. No mappings at all is a file nobody
+// has written that section of; no current context is an invocation with no
+// kubeconfig, which is the ordinary shape of reading an archive on a laptop; and
+// a context with no entry is the one that is worth a `config set-context-cluster-id`.
+func (r *BackendResolver) noContextMappingDetail(contextName string) string {
+	switch {
+	case len(r.Config.Contexts) == 0:
+		return fmt.Sprintf("%s maps no kubeconfig contexts", r.ConfigPath)
+	case contextName == "":
+		return "no kubeconfig context is current"
+	}
+	return fmt.Sprintf("%s has no entry for the context %q", r.ConfigPath, contextName)
 }
 
 // clusterIDFromContext reads the configuration file's context mapping.

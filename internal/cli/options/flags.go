@@ -136,6 +136,18 @@ const (
 	FlagPrefix         = "prefix"
 	FlagPath           = "path"
 
+	// FlagCheck asks `config resolve` whether the backend it resolved can
+	// actually be reached.
+	//
+	// It is opt-in, and that is the whole design of the command: inspecting a
+	// configuration must not require a reachable backend, because the
+	// configuration a user most wants to inspect is the one whose backend cannot
+	// be reached (D26). It is named here rather than typed at its one
+	// registration site because the report withholds the cluster-id chain's last
+	// step by name — "--check asks it" — and a message that spelled the flag
+	// independently of its registration would be the spelling that drifts.
+	FlagCheck = "check"
+
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl
 	// spells it. The long form reads oddly in help output and is kept anyway:
 	// muscle memory for `-v 6` is worth more than the tidier `--verbose`, and a

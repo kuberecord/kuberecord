@@ -19,6 +19,7 @@ package resolve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -381,8 +382,13 @@ func (r *BackendResolver) findOperatorDeployment(ctx context.Context) (*operator
 		// an optional shortcut did not work would mean a laptop with a stale
 		// kubeconfig could not read an archive sitting on its own disk, which is
 		// the case this tool most wants to serve (D18).
-		r.notef("cannot list Deployments%s (%s), so the cluster identity cannot be read from the "+
-			"operator", describeNamespace(namespace), reasonFor(err))
+		//
+		// Recorded as well as printed, in one string used twice, so that the
+		// resolution report on stdout says the same thing this notice says on
+		// stderr rather than a vaguer version of it.
+		r.operatorUnseen = fmt.Sprintf("cannot list Deployments%s (%s)",
+			describeNamespace(namespace), reasonFor(err))
+		r.notef("%s, so the cluster identity cannot be read from the operator", r.operatorUnseen)
 		return nil, nil
 	}
 	if len(list.Items) == 0 {

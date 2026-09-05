@@ -1,0 +1,48 @@
+=== stdout ===
+backend
+  --source             silent       not given
+  --sink               silent       not given
+  profile              silent       /home/engineer/.config/kuberecord/config.yaml defines no profiles
+  discovery            answered     the cluster's only sink
+
+  resolved             ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine               clickhouse
+  capabilities         deletions=yes, server_side_filter=yes, point_query=yes, time_bound_required=no
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      silent       /home/engineer/.config/kuberecord/config.yaml maps no kubeconfig contexts
+  operator Deployment  answered     prod-eu-1
+  the sink             not reached
+
+  resolved             prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+
+reachability
+  unreachable          the backend could not be reached
+                       cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: lookup clickhouse.kuberecord-system.svc: no such host
+=== stderr ===
+=== error ===
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: lookup clickhouse.kuberecord-system.svc: no such host
+
+ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so discovery was right and so is
+the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on
+one, so it will not forward a port for you.
+
+Forward it yourself, then re-run against the forwarded address:
+
+    kubectl port-forward -n kuberecord-system svc/clickhouse 9000:9000
+    kuberecord config resolve … --sink-addr 127.0.0.1:9000
+
+Or write it down once, and every later invocation reads it:
+
+    kuberecord config set-profile local --backend clickhouse \
+        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \
+        --password-env KUBERECORD_CLICKHOUSE_PASSWORD
+    kuberecord config use-profile local
+
+Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
+recommended credential for it, and the operator's own is not. Both routes, and
+why this tool will not forward the port for you:
+docs/CLI.md#running-the-cli-outside-the-cluster

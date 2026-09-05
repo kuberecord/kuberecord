@@ -1,0 +1,23 @@
+=== stdout ===
+backend
+  --source             silent       not given
+  --sink               silent       not given
+  profile              answered     "prod" is the currentProfile in /home/engineer/.config/kuberecord/config.yaml
+  discovery            not reached
+
+  resolved             prod (ClickHouse at clickhouse.example:9000/kuberecord)
+  engine               clickhouse
+  capabilities         deletions=yes, server_side_filter=yes, point_query=yes, time_bound_required=no
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      answered     prod-eu-1
+  operator Deployment  not reached
+  the sink             not reached
+
+  resolved             prod-eu-1 (from /home/engineer/.config/kuberecord/config.yaml, which maps the context "kuberecord-test")
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+=== stderr ===
+=== error ===

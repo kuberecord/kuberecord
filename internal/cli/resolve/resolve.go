@@ -111,6 +111,26 @@ func (o Origin) phrase() string {
 	return "using"
 }
 
+// Step names this origin as a step of the chain rather than as a choice already
+// made.
+//
+// It is the noun the resolution report puts in its first column, and it differs
+// from phrase for a reason: "using --source" is what a notice says once a step
+// has answered, and a report has to name the steps that did *not* answer too.
+func (o Origin) Step() string {
+	switch o {
+	case OriginSourceFlag:
+		return "--" + options.FlagSource
+	case OriginSinkFlag:
+		return "--" + options.FlagSink
+	case OriginProfile:
+		return "profile"
+	case OriginDiscovered:
+		return "discovery"
+	}
+	return string(o)
+}
+
 // Backend is an opened read plane together with the provenance of the choice.
 //
 // Description and Origin travel with the engine because a command that renders a
@@ -134,6 +154,12 @@ type Backend struct {
 	// ClusterIDSource says how the identity above was arrived at, in the words the
 	// notice used.
 	ClusterIDSource string
+
+	// diagnosis explains an unreachable cluster-internal address, and is carried
+	// here as well as on the engine because Check reaches the backend without
+	// going through one of the engine's diagnosed methods. Its zero value is
+	// inert. See diagnose.go.
+	diagnosis diagnosis
 
 	// closers release what opening this backend created, in reverse order of
 	// creation. The engine never closes a source it was lent, so this is where the
@@ -196,8 +222,21 @@ type BackendResolver struct {
 	operatorSearched bool
 	operatorNS       string
 
+	// operatorUnseen is why the search could not be carried out, when it could
+	// not. The search treats that as a step with nothing to say rather than as a
+	// failure, and this is what lets the resolution report say which of the
+	// several nothings it was.
+	operatorUnseen string
+
 	// noticesFailed records that stderr has gone, so the writer stands down.
 	noticesFailed bool
+
+	// The two chains' step-by-step records, rebuilt by every walk. They are
+	// filled in on the ordinary resolution path as well as the inspecting one,
+	// because a recording that only happened when somebody asked for it would be
+	// a second walk of the chain and therefore a second opinion about it.
+	backendSteps   []ChainStep
+	clusterIDSteps []ChainStep
 }
 
 // NewBackendResolver builds a resolver for one invocation, loading the configuration file.
@@ -342,38 +381,130 @@ func (r *BackendResolver) operatorNamespace(ctx context.Context) (string, error)
 // The order of the two halves matters: the backend is chosen and announced before
 // the cluster identity is worked out, because the identity's own last resort is to
 // ask the backend, and a user watching a slow question should already know which
-// sink is being asked.
+// sink is being asked. That ordering is why this does not simply call Inspect and
+// print two lines from what comes back: the notice has to reach stderr while the
+// second chain is still running.
 func (r *BackendResolver) Resolve(ctx context.Context) (*Backend, error) {
-	chosen, origin, err := r.resolveTarget(ctx)
-	if err != nil {
-		return nil, err
+	inspection := r.walk(ctx, walkOptions{
+		announce: func(backend *Backend) {
+			r.notef("%s %s", backend.Origin.phrase(), backend.Description)
+		},
+	})
+	if inspection.BackendErr != nil {
+		return nil, inspection.BackendErr
 	}
-
-	engine, closers, err := chosen.open(ctx)
-	if err != nil {
-		return nil, err
-	}
-	backend := &Backend{
-		Engine:      engine,
-		Origin:      origin,
-		Description: chosen.description,
-		closers:     closers,
-	}
-	r.notef("%s %s", origin.phrase(), chosen.description)
-
-	clusterID, source, err := r.resolveClusterID(ctx, engine)
-	if err != nil {
+	backend := inspection.Backend
+	if inspection.ClusterIDErr != nil {
 		// The engine was opened by this call and nothing else has a reference to
 		// it, so a failure here must not leak it. The close error is joined into
 		// the failure rather than replacing it: the reason the command is ending is
 		// the resolution failure, not the tidying up.
-		return nil, errors.Join(err, backend.Close())
+		return nil, errors.Join(inspection.ClusterIDErr, backend.Close())
 	}
-	backend.ClusterID = clusterID
-	backend.ClusterIDSource = source
-	r.notef("cluster-id %s (%s)", clusterID, source)
+	r.notef("cluster-id %s (%s)", backend.ClusterID, backend.ClusterIDSource)
 
 	return backend, nil
+}
+
+// walkOptions is the whole of how this package's two callers of walk differ.
+type walkOptions struct {
+	// unaskable, when set, is recorded in place of the cluster-id chain's last
+	// step and stops the walk from taking it. That step is the only part of
+	// resolution that asks the backend a question, and `config resolve` has to be
+	// able to inspect a configuration without asking one (D26).
+	unaskable *ChainStep
+
+	// reportBoth asks for the identity chain to be walked even when the backend
+	// chain has already failed.
+	//
+	// Resolve does not want that. It is about to run a query, and after a failed
+	// backend chain there is no query left to run — so consulting the cluster
+	// again would be work nobody can use, and for a malformed flag it would be
+	// work performed after a usage error. A report wants the opposite: the chain
+	// that still worked is what makes the one that did not legible.
+	reportBoth bool
+
+	// announce is called once, as soon as the backend is open and before the
+	// identity chain starts, or nil for a caller with nothing to say at that
+	// moment. It exists so that Resolve's notice ordering survives the two
+	// callers sharing this walk.
+	announce func(*Backend)
+}
+
+// walk runs both chains, recording every step, and is the one implementation of
+// resolution in this package.
+//
+// Neither chain's failure is returned. Both are recorded on the Inspection,
+// because a report that suppressed the working half whenever the other one broke
+// would be least informative exactly when it was most needed — and because the
+// two chains fail for unrelated reasons.
+func (r *BackendResolver) walk(ctx context.Context, opts walkOptions) *Inspection {
+	// Reset rather than append, so a resolver driven twice reports one walk
+	// rather than two spliced together.
+	r.backendSteps, r.clusterIDSteps = nil, nil
+
+	inspection := &Inspection{}
+	chosen, origin, err := r.resolveTarget(ctx)
+	inspection.Origin = origin
+	if err != nil {
+		inspection.BackendErr = err
+	} else if engine, closers, openErr := chosen.open(ctx); openErr != nil {
+		// Recorded against the step that chose the target rather than as a step of
+		// its own: the chain answered, and what failed was building what it
+		// answered with.
+		record(&r.backendSteps, origin.Step(), StepFailed, "%v", openErr)
+		inspection.BackendErr = openErr
+	} else {
+		inspection.Backend = &Backend{
+			Engine:      engine,
+			Origin:      origin,
+			Description: chosen.description,
+			diagnosis:   chosen.diagnosis,
+			closers:     closers,
+		}
+	}
+	completeChain(&r.backendSteps, backendChainSteps())
+	inspection.BackendSteps = r.backendSteps
+
+	if inspection.Backend != nil && opts.announce != nil {
+		opts.announce(inspection.Backend)
+	}
+
+	var clusterID, source string
+	var idErr error
+	if inspection.Backend != nil || opts.reportBoth {
+		unaskable := opts.unaskable
+		var engine query.QueryEngine
+		if inspection.Backend != nil {
+			engine = inspection.Backend.Engine
+		} else if unaskable == nil {
+			// Nothing was opened, so the last step has nothing to ask. Saying so
+			// is better than letting a nil engine reach clusterIDFromSink, which
+			// would report the absent backend as one that cannot list its
+			// clusters.
+			unaskable = &ChainStep{
+				Step:    stepSink,
+				Outcome: StepNotReached,
+				Detail:  "no backend was resolved, so there is nothing to ask",
+			}
+		}
+		clusterID, source, idErr = r.resolveClusterID(ctx, engine, unaskable)
+	}
+	completeChain(&r.clusterIDSteps, clusterIDChainSteps())
+
+	inspection.ClusterID = clusterID
+	inspection.ClusterIDSource = source
+	inspection.ClusterIDErr = idErr
+	inspection.ClusterIDSteps = r.clusterIDSteps
+	// Read off the record rather than from the permission: a chain allowed to ask
+	// still does not ask when an earlier step answered, and a caller that treated
+	// permission as evidence would report an unprobed backend as reachable.
+	inspection.Asked = stepWasTaken(r.clusterIDSteps, stepSink)
+	if inspection.Backend != nil {
+		inspection.Backend.ClusterID = clusterID
+		inspection.Backend.ClusterIDSource = source
+	}
+	return inspection
 }
 
 // resolveTarget walks the chain and returns the first step that answered.
@@ -385,37 +516,72 @@ func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, er
 	// Origin says what is true here: no step has answered yet. Resolve discards
 	// it on the error path.
 	if err := validateSinkAddr(r.sinkAddr()); err != nil {
+		record(&r.backendSteps, "--"+options.FlagSinkAddr, StepFailed, "%v", err)
 		return target{}, "", err
 	}
 
 	if source := r.Flags.Source; source != "" {
 		if r.sinkAddr() != "" {
-			return target{}, OriginSourceFlag, errSinkAddrWithSource(source)
+			err := errSinkAddrWithSource(source)
+			record(&r.backendSteps, OriginSourceFlag.Step(), StepFailed, "%v", err)
+			return target{}, OriginSourceFlag, err
 		}
 		chosen, err := targetFromSource(source)
+		recordResult(&r.backendSteps, OriginSourceFlag.Step(), err, "%s", source)
 		return chosen, OriginSourceFlag, err
 	}
+	record(&r.backendSteps, OriginSourceFlag.Step(), StepSilent, "not given")
 
 	if named := r.Flags.Sink; named != "" {
 		ref, err := ParseSinkRef(options.FlagSink, named)
 		if err != nil {
+			record(&r.backendSteps, OriginSinkFlag.Step(), StepFailed, "%v", err)
 			return target{}, OriginSinkFlag, err
 		}
-		chosen, err := r.targetFromSinkRef(ctx, ref)
-		return chosen, OriginSinkFlag, err
+		chosen, sinkErr := r.targetFromSinkRef(ctx, ref)
+		recordResult(&r.backendSteps, OriginSinkFlag.Step(), sinkErr, "%s", ref)
+		return chosen, OriginSinkFlag, sinkErr
 	}
+	record(&r.backendSteps, OriginSinkFlag.Step(), StepSilent, "not given")
 
 	name, profile, err := r.activeProfile()
 	if err != nil {
+		record(&r.backendSteps, OriginProfile.Step(), StepFailed, "%v", err)
 		return target{}, OriginProfile, err
 	}
 	if profile != nil {
 		chosen, profileErr := targetFromProfile(name, *profile, r.sinkAddr())
+		recordResult(&r.backendSteps, OriginProfile.Step(), profileErr, "%s", r.profileDetail(name))
 		return chosen, OriginProfile, profileErr
 	}
+	record(&r.backendSteps, OriginProfile.Step(), StepSilent, "%s", r.noProfileDetail())
 
 	chosen, err := r.targetFromDiscovery(ctx)
+	recordResult(&r.backendSteps, OriginDiscovered.Step(), err, "the cluster's only sink")
 	return chosen, OriginDiscovered, err
+}
+
+// profileDetail says why the profile step answered.
+//
+// The two spellings are the difference this command exists to expose: a profile
+// this invocation named, and one the file quietly made active. The second is how
+// a stanza written months ago shadows discovery and produces an answer that is
+// wrong in a way that looks right.
+func (r *BackendResolver) profileDetail(name string) string {
+	if r.Flags.Profile != "" {
+		return fmt.Sprintf("--%s %s", options.FlagProfile, name)
+	}
+	return fmt.Sprintf("%q is the currentProfile in %s", name, r.ConfigPath)
+}
+
+// noProfileDetail says why the profile step had nothing to say, naming the file
+// it read so that a reader can go and look at it.
+func (r *BackendResolver) noProfileDetail() string {
+	if len(r.Config.Profiles) == 0 {
+		return fmt.Sprintf("%s defines no profiles", r.ConfigPath)
+	}
+	return fmt.Sprintf("no profile is active in %s (%s)",
+		r.ConfigPath, DescribeProfileNames(r.Config.Profiles))
 }
 
 // activeProfile returns the profile this invocation should use, or nil for none.
