@@ -162,7 +162,8 @@ plugs into.
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
 | `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr) and [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster). |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
-| `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity). |
+| `--cluster-id <id>` | resolved, and the answer printed | Selects **which cluster's records to read from the sink** — the `cluster_id` column stamped on every row. Resolved in five steps if you omit it; see [The cluster identity](#the-cluster-identity). |
+| `--cluster <name>` *(kubectl's)* | the current context's cluster | Selects **a cluster entry from your kubeconfig** — which API server `kubectl` connects to. It is kubectl's own flag, described here rather than in the list below only because of the pair note that follows. |
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
 | `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
 | `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
@@ -174,12 +175,22 @@ plugs into.
 `--source`, `--sink` and `--profile` are the three ways of naming a backend, and
 they are tried in that order. Whichever wins is announced on stderr, always.
 
+**`--cluster` and `--cluster-id` are different things, and both are frequently
+correct at once.** One says *where to connect*, the other says *whose records to
+read*, and nothing requires them to agree. Reading a production cluster's history
+through a kubeconfig context that points at a bastion means setting both, and
+setting them differently: `--cluster` picks the entry that reaches an API server,
+`--cluster-id` picks the identity stamped on the rows you want back. Neither
+implies the other, and neither is ever derived from the other — which is why the
+second flag carries the suffix, and why `--help` says so on the flag itself.
+
 ### Inherited from `kubectl`
 
 These come from `genericclioptions.ConfigFlags` — the same code `kubectl` itself
 uses — and mean exactly what they mean there. They are listed rather than
 described, because a divergent description of somebody else's flag is a lie
-waiting to happen:
+waiting to happen — `--cluster` is described above only because leaving it
+undescribed is what lets it be read as `--cluster-id`:
 
 `--as`, `--as-group`, `--as-uid`, `--as-user-extra`, `--cache-dir`,
 `--certificate-authority`, `--client-certificate`, `--client-key`, `--cluster`,
@@ -189,10 +200,9 @@ waiting to happen:
 
 Three notes on how they interact with the rest:
 
-- **`--cluster` is kubectl's, `--cluster-id` is kuberecord's.** The first selects
-  a kubeconfig cluster entry; the second selects whose recorded history you are
-  reading. They are unrelated, and the collision is why the second flag carries
-  the suffix.
+- **`--cluster` is kubectl's, `--cluster-id` is kuberecord's**, they are not the
+  same selection, and you may well need both — described with the pair
+  [in the table above](#kuberecords-own).
 - **`-n`/`--namespace` narrows an object address**, and for [`scopes`](#scopes)
   alone it does *not* default to the kubeconfig's current namespace: a compliance
   question about what was being recorded means the whole cluster unless you say
@@ -1879,7 +1889,9 @@ reason to write a profile at all:
 
 The classifier is the one the unreachable-backend message uses, so the command
 that rewrites an address and the message that explains why it needed rewriting
-cannot disagree. Nothing is dialled either way: this writes a file (D24).
+cannot disagree. Nothing is dialled either way: this writes a file, and an
+address that cannot be reached is something the CLI names rather than something
+it tries to work around.
 
 **The password is not copied.** The sink's Secret is read to confirm it holds the
 key the sink names — a Secret created with `--from-literal=PASSWORD=…` is reported

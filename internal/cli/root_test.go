@@ -174,6 +174,17 @@ func TestClusterIDIsDistinctFromKubeconfigCluster(t *testing.T) {
 		t.Errorf("both flags are named %q", clusterID.Name)
 	}
 
+	// Distinct is not the same as distinguishable. Both names are correct for
+	// what they name, which makes this the likeliest confusion in the whole flag
+	// set — and pflag prints the two adjacently, so a reader meets them together
+	// whether or not they ever open docs/CLI.md. The reference's flag table now
+	// leans on this clause being here, so it is asserted rather than trusted.
+	if !strings.Contains(clusterID.Usage, "--"+options.FlagKubeconfigCluster) {
+		t.Errorf("--%s help does not name --%s, leaving the two adjacent flags "+
+			"in `--help` with nothing to tell them apart: %q",
+			options.FlagClusterID, options.FlagKubeconfigCluster, clusterID.Usage)
+	}
+
 	// A shorthand on either would let one be typed as the other by accident,
 	// and pflag would resolve `-c` to whichever was registered first.
 	if kubeconfigCluster.Shorthand != "" || clusterID.Shorthand != "" {
