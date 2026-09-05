@@ -551,6 +551,18 @@ func (r *BackendResolver) clickHouseTarget(
 	return target{
 		backend:    BackendClickHouse,
 		clickhouse: dial,
+		// Assembled here because here is where the values are: the sink that named
+		// the address, and the namespace its credentials were read from. By the
+		// time a query against this engine fails, several layers up, none of that
+		// is still in reach. It carries no password — see diagnosis.
+		diagnosis: diagnosis{
+			ref:         ref,
+			namespace:   namespace,
+			addr:        dial.Addr,
+			database:    dial.Database,
+			username:    dial.Username,
+			commandName: r.commandName(),
+		},
 		// The AC's shape exactly: the sink, then host:port/database. The username
 		// is deliberately absent and so, of course, is the password — a notice is
 		// read over shoulders and pasted into issues.
@@ -767,6 +779,11 @@ type target struct {
 	// holds the resolved password, in memory, and nothing renders it.
 	clickhouse chquery.DialConfig
 
+	// diagnosis explains an unreachable cluster-internal address, when the sink
+	// recorded one. Its zero value is inert: an address that resolves from
+	// anywhere gets exactly the path it got before diagnose.go existed.
+	diagnosis diagnosis
+
 	// s3 is the bucket configuration when backend is BackendS3.
 	s3 awssource.Config
 
@@ -797,9 +814,14 @@ func (t target) open(ctx context.Context) (query.QueryEngine, []func() error, er
 	case BackendClickHouse:
 		engine, err := chquery.Dial(t.clickhouse)
 		if err != nil {
-			return nil, nil, exit.RuntimeErrorf("%w", err)
+			return nil, nil, exit.RuntimeErrorf("%w", t.diagnosis.wrap(err))
 		}
-		return engine, []func() error{engine.Close}, nil
+		// The engine is handed back wrapped rather than raw, because the failure
+		// this diagnoses does not happen here: chquery.Dial opens no connection,
+		// and the address is first contacted by whichever query runs first. See
+		// diagnosis.watch. The closer is the engine's own — the wrapper owns
+		// nothing and closing through it would only add a layer to unwind.
+		return t.diagnosis.watch(engine), []func() error{engine.Close}, nil
 
 	case BackendS3:
 		source, err := awssource.New(ctx, t.s3)

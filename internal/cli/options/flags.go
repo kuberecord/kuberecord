@@ -57,6 +57,15 @@ const (
 	// FlagSource names a location to read directly, bypassing sink discovery.
 	FlagSource = "source"
 
+	// FlagSinkAddr replaces the endpoint a discovered sink recorded, and nothing
+	// else about it (D25, Task 13.2).
+	//
+	// The constant exists ahead of the flag itself because Task 13.1's
+	// unreachable-backend message tells the reader to type it. A message and a
+	// flag that spelled the name independently would be two spellings of one
+	// contract, and the one nobody compiles is the one that drifts.
+	FlagSinkAddr = "sink-addr"
+
 	// FlagProfile selects a stanza in the CLI's configuration file.
 	FlagProfile = "profile"
 
