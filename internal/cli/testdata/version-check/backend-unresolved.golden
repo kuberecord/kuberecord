@@ -1,0 +1,21 @@
+=== stdout ===
+kuberecord v0.4.0
+  commit  77514b632925
+  built   2026-09-05T11:02:44Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+
+setup:
+  backend      unresolved
+               no sink custom resources in this cluster. Read an archive directly with --source <dir|s3://bucket/prefix>, name a sink with --sink <kind>/<name>, or configure a profile with `kuberecord config set-profile`
+  cluster-id   prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  not checked  the backend chain resolved nothing, so there was nothing to reach
+
+for which step decided what, run `kuberecord config resolve --check`
+=== stderr ===
+=== error ===
+error: no sink custom resources in this cluster. Read an archive directly with --source <dir|s3://bucket/prefix>, name a sink with --sink <kind>/<name>, or configure a profile with `kuberecord config set-profile`

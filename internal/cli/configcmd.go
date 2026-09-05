@@ -36,10 +36,16 @@ import (
 // operator's own RBAC is the only grant that reaches it (D7). Most engineers
 // cannot read it, and the right answer to that is not to widen anybody's
 // permissions — it is a read-only ClickHouse user and a profile naming where the
-// password comes from. These four subcommands are the smallest surface that makes
-// writing such a profile a command rather than a documentation exercise.
+// password comes from. Four of these subcommands are the smallest surface that
+// makes writing such a profile a command rather than a documentation exercise.
 //
 // What they will not do is store a credential. See resolve.ClickHouseProfile.Password.
+//
+// The fifth, `resolve`, writes nothing at all. It belongs here because a profile
+// is one step of the chain that decides where an answer comes from, and the
+// question it answers — "which step won, and why not the others" — is the one a
+// reader of this file has when the file turns out not to be the step that won.
+// See resolvecmd.go.
 
 // newConfigCommand builds the `config` subtree.
 func newConfigCommand(flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) *cobra.Command {
@@ -53,7 +59,11 @@ The file lives at ${XDG_CONFIG_HOME:-~/.config}/%s/%s and is written 0600.
 It holds profiles — where to read history from — and a mapping from kubeconfig
 context to kuberecord cluster identity. It never holds a password: a profile
 names an environment variable or a file to read one from, and a password written
-inline is refused with an explanation.`, resolve.ConfigDirName, resolve.ConfigFileName),
+inline is refused with an explanation.
+
+`+"`config resolve`"+` writes nothing: it reports which step of the resolution
+chains this invocation would use, and why the earlier ones had nothing to say.`,
+			resolve.ConfigDirName, resolve.ConfigFileName),
 		Args: rejectUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -65,6 +75,7 @@ inline is refused with an explanation.`, resolve.ConfigDirName, resolve.ConfigFi
 		newConfigSetProfileCommand(flags, streams, invokedAs),
 		newConfigUseProfileCommand(streams),
 		newConfigSetContextClusterIDCommand(flags, streams, invokedAs),
+		newConfigResolveCommand(flags, streams, invokedAs),
 	)
 	return config
 }
@@ -253,8 +264,10 @@ from.`,
 		"Fill the profile in from a sink custom resource, as kind/name (for example "+
 			"ClickHouseSink/default). A cluster-internal address is rewritten to a forwarded "+
 			"loopback port, and the notice on stderr says so.")
+	mustCompleteFlag(command, options.FlagFromSink, completeSinkRefs)
 	command.Flags().StringVar(&backend, options.FlagBackend, "",
 		fmt.Sprintf("Which backend this profile reads. One of: %s.", options.JoinValues(resolve.BackendKinds)))
+	mustCompleteFlag(command, options.FlagBackend, fixedEnum(resolve.BackendKinds, backendDescriptions))
 	command.Flags().StringVar(&addr, options.FlagAddr, "",
 		"ClickHouse native-protocol endpoint, as host:port.")
 	command.Flags().StringVar(&database, options.FlagDatabase, "",
@@ -511,6 +524,11 @@ func newConfigUseProfileCommand(streams genericiooptions.IOStreams) *cobra.Comma
 The active profile is used when neither --source nor --sink is given, and it
 takes precedence over discovering a sink from the cluster. Pass --profile to
 override it for a single command.`,
+
+		// The one command whose whole argument is a profile name, completed from
+		// the same file --profile is completed from.
+		ValidArgsFunction: completeProfileNames,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return exit.UsageErrorf("config use-profile takes one argument, the profile name")

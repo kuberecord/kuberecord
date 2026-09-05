@@ -1,0 +1,45 @@
+=== stdout ===
+kuberecord v0.4.0
+  commit  77514b632925
+  built   2026-09-05T11:02:44Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+
+setup:
+  backend      ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine       clickhouse
+  cluster-id   prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  unreachable  the backend could not be reached
+               cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: lookup clickhouse.kuberecord-system.svc: no such host
+
+for which step decided what, run `kuberecord config resolve --check`
+=== stderr ===
+=== error ===
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: lookup clickhouse.kuberecord-system.svc: no such host
+
+ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so discovery was right and so is
+the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on
+one, so it will not forward a port for you.
+
+Forward it yourself, then re-run against the forwarded address:
+
+    kubectl port-forward -n kuberecord-system svc/clickhouse 9000:9000
+    kuberecord version … --sink-addr 127.0.0.1:9000
+
+Or write it down once, and every later invocation reads it:
+
+    kuberecord config set-profile local --backend clickhouse \
+        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \
+        --password-env KUBERECORD_CLICKHOUSE_PASSWORD
+    kuberecord config use-profile local
+
+Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
+recommended credential for it, and the operator's own is not. Both routes, and
+why this tool will not forward the port for you:
+docs/CLI.md#running-the-cli-outside-the-cluster

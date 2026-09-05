@@ -112,10 +112,15 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 		SilenceUsage:  true,
 		SilenceErrors: true,
 
-		// Neither the shell-completion tree nor its help entry earns a place in
-		// a plugin's command list; kubectl supplies completion for plugins
-		// itself, and `kubectl kuberecord completion bash` would print a script
-		// that installs a completion for a command name that does not exist.
+		// Cobra's generated `completion` command is suppressed because this tree
+		// ships its own (completion.go). The concern the default one raised is
+		// real — `kubectl kuberecord completion bash` writes a script for the
+		// standalone name, which a krew user may not have installed — but the
+		// answer to it is a notice naming kubectl's own plugin-completion shim,
+		// not the absence of the command. Cobra's default could say neither.
+		//
+		// The hidden `__complete` command is unaffected by this setting and is
+		// registered either way, which is what makes that shim work at all.
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
@@ -157,6 +162,10 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 
 	flags.AddFlags(root.PersistentFlags())
 
+	// Beside the registration of the flags themselves, so that a flag and the
+	// menu it offers cannot drift apart. See registerGlobalCompletions.
+	registerGlobalCompletions(root)
+
 	// Commands are added here rather than by the caller so that both binaries —
 	// and every test that builds a root — get the same tree, and so that each one
 	// is constructed with the same parsed flag surface rather than reaching for a
@@ -168,7 +177,8 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 		newBlameCommand(flags, streams, invokedAs),
 		newScopesCommand(flags, streams, invokedAs),
 		newConfigCommand(flags, streams, invokedAs),
-		newVersionCommand(flags, streams),
+		newVersionCommand(flags, streams, invokedAs),
+		newCompletionCommand(streams, invokedAs),
 	)
 
 	return root, flags

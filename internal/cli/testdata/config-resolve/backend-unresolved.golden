@@ -1,0 +1,22 @@
+=== stdout ===
+backend
+  --source             silent       not given
+  --sink               silent       not given
+  profile              silent       /home/engineer/.config/kuberecord/config.yaml defines no profiles
+  discovery            failed       no sink custom resources in this cluster. Read an archive directly with --source <dir|s3://bucket/prefix>, name a sink with --sink <kind>/<name>, or configure a profile with `kuberecord config set-profile`
+
+  unresolved
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      silent       /home/engineer/.config/kuberecord/config.yaml maps no kubeconfig contexts
+  operator Deployment  answered     prod-eu-1
+  the sink             not reached
+
+  resolved             prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+=== stderr ===
+=== error ===
+error: no sink custom resources in this cluster. Read an archive directly with --source <dir|s3://bucket/prefix>, name a sink with --sink <kind>/<name>, or configure a profile with `kuberecord config set-profile`

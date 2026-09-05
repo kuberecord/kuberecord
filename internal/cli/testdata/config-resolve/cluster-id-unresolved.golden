@@ -1,0 +1,24 @@
+=== stdout ===
+backend
+  --source             answered     testdata/two-clusters
+  --sink               not reached
+  profile              not reached
+  discovery            not reached
+
+  resolved             testdata/two-clusters (local archive)
+  engine               objectsource
+  capabilities         deletions=no, server_side_filter=no, point_query=no, time_bound_required=yes
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      silent       /home/engineer/.config/kuberecord/config.yaml maps no kubeconfig contexts
+  operator Deployment  silent       no Deployment labelled as kuberecord's operator was found
+  the sink             failed       no cluster identity: this sink holds 2 of them (prod-eu-1, prod-us-1). Pass --cluster-id, or record it for this kubeconfig context with `kuberecord config set-context-cluster-id`
+
+  unresolved
+
+reachability
+  reachable            the backend answered
+=== stderr ===
+=== error ===
+error: no cluster identity: this sink holds 2 of them (prod-eu-1, prod-us-1). Pass --cluster-id, or record it for this kubeconfig context with `kuberecord config set-context-cluster-id`

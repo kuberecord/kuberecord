@@ -121,6 +121,11 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   # Who last set the replica count, for a script.
   kuberecord blame deploy/checkout -n payments --field spec.replicas -o json`,
 
+		// The kind completes from the static short-name table; the name is an
+		// object in a cluster or an archive, and is not read from here. See
+		// completeObjectAddress.
+		ValidArgsFunction: completeObjectAddress,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := local.window.resolve(cmd.Flags()); err != nil {
 				return err

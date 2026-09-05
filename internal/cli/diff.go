@@ -106,6 +106,11 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   # git-diff semantics for a script: 0 if nothing changed, 1 if something did.
   kuberecord diff deploy/checkout -n payments --since 15m --exit-code`,
 
+		// The kind completes from the static short-name table; the name is an
+		// object in a cluster or an archive, and is not read from here. See
+		// completeObjectAddress.
+		ValidArgsFunction: completeObjectAddress,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := local.window.resolve(cmd.Flags()); err != nil {
 				return err

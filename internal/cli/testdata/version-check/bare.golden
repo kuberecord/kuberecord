@@ -1,0 +1,12 @@
+=== stdout ===
+kuberecord v0.4.0
+  commit  77514b632925
+  built   2026-09-05T11:02:44Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+=== stderr ===
+=== error ===

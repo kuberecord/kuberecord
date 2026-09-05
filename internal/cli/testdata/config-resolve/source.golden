@@ -1,0 +1,23 @@
+=== stdout ===
+backend
+  --source             answered     s3://acme-audit/kuberecord
+  --sink               not reached
+  profile              not reached
+  discovery            not reached
+
+  resolved             s3://acme-audit/kuberecord (region eu-west-1)
+  engine               objectsource
+  capabilities         deletions=no, server_side_filter=no, point_query=no, time_bound_required=yes
+
+cluster identity
+  --cluster-id         answered     prod-eu-1
+  context mapping      not reached
+  operator Deployment  not reached
+  the sink             not reached
+
+  resolved             prod-eu-1 (from --cluster-id)
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+=== stderr ===
+=== error ===

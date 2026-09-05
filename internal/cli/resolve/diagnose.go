@@ -256,8 +256,18 @@ func (d diagnosis) armed() bool {
 // The original is wrapped rather than replaced. errors.Is and errors.As still
 // reach the *net.DNSError underneath, which is what a `-v` user needs to see and
 // what a maintainer reading a bug report needs in order to believe the rest of it.
+//
+// An error this has already annotated passes through unchanged. Two callers now
+// hand it the same failure — the engine wrapper below, and Backend.Check, which
+// reaches the backend through an engine that may already be wrapped — and a
+// second annotation would produce "cannot reach X at Y: cannot reach X at Y: …"
+// while changing nothing a reader needs.
 func (d diagnosis) wrap(err error) error {
 	if err == nil || !d.armed() || !unreachableFromOutside(err) {
+		return err
+	}
+	var already *UnreachableSinkError
+	if errors.As(err, &already) {
 		return err
 	}
 	return &UnreachableSinkError{diagnosis: d, cause: err}

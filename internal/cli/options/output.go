@@ -57,6 +57,16 @@ var outputFormats = []OutputFormat{
 	OutputTable, OutputWide, OutputJSON, OutputJSONL, OutputYAML, OutputDiff,
 }
 
+// OutputFormats returns the accepted --output values, in the order a user is
+// shown them.
+//
+// It exists so that the help string, the rejection message and the shell
+// completion menu are three renderings of one list rather than three lists that
+// agree today. A clone is returned because the caller is outside this package and
+// the set is closed: a consumer that could append to the accepted set would be
+// teaching --output a format nothing renders.
+func OutputFormats() []OutputFormat { return slices.Clone(outputFormats) }
+
 // String implements pflag.Value.
 func (f *OutputFormat) String() string { return string(*f) }
 
@@ -89,6 +99,10 @@ const (
 
 // colorModes is the accepted set, in the order it is shown to a user.
 var colorModes = []ColorMode{ColorAuto, ColorAlways, ColorNever}
+
+// ColorModes returns the accepted --color values, in the order a user is shown
+// them. See OutputFormats for why it is a clone.
+func ColorModes() []ColorMode { return slices.Clone(colorModes) }
 
 // String implements pflag.Value.
 func (m *ColorMode) String() string { return string(*m) }

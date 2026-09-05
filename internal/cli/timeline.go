@@ -123,6 +123,11 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   # With the Kubernetes Events that were recorded about it, oldest first.
   kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse`,
 
+		// The kind completes from the static short-name table; the name is an
+		// object in a cluster or an archive, and is not read from here. See
+		// completeObjectAddress.
+		ValidArgsFunction: completeObjectAddress,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Before anything reads the window: past this line the command sees one
 			// spelling of each bound, which is what keeps the alias a fact about the

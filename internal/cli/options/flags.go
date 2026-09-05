@@ -136,6 +136,37 @@ const (
 	FlagPrefix         = "prefix"
 	FlagPath           = "path"
 
+	// FlagCheck asks whether the resolved backend can actually be reached.
+	//
+	// Two commands take it — `config resolve`, which reports every step of both
+	// resolution chains, and `version`, which reports the four facts those chains
+	// produced — and it is one name because it is one question put through one
+	// piece of machinery. A build that answered "reachable" under one spelling and
+	// something else under another would be two opinions about one backend.
+	//
+	// It is opt-in on both, and that is the whole design. Inspecting a
+	// configuration must not require a reachable backend, because the
+	// configuration a user most wants to inspect is the one whose backend cannot
+	// be reached (D26); and `version` is the command somebody types when nothing
+	// works, so it has to stay instant and offline until it is asked otherwise.
+	//
+	// It is named here rather than typed at its registration sites because the
+	// resolution report withholds the cluster-id chain's last step by name —
+	// "--check asks it" — and a message that spelled the flag independently of its
+	// registration would be the spelling that drifts.
+	FlagCheck = "check"
+
+	// FlagNoDescriptions strips the per-value descriptions from a generated
+	// completion script.
+	//
+	// It is spelled the way cobra's own generated completion command spells it,
+	// because a user who has typed it at one cobra CLI must not have to look it up
+	// at this one. What it is for is bash: zsh and fish render a description in a
+	// column beside the value, while bash appends it to the candidate itself, so a
+	// menu of six output formats becomes six long lines in the one shell where the
+	// menu was already the least readable.
+	FlagNoDescriptions = "no-descriptions"
+
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl
 	// spells it. The long form reads oddly in help output and is kept anyway:
 	// muscle memory for `-v 6` is worth more than the tidier `--verbose`, and a

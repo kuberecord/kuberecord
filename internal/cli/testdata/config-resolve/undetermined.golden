@@ -1,0 +1,23 @@
+=== stdout ===
+backend
+  --source             silent    not given
+  --sink               silent    not given
+  profile              silent    /home/engineer/.config/kuberecord/config.yaml defines no profiles
+  discovery            answered  the cluster's only sink
+
+  resolved             ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine               clickhouse
+  capabilities         deletions=yes, server_side_filter=yes, point_query=yes, time_bound_required=no
+
+cluster identity
+  --cluster-id         silent    not given
+  context mapping      silent    /home/engineer/.config/kuberecord/config.yaml maps no kubeconfig contexts
+  operator Deployment  silent    no Deployment labelled as kuberecord's operator was found
+  the sink             withheld  would be asked which clusters it holds; --check asks it
+
+  undetermined
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+=== stderr ===
+=== error ===

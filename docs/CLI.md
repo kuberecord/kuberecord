@@ -88,6 +88,65 @@ The manifest krew consumes (`kuberecord.yaml`) and the Homebrew formula
 listed in `checksums.txt` — so the digests they publish are covered by the same
 signature as everything else a release attaches.
 
+### Shell completion
+
+The same binary generates its own completion script, so completion arrives from
+whichever of the four channels you used — there is nothing extra to download.
+`brew install` writes the bash, zsh and fish scripts during installation and you
+are done; the other three channels want one of the lines below.
+
+```sh
+# bash — needs the bash-completion package, which your OS package manager has.
+kuberecord completion bash > /etc/bash_completion.d/kuberecord            # Linux
+kuberecord completion bash > $(brew --prefix)/etc/bash_completion.d/kuberecord   # macOS
+
+# zsh — after `echo "autoload -U compinit; compinit" >> ~/.zshrc`, if you have
+# not enabled completion before.
+kuberecord completion zsh > "${fpath[1]}/_kuberecord"                    # Linux
+kuberecord completion zsh > $(brew --prefix)/share/zsh/site-functions/_kuberecord  # macOS
+
+# fish
+kuberecord completion fish > ~/.config/fish/completions/kuberecord.fish
+
+# PowerShell — append the output to your profile to keep it.
+kuberecord completion powershell | Out-String | Invoke-Expression
+```
+
+Each of `completion bash`, `completion zsh`, `completion fish` and
+`completion powershell` writes the script to **stdout**, so it can be redirected
+or sourced. `--no-descriptions` omits the gloss shown beside each candidate;
+bash appends that gloss to the candidate itself rather than showing it in a
+second column, which is the one shell where a long menu reads better without it.
+
+**`kubectl kuberecord` is completed by kubectl, not by a script from here.** A
+shell function binds to a single word, and that one is two. kubectl completes a
+plugin from an executable named `kubectl_complete-<plugin>` on your `PATH`, which
+it calls with the words typed so far — and the protocol it speaks is the one this
+binary already answers, so the whole of it is two lines:
+
+```sh
+printf '#!/usr/bin/env sh\nexec kubectl-kuberecord __complete "$@"\n' \
+  > ~/.local/bin/kubectl_complete-kuberecord && chmod +x $_
+```
+
+Running `kubectl kuberecord completion bash` prints that same instruction to
+stderr, because the script it writes on stdout is the standalone command's and a
+krew install has only the plugin.
+
+**What completes, and what does not.** Subcommands, flag names, the values of
+every flag whose values are a closed set (`--output`, `--color`, `--backend`,
+and the kind half of `--sink`/`--from-sink`), the profiles in
+[your configuration file](#the-configuration-file), and `kubectl`'s built-in
+resource short names — `deploy`, `sts`, `cm`, `ing` and the rest, each shown
+beside the kind it names.
+
+Object *names* do not complete, and neither do the short names a CRD declares.
+Both would mean contacting the API server on a keystroke, which is a surprising
+thing for a TAB press to do and the same instinct behind
+[the CLI not forwarding your port](#the-cli-will-not-forward-the-port-for-you).
+Everything the menu offers comes from the binary or from your own configuration
+file. Nothing here dials a cluster or a backend.
+
 ## Global flags
 
 Every command carries the same two sets of persistent flags, and the split
@@ -103,7 +162,8 @@ plugs into.
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
 | `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr) and [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster). |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
-| `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity). |
+| `--cluster-id <id>` | resolved, and the answer printed | Selects **which cluster's records to read from the sink** — the `cluster_id` column stamped on every row. Resolved in five steps if you omit it; see [The cluster identity](#the-cluster-identity). |
+| `--cluster <name>` *(kubectl's)* | the current context's cluster | Selects **a cluster entry from your kubeconfig** — which API server `kubectl` connects to. It is kubectl's own flag, described here rather than in the list below only because of the pair note that follows. |
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
 | `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
 | `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
@@ -115,12 +175,22 @@ plugs into.
 `--source`, `--sink` and `--profile` are the three ways of naming a backend, and
 they are tried in that order. Whichever wins is announced on stderr, always.
 
+**`--cluster` and `--cluster-id` are different things, and both are frequently
+correct at once.** One says *where to connect*, the other says *whose records to
+read*, and nothing requires them to agree. Reading a production cluster's history
+through a kubeconfig context that points at a bastion means setting both, and
+setting them differently: `--cluster` picks the entry that reaches an API server,
+`--cluster-id` picks the identity stamped on the rows you want back. Neither
+implies the other, and neither is ever derived from the other — which is why the
+second flag carries the suffix, and why `--help` says so on the flag itself.
+
 ### Inherited from `kubectl`
 
 These come from `genericclioptions.ConfigFlags` — the same code `kubectl` itself
 uses — and mean exactly what they mean there. They are listed rather than
 described, because a divergent description of somebody else's flag is a lie
-waiting to happen:
+waiting to happen — `--cluster` is described above only because leaving it
+undescribed is what lets it be read as `--cluster-id`:
 
 `--as`, `--as-group`, `--as-uid`, `--as-user-extra`, `--cache-dir`,
 `--certificate-authority`, `--client-certificate`, `--client-key`, `--cluster`,
@@ -130,10 +200,9 @@ waiting to happen:
 
 Three notes on how they interact with the rest:
 
-- **`--cluster` is kubectl's, `--cluster-id` is kuberecord's.** The first selects
-  a kubeconfig cluster entry; the second selects whose recorded history you are
-  reading. They are unrelated, and the collision is why the second flag carries
-  the suffix.
+- **`--cluster` is kubectl's, `--cluster-id` is kuberecord's**, they are not the
+  same selection, and you may well need both — described with the pair
+  [in the table above](#kuberecords-own).
 - **`-n`/`--namespace` narrows an object address**, and for [`scopes`](#scopes)
   alone it does *not* default to the kubeconfig's current namespace: a compliance
   question about what was being recorded means the whole cluster unless you say
@@ -749,8 +818,10 @@ and it is the first thing to check when a `--source` or a profile is refused. Th
 matched to the row that produced it — `s3` and `local` are two ways of reaching one
 engine, which is why the column is not redundant.
 
-It contacts nothing: no cluster, no sink, no network. That is deliberate — the
-reason to run it is usually that something else already failed.
+By itself it contacts nothing: no cluster, no sink, no network. That is
+deliberate — the reason to run it is usually that something else already failed.
+[`--check`](#version---check) is the exception, and it is opt-in for the same
+reason.
 
 `-o json` and `-o yaml` render the same facts as a document. It carries the same
 `apiVersion` as every other structured answer and the same additive-only promise,
@@ -795,6 +866,121 @@ handled before any command runs — so it could not honour `-o`, and
 `kuberecord --version -o json` would print a table while appearing to have been
 asked for JSON.
 
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--check` | Also resolve the backend, ask it whether it answers, and report the sink, the cluster identity and what came back. Without it nothing is contacted. See [`version --check`](#version---check). |
+
+`-o` is `table` (the default), `wide`, `json` or `yaml`.
+
+### `version --check`
+
+**This is the first thing to run when something is not working.** It answers the
+question the bare command cannot: not "which build is this" but "does this setup
+work".
+
+It resolves the backend exactly as a query command would, asks it whether it
+answers, and reports the four facts that decide whether anything else will
+succeed — the sink, the engine behind it, the cluster identity, and what came
+back:
+
+```console
+$ kuberecord version --check
+kuberecord v0.4.0
+  commit  77514b632925
+  built   2026-09-05T11:02:44Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+
+setup:
+  backend     ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine      clickhouse
+  cluster-id  prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  reachable   the backend answered
+```
+
+The last row is the probe, and it reports one of four outcomes in the same words
+[`config resolve`](#config-resolve) reports them in:
+
+| Outcome | What it means |
+|---|---|
+| `reachable` | the backend answered |
+| `unreachable` | it did not, and the failure is printed below with its explanation |
+| `cannot be checked` | the engine cannot say without running a real query — a statement about the engine, not a fault, and it does not fail the command |
+| `not checked` | there was nothing to reach, because the backend chain resolved nothing |
+
+The question put to the backend is which clusters it holds. That is the cheapest
+question the read plane has, and it exercises the whole path rather than a socket:
+DNS, the connection, the credential, and — for ClickHouse — the database being the
+one the sink named. A bare TCP dial would pass against a server holding somebody
+else's history.
+
+**A failure exits `1` and prints the same explanation every other command prints**
+— see [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster).
+The document is still written first, because a bug report needs the build *and*
+the setup:
+
+```console
+$ kuberecord version --check
+…
+setup:
+  backend      ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine       clickhouse
+  cluster-id   prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  unreachable  the backend could not be reached
+               cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+
+for which step decided what, run `kuberecord config resolve --check`
+
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+
+ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+…
+```
+
+**This is a summary, and [`config resolve --check`](#config-resolve) is the
+detail.** The two put one question through one piece of machinery and differ only
+in how much of the walk they show: nine steps decide the four facts above, and
+when one of them is not what you expected — a profile written months ago shadowing
+discovery, a `--context` pointing at the wrong cluster — that command names the
+step that decided it. Start here; go there when the summary is surprising.
+
+`-o json` and `-o yaml` add a `setup` block to the document, with the probe under
+the field names `config resolve` gives it, so one `jq` recipe reads either:
+
+```console
+$ kuberecord version --check -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Version",
+  …
+  "setup": {
+    "backend": "ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)",
+    "engine": "clickhouse",
+    "clusterID": "prod-eu-1",
+    "clusterIDSource": "from the operator Deployment kuberecord-system/kuberecord-controller-manager",
+    "check": {
+      "requested": true,
+      "outcome": "reachable",
+      "detail": "the backend answered"
+    }
+  }
+}
+```
+
+**Without `--check` the block is absent entirely**, rather than present and empty.
+A bare `version` looked at no configuration, and a document carrying a hollow
+`setup` would be claiming otherwise.
+
+**No credential appears in any format, at any verbosity.** The block names the
+host, the database, the sink and the cluster; never the password, never the
+access key.
+
 How to check that the binary this reports on is the one you verified:
 [`VERIFYING.md`](VERIFYING.md#the-cli-archives).
 
@@ -826,6 +1012,7 @@ it out here.
 | [`scopes`](#scopes) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
 | [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config view` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [`config resolve`](#config-resolve) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 
 Each ❌ has a reason, and the error says it:
 
@@ -837,11 +1024,14 @@ Each ❌ has a reason, and the error says it:
   than a row, and there is nothing for a tabular format to lay out. Its default is
   `yaml`, which is the shape people want and the one that carries the **NOT A
   DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
-- **`version` and `config view` refuse `jsonl`.** It is a streaming format for a
-  result larger than memory, and each of these is exactly one document.
+- **`version`, `config view` and `config resolve` refuse `jsonl`.** It is a
+  streaming format for a result larger than memory, and each of these is exactly
+  one document.
 - **`config view` renders YAML for `table` and `wide`** rather than refusing them,
   because a configuration file *is* YAML and `table` is the global default a user
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
+- **`config resolve` refuses `diff` too**, and for the same reason: it reports two
+  chains of decisions, and there is no patch anywhere in it.
 
 For `table`, `wide` and `diff` the header, the notices and every explanation go to
 **stderr** and the rows go to **stdout**. For `json`, `jsonl` and `yaml` the
@@ -909,13 +1099,17 @@ exists and the pipeline keeps running while producing empty findings.
 `cluster_id`, `backend` and `coverage` on every kind, and `reconstruction` on
 `Object` alone.
 
-**Two documents carry the same `apiVersion` without being envelopes**, and the
-difference is deliberate. [`version`](#version) renders a `Version` document and
-`config view` renders a `Config` one; neither is the answer to a query, so neither
-has a `metadata` block or an `items` list. A `Version` carrying `cluster_id: ""`
-and an empty coverage report would be inviting a consumer to read three fields
-that could never mean anything. What they do share is the contract those five
-kinds are governed by — the same `apiVersion`, and therefore the same
+**Three documents carry the same `apiVersion` without being envelopes**, and the
+difference is deliberate. [`version`](#version) renders a `Version` document,
+`config view` renders a `Config` one, and
+[`config resolve`](#config-resolve) renders a `Resolution`; none is the answer to a
+query, so none has a `metadata` block or an `items` list. A `Version` carrying
+`cluster_id: ""` and an empty coverage report would be inviting a consumer to read
+three fields that could never mean anything. ([`version --check`](#version---check)
+adds a `setup` block naming a cluster, and that is not a `metadata` block: it is
+what the resolution chains chose, reported because it was asked for, and it is
+absent when it was not.) What they do share is the contract those five kinds are
+governed by — the same `apiVersion`, and therefore the same
 [additive-only policy](#the-additive-only-policy).
 
 ### Item field names are the schema's column names
@@ -1108,6 +1302,13 @@ Steps 2 and 4 read an address a cluster wrote for itself, which is why the first
 thing many people meet is a `no such host` from a laptop. That is the subject of
 [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster), and
 step 1 does not have it at all.
+
+To see which step would win — and why the earlier ones had nothing to say — without
+running a query, ask: [`kuberecord config resolve`](#config-resolve). It reports
+both chains and contacts nothing unless `--check` says to. For the short answer —
+which sink, which cluster, and does it answer —
+[`kuberecord version --check`](#version---check) reports the same four facts
+without the steps.
 
 **Nothing prints a credential, at any verbosity.** The notice names the host, the
 database and the sink; never the password, never the access key.
@@ -1351,6 +1552,11 @@ and none of them prints this message. Telling the on-call engineer of a producti
 ClickHouse that has fallen over to run `kubectl port-forward` would send them
 somewhere the fault is not, at the moment they can least afford it.
 
+To provoke the same diagnosis deliberately — without running a query — use
+[`kuberecord version --check`](#version---check), which is also how you confirm the
+forwarded port worked. To see which step chose the address in the first place, use
+[`kuberecord config resolve --check`](#--check).
+
 ### None of this applies to `--source`
 
 An archive is **named, not discovered**. [`--source`](#--source) takes a bucket or
@@ -1456,6 +1662,10 @@ It is resolved by five steps, and the answer is printed:
 Step 3 is a convenience and never a requirement: an unreachable cluster, a
 forbidden Deployment list, or an operator running on the built-in default all
 produce a notice on stderr and continue to step 4.
+
+Step 4 is the only one that questions the backend, which is why
+[`config resolve`](#config-resolve) withholds it unless `--check` is given, and
+reports the identity as `undetermined` rather than dialling to find out.
 
 ## The configuration file
 
@@ -1599,9 +1809,13 @@ $ kuberecord config set-context-cluster-id prod-eu prod-eu-1  # a named one
 # Print the file. The document goes to stdout, its path to stderr.
 $ kuberecord config view
 $ kuberecord config view -o json | jq .profiles
+
+# Ask what the resolution chains would choose, without running a query.
+$ kuberecord config resolve
+$ kuberecord config resolve --check
 ```
 
-Four subcommands, and only one of them has flags of its own:
+Five subcommands, and two of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
@@ -1609,6 +1823,12 @@ Four subcommands, and only one of them has flags of its own:
 | `config use-profile` | `NAME` | none |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
+| `config resolve` | none | `--check` — see [`config resolve`](#config-resolve) |
+
+`config resolve` is the only one that writes nothing. It is here because a profile
+is one step of [where the data comes from](#where-the-data-comes-from), and the
+question it answers is the one a reader of this file has when the file turns out
+not to be the step that won.
 
 `config set-profile` carries one flag per field of the stanza its `--backend`
 selects. A flag belonging to a different backend is a validation error naming
@@ -1669,7 +1889,9 @@ reason to write a profile at all:
 
 The classifier is the one the unreachable-backend message uses, so the command
 that rewrites an address and the message that explains why it needed rewriting
-cannot disagree. Nothing is dialled either way: this writes a file (D24).
+cannot disagree. Nothing is dialled either way: this writes a file, and an
+address that cannot be reached is something the CLI names rather than something
+it tries to work around.
 
 **The password is not copied.** The sink's Secret is read to confirm it holds the
 key the sink names — a Secret created with `--from-literal=PASSWORD=…` is reported
@@ -1697,6 +1919,117 @@ for it is not a guess this command makes.
 the `config use-profile` line to run next is printed instead. The one exception is
 the rule the whole subcommand already follows: the first profile in an empty file
 becomes the active one, and says so.
+
+#### `config resolve`
+
+Nine steps decide where an answer comes from — four for
+[the backend](#where-the-data-comes-from), five for
+[the cluster identity](#the-cluster-identity) — and a working command reports them
+in two lines of notice. That is the right amount of ceremony for an answer somebody
+wanted. It is the wrong amount when the chain chose something you did not expect: a
+profile written months ago shadowing discovery, a `--context` pointing at the wrong
+cluster, an identity read from an operator that is not the one you meant. The result
+is then wrong in a way that looks right.
+
+`config resolve` runs both chains, prints what every step decided, and stops. It
+answers no question about recorded history and returns no rows.
+
+It is the detailed half of a pair. [`version --check`](#version---check) puts the
+same question through the same machinery and reports the four facts the chains
+produced; this reports the nine steps that produced them. Run that one first, and
+this one when its answer is surprising.
+
+```console
+$ kuberecord config resolve
+backend
+  --source             silent       not given
+  --sink               silent       not given
+  profile              silent       ~/.config/kuberecord/config.yaml defines no profiles
+  discovery            answered     the cluster's only sink
+
+  resolved             ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine               clickhouse
+  capabilities         deletions=yes, server_side_filter=yes, point_query=yes, time_bound_required=no
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      silent       ~/.config/kuberecord/config.yaml maps no kubeconfig contexts
+  operator Deployment  answered     prod-eu-1
+  the sink             not reached
+
+  resolved             prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+```
+
+Every step reports one of five outcomes:
+
+| Outcome | What it means |
+|---|---|
+| `answered` | it produced the chain's result |
+| `silent` | it was consulted and had nothing — no flag, no active profile, no mapping for this context |
+| `failed` | it had something to say and could not say it, and the chain stopped there |
+| `not reached` | an earlier step answered, or the chain stopped before this one |
+| `withheld` | it would have contacted the backend, and `--check` was not given |
+
+The `capabilities` line is the chosen engine's own declaration, in the names
+[the capability table](#backend-capability-differences) and `-o json` both use.
+It is on one line because the question it answers is comparative: two setups that
+answer the same query differently differ here, and two of these reports can be put
+side by side.
+
+##### `--check`
+
+**Nothing is dialled without it.** The configuration most worth inspecting is the
+one whose backend cannot be reached, and a command that dialled in order to
+describe itself would stall for a dial timeout on exactly that case. The identity
+chain's last step — the only part of resolution that questions the backend — is
+therefore `withheld` by default, and an identity that only that step could have
+produced is reported as `undetermined` rather than as a failure. Nothing is wrong:
+one step has not been taken.
+
+With `--check`, the backend is asked which clusters it holds. That is the cheapest
+question the read plane has and the one the identity chain's last step asks anyway,
+and it exercises the whole path rather than a socket: DNS, the connection, the
+credential, and — for ClickHouse — the database being the one the sink named.
+
+```console
+$ kuberecord config resolve --check
+…
+reachability
+  unreachable          the backend could not be reached
+                       cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+
+ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+…
+```
+
+A failure here prints the same explanation the query commands print — see
+[Running the CLI outside the cluster](#running-the-cli-outside-the-cluster) — so
+the diagnostic is identical wherever you meet it. A backend that cannot answer the
+question without running a real query reports `cannot be checked` and does not fail
+the command: that is a statement about the engine, not a fault.
+
+##### Output and exit codes
+
+`-o json` and `-o yaml` emit a `cli.kuberecord.io/v1alpha1` document with
+`kind: Resolution`, carrying both chains, their steps and the declared
+capabilities. "Paste the output of `kuberecord config resolve -o json`" is a better
+first question in a support thread than "what does your config look like".
+`-o jsonl` and `-o diff` are refused by name: the document is one item, and there
+are no change operations in it.
+
+| Code | When |
+|------|------|
+| `0` | both chains resolved — or the identity is `undetermined` because `--check` was not given, which is not a failure |
+| `1` | a chain failed, or `--check` could not reach the backend |
+| `2` | the invocation was malformed — including a malformed `--sink`, which is the same usage error a query command gives |
+
+**No credential appears in any format, at any verbosity.** The report names the
+host, the database, the sink and the file paths it read; never the password, never
+the access key.
 
 ## The read-only ClickHouse user
 

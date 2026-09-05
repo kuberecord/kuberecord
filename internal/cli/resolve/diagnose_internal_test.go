@@ -220,6 +220,28 @@ func TestBothConditionsAreRequired(t *testing.T) {
 	}
 }
 
+// TestAFailureIsDiagnosedOnlyOnce.
+//
+// Two callers now hand the same failure to the same diagnosis: the engine
+// wrapper, which annotates whatever a query returns, and Backend.Check, which
+// reaches the backend through an engine that may already be wrapped. A second
+// annotation would produce "cannot reach X at Y: cannot reach X at Y: no such
+// host" — a message that reads like two faults and describes one.
+func TestAFailureIsDiagnosedOnlyOnce(t *testing.T) {
+	d := fixtureDiagnosis()
+	cause := dnsNotFound("clickhouse.kuberecord-quickstart.svc")
+
+	once := d.wrap(cause)
+	twice := d.wrap(once)
+
+	if twice != once {
+		t.Errorf("a second diagnosis produced a different error.\n once: %v\ntwice: %v", once, twice)
+	}
+	if got := strings.Count(twice.Error(), "cannot reach"); got != 1 {
+		t.Errorf("the summary says %q %d times, want once: %s", "cannot reach", got, twice.Error())
+	}
+}
+
 // TestTheUnderlyingErrorSurvivesTheDiagnosis.
 //
 // The message is an addition, never a replacement. A user running with -v and a
