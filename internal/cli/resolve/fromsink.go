@@ -423,11 +423,13 @@ func (p *SinkProfile) explainClickHouse(line func(string), paint diagnosticPalet
 	case stanza.PasswordEnv != "":
 		line(fmt.Sprintf("The profile does not copy it: it reads $%s.", stanza.PasswordEnv))
 		line("Export a read-only ClickHouse user's password there rather than the operator's,")
-		line("which is a credential that can write to the audit trail. See docs/CLI.md.")
+		line("which is a credential that can write to the audit trail. See")
+		line(docsReadOnlyUser)
 	case stanza.PasswordFile != "":
 		line(fmt.Sprintf("The profile does not copy it: it reads the file %s.", stanza.PasswordFile))
 		line("Put a read-only ClickHouse user's password there rather than the operator's,")
-		line("which is a credential that can write to the audit trail. See docs/CLI.md.")
+		line("which is a credential that can write to the audit trail. See")
+		line(docsReadOnlyUser)
 	}
 }
 

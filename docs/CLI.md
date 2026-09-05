@@ -24,6 +24,7 @@ This page is the reference for **the commands**, **where the CLI reads from** an
 - [Output formats](#output-formats)
 - [Structured output](#structured-output)
 - [Where the data comes from](#where-the-data-comes-from)
+- [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster)
 - [Backend capability differences](#backend-capability-differences)
 - [The cluster identity](#the-cluster-identity)
 - [The configuration file](#the-configuration-file)
@@ -100,7 +101,7 @@ plugs into.
 |------|---------|--------------|
 | `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). |
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
-| `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr). |
+| `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr) and [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster). |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
 | `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity). |
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
@@ -1103,6 +1104,11 @@ optional: a tool that silently picked between four sources would eventually read
 the wrong one and be believed, and for an audit trail being believed while wrong is
 the worst available failure.
 
+Steps 2 and 4 read an address a cluster wrote for itself, which is why the first
+thing many people meet is a `no such host` from a laptop. That is the subject of
+[Running the CLI outside the cluster](#running-the-cli-outside-the-cluster), and
+step 1 does not have it at all.
+
 **Nothing prints a credential, at any verbosity.** The notice names the host, the
 database and the sink; never the password, never the access key.
 
@@ -1166,7 +1172,9 @@ reporting one problem.
 anything does not acquire one for a convenience. When a dial fails against an
 address that only resolves inside a cluster, it prints the `kubectl port-forward`
 line to run and the `--sink-addr` to follow it with, pre-filled from the sink it
-just read.
+just read. The whole of that failure, both routes out of it and why an archive
+read with `--source` never meets it:
+[Running the CLI outside the cluster](#running-the-cli-outside-the-cluster).
 
 For a setup you come back to, write it down once with
 [`config set-profile`](#kuberecord-config) instead. This flag is for the one-off:
@@ -1198,6 +1206,178 @@ from anybody.
 The namespace it looks in is `--operator-namespace`, then `operatorNamespace` in
 the configuration file, then the namespace of the operator's Deployment if it can
 be found by label, then `kuberecord-system`.
+
+The other way discovery can succeed and still leave you with no answer is the
+address it discovers: correct for the operator, unresolvable from a laptop. See
+[Running the CLI outside the cluster](#running-the-cli-outside-the-cluster).
+
+## Running the CLI outside the cluster
+
+The address a `ClickHouseSink` records is written for the operator, which runs
+inside the cluster:
+
+```yaml
+spec:
+  connection:
+    addr: clickhouse.kuberecord-quickstart.svc:9000
+```
+
+That is the correct value, and there is no other value it could hold. A Service
+DNS name is how one pod reaches another; it resolves through the cluster's own
+resolver and nowhere else. Nothing about it is a misconfiguration — but a laptop
+is not in the cluster, so a CLI that discovers that sink and dials what it says
+gets `no such host`.
+
+So the CLI says that, rather than leaving you with the resolver's opinion:
+
+```console
+$ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
+→ discovered ClickHouseSink/default (clickhouse.kuberecord-quickstart.svc:9000/kuberecord)
+→ cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-quickstart.svc:9000: dial tcp: lookup clickhouse.kuberecord-quickstart.svc: no such host
+
+ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so discovery was right and so is
+the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on
+one, so it will not forward a port for you.
+
+Forward it yourself, then re-run against the forwarded address:
+
+    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+    kubectl kuberecord timeline … --sink-addr 127.0.0.1:9000
+
+Or write it down once, and every later invocation reads it:
+
+    kubectl kuberecord config set-profile local --backend clickhouse \
+        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \
+        --password-env KUBERECORD_CLICKHOUSE_PASSWORD
+    kubectl kuberecord config use-profile local
+
+Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
+recommended credential for it, and the operator's own is not. Both routes, and
+why this tool will not forward the port for you:
+docs/CLI.md#running-the-cli-outside-the-cluster
+```
+
+The Service and its namespace come out of the address itself, so the
+`port-forward` line is the one to run rather than a template to fill in. Below is
+what each route is for.
+
+### The one-off: a forwarded port and `--sink-addr`
+
+```console
+$ kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+$ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo --sink-addr 127.0.0.1:9000
+→ discovered ClickHouseSink/default (127.0.0.1:9000/kuberecord, address from --sink-addr)
+→ cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+```
+
+Discovery still does everything it did: the custom resource is read, its Secret is
+resolved, the database and the user are the sink's own. [`--sink-addr`](#--sink-addr)
+replaces the endpoint and nothing else, and the notice says so — which is what
+keeps the line an honest account of where the answer came from.
+
+This is the right route for a cluster you are visiting: a colleague's, a CI job
+that forwards and then queries, an investigation that should leave nothing behind
+on disk.
+
+### The repeated: a profile
+
+For a cluster you come back to, write the answer down once and stop passing
+flags. `--from-sink` reads the sink you already have and fills in the stanza,
+substituting the forwarded address for the one only the cluster can resolve:
+
+```console
+$ kubectl kuberecord config set-profile local --from-sink ClickHouseSink/default
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ "local" is now the active profile
+
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so the profile records
+127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+…
+
+$ export KUBERECORD_CLICKHOUSE_PASSWORD=…
+$ kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+$ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
+→ using profile local (ClickHouse at 127.0.0.1:9000/kuberecord)
+```
+
+The port-forward is still yours to run — a profile records an address, it does not
+open a tunnel — but nothing else has to be repeated, and the profile survives the
+kubeconfig context changing under it. The password is **not** copied out of the
+sink's Secret: the profile names an environment variable, and what you export
+there should be [a read-only ClickHouse user](#the-read-only-clickhouse-user)
+rather than the operator's own credential, which can write to the audit trail.
+The whole subcommand, including which flags survive `--from-sink` and what an
+`S3Sink` does instead, is [`--from-sink`](#--from-sink).
+
+### The CLI will not forward the port for you
+
+It could. It will not, and the reason is worth stating rather than leaving as an
+omission somebody files a bug about.
+
+Forwarding a port is `create` on `pods/portforward` — a **write** verb, on the
+Kubernetes API, in the cluster being audited. Everything else this tool does is
+`get` and `list`. That difference is the whole claim: an audit reader that cannot
+alter what it is auditing is a tool you can hand to somebody you would not give
+write access to, and can run against a production cluster during an incident
+without being one more thing that might have caused it. Acquiring a write verb to
+save a reader one command is a bad trade, and it is not one that can be
+un-acquired later — a permission a tool has ever needed is a permission its users
+have been granted.
+
+The same reasoning is why every kubectl flag is [inert under
+`--source`](#inherited-from-kubectl): a reader that reaches for the cluster when
+something goes wrong is a reader whose promises need footnotes.
+
+So the failure above is a **diagnostic**, never a fallback. Nothing retries,
+nothing substitutes an address, and nothing tries `127.0.0.1` to see whether a
+forward happens to be open already. Recognising a cluster-internal address means
+saying so; a CLI that quietly connected somewhere other than where it was told
+would make every answer it gave carry an unstated "…from somewhere".
+
+The recognition is deliberately narrow, and the narrowness is the reason to trust
+it. Both halves must hold: the address has to be one that only resolves inside a
+cluster — a `.svc`, `.svc.cluster.local` or `.cluster.local` name, or a bare
+single-label host — **and** the failure has to be a name that did not resolve or a
+connection that was refused. A timeout, a TLS failure, an authentication rejection
+and a ClickHouse protocol error are all a backend that was reached and answered,
+and none of them prints this message. Telling the on-call engineer of a production
+ClickHouse that has fallen over to run `kubectl port-forward` would send them
+somewhere the fault is not, at the moment they can least afford it.
+
+### None of this applies to `--source`
+
+An archive is **named, not discovered**. [`--source`](#--source) takes a bucket or
+a directory and reads it directly: no custom resource is consulted, no Secret is
+resolved, no kubeconfig is used, and nothing anywhere holds an address written for
+a reader inside the cluster. There is no cluster-versus-laptop mismatch to hit,
+because there is no cluster in the picture.
+
+```console
+$ kuberecord timeline Deployment.apps/checkout-api -n quickstart-demo \
+    --source s3://acme-audit/kuberecord --since 24h
+```
+
+That is not a workaround for the friction on this page — it is what
+[evaluation mode](#evaluation-mode) and an `S3Sink` archive are, and it is why
+an auditor with a synced directory and no cluster access can answer the same
+questions from a plane. The whole path is
+[`examples/zero-infra/`](../examples/zero-infra/). What it costs is query
+performance on wide questions, stated in [Backend capability
+differences](#backend-capability-differences) and [Cold scans](#cold-scans).
+
+One honest caveat, because "no friction" would be too strong: if the object store
+*itself* runs in the cluster — the MinIO in that example does — you will forward a
+port to reach it, exactly as you would for any other in-cluster service. The
+difference is that you point `--source` and the AWS credential chain at whatever
+you can reach, and nothing has discovered an address on your behalf that could
+turn out to be wrong.
 
 ## Backend capability differences
 
@@ -1475,7 +1655,9 @@ which is a credential that can write to the audit trail. See docs/CLI.md.
 ```
 
 It reads the named sink through the same discovery path a query uses, and writes
-the stanza its kind calls for. The point is the address, which is precisely the
+the stanza its kind calls for. It is the second of the two routes in [Running the
+CLI outside the cluster](#running-the-cli-outside-the-cluster) — the one for a
+cluster you come back to. The point is the address, which is precisely the
 field that must differ from the custom resource — otherwise there would be no
 reason to write a profile at all:
 

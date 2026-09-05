@@ -89,6 +89,28 @@ const (
 	loopbackHost     = "127.0.0.1"
 )
 
+// The two sections of docs/CLI.md a rendered message can send a reader to.
+//
+// Each names a section rather than the page. The page is a command reference
+// several hundred lines long, and a reader who has just been told "see
+// docs/CLI.md" by a failure has been handed a search, not an answer.
+//
+// They are two rather than one because the messages ask two different things of
+// the reader. docsOutsideCluster is for somebody stuck: why the address is a
+// Service name and why that is right, both routes out of it, and why this tool
+// will not forward the port itself. docsReadOnlyUser is for somebody who is not
+// stuck at all — `--from-sink` prints the credential advice after writing a
+// profile for a perfectly public endpoint too, and pointing that reader at a
+// port-forward section would be a non-sequitur.
+//
+// Both are printed on a line of their own and unpunctuated, for the same reason
+// the address gets one: they are tokens to be copied rather than prose to be
+// read, and a trailing full stop is a character that travels with them.
+const (
+	docsOutsideCluster = "docs/CLI.md#running-the-cli-outside-the-cluster"
+	docsReadOnlyUser   = "docs/CLI.md#the-read-only-clickhouse-user"
+)
+
 // clusterInternalSuffixes are the DNS suffixes that only resolve inside a
 // cluster.
 //
@@ -419,7 +441,9 @@ func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string 
 	line(paint.bold(fmt.Sprintf("    %s config use-profile %s", d.commandName, localProfileName)))
 	line("")
 	line(paint.dim(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", passwordEnvName)))
-	line(paint.dim("recommended credential for it, and the operator's own is not; see docs/CLI.md."))
+	line(paint.dim("recommended credential for it, and the operator's own is not. Both routes, and"))
+	line(paint.dim("why this tool will not forward the port for you:"))
+	line(paint.dim(docsOutsideCluster))
 
 	return out.String()
 }

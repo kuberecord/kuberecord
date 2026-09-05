@@ -6,4 +6,5 @@ Database kuberecord is the sink's own; the user is kuberecord_ro, as --username 
 Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
 The profile does not copy it: it reads the file /run/ch.
 Put a read-only ClickHouse user's password there rather than the operator's,
-which is a credential that can write to the audit trail. See docs/CLI.md.
+which is a credential that can write to the audit trail. See
+docs/CLI.md#the-read-only-clickhouse-user

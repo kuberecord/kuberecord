@@ -17,4 +17,6 @@ Or write it down once, and every later invocation reads it:
     kuberecord config use-profile local
 
 Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
-recommended credential for it, and the operator's own is not; see docs/CLI.md.
+recommended credential for it, and the operator's own is not. Both routes, and
+why this tool will not forward the port for you:
+docs/CLI.md#running-the-cli-outside-the-cluster
