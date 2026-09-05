@@ -378,7 +378,20 @@ func (r *BackendResolver) Resolve(ctx context.Context) (*Backend, error) {
 
 // resolveTarget walks the chain and returns the first step that answered.
 func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, error) {
+	// The shape of --sink-addr is checked before the chain runs and before
+	// anything is contacted. A malformed value is a usage error whichever step
+	// would have consumed it, and learning that after a cluster round trip and a
+	// Secret read is a slower way to be told the port was left off. The empty
+	// Origin says what is true here: no step has answered yet. Resolve discards
+	// it on the error path.
+	if err := validateSinkAddr(r.sinkAddr()); err != nil {
+		return target{}, "", err
+	}
+
 	if source := r.Flags.Source; source != "" {
+		if r.sinkAddr() != "" {
+			return target{}, OriginSourceFlag, errSinkAddrWithSource(source)
+		}
 		chosen, err := targetFromSource(source)
 		return chosen, OriginSourceFlag, err
 	}
@@ -397,7 +410,7 @@ func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, er
 		return target{}, OriginProfile, err
 	}
 	if profile != nil {
-		chosen, profileErr := targetFromProfile(name, *profile)
+		chosen, profileErr := targetFromProfile(name, *profile, r.sinkAddr())
 		return chosen, OriginProfile, profileErr
 	}
 
@@ -489,6 +502,13 @@ func (r *BackendResolver) targetFromSink(ctx context.Context, candidate sinkCand
 		}
 		return r.clickHouseTarget(ctx, candidate.ref, sink)
 	case KindS3Sink:
+		// Refused here rather than in s3Target so that it covers both routes to an
+		// object store — named with --sink, or discovered as the cluster's only
+		// sink — and so that nothing is decoded and no Secret is read for a
+		// resolution that is already a usage error.
+		if r.sinkAddr() != "" {
+			return target{}, errSinkAddrWithS3Sink(candidate.ref)
+		}
 		sink, err := decodeS3Sink(candidate.object)
 		if err != nil {
 			return target{}, err
@@ -548,6 +568,24 @@ func (r *BackendResolver) clickHouseTarget(
 		dial.DialTimeout = connection.DialTimeout.Duration
 	}
 
+	// The override is applied last, once every other field has been resolved from
+	// the custom resource and from the Secret it named, and it replaces exactly
+	// one of them (D25). The database, the username, the credentials and the dial
+	// timeout above are untouched; so is the TLS setting, which this connection
+	// spec does not carry at all and which therefore stays at the driver's
+	// default whether or not the flag was given.
+	//
+	// Origin stays OriginDiscovered — or OriginSinkFlag, whichever step reached
+	// here. A new Origin is the obvious-looking choice and it is wrong: it would
+	// report that the custom resource was not consulted, when four of its five
+	// answers are the ones being used. The step is still the step that answered;
+	// what changed is one field of its result, and the description below is what
+	// says so.
+	overridden := r.sinkAddr() != ""
+	if overridden {
+		dial.Addr = r.sinkAddr()
+	}
+
 	return target{
 		backend:    BackendClickHouse,
 		clickhouse: dial,
@@ -555,6 +593,11 @@ func (r *BackendResolver) clickHouseTarget(
 		// the address, and the namespace its credentials were read from. By the
 		// time a query against this engine fails, several layers up, none of that
 		// is still in reach. It carries no password — see diagnosis.
+		//
+		// It reads dial.Addr rather than connection.Addr, so an override is the
+		// address it describes. That is what disarms it for a forwarded loopback
+		// port: a message explaining that a name resolves only inside the cluster
+		// must never be printed about an address this process did not dial.
 		diagnosis: diagnosis{
 			ref:         ref,
 			namespace:   namespace,
@@ -563,10 +606,12 @@ func (r *BackendResolver) clickHouseTarget(
 			username:    dial.Username,
 			commandName: r.commandName(),
 		},
-		// The AC's shape exactly: the sink, then host:port/database. The username
-		// is deliberately absent and so, of course, is the password — a notice is
-		// read over shoulders and pasted into issues.
-		description: fmt.Sprintf("%s (%s/%s)", ref, dial.Addr, dial.Database),
+		// The AC's shape exactly: the sink, then host:port/database, then the
+		// marker when the endpoint was replaced. The username is deliberately
+		// absent and so, of course, is the password — a notice is read over
+		// shoulders and pasted into issues.
+		description: fmt.Sprintf("%s (%s/%s%s)", ref, dial.Addr, dial.Database,
+			sinkAddrNote(overridden)),
 	}, nil
 }
 
@@ -642,24 +687,40 @@ func (r *BackendResolver) secretNamespace(ctx context.Context, ref v1alpha1.Secr
 }
 
 // targetFromProfile turns a configured profile into something openable.
-func targetFromProfile(name string, profile Profile) (target, error) {
+//
+// sinkAddr is the --sink-addr override, empty when it was not given. A profile is
+// step 3 of the chain, so a ClickHouse profile that is merely *active* — named by
+// the file's currentProfile rather than by --profile — is what the flag has to
+// modify for the flag to work at all on a machine that has one. Refusing it here
+// on the grounds that the address came from a file rather than a custom resource
+// would leave that user with a flag that parsed and did nothing.
+func targetFromProfile(name string, profile Profile, sinkAddr string) (target, error) {
+	if sinkAddr != "" && profile.Backend != BackendClickHouse {
+		return target{}, errSinkAddrWithProfile(name, profile.Backend)
+	}
+
 	switch profile.Backend {
 	case BackendClickHouse:
 		password, err := profile.ClickHouse.ResolvePassword()
 		if err != nil {
 			return target{}, exit.RuntimeErrorf("profile %q: %w", name, err)
 		}
+		// One field replaced and no other: the database, the username, the
+		// credential the profile points at and its TLS setting all still come from
+		// the stanza (D25).
+		addr := valueOr(sinkAddr, profile.ClickHouse.Addr)
+		database := valueOr(profile.ClickHouse.Database, DefaultClickHouseDatabase)
 		return target{
 			backend: BackendClickHouse,
 			clickhouse: chquery.DialConfig{
-				Addr:     profile.ClickHouse.Addr,
-				Database: valueOr(profile.ClickHouse.Database, DefaultClickHouseDatabase),
+				Addr:     addr,
+				Database: database,
 				Username: profile.ClickHouse.Username,
 				Password: password,
 				TLS:      profile.ClickHouse.TLS,
 			},
-			description: fmt.Sprintf("%s (ClickHouse at %s/%s)", name,
-				profile.ClickHouse.Addr, valueOr(profile.ClickHouse.Database, DefaultClickHouseDatabase)),
+			description: fmt.Sprintf("%s (ClickHouse at %s/%s%s)", name, addr, database,
+				sinkAddrNote(sinkAddr != "")),
 		}, nil
 
 	case BackendS3:

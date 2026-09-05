@@ -57,10 +57,11 @@ const (
 	// FlagSource names a location to read directly, bypassing sink discovery.
 	FlagSource = "source"
 
-	// FlagSinkAddr replaces the endpoint a discovered sink recorded, and nothing
-	// else about it (D25, Task 13.2).
+	// FlagSinkAddr replaces the endpoint the resolution chain arrived at, and
+	// nothing else about it (D25).
 	//
-	// The constant exists ahead of the flag itself because Task 13.1's
+	// It is named here beside FlagSink because it modifies that step's result
+	// rather than adding a step of its own, and because Task 13.1's
 	// unreachable-backend message tells the reader to type it. A message and a
 	// flag that spelled the name independently would be two spellings of one
 	// contract, and the one nobody compiles is the one that drifts.
@@ -151,6 +152,17 @@ type GlobalFlags struct {
 	// operator and any sink CR from the evaluation route.
 	Source string
 
+	// SinkAddr replaces the endpoint of a resolved ClickHouse backend — a sink
+	// custom resource's spec.connection.addr, or a profile's clickhouse.addr —
+	// and replaces nothing else about it (D25). The database, the user, the
+	// credentials, the TLS setting and the dial timeout still come from wherever
+	// that address came from.
+	//
+	// It is the ephemeral half of what `config set-profile` writes down: a
+	// forwarded port for one invocation, for a colleague's cluster or a CI job,
+	// with no file on disk touched. The persistent case is still a profile.
+	SinkAddr string
+
 	// Profile selects a stanza in the CLI's configuration file.
 	Profile string
 
@@ -207,6 +219,10 @@ func (g *GlobalFlags) AddFlags(flags *pflag.FlagSet) {
 		"Read through a configured sink, as kind/name (for example ClickHouseSink/default).")
 	flags.StringVar(&g.Source, FlagSource, g.Source,
 		"Read directly from a location, bypassing sink discovery: a local directory or an s3:// URL.")
+	flags.StringVar(&g.SinkAddr, FlagSinkAddr, g.SinkAddr,
+		"Dial this host:port instead of the address the resolved ClickHouse backend recorded, "+
+			"which is what a forwarded port needs. Everything else — database, user, credentials, "+
+			"TLS, dial timeout — still comes from that backend, and the notice on stderr says so.")
 	flags.StringVar(&g.Profile, FlagProfile, g.Profile,
 		"Use this profile from the kuberecord configuration file.")
 	flags.StringVar(&g.OperatorNamespace, FlagOperatorNamespace, g.OperatorNamespace,

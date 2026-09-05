@@ -100,6 +100,7 @@ plugs into.
 |------|---------|--------------|
 | `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). |
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
+| `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr). |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
 | `--cluster-id <id>` | resolved, and the answer printed | The kuberecord cluster identity whose history to read — the `cluster_id` column. **Not** a kubeconfig cluster entry; see [The cluster identity](#the-cluster-identity). |
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
@@ -1123,6 +1124,54 @@ ignores; `AWS_ENDPOINT_URL_S3` is honoured by the SDK itself. Set
 `AWS_S3_FORCE_PATH_STYLE=true` for a MinIO deployment that needs
 `<endpoint>/<bucket>/<key>` addressing — or, better, put the endpoint and the
 addressing style in a profile once.
+
+### `--sink-addr`
+
+```console
+$ kubectl port-forward -n kuberecord-system svc/clickhouse 9000:9000
+$ kubectl kuberecord timeline deploy/checkout -n payments --sink-addr 127.0.0.1:9000
+→ discovered ClickHouseSink/default (127.0.0.1:9000/kuberecord, address from --sink-addr)
+```
+
+A `ClickHouseSink` answers five questions — address, database, username,
+credentials and dial timeout — and exactly one of them is wrong when the CLI runs
+outside the cluster the sink was written for. `--sink-addr` replaces **that one**.
+The database, the user, the credentials read from the sink's Secret, the TLS
+setting and the dial timeout all still come from wherever the address came from.
+
+The step that answered does not change, and neither does the word the notice uses
+for it: the line still says `discovered`, because the custom resource really was
+consulted and four of its five answers are the ones in use. What changes is the
+description, which gains `address from --sink-addr` — so the override is in the
+notice, and the line cannot be read as a claim about what the cluster recorded.
+
+It applies wherever the chain lands on ClickHouse: a discovered sink, an explicit
+`--sink ClickHouseSink/<name>`, or a ClickHouse profile. The routes with no
+endpoint of that shape **refuse** it — a usage error, exit 2 — rather than
+accepting the flag and doing nothing with it:
+
+| Given with | Why it is refused |
+|---|---|
+| `--source` | It reads that location directly, so nothing recorded an endpoint to replace. |
+| A profile whose backend is `s3` or `local` | An archive is read as objects; it is never dialled. |
+| `--sink S3Sink/<name>`, or a discovered `S3Sink` | An object store. Its bucket, region and endpoint URL come from the custom resource. |
+
+The value is `host:port` — `127.0.0.1:9000`, `[::1]:9000` — with no scheme, and a
+bare host is refused by name. Nothing here resolves it: that is the dial's job, and
+a validation that succeeded where the dial then failed would be two error paths
+reporting one problem.
+
+**The CLI will not forward the port for you.** Forwarding needs `create` on
+`pods/portforward`, a write verb, and a tool whose value is that it cannot alter
+anything does not acquire one for a convenience. When a dial fails against an
+address that only resolves inside a cluster, it prints the `kubectl port-forward`
+line to run and the `--sink-addr` to follow it with, pre-filled from the sink it
+just read.
+
+For a setup you come back to, write it down once with
+[`config set-profile`](#kuberecord-config) instead. This flag is for the one-off:
+a colleague's cluster, a CI job that forwards and then queries, a debugging
+session that should leave nothing on disk.
 
 ### Discovery, and why it degrades
 
