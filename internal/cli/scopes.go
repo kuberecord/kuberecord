@@ -120,6 +120,7 @@ exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
 		"Only scopes for this kind: a short name, a resource name or a kind, as the object commands "+
 			"accept. Without a cluster to ask, give it as it is recorded — Deployment or "+
 			"Deployment.apps.")
+	mustCompleteFlag(command, "kind", completeResourceKind)
 	local.window.addFlags(command.Flags(),
 		"Only periods overlapping this point onwards: a duration (6h, 90m, 3d, 2w) or an instant "+
 			"(2026-08-20, 2026-08-20T14:00:00Z). A period that merely overlaps is shown whole.",

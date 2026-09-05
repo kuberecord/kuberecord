@@ -264,8 +264,10 @@ from.`,
 		"Fill the profile in from a sink custom resource, as kind/name (for example "+
 			"ClickHouseSink/default). A cluster-internal address is rewritten to a forwarded "+
 			"loopback port, and the notice on stderr says so.")
+	mustCompleteFlag(command, options.FlagFromSink, completeSinkRefs)
 	command.Flags().StringVar(&backend, options.FlagBackend, "",
 		fmt.Sprintf("Which backend this profile reads. One of: %s.", options.JoinValues(resolve.BackendKinds)))
+	mustCompleteFlag(command, options.FlagBackend, fixedEnum(resolve.BackendKinds, backendDescriptions))
 	command.Flags().StringVar(&addr, options.FlagAddr, "",
 		"ClickHouse native-protocol endpoint, as host:port.")
 	command.Flags().StringVar(&database, options.FlagDatabase, "",
@@ -522,6 +524,11 @@ func newConfigUseProfileCommand(streams genericiooptions.IOStreams) *cobra.Comma
 The active profile is used when neither --source nor --sink is given, and it
 takes precedence over discovering a sink from the cluster. Pass --profile to
 override it for a single command.`,
+
+		// The one command whose whole argument is a profile name, completed from
+		// the same file --profile is completed from.
+		ValidArgsFunction: completeProfileNames,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return exit.UsageErrorf("config use-profile takes one argument, the profile name")

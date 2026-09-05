@@ -194,6 +194,15 @@ class Kuberecord < Formula
   def install
     bin.install "$standalone_name"
     bin.install "$plugin_binary"
+
+    # The binary generates its own completion scripts, so the one channel that
+    # installs both names is also the one that can wire completion without asking
+    # the user for a line. It is generated from the archive being installed rather
+    # than shipped alongside it, which is what keeps a new flag's menu from
+    # lagging a release. Only the standalone name is completed here: "kubectl
+    # kuberecord" is completed by kubectl, from a kubectl_complete-kuberecord
+    # shim, and no per-shell script can bind a two-word command.
+    generate_completions_from_executable(bin/"$standalone_name", "completion")
   end
 
   # The one check that catches a formula pointing at the wrong tag's archive: the

@@ -101,6 +101,11 @@ disagree, which is a chain-of-custody finding, and it exits ` +
   # Pin the reconstruction to one incarnation of a reused name.
   kuberecord get deploy/checkout -n payments --at 2026-08-28 --uid 7c9e6679-7425-40de-944b-e07fc1f90ae7`,
 
+		// The kind completes from the static short-name table; the name is an
+		// object in a cluster or an archive, and is not read from here. See
+		// completeObjectAddress.
+		ValidArgsFunction: completeObjectAddress,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runGetCommand(cmd, flags, local, args, streams, invokedAs)
 		},

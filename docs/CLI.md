@@ -88,6 +88,65 @@ The manifest krew consumes (`kuberecord.yaml`) and the Homebrew formula
 listed in `checksums.txt` — so the digests they publish are covered by the same
 signature as everything else a release attaches.
 
+### Shell completion
+
+The same binary generates its own completion script, so completion arrives from
+whichever of the four channels you used — there is nothing extra to download.
+`brew install` writes the bash, zsh and fish scripts during installation and you
+are done; the other three channels want one of the lines below.
+
+```sh
+# bash — needs the bash-completion package, which your OS package manager has.
+kuberecord completion bash > /etc/bash_completion.d/kuberecord            # Linux
+kuberecord completion bash > $(brew --prefix)/etc/bash_completion.d/kuberecord   # macOS
+
+# zsh — after `echo "autoload -U compinit; compinit" >> ~/.zshrc`, if you have
+# not enabled completion before.
+kuberecord completion zsh > "${fpath[1]}/_kuberecord"                    # Linux
+kuberecord completion zsh > $(brew --prefix)/share/zsh/site-functions/_kuberecord  # macOS
+
+# fish
+kuberecord completion fish > ~/.config/fish/completions/kuberecord.fish
+
+# PowerShell — append the output to your profile to keep it.
+kuberecord completion powershell | Out-String | Invoke-Expression
+```
+
+Each of `completion bash`, `completion zsh`, `completion fish` and
+`completion powershell` writes the script to **stdout**, so it can be redirected
+or sourced. `--no-descriptions` omits the gloss shown beside each candidate;
+bash appends that gloss to the candidate itself rather than showing it in a
+second column, which is the one shell where a long menu reads better without it.
+
+**`kubectl kuberecord` is completed by kubectl, not by a script from here.** A
+shell function binds to a single word, and that one is two. kubectl completes a
+plugin from an executable named `kubectl_complete-<plugin>` on your `PATH`, which
+it calls with the words typed so far — and the protocol it speaks is the one this
+binary already answers, so the whole of it is two lines:
+
+```sh
+printf '#!/usr/bin/env sh\nexec kubectl-kuberecord __complete "$@"\n' \
+  > ~/.local/bin/kubectl_complete-kuberecord && chmod +x $_
+```
+
+Running `kubectl kuberecord completion bash` prints that same instruction to
+stderr, because the script it writes on stdout is the standalone command's and a
+krew install has only the plugin.
+
+**What completes, and what does not.** Subcommands, flag names, the values of
+every flag whose values are a closed set (`--output`, `--color`, `--backend`,
+and the kind half of `--sink`/`--from-sink`), the profiles in
+[your configuration file](#the-configuration-file), and `kubectl`'s built-in
+resource short names — `deploy`, `sts`, `cm`, `ing` and the rest, each shown
+beside the kind it names.
+
+Object *names* do not complete, and neither do the short names a CRD declares.
+Both would mean contacting the API server on a keystroke, which is a surprising
+thing for a TAB press to do and the same instinct behind
+[the CLI not forwarding your port](#the-cli-will-not-forward-the-port-for-you).
+Everything the menu offers comes from the binary or from your own configuration
+file. Nothing here dials a cluster or a backend.
+
 ## Global flags
 
 Every command carries the same two sets of persistent flags, and the split
