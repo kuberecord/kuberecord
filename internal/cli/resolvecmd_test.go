@@ -30,6 +30,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"sigs.k8s.io/yaml"
 
 	"github.com/kuberecord/kuberecord/internal/cli"
@@ -134,17 +135,14 @@ type resolveCase struct {
 	format render.StructuredFormat
 }
 
-// run drives one case through the whole command layer and returns both streams.
+// inspect walks both chains against this case's fixture cluster.
 //
-// It goes through resolve.Inspect and cli.RunResolve rather than through the
-// cobra command for the reason every rendering test in this package does: the
-// command's own job is flag parsing, and what these cases are about is what the
-// report says.
-func (c resolveCase) run(t *testing.T) (stdout, stderr string, err error) {
+// It is separated from run because `version --check` needs exactly this half: the
+// two commands put one question through one piece of machinery (Task 14.2), and a
+// second fixture resolver written beside the version tests would be a second
+// opinion about what the chains decide.
+func (c resolveCase) inspect(t *testing.T, streams genericiooptions.IOStreams) *resolve.Inspection {
 	t.Helper()
-
-	var out, errOut bytes.Buffer
-	streams := ioStreams(&out, &errOut)
 
 	args := append([]string{"--kubeconfig", kubeconfigPath}, c.args...)
 	root, flags := cli.NewRootCommand(options.StandaloneName, streams)
@@ -169,8 +167,22 @@ func (c resolveCase) run(t *testing.T) (stdout, stderr string, err error) {
 	if c.swap != nil {
 		c.swap(inspection)
 	}
+	return inspection
+}
 
-	err = cli.RunResolve(t.Context(), inspection,
+// run drives one case through the whole command layer and returns both streams.
+//
+// It goes through resolve.Inspect and cli.RunResolve rather than through the
+// cobra command for the reason every rendering test in this package does: the
+// command's own job is flag parsing, and what these cases are about is what the
+// report says.
+func (c resolveCase) run(t *testing.T) (stdout, stderr string, err error) {
+	t.Helper()
+
+	var out, errOut bytes.Buffer
+	streams := ioStreams(&out, &errOut)
+
+	err = cli.RunResolve(t.Context(), c.inspect(t, streams),
 		cli.ResolveRequest{Check: c.check, Structured: c.format}, streams)
 	return out.String(), errOut.String(), err
 }
@@ -179,9 +191,23 @@ func (c resolveCase) run(t *testing.T) (stdout, stderr string, err error) {
 // checked-in file.
 func assertResolveGolden(t *testing.T, name, stdout, stderr string, err error) {
 	t.Helper()
+	assertReportGolden(t, "config-resolve", name, "kuberecord config resolve", stdout, stderr, err)
+}
 
-	path := filepath.Join("testdata", "config-resolve", name+".golden")
-	got := stdoutMarker + stdout + stderrMarker + stderr + errorMarker + topLevelDiagnostic(err)
+// assertReportGolden is the comparison both of the reporting commands use.
+//
+// dir names the subdirectory of testdata/ the golden lives in and commandPath is
+// what cobra would have called the command that failed. Those two are the whole
+// of how the two callers differ: the three sections, the update flag and the
+// top-level diagnostic are shared, because the property they assert — that a
+// failure reaches the reader through the same path whichever command met it — is
+// the same property.
+func assertReportGolden(t *testing.T, dir, name, commandPath, stdout, stderr string, err error) {
+	t.Helper()
+
+	path := filepath.Join("testdata", dir, name+".golden")
+	got := stdoutMarker + stdout + stderrMarker + stderr +
+		errorMarker + topLevelDiagnostic(commandPath, err)
 
 	if *updateGolden {
 		if mkErr := os.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
@@ -202,8 +228,8 @@ func assertResolveGolden(t *testing.T, name, stdout, stderr string, err error) {
 	}
 }
 
-// topLevelDiagnostic is what cli.RunContext writes to stderr for a failure this
-// command returned.
+// topLevelDiagnostic is what cli.RunContext writes to stderr for a failure one of
+// these commands returned.
 //
 // It is reproduced here rather than driven through RunContext because these cases
 // hold a fixture cluster that only a directly-constructed resolver can be given.
@@ -212,7 +238,7 @@ func assertResolveGolden(t *testing.T, name, stdout, stderr string, err error) {
 // The block is the whole reason this section exists — an unreachable sink
 // resolved by `config resolve` has to produce the same explanation it produces
 // under `timeline`, and this is where a golden can see that it does.
-func topLevelDiagnostic(err error) string {
+func topLevelDiagnostic(commandPath string, err error) string {
 	if err == nil {
 		return ""
 	}
@@ -220,7 +246,7 @@ func topLevelDiagnostic(err error) string {
 
 	var unreachable *resolve.UnreachableSinkError
 	if errors.As(err, &unreachable) {
-		out += "\n" + unreachable.Render("kuberecord config resolve", false)
+		out += "\n" + unreachable.Render(commandPath, false)
 	}
 	return out
 }

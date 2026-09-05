@@ -136,16 +136,24 @@ const (
 	FlagPrefix         = "prefix"
 	FlagPath           = "path"
 
-	// FlagCheck asks `config resolve` whether the backend it resolved can
-	// actually be reached.
+	// FlagCheck asks whether the resolved backend can actually be reached.
 	//
-	// It is opt-in, and that is the whole design of the command: inspecting a
+	// Two commands take it — `config resolve`, which reports every step of both
+	// resolution chains, and `version`, which reports the four facts those chains
+	// produced — and it is one name because it is one question put through one
+	// piece of machinery. A build that answered "reachable" under one spelling and
+	// something else under another would be two opinions about one backend.
+	//
+	// It is opt-in on both, and that is the whole design. Inspecting a
 	// configuration must not require a reachable backend, because the
 	// configuration a user most wants to inspect is the one whose backend cannot
-	// be reached (D26). It is named here rather than typed at its one
-	// registration site because the report withholds the cluster-id chain's last
-	// step by name — "--check asks it" — and a message that spelled the flag
-	// independently of its registration would be the spelling that drifts.
+	// be reached (D26); and `version` is the command somebody types when nothing
+	// works, so it has to stay instant and offline until it is asked otherwise.
+	//
+	// It is named here rather than typed at its registration sites because the
+	// resolution report withholds the cluster-id chain's last step by name —
+	// "--check asks it" — and a message that spelled the flag independently of its
+	// registration would be the spelling that drifts.
 	FlagCheck = "check"
 
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl

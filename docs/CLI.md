@@ -749,8 +749,10 @@ and it is the first thing to check when a `--source` or a profile is refused. Th
 matched to the row that produced it — `s3` and `local` are two ways of reaching one
 engine, which is why the column is not redundant.
 
-It contacts nothing: no cluster, no sink, no network. That is deliberate — the
-reason to run it is usually that something else already failed.
+By itself it contacts nothing: no cluster, no sink, no network. That is
+deliberate — the reason to run it is usually that something else already failed.
+[`--check`](#version---check) is the exception, and it is opt-in for the same
+reason.
 
 `-o json` and `-o yaml` render the same facts as a document. It carries the same
 `apiVersion` as every other structured answer and the same additive-only promise,
@@ -794,6 +796,121 @@ There is no `--version` flag. kubectl has none either, and cobra's built-in one 
 handled before any command runs — so it could not honour `-o`, and
 `kuberecord --version -o json` would print a table while appearing to have been
 asked for JSON.
+
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--check` | Also resolve the backend, ask it whether it answers, and report the sink, the cluster identity and what came back. Without it nothing is contacted. See [`version --check`](#version---check). |
+
+`-o` is `table` (the default), `wide`, `json` or `yaml`.
+
+### `version --check`
+
+**This is the first thing to run when something is not working.** It answers the
+question the bare command cannot: not "which build is this" but "does this setup
+work".
+
+It resolves the backend exactly as a query command would, asks it whether it
+answers, and reports the four facts that decide whether anything else will
+succeed — the sink, the engine behind it, the cluster identity, and what came
+back:
+
+```console
+$ kuberecord version --check
+kuberecord v0.4.0
+  commit  77514b632925
+  built   2026-09-05T11:02:44Z
+  go      go1.25.7 linux/amd64
+
+query backends compiled in:
+  clickhouse  engine clickhouse   — schema v1 in ClickHouse
+  s3          engine objectsource — jsonl-v1 archive in an S3-compatible bucket
+  local       engine objectsource — jsonl-v1 archive in a directory
+
+setup:
+  backend     ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine      clickhouse
+  cluster-id  prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  reachable   the backend answered
+```
+
+The last row is the probe, and it reports one of four outcomes in the same words
+[`config resolve`](#config-resolve) reports them in:
+
+| Outcome | What it means |
+|---|---|
+| `reachable` | the backend answered |
+| `unreachable` | it did not, and the failure is printed below with its explanation |
+| `cannot be checked` | the engine cannot say without running a real query — a statement about the engine, not a fault, and it does not fail the command |
+| `not checked` | there was nothing to reach, because the backend chain resolved nothing |
+
+The question put to the backend is which clusters it holds. That is the cheapest
+question the read plane has, and it exercises the whole path rather than a socket:
+DNS, the connection, the credential, and — for ClickHouse — the database being the
+one the sink named. A bare TCP dial would pass against a server holding somebody
+else's history.
+
+**A failure exits `1` and prints the same explanation every other command prints**
+— see [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster).
+The document is still written first, because a bug report needs the build *and*
+the setup:
+
+```console
+$ kuberecord version --check
+…
+setup:
+  backend      ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)
+  engine       clickhouse
+  cluster-id   prod-eu-1 (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+  unreachable  the backend could not be reached
+               cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+
+for which step decided what, run `kuberecord config resolve --check`
+
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
+
+ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+…
+```
+
+**This is a summary, and [`config resolve --check`](#config-resolve) is the
+detail.** The two put one question through one piece of machinery and differ only
+in how much of the walk they show: nine steps decide the four facts above, and
+when one of them is not what you expected — a profile written months ago shadowing
+discovery, a `--context` pointing at the wrong cluster — that command names the
+step that decided it. Start here; go there when the summary is surprising.
+
+`-o json` and `-o yaml` add a `setup` block to the document, with the probe under
+the field names `config resolve` gives it, so one `jq` recipe reads either:
+
+```console
+$ kuberecord version --check -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Version",
+  …
+  "setup": {
+    "backend": "ClickHouseSink/default (clickhouse.kuberecord-system.svc:9000/kuberecord)",
+    "engine": "clickhouse",
+    "clusterID": "prod-eu-1",
+    "clusterIDSource": "from the operator Deployment kuberecord-system/kuberecord-controller-manager",
+    "check": {
+      "requested": true,
+      "outcome": "reachable",
+      "detail": "the backend answered"
+    }
+  }
+}
+```
+
+**Without `--check` the block is absent entirely**, rather than present and empty.
+A bare `version` looked at no configuration, and a document carrying a hollow
+`setup` would be claiming otherwise.
+
+**No credential appears in any format, at any verbosity.** The block names the
+host, the database, the sink and the cluster; never the password, never the
+access key.
 
 How to check that the binary this reports on is the one you verified:
 [`VERIFYING.md`](VERIFYING.md#the-cli-archives).
@@ -919,8 +1036,11 @@ difference is deliberate. [`version`](#version) renders a `Version` document,
 [`config resolve`](#config-resolve) renders a `Resolution`; none is the answer to a
 query, so none has a `metadata` block or an `items` list. A `Version` carrying
 `cluster_id: ""` and an empty coverage report would be inviting a consumer to read
-three fields that could never mean anything. What they do share is the contract
-those five kinds are governed by — the same `apiVersion`, and therefore the same
+three fields that could never mean anything. ([`version --check`](#version---check)
+adds a `setup` block naming a cluster, and that is not a `metadata` block: it is
+what the resolution chains chose, reported because it was asked for, and it is
+absent when it was not.) What they do share is the contract those five kinds are
+governed by — the same `apiVersion`, and therefore the same
 [additive-only policy](#the-additive-only-policy).
 
 ### Item field names are the schema's column names
@@ -1116,7 +1236,10 @@ step 1 does not have it at all.
 
 To see which step would win — and why the earlier ones had nothing to say — without
 running a query, ask: [`kuberecord config resolve`](#config-resolve). It reports
-both chains and contacts nothing unless `--check` says to.
+both chains and contacts nothing unless `--check` says to. For the short answer —
+which sink, which cluster, and does it answer —
+[`kuberecord version --check`](#version---check) reports the same four facts
+without the steps.
 
 **Nothing prints a credential, at any verbosity.** The notice names the host, the
 database and the sink; never the password, never the access key.
@@ -1360,8 +1483,9 @@ and none of them prints this message. Telling the on-call engineer of a producti
 ClickHouse that has fallen over to run `kubectl port-forward` would send them
 somewhere the fault is not, at the moment they can least afford it.
 
-To provoke the same diagnosis deliberately — without running a query, and after
-seeing which step chose the address in the first place — use
+To provoke the same diagnosis deliberately — without running a query — use
+[`kuberecord version --check`](#version---check), which is also how you confirm the
+forwarded port worked. To see which step chose the address in the first place, use
 [`kuberecord config resolve --check`](#--check).
 
 ### None of this applies to `--source`
@@ -1738,6 +1862,11 @@ is then wrong in a way that looks right.
 
 `config resolve` runs both chains, prints what every step decided, and stops. It
 answers no question about recorded history and returns no rows.
+
+It is the detailed half of a pair. [`version --check`](#version---check) puts the
+same question through the same machinery and reports the four facts the chains
+produced; this reports the nine steps that produced them. Run that one first, and
+this one when its answer is surprising.
 
 ```console
 $ kuberecord config resolve
