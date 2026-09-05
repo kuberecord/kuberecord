@@ -430,6 +430,66 @@ func TestQuickstartIsWiredUp(t *testing.T) {
 	}
 }
 
+// TestQuickstartShowsTheOutsideTheClusterRoute keeps the ClickHouse quickstart
+// from walking a first-time reader into a wall.
+//
+// The sink that quickstart installs records a Service DNS name, because that is
+// the address the operator — which runs inside the cluster — dials. Every CLI
+// command the README then suggests runs on a laptop, where that name resolves to
+// nothing. The CLI diagnoses it, but a quickstart that produces a diagnosable
+// failure it could have pre-empted has still spent a stranger's first ten minutes
+// on a detour.
+//
+// So this checks the three things that make the step self-contained: the
+// forwarded port, the flag that points the run at it, and the link onward for the
+// reader who wants to stop passing the flag. Presence, not wording — the prose
+// around them is free to be rewritten.
+func TestQuickstartShowsTheOutsideTheClusterRoute(t *testing.T) {
+	readme := readFile(t, "examples/quickstart/README.md")
+
+	for _, tc := range []struct{ want, why string }{
+		{
+			"kubectl port-forward -n kuberecord-quickstart svc/clickhouse",
+			"the forward itself, against the Service the sink names",
+		},
+		{
+			"--sink-addr 127.0.0.1:9000",
+			"the flag that points one run at the forwarded port, shown inline",
+		},
+		{
+			"../../docs/CLI.md#running-the-cli-outside-the-cluster",
+			"where a reader goes for the profile route and for why the CLI forwards nothing itself",
+		},
+	} {
+		if !strings.Contains(readme, tc.want) {
+			t.Errorf("examples/quickstart/README.md no longer shows %q — %s", tc.want, tc.why)
+		}
+	}
+
+	// The section it links to has to keep the two claims a reader arrives for.
+	// Both are load-bearing: the first is the reason this tool has no write verb
+	// anywhere in it, and the second is the property that makes reading an
+	// archive the answer to the whole problem rather than a workaround for it.
+	reference := readFile(t, "docs/CLI.md")
+	const heading = "## Running the CLI outside the cluster\n"
+	_, section, found := strings.Cut(reference, heading)
+	if !found {
+		t.Fatalf("docs/CLI.md has no %q section for the quickstart to link into", strings.TrimSpace(heading))
+	}
+	if next := strings.Index(section, "\n## "); next >= 0 {
+		section = section[:next]
+	}
+	for _, tc := range []struct{ want, why string }{
+		{"pods/portforward", "why the CLI will not forward the port itself: it is a write verb"},
+		{"--source", "that an archive read directly never meets any of this"},
+	} {
+		if !strings.Contains(section, tc.want) {
+			t.Errorf("the \"Running the CLI outside the cluster\" section no longer mentions %q — %s",
+				tc.want, tc.why)
+		}
+	}
+}
+
 //
 // The tee example is complete, self-consistent and CI-tested (Task 7.1)
 //
@@ -1633,6 +1693,9 @@ func TestCLIReferenceCoversItsRequiredSubjects(t *testing.T) {
 		{"cli.kuberecord.io/v1alpha1", "the structured output contract (D19)"},
 		{"\n## Backend capability differences\n", "what each backend can and cannot answer (D17)"},
 		{"\n### Cold scans\n", "what a scan of an unindexed archive costs, which is the trade D18 buys"},
+		{"\n## Running the CLI outside the cluster\n",
+			"the route out of a discovered address that only resolves inside a cluster, " +
+				"which is the first failure a new user meets"},
 		{"\n## The configuration file\n", "the file schema, including the fields it refuses by name"},
 		{"\n### The schema, field by field\n", "a reference needs the fields, not only an annotated example"},
 	} {

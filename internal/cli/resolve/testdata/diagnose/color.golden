@@ -1,0 +1,22 @@
+ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
+
+[2mThat name resolves inside the cluster and nowhere else, so discovery was right and so is[0m
+[2mthe sink: this machine is simply outside it. kuberecord reads a cluster and never acts on[0m
+[2mone, so it will not forward a port for you.[0m
+
+[2mForward it yourself, then re-run against the forwarded address:[0m
+
+[1m    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000[0m
+[1m    kuberecord timeline … --sink-addr 127.0.0.1:9000[0m
+
+[2mOr write it down once, and every later invocation reads it:[0m
+
+[1m    kuberecord config set-profile local --backend clickhouse \[0m
+[1m        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \[0m
+[1m        --password-env KUBERECORD_CLICKHOUSE_PASSWORD[0m
+[1m    kuberecord config use-profile local[0m
+
+[2mExport KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the[0m
+[2mrecommended credential for it, and the operator's own is not. Both routes, and[0m
+[2mwhy this tool will not forward the port for you:[0m
+[2mdocs/CLI.md#running-the-cli-outside-the-cluster[0m

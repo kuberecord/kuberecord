@@ -346,9 +346,26 @@ cat <<EOF
 
 $(printf '\033[1;32m%s\033[0m' "kuberecord is streaming. ${rows} rows in ${ELAPSED}s.")
 
-Query it yourself — port-forward ClickHouse, then connect:
+Query it yourself — forward the port once, and both readers below use it:
 
   kubectl port-forward -n ${QS_CH_NAMESPACE} svc/clickhouse 9000:9000
+
+Read it back with the CLI, which asks about an object rather than a table:
+
+  go build -o bin/kuberecord ./cmd/kubectl-kuberecord
+
+  bin/kuberecord timeline deploy/checkout-api -n quickstart-demo \\
+    --sink-addr 127.0.0.1:9000
+
+The sink records clickhouse.${QS_CH_NAMESPACE}.svc:9000, which resolves inside the
+cluster and nowhere else — correct for the operator, unreachable from here. So
+--sink-addr points this run at the forwarded port, and nothing else changes: the
+database, the user and the credentials still come from the sink itself. Run it
+without the forward and it says so, and names both ways out. The long version,
+including how to write it down once and stop passing flags:
+docs/CLI.md#running-the-cli-outside-the-cluster
+
+Or with SQL:
 
   clickhouse-client --host 127.0.0.1 --port 9000 \\
     --user ${QS_CH_USER} --password ${QS_CH_PASSWORD} --database ${QS_CH_DATABASE}
@@ -371,7 +388,8 @@ Then: change something in the quickstart-demo namespace and watch it appear.
 
   kubectl -n quickstart-demo set env deploy/checkout-api RELEASE=v2
 
-More: docs/QUERIES.md (incident windows, drift by actor, flap reports, state
+More: docs/CLI.md (every command the CLI has, and where it reads from),
+docs/QUERIES.md (incident windows, drift by actor, flap reports, state
 reconstruction), docs/SCHEMA.md (what every column means), docs/DASHBOARDS.md
 (the same questions as Grafana dashboards).
 

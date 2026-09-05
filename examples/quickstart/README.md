@@ -43,7 +43,9 @@ to keep querying.
 
 ## Doing it by hand
 
-Every command here is one the script runs. `$` prompts are elided.
+Every command here is one the script runs, except the two readers at the end:
+the script prints those rather than holding a port-forward open on your behalf.
+`$` prompts are elided.
 
 **1. A cluster.**
 
@@ -134,7 +136,53 @@ kubectl -n quickstart-demo patch configmap checkout-config \
   --type=merge -p '{"data":{"feature_flags":"new-checkout=on"}}'
 ```
 
-**8. Query it.**
+**8. Read it back.**
+
+The CLI is the read side: the same rows, addressed the way you address a
+Kubernetes object rather than as SQL. One build from this clone gets you the
+standalone name; the same bytes on your `PATH` as `kubectl-kuberecord` are what
+make `kubectl kuberecord …` work, and a released install is the same build again
+([`docs/CLI.md`](../../docs/CLI.md#installing)).
+
+```sh
+go build -o bin/kuberecord ./cmd/kubectl-kuberecord
+
+# In another terminal, or with a trailing &: it holds the port until stopped.
+kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+
+bin/kuberecord timeline deploy/checkout-api -n quickstart-demo \
+  --sink-addr 127.0.0.1:9000
+```
+
+The port-forward is the step that is easy to skip and impossible to skip twice.
+The `ClickHouseSink` records `clickhouse.kuberecord-quickstart.svc:9000`, which
+is the right address — it is what the operator, running inside this cluster,
+dials — and it resolves nowhere else. `--sink-addr` replaces that one field and
+nothing else: the database, the user and the credentials still come from the
+sink the CLI just discovered, and the notice on stderr says so.
+
+```
+→ discovered ClickHouseSink/default (127.0.0.1:9000/kuberecord, address from --sink-addr)
+→ cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+```
+
+Two lines worth reading rather than scrolling past. The second is why nothing
+here passes a `--cluster-id`: the overlay stamped `kuberecord-quickstart` on the
+operator, and the CLI read it back off the Deployment.
+
+Run it without the forward and you get the failure this step exists to pre-empt,
+which names both ways out of itself: the forwarded port above, and, for a cluster
+you come back to, `config set-profile --from-sink ClickHouseSink/default` — which
+writes the address, database and user down once, so later runs need no flags.
+
+The CLI never forwards a port itself. That needs `create` on `pods/portforward`,
+a write verb, and an audit reader that cannot alter the cluster it audits is the
+whole point of it. The long version, including why none of this applies to
+reading an archive with `--source`, is [running the CLI outside the
+cluster](../../docs/CLI.md#running-the-cli-outside-the-cluster).
+
+**9. Or query it with SQL.** The forwarded port from step 8 serves both; the CLI
+asks narrow questions about one object, and this is everything else.
 
 ```sh
 kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
@@ -207,6 +255,10 @@ namespaced Secret grant, leader election, the authenticated metrics endpoint, th
 
 ## Where to go next
 
+- [`docs/CLI.md`](../../docs/CLI.md) — every command `kubectl kuberecord` has,
+  where it reads from, and [what to do when the address it discovers only
+  resolves inside the
+  cluster](../../docs/CLI.md#running-the-cli-outside-the-cluster).
 - [`docs/QUERIES.md`](../../docs/QUERIES.md) — incident windows, drift by actor,
   flap reports, reconstructing an object's state at an instant.
 - [`docs/SCHEMA.md`](../../docs/SCHEMA.md) — what every column means, and what
@@ -228,6 +280,7 @@ your custom resources before it exits. Beyond that:
 | `ClickHouseSink` not `Ready` | `kubectl describe clickhousesink default` — `CredentialsResolved`, `SchemaValid` and `Ready` each name their own reason |
 | Rule not `Ready` | `kubectl describe clusterstreamrule quickstart` — `PolicyAllowed`, `ResourceResolved` and `RBACGranted`, each per-kind |
 | Sink ready, rule ready, no rows | `kubectl logs -n kuberecord-system deploy/kuberecord-controller-manager` |
+| `kuberecord timeline` reports `no such host` | The port-forward from step 8. The sink's address resolves inside the cluster only — the CLI prints both routes out of it, and [running the CLI outside the cluster](../../docs/CLI.md#running-the-cli-outside-the-cluster) is the long version |
 | `kind: command not found` | [kind's install guide][kind] |
 
 [kind]: https://kind.sigs.k8s.io/docs/user/quick-start/#installation

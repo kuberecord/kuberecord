@@ -170,6 +170,99 @@ func TestConfigSetProfileRefusesAProfileThatCannotWork(t *testing.T) {
 	}
 }
 
+// TestConfigSetProfileFromSinkRefusesWhatTheSinkAlreadyAnswers.
+//
+// Every one of these is refused before the cluster is contacted, which is why the
+// cases need no cluster: a mistyped command must not cost an API round trip and a
+// Secret read to learn that two of its flags disagree. A flag accepted and quietly
+// ignored would be the worse outcome — a profile reading somewhere its author did
+// not choose (Invariant 4).
+func TestConfigSetProfileFromSinkRefusesWhatTheSinkAlreadyAnswers(t *testing.T) {
+	const clickHouse = "ClickHouseSink/default"
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "--backend, which the sink's kind decides",
+			args: []string{"--from-sink", clickHouse, "--backend", "clickhouse"},
+			want: []string{"--from-sink " + clickHouse, "--backend", "decides the backend"},
+		},
+		{
+			name: "a field the custom resource states",
+			args: []string{"--from-sink", clickHouse, "--database", "somewhere_else"},
+			want: []string{"--database", "states it", "somewhere other than where that sink writes"},
+		},
+		{
+			name: "a flag belonging to another backend",
+			args: []string{"--from-sink", clickHouse, "--bucket", "acme-audit"},
+			want: []string{"--bucket", "configures the s3 backend", "writes a clickhouse profile"},
+		},
+		{
+			name: "an endpoint override against an object store",
+			args: []string{"--from-sink", "S3Sink/archive", "--addr", "127.0.0.1:9000"},
+			want: []string{"--addr", "configures the clickhouse backend", "writes a s3 profile"},
+		},
+		{
+			name: "the per-invocation override, which writes nothing",
+			args: []string{"--from-sink", clickHouse, "--sink-addr", "127.0.0.1:9000"},
+			want: []string{"--sink-addr", "writes a file", "--addr"},
+		},
+		{
+			name: "a value that is not kind/name",
+			args: []string{"--from-sink", "default"},
+			want: []string{`malformed --from-sink "default"`, "<kind>/<name>"},
+		},
+		{
+			name: "a kind no CRD in this build defines",
+			args: []string{"--from-sink", "PostgresSink/default"},
+			want: []string{"--from-sink names the kind", "ClickHouseSink, S3Sink"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := configHome(t)
+
+			_, stderr, code := run(t, append([]string{"config", "set-profile", "local"}, tc.args...)...)
+			if code != exit.UsageError {
+				t.Errorf("exit code %d, want %d for a malformed invocation", code, exit.UsageError)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr does not say %q:\n%s", want, stderr)
+				}
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("a refused set-profile created %s anyway", path)
+			}
+		})
+	}
+}
+
+// TestConfigSetProfileFromSinkAcceptsWhatTheSinkCannotState is the other half:
+// the four flags that must survive --from-sink, because a ClickHouseSink states
+// none of them for a reader.
+//
+// It asserts the absence of a conflict rather than a successful write, since there
+// is no cluster here to read a sink out of. What comes back is whatever the
+// kubeconfig fixture's unreachable API server says, and that is not this test's
+// subject.
+func TestConfigSetProfileFromSinkAcceptsWhatTheSinkCannotState(t *testing.T) {
+	configHome(t)
+
+	_, stderr, _ := run(t, "--kubeconfig", kubeconfigPath,
+		"config", "set-profile", "local", "--from-sink", "ClickHouseSink/default",
+		"--addr", "127.0.0.1:9000", "--username", "kuberecord_ro",
+		"--password-env", "KUBERECORD_CLICKHOUSE_PASSWORD", "--tls")
+
+	if strings.Contains(stderr, "cannot be given together") {
+		t.Errorf("a flag the custom resource cannot state was refused:\n%s", stderr)
+	}
+}
+
 // TestConfigUseProfileSwitchesAndRefusesTheUnknown.
 func TestConfigUseProfileSwitchesAndRefusesTheUnknown(t *testing.T) {
 	path := configHome(t)

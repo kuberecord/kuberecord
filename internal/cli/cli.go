@@ -101,6 +101,9 @@ import (
 	"syscall"
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
+	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/resolve"
+	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 )
 
@@ -148,7 +151,7 @@ func interruptContext(parent context.Context) (context.Context, context.CancelFu
 // delivering a real signal to the test binary, and so that a future embedder can
 // supply its own cancellation. Run is the whole of what main needs.
 func RunContext(ctx context.Context, args []string, streams genericiooptions.IOStreams) int {
-	root, _ := NewRootCommand(InvocationName(args), streams)
+	root, flags := NewRootCommand(InvocationName(args), streams)
 
 	// Always an explicit, non-nil slice. Cobra reads os.Args[1:] whenever its
 	// args are nil — that is its documented default, not an edge case — so
@@ -196,6 +199,7 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 		// worse message than the one cobra would have printed unprompted.
 		diagnostic += "\n" + failed.UsageString()
 	}
+	diagnostic += unreachableAdvice(err, failed, flags, streams)
 
 	// The write is checked rather than discarded because every fallible call
 	// here is, and then deliberately not acted on: a failure means stderr itself
@@ -207,6 +211,40 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 	}
 
 	return code
+}
+
+// unreachableAdvice is the block that turns an unreachable cluster-internal
+// backend from a dead end into two commands (Task 13.1).
+//
+// It is rendered here, at the top, for three reasons that all point the same way.
+// The failure it explains can be raised anywhere — during resolution, or from the
+// first query several layers below a command — and this is the one place every
+// path ends up. Colour is decided from --color, NO_COLOR and whether stderr is a
+// terminal, and only here are all three known. And rendering once, into
+// RunContext's single write, is what keeps the message out of the middle of a
+// half-drawn table.
+//
+// cobra's own name for the command that failed is passed through, so the
+// invocation the message tells the reader to re-run is the one they actually
+// typed rather than a placeholder. It is the only thing this layer adds; the
+// words belong to resolve/diagnose.go.
+func unreachableAdvice(
+	err error, failed *cobra.Command, flags *options.GlobalFlags, streams genericiooptions.IOStreams,
+) string {
+	var unreachable *resolve.UnreachableSinkError
+	if !errors.As(err, &unreachable) {
+		return ""
+	}
+
+	commandPath := ""
+	if failed != nil {
+		commandPath = failed.CommandPath()
+	}
+	colorize := false
+	if flags != nil {
+		colorize = options.ShouldColorize(flags.Color, streams.ErrOut)
+	}
+	return "\n" + unreachable.Render(commandPath, colorize)
 }
 
 // interrupted phrases the end of an invocation that was told to stop.

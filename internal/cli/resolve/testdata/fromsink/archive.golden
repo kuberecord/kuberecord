@@ -1,0 +1,7 @@
+S3Sink/archive records the archive at s3://acme-audit/kuberecord, region eu-west-1.
+
+An object store has no address that resolves only inside a cluster, so all of it
+transfers unchanged.
+
+Credentials are not in this file and never will be: the AWS chain resolves them —
+AWS_ACCESS_KEY_ID and friends, ~/.aws/config, SSO, an instance role.
