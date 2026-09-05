@@ -111,6 +111,31 @@ const (
 	// were shown before they typed it.
 	FlagMaxObjects = "max-objects"
 
+	// The per-field flags `config set-profile` carries, one per field of the
+	// stanza its --backend selects, plus the one that fills them all in from a
+	// sink custom resource.
+	//
+	// They are constants because --from-sink refuses each of them by name: the
+	// custom resource states the database, the bucket and the rest, and a profile
+	// that disagreed with it would read somewhere other than where the sink
+	// writes. A refusal that spelled the flag independently of its registration
+	// would be two spellings of one contract, and the one nobody compiles is the
+	// one that drifts — the same reason FlagSinkAddr is named here.
+	FlagFromSink       = "from-sink"
+	FlagBackend        = "backend"
+	FlagAddr           = "addr"
+	FlagDatabase       = "database"
+	FlagUsername       = "username"
+	FlagPasswordEnv    = "password-env"
+	FlagPasswordFile   = "password-file"
+	FlagTLS            = "tls"
+	FlagBucket         = "bucket"
+	FlagRegion         = "region"
+	FlagEndpoint       = "endpoint"
+	FlagForcePathStyle = "force-path-style"
+	FlagPrefix         = "prefix"
+	FlagPath           = "path"
+
 	// FlagVerbosity is spelled "v" with a "-v" shorthand, exactly as kubectl
 	// spells it. The long form reads oddly in help output and is kept anyway:
 	// muscle memory for `-v 6` is worth more than the tidier `--verbose`, and a

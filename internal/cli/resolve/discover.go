@@ -128,19 +128,25 @@ type SinkRef struct {
 // about a sink spells one.
 func (s SinkRef) String() string { return s.Kind + "/" + s.Name }
 
-// ParseSinkRef reads the value of --sink.
+// ParseSinkRef reads a <kind>/<name> value, naming the flag it came from when it
+// cannot.
 //
 // Kinds are matched case-insensitively and in both singular and plural, because
 // the flag is typed by hand and `--sink clickhousesink/default` is not a mistake
 // anybody needs to be corrected about. What it will not do is guess at a kind it
 // does not know: a typo that resolved to the wrong CRD would send the query at the
 // wrong archive.
-func ParseSinkRef(value string) (SinkRef, error) {
+//
+// The flag name is a parameter because two flags carry this shape — --sink
+// selects a sink to read through, and `config set-profile --from-sink` selects one
+// to copy a profile out of — and a correction that named the wrong one would send
+// the reader to a flag they did not type.
+func ParseSinkRef(flag, value string) (SinkRef, error) {
 	kind, name, found := strings.Cut(value, "/")
 	if !found || kind == "" || name == "" {
 		return SinkRef{}, exit.UsageErrorf(
-			"malformed --sink %q: expected <kind>/<name>, for example %s/default",
-			value, KindClickHouseSink)
+			"malformed --%s %q: expected <kind>/<name>, for example %s/default",
+			flag, value, KindClickHouseSink)
 	}
 
 	normalized := strings.TrimSuffix(strings.ToLower(kind), "s")
@@ -149,8 +155,8 @@ func ParseSinkRef(value string) (SinkRef, error) {
 			return SinkRef{Kind: known, Name: name}, nil
 		}
 	}
-	return SinkRef{}, exit.UsageErrorf("--sink names the kind %q, which is not one of %s",
-		kind, strings.Join(sinkKinds, ", "))
+	return SinkRef{}, exit.UsageErrorf("--%s names the kind %q, which is not one of %s",
+		flag, kind, strings.Join(sinkKinds, ", "))
 }
 
 // gvrFor maps a sink kind to the resource that holds it.

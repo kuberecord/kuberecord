@@ -1,0 +1,13 @@
+S3Sink/archive records the archive at s3://acme-audit/kuberecord, region eu-west-1.
+
+An object store has no address that resolves only inside a cluster, so all of it
+transfers unchanged.
+
+Its endpoint http://minio.kuberecord-system.svc:9000 resolves inside the cluster too.
+
+It is recorded as it stands: an endpoint carries a scheme and a certificate name as
+well as a host, so substituting a forwarded port for it is not a guess this command
+will make. Edit s3.endpoint in the configuration file if you read it from outside.
+
+Credentials are not in this file and never will be: the AWS chain resolves them —
+AWS_ACCESS_KEY_ID and friends, ~/.aws/config, SSO, an instance role.

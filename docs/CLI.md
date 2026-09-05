@@ -1401,6 +1401,9 @@ $ kuberecord config set-profile prod --backend clickhouse \
     --addr clickhouse.example:9000 --database kuberecord \
     --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD
 
+# Or read the whole stanza out of the sink the operator already writes to.
+$ kuberecord config set-profile local --from-sink ClickHouseSink/default
+
 $ kuberecord config set-profile archive --backend s3 --bucket acme-audit \
     --prefix kuberecord --endpoint https://minio.internal:9000 --force-path-style
 
@@ -1433,7 +1436,8 @@ both halves, for the same reason the file refuses a mismatched stanza:
 
 | Flag | Backend | Writes |
 |------|---------|--------|
-| `--backend <kind>` | — | `backend`. One of `clickhouse`, `s3`, `local`. Required. |
+| `--from-sink <kind>/<name>` | — | every field below, read from a sink custom resource. Mutually exclusive with `--backend` — see [`--from-sink`](#--from-sink). |
+| `--backend <kind>` | — | `backend`. One of `clickhouse`, `s3`, `local`. Required unless `--from-sink` is given. |
 | `--addr <host:port>` | `clickhouse` | `clickhouse.addr` |
 | `--database <name>` | `clickhouse` | `clickhouse.database` |
 | `--username <user>` | `clickhouse` | `clickhouse.username` |
@@ -1448,6 +1452,69 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
 
 There is no `--password`. That is not an omission: see the first rule above.
+
+#### `--from-sink`
+
+```console
+$ kuberecord config set-profile local --from-sink ClickHouseSink/default
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ "local" is now the active profile
+
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so the profile records
+127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+
+Database kuberecord and user kuberecord are the sink's own.
+Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
+The profile does not copy it: it reads $KUBERECORD_CLICKHOUSE_PASSWORD.
+Export a read-only ClickHouse user's password there rather than the operator's,
+which is a credential that can write to the audit trail. See docs/CLI.md.
+```
+
+It reads the named sink through the same discovery path a query uses, and writes
+the stanza its kind calls for. The point is the address, which is precisely the
+field that must differ from the custom resource — otherwise there would be no
+reason to write a profile at all:
+
+| `--addr` | The custom resource's address | The profile records |
+|---|---|---|
+| given | anything | what `--addr` says |
+| omitted | cluster-internal (`*.svc`, `*.cluster.local`, a bare host) | `127.0.0.1:<the recorded port>`, with a notice and the `kubectl port-forward` line |
+| omitted | anything else | the recorded address, unchanged |
+
+The classifier is the one the unreachable-backend message uses, so the command
+that rewrites an address and the message that explains why it needed rewriting
+cannot disagree. Nothing is dialled either way: this writes a file (D24).
+
+**The password is not copied.** The sink's Secret is read to confirm it holds the
+key the sink names — a Secret created with `--from-literal=PASSWORD=…` is reported
+here rather than three steps later — and the value is never extracted. The profile
+names `KUBERECORD_CLICKHOUSE_PASSWORD` unless `--password-env` or `--password-file`
+says otherwise, and the file rule above applies to it exactly as it does to a
+hand-written stanza. A Secret you may not read is a notice, not a failure: nothing
+in the written profile depends on it, and being unable to read it is the ordinary
+state this whole subcommand exists for.
+
+Four flags survive `--from-sink`, and they are the ones a `ClickHouseSink` cannot
+state or must not state for a *reader*: `--addr`, `--username`, `--password-env` /
+`--password-file`, and `--tls` (`spec.connection` carries no TLS field at all).
+Everything else is refused by name, because the custom resource states it and a
+profile that disagreed would read somewhere other than where the sink writes.
+
+An `S3Sink` transfers directly — bucket, prefix, region, endpoint and path style —
+and takes no overrides: an object store has no address that resolves only inside a
+cluster, and its credentials are not in this file at all. A cluster-internal
+`endpoint` is recorded as it stands and said so in the notice; an endpoint carries
+a scheme and a certificate name as well as a host, so substituting a forwarded port
+for it is not a guess this command makes.
+
+**The profile is written, not activated.** An existing choice is never overridden;
+the `config use-profile` line to run next is printed instead. The one exception is
+the rule the whole subcommand already follows: the first profile in an empty file
+becomes the active one, and says so.
 
 ## The read-only ClickHouse user
 

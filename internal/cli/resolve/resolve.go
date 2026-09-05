@@ -397,7 +397,7 @@ func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, er
 	}
 
 	if named := r.Flags.Sink; named != "" {
-		ref, err := ParseSinkRef(named)
+		ref, err := ParseSinkRef(options.FlagSink, named)
 		if err != nil {
 			return target{}, OriginSinkFlag, err
 		}
