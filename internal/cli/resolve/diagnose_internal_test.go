@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -36,6 +37,7 @@ import (
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -447,25 +449,67 @@ func TestTheMessageRendersInBothColourModes(t *testing.T) {
 	}
 }
 
-// TestColourIsNothingButColour.
+// sgrSequence matches an ANSI colour sequence — a CSI ending in `m` — and nothing
+// else.
+//
+// The sequences were enumerable while this test covered one palette of three. They
+// stopped being so when the property grew to cover the severity vocabulary in
+// internal/cli/render, whose sequences are unexported there: naming them here
+// would be a second copy of a colour table, and it would drift silently the day
+// one of them changed. What the property actually says is "nothing but escapes
+// differ", and this expression is that sentence rather than a list of the escapes
+// somebody thought of. That only the intended sequences are emitted is a different
+// claim, and it is the golden files in both packages that make it.
+var sgrSequence = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// TestColourIsNothingButColour, over every rendering this CLI paints.
 //
 // Stripping the escape sequences from the coloured rendering must give back the
 // uncoloured one exactly. Anything else means the two modes are two messages, and
 // the one nobody generates golden files for is the one that rots.
+//
+// The severity vocabulary is asserted here rather than in a test of its own,
+// though it lives in another package. The property belongs to the CLI's output and
+// not to any package that produces some of it: a second test asserting the same
+// sentence is a second place for the sentence to be weakened, and the weakened one
+// would be whichever a change happened not to touch. So the table grows a case per
+// rendering instead — the unreachable-sink diagnostic, and one line per tier.
 func TestColourIsNothingButColour(t *testing.T) {
 	failure := &UnreachableSinkError{
 		diagnosis: fixtureDiagnosis(),
 		cause:     dnsNotFound("clickhouse.kuberecord-quickstart.svc"),
 	}
+	// One sentence through every tier, so that a difference between the two
+	// columns of a case can only be that tier's colour.
+	const line = "this backend does not record deletions"
 
-	painted := failure.Render("kuberecord timeline", true)
-	if !strings.Contains(painted, ansiReset) {
-		t.Fatal("the coloured rendering carries no escape sequences at all")
-	}
-	stripped := strings.NewReplacer(ansiReset, "", ansiBold, "", ansiDim, "").Replace(painted)
-	if plain := failure.Render("kuberecord timeline", false); stripped != plain {
-		t.Errorf("colour changes more than colour.\n--- plain ---\n%s\n--- stripped ---\n%s",
-			plain, stripped)
+	for name, rendering := range map[string]struct{ painted, plain string }{
+		"the unreachable-sink diagnostic": {
+			painted: failure.Render("kuberecord timeline", true),
+			plain:   failure.Render("kuberecord timeline", false),
+		},
+		"the warning tier": {
+			painted: render.NewSeverity(true).Warning(line),
+			plain:   render.NewSeverity(false).Warning(line),
+		},
+		"the provenance tier": {
+			painted: render.NewSeverity(true).Provenance(line),
+			plain:   render.NewSeverity(false).Provenance(line),
+		},
+		"the emphasis tier": {
+			painted: render.NewSeverity(true).Emphasis(line),
+			plain:   render.NewSeverity(false).Emphasis(line),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !sgrSequence.MatchString(rendering.painted) {
+				t.Fatal("the coloured rendering carries no escape sequences at all")
+			}
+			if stripped := sgrSequence.ReplaceAllString(rendering.painted, ""); stripped != rendering.plain {
+				t.Errorf("colour changes more than colour.\n--- plain ---\n%s\n--- stripped ---\n%s",
+					rendering.plain, stripped)
+			}
+		})
 	}
 }
 
