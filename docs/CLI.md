@@ -241,7 +241,9 @@ backend that records no deletions, a window with no state before it, a column
 that could not show a row whole — and they are the one thing on the screen a
 reader cannot skip and still read the table correctly, so they are marked and
 never dimmed. Lines opening `→` are provenance: which sink, which cluster
-identity, which step of the resolution chain answered.
+identity, which step of the resolution chain answered. **On a terminal those
+recede, unless the chain chose something you would not assume** — see
+[Where the data comes from](#where-the-data-comes-from).
 
 **Rows read oldest first, so the newest change is the last line printed** — the
 one immediately above your prompt, because this CLI does not page. Which changes
@@ -330,6 +332,18 @@ too:
 
 `--all-incarnations` adds a `UID` column, so no two of them can blur together in
 one table.
+
+[`diff`](#diff) and [`blame`](#blame) print the same banner over the same
+selection, and neither has `--all-incarnations` — a diff or a field table spanning
+two UIDs is the splice this section exists to prevent. On those two the banner
+offers `--uid`, and names `timeline --all-incarnations` as where the others can be
+read:
+
+```
+! payments/checkout has had 2 incarnations in this window; showing the newest
+  (7c9e6679-…). Pass --uid to pin one, or `timeline --all-incarnations` to see
+  them all
+```
 
 ### An empty result is never presented on its own
 
@@ -683,7 +697,10 @@ make fields written inside the window render as `(before window)` — a false
 statement produced by a flag rather than by the data. The window is the bound here;
 `--max-objects` is still the circuit breaker for a cold scan. There is no
 `--all-incarnations` either, because one field table spanning two UIDs attributes
-fields to changes made to two different objects that happened to share a name.
+fields to changes made to two different objects that happened to share a name. The
+banner over a reused name says so — it offers `--uid` and points at
+[`timeline --all-incarnations`](#incarnations) rather than naming a flag this
+command would refuse.
 
 ### A field is attributed to the change that wrote it, not to the one that named it
 
@@ -1408,6 +1425,30 @@ Those lines go to **stderr**, so `-o json | jq` never receives them. They are no
 optional: a tool that silently picked between four sources would eventually read
 the wrong one and be believed, and for an audit trail being believed while wrong is
 the worst available failure.
+
+**They are dimmed on a terminal when they say the expected thing, and left at full
+weight when they do not.** Both lines print on every invocation, so a register that
+never varied would be one you learned to skip inside a week — which is exactly the
+week one of them starts saying something you needed to read. Two states, and
+nothing else about the line changes:
+
+| The line says | Weight | Why |
+|---------------|--------|-----|
+| Step 4 answered — the cluster's own sink | dimmed | There was exactly one, so the tool went to the single place the cluster points at. Nothing in it to check. |
+| Step 1, 2 or 3 answered — `--source`, `--sink`, a profile | full weight | Something **shadowed** what discovery would have found: a flag from a shell alias, a stanza written months ago. |
+| The identity came from `--cluster-id` or the context mapping | dimmed | Your own words handed back. |
+| The identity came from the operator's Deployment or from the sink | full weight | The tool worked it out. It is usually right, and when it is not it does not fail — it returns another cluster's history looking exactly like an answer. |
+
+The `→` marker itself never changes weight, so the two markers stay tellable apart
+at a glance whatever the line after them is doing. Neither state is ever promoted
+to a `!` notice: nothing has gone wrong, and that tier means the data on its own
+misleads.
+
+**Under `--color=never`, `NO_COLOR` or a redirect this changes nothing at all** —
+same lines, same words, same order, byte for byte. There is no `--quiet`, and
+deliberately: suppressing provenance would remove the record of where an answer
+came from, which is not a thing an audit reader should be able to switch off by
+accident. `2>/dev/null` is still there, and having to type it is the point.
 
 Steps 2 and 4 read an address a cluster wrote for itself, which is why the first
 thing many people meet is a `no such host` from a laptop. That is the subject of

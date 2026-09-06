@@ -188,6 +188,49 @@ func stepWasTaken(chain []ChainStep, name string) bool {
 	return false
 }
 
+// answeringStep names the step that produced a chain's result, or the empty
+// string when none did.
+//
+// A chain stops at the step that answers it, so there is at most one, and it is
+// read off the record the walk left rather than inferred from the result: the
+// result is a sentence, and a sentence assembled for a human is the wrong thing
+// to take a decision from. It is the counterpart of stepWasTaken, which asks
+// about one named step instead of asking which one it was.
+func answeringStep(chain []ChainStep) string {
+	for _, step := range chain {
+		if step.Outcome == StepAnswered {
+			return step.Step
+		}
+	}
+	return ""
+}
+
+// clusterIDRoutine reports whether the identity was stated rather than inferred.
+//
+// The first two steps are the user's own words handed back: --cluster-id is them
+// saying it outright, and the context mapping is them having said it once for
+// this kubeconfig context. There is nothing in either for a reader to check, so
+// the notice announcing them recedes.
+//
+// The last two are the tool working it out. Reading CLUSTER_ID off whichever
+// Deployment carries the operator's label answers for the cluster the kubeconfig
+// currently points at, which is not always the cluster the reader has in mind;
+// taking the sink's only cluster answers for whatever history happens to be in
+// there. Both are usually right and both are silently wrong when they are not —
+// and being wrong about the identity does not fail a query, it returns another
+// cluster's history looking exactly like an answer. That is the case the notice
+// exists for, so it is the case that stays at full weight.
+//
+// The chain's own record is what it reads, which is why a step reordered in
+// resolveClusterID cannot leave this agreeing with a chain that no longer runs.
+func clusterIDRoutine(chain []ChainStep) bool {
+	switch answeringStep(chain) {
+	case stepClusterIDFlag, stepContextMapping:
+		return true
+	}
+	return false
+}
+
 // Inspection is what the two chains decided, step by step.
 //
 // It is the value `kuberecord config resolve` renders, and the reason it exists

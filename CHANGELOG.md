@@ -137,6 +137,39 @@ than a summary of them.
   dropped or reworded, and a redirect, a pipe or a golden file sees the same
   characters it saw before.
 
+- **The two resolution notices recede on a terminal, and stop receding when the
+  chain chose something you would not assume.** `→ discovered …` and
+  `→ cluster-id …` print on every invocation, so a register that never varied was
+  one you learned to skip inside a week — which is exactly the week one of them
+  started saying something you needed to read. They are the other half of the
+  rule above: `!` is marked and never dimmed, `→` is provenance and now looks
+  like it.
+
+  The ordinary resolution is dimmed: the backend came from the cluster's own sink
+  because there was exactly one of them, and the identity came from `--cluster-id`
+  or from the context mapping — your own words handed back. **A resolution that
+  shadowed the ordinary one stays at full weight**: `--source`, `--sink` or a
+  profile stanza answering in front of a discoverable sink, and an identity the
+  tool worked out for itself from the operator's Deployment or from the sink's
+  contents. That second pair is not a warning and is not marked as one — nothing
+  has gone wrong — but it is the case where being wrong does not fail the query,
+  it returns another cluster's history looking exactly like an answer. The line
+  announcing that a cluster holds several operators and the tool picked one is at
+  full weight for the same reason. Which state a line is in is derived from the
+  step that answered, so a chain reordered later cannot leave the weights
+  describing a walk that no longer happens.
+
+  **There is no `--quiet`, deliberately.** Suppressing provenance would remove the
+  record of where an answer came from, and that is not a thing an audit reader
+  should be able to switch off by accident; `2>/dev/null` is still there, and
+  having to type it is the point.
+
+  Plain output is byte for byte what it was. Under `--color=never`, `NO_COLOR`,
+  and any time stderr is not a terminal, the same lines are written in the same
+  words in the same order — the `→` marker itself never changes weight either, so
+  the two markers stay tellable apart at a glance whatever the line after them is
+  doing.
+
 - **A patch of several operations is summarized as `3 ops`, not `~3 ops`.** The
   `~` was borrowed from the operation vocabulary, where it means *replace* and is
   painted yellow to say so — so the cell read, in the only language that column
@@ -152,6 +185,29 @@ than a summary of them.
   prints no footer at all, so a footer being there means there is something behind
   it. It goes to stderr with every other notice, which keeps `timeline … | wc -l`
   counting changes.
+
+### Fixed
+
+- **The incarnation banner no longer offers `diff` and `blame` a flag they
+  reject.** Over a name that has belonged to more than one object, all three
+  object commands print the same banner naming the incarnations they are not
+  showing — and it ended "Pass `--all-incarnations` to see them all", which only
+  `timeline` has. On `diff` and `blame` that answered "how do I see the others?"
+  with `unknown flag`, which is worse than saying nothing: the reader spends the
+  suggestion, is refused, and is left with no second one.
+
+  Those two now read "Pass `--uid` to pin one, or `` `timeline
+  --all-incarnations` `` to see them all" — the flag they do have, and the command
+  that has the other. Neither gains `--all-incarnations`: a diff or a field table
+  spanning two UIDs would attribute one object's changes to another that happened
+  to wear the same name, which is the splice the banner exists to prevent.
+  `timeline`'s banner is unchanged.
+
+  Found by a sweep of every flag that changes what a reader sees rather than what
+  is queried — `--full`, `--with-events`, `--all-incarnations`, `--reverse` — for
+  whether it is named at the point its absence is visible. It was the only gap;
+  a test now asserts that no notice names a bare flag its own command does not
+  define.
 
 ## [0.3.2] - 2026-09-04
 

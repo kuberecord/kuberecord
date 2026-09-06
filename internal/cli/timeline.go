@@ -72,6 +72,12 @@ import (
 // up. See holdForDisplayOrder for the trap in conflating the two.
 const defaultLimit = 100
 
+// timelineCommand is the command a notice points a reader at when the question
+// it raises is answerable somewhere other than where it was asked. It is bare,
+// as scopesCommand is, because a notice names the subcommand and the reader
+// already knows how they invoked the binary.
+const timelineCommand = "timeline"
+
 // scopesCommand is the command a notice points a reader at when the answer
 // depends on what was being watched.
 const scopesCommand = "scopes"
@@ -529,6 +535,24 @@ type TimelineRequest struct {
 	// newest.
 	AllIncarnations bool
 
+	// AllIncarnationsOffered says the command being run has the
+	// --all-incarnations flag, so the banner that names the incarnations it is
+	// not showing may point at it.
+	//
+	// `timeline` is the only one. `diff` and `blame` deliberately have no such
+	// flag — one field table or one diff spanning two UIDs is the splice
+	// Invariant 7 forbids, and blame.go states why at length — and the banner is
+	// shared by all three, so without this it answered "how do I see the others?"
+	// on two commands with a flag they reject.
+	//
+	// Spelled as an offer rather than as a suppression, unlike NoPriorValues,
+	// because the failures are not symmetrical: a command that forgets to set
+	// this loses one suggestion from a notice, while a command that had to
+	// remember to *unset* it would send a reader to a usage error. So the
+	// conservative claim is the zero value, and RunTimeline pins the other one on
+	// the way in rather than trusting its callers to.
+	AllIncarnationsOffered bool
+
 	// Actors, ExcludeActors and FieldPaths are the read plane's predicates,
 	// already in its own grammar.
 	Actors        []string
@@ -608,6 +632,12 @@ func RunTimeline(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
+	// Pinned here rather than filled in by the caller, as RunBlame pins Reverse:
+	// having the flag is a fact about this command, and a field the wiring had to
+	// remember to set is one a second call site — a test, a future entry point —
+	// would leave false, silently costing the banner its suggestion.
+	request.AllIncarnationsOffered = true
+
 	if request.Structured != "" {
 		return runTimelineStructured(ctx, backend, request, streams, opts)
 	}

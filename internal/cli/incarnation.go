@@ -155,8 +155,8 @@ func pinnedNotices(request TimelineRequest, uids []string) []render.Notice {
 // otherIncarnationNotices is the banner that keeps a single-incarnation timeline
 // honest.
 //
-// It says how many others there are and which flag shows them, because a reader
-// who is not told cannot know that the history they are looking at begins where
+// It says how many others there are and how to reach them, because a reader who
+// is not told cannot know that the history they are looking at begins where
 // another object's ended.
 func otherIncarnationNotices(
 	request TimelineRequest, incarnations []query.Incarnation, newest string,
@@ -166,10 +166,32 @@ func otherIncarnationNotices(
 		return nil
 	}
 	return []render.Notice{{
-		Text: fmt.Sprintf("%s has had %s in this window; showing the newest (%s). "+
-			"Pass --all-incarnations to see them all, or --uid to pin one",
-			describeObject(request.Ref), pluralIncarnations(len(incarnations)), newest),
+		Text: fmt.Sprintf("%s has had %s in this window; showing the newest (%s). %s",
+			describeObject(request.Ref), pluralIncarnations(len(incarnations)), newest,
+			incarnationRemedy(request)),
 	}}
+}
+
+// incarnationRemedy names the ways out of a single-incarnation view that the
+// command being run actually has.
+//
+// The banner is shared by three commands and the flag is not: `timeline` has
+// --all-incarnations, and `diff` and `blame` deliberately do not (see
+// TimelineRequest.AllIncarnationsOffered). Naming it on those two would answer
+// "how do I see the others?" with `unknown flag`, which is a worse affordance
+// than not naming it — the reader types it, is refused, and is left with no
+// second suggestion at the moment they most need one.
+//
+// So the other two name the flag they do have and the command that has the other
+// one. Pointing at a sibling command rather than at the documentation is the
+// same move explainEmpty makes with `scopes`: the next thing to type, not the
+// next thing to read.
+func incarnationRemedy(request TimelineRequest) string {
+	if request.AllIncarnationsOffered {
+		return "Pass --all-incarnations to see them all, or --uid to pin one"
+	}
+	return fmt.Sprintf("Pass --uid to pin one, or `%s --all-incarnations` to see them all",
+		timelineCommand)
 }
 
 // pluralIncarnations spells the count so the banner reads as a sentence.
