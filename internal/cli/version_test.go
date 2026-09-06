@@ -163,6 +163,24 @@ func TestVersionYAMLIsTheSameDocument(t *testing.T) {
 	}
 }
 
+// TestVersionYAMLOpensLikeAKubernetesDocument.
+//
+// This document is not an envelope — it carries no metadata and no items — but it
+// carries render.EnvelopeAPIVersion and a kind of its own, so it is governed by
+// the same contract and has to open the same way. Sorted alphabetically `kind`
+// was sixth of eight, below the whole backends array.
+func TestVersionYAMLOpensLikeAKubernetesDocument(t *testing.T) {
+	asYAML, _, code := run(t, "version", "-o", "yaml")
+	if code != exit.Success {
+		t.Fatalf("yaml exit code = %d", code)
+	}
+
+	want := []string{"apiVersion", "kind", "version", "commit", "buildDate", "goVersion", "platform", "backends"}
+	if got := topLevelYAMLKeys(asYAML); !slices.Equal(got, want) {
+		t.Errorf("the version document opens %v, want %v\n%s", got, want, asYAML)
+	}
+}
+
 // TestVersionRefusesFormatsItHasNoDocumentFor is the "no silent errors" half.
 //
 // `jsonl` streams one item per line for a result larger than memory and `diff`

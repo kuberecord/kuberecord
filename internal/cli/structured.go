@@ -145,26 +145,21 @@ func envelopeHead(backend *resolve.Backend, kind string, coverage coverageAnswer
 	}
 }
 
-// changeItem is one change as the envelope carries it.
+// changeItem is one change as the envelope carries it, or the finding that the
+// row cannot honestly be carried at all.
 //
-// The type is query.Change unchanged, so the field names are the schema's column
-// names by construction rather than by a mapping somebody has to keep in step.
-// What it fixes is the *shape* of two absences: a nil slice and a nil map encode
-// as JSON null, and the columns they mirror are an array and a map that a backend
-// returns empty. The contract already says which reading is the honest one — of
-// an actorless deletion, query.Change.Actors says "an empty list is the honest
-// answer rather than a missing one" — and null is the other reading. It also
-// breaks the obvious consumer: `.actors[]` fails on a null and yields nothing on
-// an empty list, and failing is not what "this deletion had no actors" should do
-// to somebody's pipeline.
-func changeItem(change query.Change) query.Change {
-	if change.Actors == nil {
-		change.Actors = []string{}
+// The shaping and the parsing both live in the contract's own package, where the
+// reasons for them are written down beside the fields they produce. What is added
+// here is the exit code: a row whose `data` or `diff` will not parse is corrupt
+// evidence rather than a malformed request, so it ends the invocation as a
+// runtime failure and not as a usage one — a script that retries on failure
+// should not retry this, but it must not mistake it for a typo either.
+func changeItem(change query.Change) (render.ChangeItem, error) {
+	item, err := render.NewChangeItem(change)
+	if err != nil {
+		return render.ChangeItem{}, exit.RuntimeErrorf("%w", err)
 	}
-	if change.Labels == nil {
-		change.Labels = map[string]string{}
-	}
-	return change
+	return item, nil
 }
 
 // writeItems writes a whole answer through an envelope stream.

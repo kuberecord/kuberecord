@@ -22,24 +22,77 @@
   },
   "items": [
     {
-      "ts": "2026-08-28T14:09:40.9Z",
-      "event_type": "Modified",
-      "actors": [],
+      "ts": "2026-08-28T14:02:58.001Z",
+      "event_type": "Added",
+      "actors": [
+        "kubectl-client-side-apply"
+      ],
       "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "resource_version": "1004",
+      "resource_version": "1001",
       "api_version": "apps/v1",
-      "data": "",
-      "diff": "[{\"op\":\"replace\",\"path\":\"/metadata/annotations/deployment.kubernetes.io~1revision\",\"value\":\"2\"}]",
       "sha256": "",
       "labels": {},
+      "data": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "name": "checkout",
+          "namespace": "payments",
+          "annotations": {
+            "deployment.kubernetes.io/revision": "1"
+          }
+        },
+        "spec": {
+          "replicas": 3,
+          "minReadySeconds": 10,
+          "template": {
+            "spec": {
+              "containers": [
+                {
+                  "name": "checkout",
+                  "image": "registry.example/checkout:1.4.2",
+                  "resources": {
+                    "limits": {
+                      "cpu": "2",
+                      "memory": "2Gi"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "diff": [],
+      "hunks": []
+    },
+    {
+      "ts": "2026-08-28T14:03:11.482Z",
+      "event_type": "Modified",
+      "actors": [
+        "kubectl-client-side-apply"
+      ],
+      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "resource_version": "1002",
+      "api_version": "apps/v1",
+      "sha256": "",
+      "labels": {},
+      "data": {},
+      "diff": [
+        {
+          "op": "replace",
+          "path": "/spec/template/spec/containers/0/resources/limits/memory",
+          "value": "512Mi"
+        }
+      ],
       "hunks": [
         {
           "op": "replace",
-          "path": "metadata.annotations.deployment.kubernetes.io/revision",
-          "pointer": "/metadata/annotations/deployment.kubernetes.io~1revision",
-          "old": "1",
+          "path": "spec.template.spec.containers[0].resources.limits.memory",
+          "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
+          "old": "2Gi",
           "old_known": true,
-          "new": "2"
+          "new": "512Mi"
         }
       ]
     },
@@ -52,10 +105,25 @@
       "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
       "resource_version": "1003",
       "api_version": "apps/v1",
-      "data": "",
-      "diff": "[{\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":5},{\"op\":\"add\",\"path\":\"/spec/paused\",\"value\":true},{\"op\":\"remove\",\"path\":\"/spec/minReadySeconds\"}]",
       "sha256": "",
       "labels": {},
+      "data": {},
+      "diff": [
+        {
+          "op": "replace",
+          "path": "/spec/replicas",
+          "value": 5
+        },
+        {
+          "op": "add",
+          "path": "/spec/paused",
+          "value": true
+        },
+        {
+          "op": "remove",
+          "path": "/spec/minReadySeconds"
+        }
+      ],
       "hunks": [
         {
           "op": "replace",
@@ -83,43 +151,32 @@
       ]
     },
     {
-      "ts": "2026-08-28T14:03:11.482Z",
+      "ts": "2026-08-28T14:09:40.9Z",
       "event_type": "Modified",
-      "actors": [
-        "kubectl-client-side-apply"
-      ],
+      "actors": [],
       "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "resource_version": "1002",
+      "resource_version": "1004",
       "api_version": "apps/v1",
-      "data": "",
-      "diff": "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/memory\",\"value\":\"512Mi\"}]",
       "sha256": "",
       "labels": {},
+      "data": {},
+      "diff": [
+        {
+          "op": "replace",
+          "path": "/metadata/annotations/deployment.kubernetes.io~1revision",
+          "value": "2"
+        }
+      ],
       "hunks": [
         {
           "op": "replace",
-          "path": "spec.template.spec.containers[0].resources.limits.memory",
-          "pointer": "/spec/template/spec/containers/0/resources/limits/memory",
-          "old": "2Gi",
+          "path": "metadata.annotations.deployment.kubernetes.io/revision",
+          "pointer": "/metadata/annotations/deployment.kubernetes.io~1revision",
+          "old": "1",
           "old_known": true,
-          "new": "512Mi"
+          "new": "2"
         }
       ]
-    },
-    {
-      "ts": "2026-08-28T14:02:58.001Z",
-      "event_type": "Added",
-      "actors": [
-        "kubectl-client-side-apply"
-      ],
-      "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "resource_version": "1001",
-      "api_version": "apps/v1",
-      "data": "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"name\":\"checkout\",\"namespace\":\"payments\",\"annotations\":{\"deployment.kubernetes.io/revision\":\"1\"}},\"spec\":{\"replicas\":3,\"minReadySeconds\":10,\"template\":{\"spec\":{\"containers\":[{\"name\":\"checkout\",\"image\":\"registry.example/checkout:1.4.2\",\"resources\":{\"limits\":{\"cpu\":\"2\",\"memory\":\"2Gi\"}}}]}}}}",
-      "diff": "",
-      "sha256": "",
-      "labels": {},
-      "hunks": []
     }
   ]
 }

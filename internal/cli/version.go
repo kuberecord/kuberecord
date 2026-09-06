@@ -26,7 +26,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
-	"sigs.k8s.io/yaml"
 
 	"github.com/kuberecord/kuberecord/internal/cli/buildinfo"
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
@@ -446,12 +445,15 @@ func writeVersion(
 
 	case options.OutputYAML:
 		// Through the JSON tags, so the two serializations are one document in
-		// two syntaxes rather than two documents that resemble each other.
-		encoded, err := yaml.Marshal(doc)
+		// two syntaxes rather than two documents that resemble each other — and
+		// through render.YAMLDocument rather than sigs.k8s.io/yaml, so `kind`
+		// stays second here as it does in every structured answer beside it. See
+		// that file for why the familiar import buries it.
+		encoded, err := render.YAMLDocument(doc)
 		if err != nil {
 			return exit.RuntimeErrorf("encoding the version: %w", err)
 		}
-		return options.WriteAll(out, string(encoded))
+		return options.WriteAll(out, encoded)
 	}
 	// Unreachable through versionFormat, which accepts four spellings of three
 	// renderings and refuses the rest by name. Stated rather than ignored,

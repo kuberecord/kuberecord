@@ -50,6 +50,7 @@ import (
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 	chquery "github.com/kuberecord/kuberecord/internal/query/clickhouse"
 	"github.com/kuberecord/kuberecord/internal/query/objectsource"
@@ -110,6 +111,22 @@ func (o Origin) phrase() string {
 	}
 	return "using"
 }
+
+// routine reports whether this origin is the answer a reader already assumes.
+//
+// Discovery is the only one. It is the step that reads the cluster's own sink
+// custom resource because there is exactly one of them, so there is nothing in
+// it for a reader to check: the tool went to the single place the cluster points
+// at. Every other step is something else steering — a stanza written months ago,
+// a flag inherited from a shell alias, a --sink naming one of several — and it
+// has *shadowed* what discovery would otherwise have found. That is the case
+// where the notice is load-bearing rather than ceremonial, and it is why the
+// notice writer takes a weight (see notef).
+//
+// It is derived from the enum rather than recorded alongside it, so a fifth step
+// added to the chain has to answer this question in the same switch that already
+// gives it a phrase and a name.
+func (o Origin) routine() bool { return o == OriginDiscovered }
 
 // Step names this origin as a step of the chain rather than as a choice already
 // made.
@@ -231,6 +248,13 @@ type BackendResolver struct {
 	// noticesFailed records that stderr has gone, so the writer stands down.
 	noticesFailed bool
 
+	// The notice writer's colour decision, made once. It is memoized rather than
+	// taken per line because answering it costs an environment lookup and a
+	// terminal probe, and because two lines of one invocation disagreeing about
+	// whether stderr is a terminal would be a defect nobody could reproduce.
+	severity      render.Severity
+	severityBound bool
+
 	// The two chains' step-by-step records, rebuilt by every walk. They are
 	// filled in on the ordinary resolution path as well as the inspecting one,
 	// because a recording that only happened when somebody asked for it would be
@@ -271,7 +295,89 @@ func (r *BackendResolver) commandName() string {
 	return r.InvokedAs
 }
 
-// notef writes one resolution notice to stderr.
+// Notices, and the two weights they are written at.
+//
+// Every line here opens "→" and every line here is provenance: where the answer
+// came from, which is a fact a reader needs available and does not need to read
+// again on the four hundredth invocation. So the ordinary ones recede — D30's
+// other half, and what docs/CLI.md has said about "→" lines since v0.3.0.
+//
+// Receding all of them would be the mistake. These lines are worth printing
+// precisely for the invocation where one of them says something the reader did
+// not expect — a profile stanza written months ago shadowing the cluster's own
+// sink, an identity read off whichever operator Deployment the label selector
+// happened to return first — and a register that never varies is one a reader
+// learns to skip in a week. So the unexpected ones stay at full weight: not
+// promoted to a warning, because nothing has gone wrong and the "!" tier means
+// something else, simply not dimmed.
+//
+// Which is which is derived, never recorded. The backend half is Origin.routine;
+// the identity half is the step that answered, read off the chain's own record
+// (see clusterIDRoutine). Neither reads the description, because a sentence
+// assembled for a human is the last thing a decision should be taken from.
+
+// noticeSeverity binds this invocation's colour decision, once.
+//
+// The decision is made here rather than passed in, unlike UnreachableSinkError.Render
+// and SinkProfile.Explain, and the difference is that those return a string to a
+// caller that knows where it is going while this writes to a stream it was handed
+// at construction. Nothing above it is in a position to answer for a line this
+// package emits from the middle of a chain walk.
+func (r *BackendResolver) noticeSeverity() render.Severity {
+	if !r.severityBound {
+		mode := options.ColorAuto
+		if r.Flags != nil {
+			mode = r.Flags.Color
+		}
+		r.severity = render.NewSeverity(options.ShouldColorize(mode, r.Streams.ErrOut))
+		r.severityBound = true
+	}
+	return r.severity
+}
+
+// notef writes one resolution notice to stderr, receded.
+//
+// It is the default because most notices, most of the time, are the chain
+// reporting that it did the ordinary thing.
+func (r *BackendResolver) notef(format string, args ...any) {
+	r.writeNotice(r.noticeSeverity().Provenance(fmt.Sprintf(format, args...)))
+}
+
+// noteUnusualf writes one resolution notice to stderr at full weight.
+//
+// Full weight is the absence of the dimming rather than a register of its own:
+// the line is still provenance, and promoting it to Warning would spend a tier
+// whose whole meaning is "the data on its own misleads" on a resolution that is
+// merely worth looking at. Under --color=never it is byte for byte the line
+// notef would have written, which is the property that keeps the two weights a
+// terminal affordance and not a change to the output.
+func (r *BackendResolver) noteUnusualf(format string, args ...any) {
+	r.writeNotice(fmt.Sprintf(format, args...))
+}
+
+// noteAtf writes one notice receded or not, for the two call sites that decide
+// which as they go.
+//
+// A boolean parameter rather than two call sites choosing a method, because the
+// alternative at both of them is a two-line branch around one Fprintf whose
+// format string would then be written twice — and a format string written twice
+// is a format string that eventually differs.
+func (r *BackendResolver) noteAtf(routine bool, format string, args ...any) {
+	if routine {
+		r.notef(format, args...)
+		return
+	}
+	r.noteUnusualf(format, args...)
+}
+
+// writeNotice puts one already-painted notice on stderr behind the "→" marker.
+//
+// The marker is left unpainted, exactly as render.renderNotices leaves "!"
+// unpainted: the tier belongs to the sentence, and a marker that dimmed with the
+// line would make the severity a property of one character while the part
+// actually read carried none. It also keeps the left edge of the stream scannable
+// at one weight, so "→" and "!" stay tellable apart at a glance whatever the line
+// after them is doing.
 //
 // The write is checked, because every fallible call in this package is, and then
 // deliberately not propagated: a failed write to stderr means stderr itself has
@@ -280,11 +386,11 @@ func (r *BackendResolver) commandName() string {
 // stdout, so failing the command would trade a working answer for an unreportable
 // diagnostic. Every later notice would fail identically, so the writer stands down
 // instead of retrying once a line for the rest of the invocation.
-func (r *BackendResolver) notef(format string, args ...any) {
+func (r *BackendResolver) writeNotice(text string) {
 	if r.noticesFailed || r.Streams.ErrOut == nil {
 		return
 	}
-	if _, err := fmt.Fprintf(r.Streams.ErrOut, "→ "+format+"\n", args...); err != nil {
+	if _, err := fmt.Fprintf(r.Streams.ErrOut, "→ %s\n", text); err != nil {
 		r.noticesFailed = true
 	}
 }
@@ -387,7 +493,8 @@ func (r *BackendResolver) operatorNamespace(ctx context.Context) (string, error)
 func (r *BackendResolver) Resolve(ctx context.Context) (*Backend, error) {
 	inspection := r.walk(ctx, walkOptions{
 		announce: func(backend *Backend) {
-			r.notef("%s %s", backend.Origin.phrase(), backend.Description)
+			r.noteAtf(backend.Origin.routine(), "%s %s",
+				backend.Origin.phrase(), backend.Description)
 		},
 	})
 	if inspection.BackendErr != nil {
@@ -401,7 +508,8 @@ func (r *BackendResolver) Resolve(ctx context.Context) (*Backend, error) {
 		// the resolution failure, not the tidying up.
 		return nil, errors.Join(inspection.ClusterIDErr, backend.Close())
 	}
-	r.notef("cluster-id %s (%s)", backend.ClusterID, backend.ClusterIDSource)
+	r.noteAtf(clusterIDRoutine(inspection.ClusterIDSteps), "cluster-id %s (%s)",
+		backend.ClusterID, backend.ClusterIDSource)
 
 	return backend, nil
 }

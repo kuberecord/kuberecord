@@ -128,7 +128,6 @@ func explainEmpty(
 			Text: fmt.Sprintf("no changes recorded for %s in %s, and this backend has no scope log: "+
 				"it cannot say whether that means nothing changed or nothing was watching",
 				object, window),
-			Warning: true,
 		}}, nil
 	}
 
@@ -145,7 +144,6 @@ func explainEmpty(
 				"%s, when %s opened the scope: a change before then would not have been recorded",
 				object, window, describeKind(request.Ref),
 				render.FormatInstant(earliest.From), describeRule(earliest)),
-			Warning: true,
 		}}, nil
 	}
 

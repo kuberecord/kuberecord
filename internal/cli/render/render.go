@@ -137,6 +137,7 @@ func (o Options) width() int {
 // enabled flag and a global writer, and this package deliberately has neither.
 const (
 	ansiReset   = "\x1b[0m"
+	ansiBold    = "\x1b[1m"
 	ansiDim     = "\x1b[2m"
 	ansiRed     = "\x1b[31m"
 	ansiGreen   = "\x1b[32m"

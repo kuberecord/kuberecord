@@ -1,0 +1,4 @@
+[1mNOT A DEPLOYABLE MANIFEST[0m
+[2mCluster    prod-eu-1[0m
+[2mBase       2026-08-14T09:12:44.317Z  Modified[0m
+! [33mthis backend does not record deletions, so a timeline that stops is not proof the object was deleted[0m

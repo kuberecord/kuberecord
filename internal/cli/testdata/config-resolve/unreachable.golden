@@ -24,7 +24,7 @@ reachability
 === error ===
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: lookup clickhouse.kuberecord-system.svc: no such host
 
-ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so discovery was right and so is
 the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on

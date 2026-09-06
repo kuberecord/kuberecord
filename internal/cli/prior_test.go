@@ -144,7 +144,7 @@ func TestPriorValuesDegradeWhenStateCannotBeReconstructed(t *testing.T) {
 				t.Errorf("the new value was lost along with the prior one:\n%s", stdout)
 			}
 			// The new values are still exact, and must still be there.
-			if !strings.Contains(stdout, "~3 ops") {
+			if !strings.Contains(stdout, "3 ops") {
 				t.Errorf("the rows themselves were lost along with their prior values:\n%s", stdout)
 			}
 		})

@@ -113,7 +113,7 @@ func TestScopesWritesNoTableForNoPeriods(t *testing.T) {
 		Cluster: "prod-eu-1",
 		Scope:   "Secret in namespace payments",
 		Window:  "all recorded history",
-		Notices: []render.Notice{{Text: "nothing was ever watching this", Warning: true}},
+		Notices: []render.Notice{{Text: "nothing was ever watching this"}},
 	}
 	if err := render.WriteScopes(&out, &errOut, doc, render.Options{Width: 120}); err != nil {
 		t.Fatalf("WriteScopes: %v", err)

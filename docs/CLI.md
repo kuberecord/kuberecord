@@ -225,15 +225,31 @@ UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
 TIME (UTC)               EVENT     ACTOR                      CHANGE
-2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
-2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
+2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
 The header and the table go to **stdout**; every banner, notice and explanation
 goes to **stderr**. One sentence: stdout is the data, stderr explains it. That is
 what makes `timeline … | wc -l` count changes.
+
+Lines opening `!` are notices. They are the qualifications on the answer — a
+backend that records no deletions, a window with no state before it, a column
+that could not show a row whole — and they are the one thing on the screen a
+reader cannot skip and still read the table correctly, so they are marked and
+never dimmed. Lines opening `→` are provenance: which sink, which cluster
+identity, which step of the resolution chain answered. **On a terminal those
+recede, unless the chain chose something you would not assume** — see
+[Where the data comes from](#where-the-data-comes-from).
+
+**Rows read oldest first, so the newest change is the last line printed** — the
+one immediately above your prompt, because this CLI does not page. Which changes
+are selected is a separate matter and has not moved: `--limit` still takes the
+**newest** N, and only their layout runs forward. `--reverse` puts the newest at
+the top.
 
 ### Flags
 
@@ -241,13 +257,13 @@ what makes `timeline … | wc -l` count changes.
 |------|--------------|
 | `--since`, `--until` | Bound the window. Either a duration — `90m`, `6h`, `3d`, `2w`, `1d6h` — or an instant: `2026-08-20`, `2026-08-20 14:00:00`, `2026-08-20T14:00:00Z`. Both read as *ago*. |
 | `--from`, `--to` | Aliases for `--since` and `--until`, spelled the way the structured output and the query contract spell these bounds. Giving one bound under both names with two different values is a usage error. |
-| `--limit` | At most this many changes, newest first. Default `100`; `0` means no limit. |
-| `--reverse` | Show the same changes oldest first. It reorders rows; it does not select different ones. |
+| `--limit` | At most this many changes. It selects the **newest** N, and they are displayed oldest first. Default `100`; `0` means no limit. |
+| `--reverse` | Show the same changes newest first. It reorders rows; it does not select different ones. |
 | `--actor`, `--exclude-actor` | Field-manager predicates. Repeatable. `--exclude-actor` is applied second and wins on conflict. |
 | `--field` | Field-path prefixes, repeatable. Either spelling works: `spec.containers[0].image` or `spec.containers.0.image`. |
 | `--uid` | Pin the timeline to one incarnation. |
 | `--all-incarnations` | Show every incarnation in the window, with a `UID` column. |
-| `--full` | Print every operation of every patch, unshortened. |
+| `--full` | Print every operation of every patch, unshortened. The footer names it when a row was shortened without it. |
 | `--with-events` | Interleave the Kubernetes Events recorded about the object. |
 
 `-o wide` adds the full UID and the resource version, and prints timestamps at the
@@ -261,15 +277,25 @@ Against an object archive the window is not a filter, it is the work — see
 
 A one-operation patch is one line, with the operation's glyph — `+` added, `-`
 removed, `~` replaced — the field path, and the values. A larger patch is
-summarized as `~N ops`, and `--full` expands it:
+summarized as `N ops`, and `--full` expands it:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments --full
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10
 ```
+
+The count carries no glyph. `+`, `-` and `~` mean an operation happened, here and
+in the hunk view, and a summary is not an operation — `~3 ops` said, in the only
+vocabulary this column has, that something called "3 ops" had been replaced.
+
+**`--full` is named once, in the footer, and only when a row was actually
+shortened.** A row summarized as a count and a row whose path the column had to
+elide are both rows the flag would show more of; a timeline where every row fits
+prints no footer at all, so a footer that is there means there is something
+behind it.
 
 Paths are RFC 6901 JSON Pointers converted to a dotted form with bracketed array
 indices, elided in the middle when they exceed the column. The head is kept
@@ -306,6 +332,18 @@ too:
 
 `--all-incarnations` adds a `UID` column, so no two of them can blur together in
 one table.
+
+[`diff`](#diff) and [`blame`](#blame) print the same banner over the same
+selection, and neither has `--all-incarnations` — a diff or a field table spanning
+two UIDs is the splice this section exists to prevent. On those two the banner
+offers `--uid`, and names `timeline --all-incarnations` as where the others can be
+read:
+
+```
+! payments/checkout has had 2 incarnations in this window; showing the newest
+  (7c9e6679-…). Pass --uid to pin one, or `timeline --all-incarnations` to see
+  them all
+```
 
 ### An empty result is never presented on its own
 
@@ -374,6 +412,11 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
+2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+  ~ spec.template.spec.containers[0].resources.limits.memory
+      - 2Gi
+      + 512Mi
+
 2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
   ~ spec.replicas
       - 3
@@ -382,14 +425,11 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
       + true
   - spec.minReadySeconds
       - 10
-
-2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
-  ~ spec.template.spec.containers[0].resources.limits.memory
-      - 2Gi
-      + 512Mi
 ```
 
-`+` is green, `-` is red, `~` is yellow.
+`+` is green, `-` is red, `~` is yellow. Blocks read oldest first, as
+[`timeline`](#timeline)'s rows do and for the same reason; `--reverse` puts the
+newest at the top.
 
 ### Flags
 
@@ -398,8 +438,8 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 | `--since` | Only changes at or after this point: a duration (`6h`, `90m`, `3d`, `2w`) or an instant (`2026-08-20`, `2026-08-20T14:00:00Z`). |
 | `--until` | Only changes at or before this point, in the same forms. |
 | `--from`, `--to` | Aliases for `--since` and `--until`. |
-| `--limit` | Examine at most this many changes, newest first. Default 100; zero means no limit. |
-| `--reverse` | Oldest first. It reorders the blocks; it does not select different ones. |
+| `--limit` | Examine at most this many changes. It selects the **newest** N, and they are displayed oldest first. Default 100; zero means no limit. |
+| `--reverse` | Newest first. It reorders the blocks; it does not select different ones. |
 | `--uid` | Pin the diff to one incarnation. |
 | `--field` | Only changes touching one of these paths, matched by prefix, with every hunk of those changes. |
 | `--full` | Print every operation and every value in full. |
@@ -481,20 +521,23 @@ $ kuberecord get deploy/checkout -n payments --at 2h
 apiVersion: cli.kuberecord.io/v1alpha1
 kind: Object
 metadata:
-  backend: clickhouse
   cluster_id: prod-eu-1
+  backend: clickhouse
   coverage: ...
   reconstruction:
-    at: "2026-08-28T13:00:00Z"
-    base_event: Checkpoint
-    base_ts: "2026-08-28T14:05:02.117Z"
-    not_deployable: true
-    patches_applied: 0
     reconstructed: true
+    not_deployable: true
+    at: "2026-08-28T13:00:00Z"
+    base_ts: "2026-08-28T14:05:02.117Z"
+    base_event: Checkpoint
+    patches_applied: 0
 items:
 - at: "2026-08-28T13:00:00Z"
-  base_event: Checkpoint
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
   base_ts: "2026-08-28T14:05:02.117Z"
+  base_event: Checkpoint
+  patches_applied: 0
+  sha256: 283f5a59…
   object:
     apiVersion: apps/v1
     kind: Deployment
@@ -502,10 +545,11 @@ items:
       name: checkout
       namespace: payments
     ...
-  patches_applied: 0
-  sha256: 283f5a59…
-  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
 ```
+
+The reconstructed state is the **last** key of the item, under the six facts a
+reader judges it by — how old the base row is, how many patches were replayed over
+it — so a document of any length ends with the object it was run for.
 
 The state is at `.items[0].object`, inside the same [envelope](#structured-output)
 every other command answers in — so `kubectl apply -f` on this file fails loudly
@@ -553,11 +597,31 @@ old and two patches deserves more confidence than one assembled from a base thre
 months old and four hundred, and `base row` and `patches applied` are what let a
 reader judge which they have.
 
+On a terminal the block is **dimmed** — all of it except `NOT A DEPLOYABLE
+MANIFEST`, which is not. Provenance is a fact you need available and do not need
+to re-read; that one phrase is the line that has to survive you skimming past the
+rest of them.
+
 The header solves this for a person and not for a script: stderr is the stream
 `2>/dev/null` discards and a pipe never reads, so `get … -o json | jq` would
 otherwise receive a reconstruction with nothing in its input saying so. The same
 facts are therefore carried as fields on stdout, in every format, as
 [`metadata.reconstruction`](#metadatareconstruction-on-get).
+
+### Everything but the object recedes
+
+`-o yaml` on a terminal dims the whole kuberecord wrapper: the envelope's
+`apiVersion`, `kind` and `metadata`, and the six bookkeeping fields above the
+state (`at`, `uid`, `base_ts`, `base_event`, `patches_applied`, `sha256`). **The
+recorded object is the only thing left at full intensity**, so you find it by
+everything around it receding rather than by counting keys.
+
+Nothing is highlighted, and that matters when you redirect: under
+`--color=never`, under `NO_COLOR`, and any time stdout is not a terminal, the
+document is byte for byte what it has always been. `yq '.items[0].object'`, a
+`> object.yaml`, and a diff against a file you saved last week are all unaffected.
+`--color=always` forces the escapes on, which is worth knowing before piping that
+into a parser.
 
 ### `--verify`
 
@@ -633,7 +697,10 @@ make fields written inside the window render as `(before window)` — a false
 statement produced by a flag rather than by the data. The window is the bound here;
 `--max-objects` is still the circuit breaker for a cold scan. There is no
 `--all-incarnations` either, because one field table spanning two UIDs attributes
-fields to changes made to two different objects that happened to share a name.
+fields to changes made to two different objects that happened to share a name. The
+banner over a reused name says so — it offers `--uid` and points at
+[`timeline --all-incarnations`](#incarnations) rather than naming a flag this
+command would refuse.
 
 ### A field is attributed to the change that wrote it, not to the one that named it
 
@@ -939,7 +1006,7 @@ for which step decided what, run `kuberecord config resolve --check`
 
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 
-ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
 …
 ```
 
@@ -1076,10 +1143,16 @@ exists and the pipeline keeps running while producing empty findings.
       "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
       "resource_version": "1002",
       "api_version": "apps/v1",
-      "data": "",
-      "diff": "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/memory\",\"value\":\"512Mi\"}]",
       "sha256": "",
-      "labels": {}
+      "labels": {},
+      "data": {},
+      "diff": [
+        {
+          "op": "replace",
+          "path": "/spec/template/spec/containers/0/resources/limits/memory",
+          "value": "512Mi"
+        }
+      ]
     }
   ]
 }
@@ -1098,6 +1171,21 @@ exists and the pipeline keeps running while producing empty findings.
 `items` is always a list, including when it is empty. `metadata` carries
 `cluster_id`, `backend` and `coverage` on every kind, and `reconstruction` on
 `Object` alone.
+
+**Key order is declaration order, in every format.** A YAML envelope opens
+`apiVersion`, `kind`, `metadata`, `items` — the order every Kubernetes document
+opens in, and the order `-o json` has always emitted. A document that began
+`apiVersion, items` pushed the two fields that say what it is below a
+several-hundred-line array, and read as malformed even when it was not. Items
+follow the same rule, which puts the bulky fields at the end of each one: `data`
+and `diff` after the eight columns that identify a change, and the reconstructed
+`object` after the six facts a reader judges a reconstruction by. The
+[`version`](#version) and [`config resolve`](#config-resolve) documents open the
+same way.
+
+It is a property of the rendering rather than of the contract. Nothing `jq` or
+`yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
+only one that notices.
 
 **Three documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,
@@ -1120,6 +1208,35 @@ governed by — the same `apiVersion`, and therefore the same
 data reached two ways. A `jq` recipe written against a SQL result transfers here
 unchanged, which is the point of the mirroring rather than a detail of it. An
 empty `actors` or `labels` is `[]` and `{}`, never `null`.
+
+**The names are the schema's; two of the types are not.** `data` and `diff` are
+`String` columns in ClickHouse because ClickHouse stores strings, and emitting
+them as strings would mean handing a consumer a JSON document with JSON inside a
+string — a second parse before any path can be reached, and in YAML an escaped
+payload that wraps mid-token and cannot be read at all. So structured output
+carries them as what they are:
+
+| Field | Type in `-o json`, `-o jsonl` and `-o yaml` | Empty |
+|-------|---------------------------------------------|-------|
+| `data` | **Object** — the full recorded state, as recorded. | `{}` on a row that carries no state: a modification, a deletion. |
+| `diff` | **Array** — the RFC 6902 operations, in order, exactly as recorded. Each entry keeps its `path` as a JSON Pointer, which is what a patch library takes. | `[]` on a row that carries no patch: a first sighting, a snapshot, a deletion. |
+
+Empty is the empty structure and never `null`, and the key is never omitted: an
+absent patch and an empty patch are different facts, and dropping the key would
+make you test for presence to learn something the value already says.
+
+The bytes are carried through untouched, so a large integer, a float's written
+form and the key order of the recorded object all survive the trip. On a
+`Checkpoint`, `diff` describes the transition `data` already reflects and **must
+not be applied over it** — parsing the column does nothing to change that.
+
+**A column that will not parse fails the command.** A stored `diff` that is not a
+JSON array is corrupt evidence, and printing the raw string in its place would
+hide exactly what an audit tool exists to surface. The CLI names the row by its
+`ts` and `uid`, exits `1`, and emits nothing for it. The tables and the hunk view
+are unaffected — they mark the row `unreadable patch` and render the rest of the
+history — so a damaged row is still visible in the renderings that have somewhere
+to say so.
 
 A `Diff` item adds `hunks`, one per patch operation:
 
@@ -1205,7 +1322,14 @@ document is unchanged too. A reader gets both; a parser gets one.
 
 Within one `apiVersion`, fields may be **added** and are never renamed, removed or
 repurposed — the same policy the frozen schema carries. Consumers must ignore
-fields they do not recognize. Anything else is a new `apiVersion`.
+fields they do not recognize. Anything else — including a field's type — is a
+break, and is recorded as one in
+[`CHANGELOG.md`](https://github.com/kuberecord/kuberecord/blob/main/CHANGELOG.md).
+
+`v1alpha1` is where such a break is still affordable, and v0.4.0 spent it once:
+`data` and `diff` stopped being strings. An `alpha` version is the part of the
+contract that says so out loud, and the intent is that it is spent rarely and
+never quietly.
 
 ### `jsonl` streams
 
@@ -1215,8 +1339,8 @@ six-figure timeline can be piped into something that reads it a line at a time:
 
 ```
 {"apiVersion":"cli.kuberecord.io/v1alpha1","kind":"Timeline","metadata":{…}}
-{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…}
-{"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…}
+{"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…,"data":{},"diff":[{"op":"replace","path":"/spec/replicas","value":5}]}
+{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…,"data":{},"diff":[{"op":"replace","path":"/metadata/annotations/deployment.kubernetes.io~1revision","value":"2"}]}
 ```
 
 The head line carries no `items` key — it cannot, since nothing has been read yet
@@ -1225,10 +1349,11 @@ the stream as it arrives already knows whether an empty stream means "nothing
 changed" or "nothing was watching".
 
 One case holds items back, and it is bounded by a number you typed rather than by
-the result: `--reverse` with `--limit N` has to read the newest N changes before
-it can write the oldest of them, so at most N are held. Without a limit the two
-orderings select the same changes, so the query is simply asked oldest-first and
-nothing is held at all.
+the result: the display order is oldest first while `--limit N` selects the
+newest N, so those N have to be read before the oldest of them can be written, and
+at most N are held. `--limit 0` makes the two orderings select the same changes,
+so the query is simply asked oldest-first and nothing is held at all; `--reverse`
+asks for the order the backend already emits and holds nothing either.
 
 `json` and `yaml` are single documents and are complete before they are written,
 which is what a single document means.
@@ -1239,20 +1364,23 @@ The flagship question — who changed what — as one line per change:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments -o jsonl \
-  | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \(.diff)"'
-2026-08-28T14:05:02.117Z  kube-controller-manager    [{"op":"replace","path":"/spec/replicas",…
-2026-08-28T14:03:11.482Z  kubectl-client-side-apply  [{"op":"replace","path":"/spec/template/spec/…
+  | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \([.diff[].path] | join(" "))"'
+2026-08-28T14:03:11.482Z  kubectl-client-side-apply  /spec/template/spec/containers/0/resources/limits/memory
+2026-08-28T14:05:02.117Z  kube-controller-manager    /spec/replicas /spec/paused /spec/minReadySeconds
 ```
 
 `select(.ts)` is what skips the head line: it is the only line with no `ts`.
+`.diff` is an array, so `[.diff[].path]` reaches the paths directly — there is
+nothing to parse first, and a row with no patch yields an empty line rather than
+an error.
 
 Or, with the field paths already decoded, from `diff`:
 
 ```console
 $ kubectl kuberecord diff deploy/checkout -n payments --since 24h -o json \
   | jq -r '.items[] | . as $c | .hunks[] | "\($c.ts)  \($c.actors[0])  \(.path): \(.old) → \(.new)"'
-2026-08-28T14:05:02.117Z   kube-controller-manager    spec.replicas: 3 → 5
 2026-08-28T14:03:11.482Z   kubectl-client-side-apply  spec.template.spec.containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28T14:05:02.117Z   kube-controller-manager    spec.replicas: 3 → 5
 ```
 
 An operation whose prior value the replay could not establish renders `null`
@@ -1297,6 +1425,30 @@ Those lines go to **stderr**, so `-o json | jq` never receives them. They are no
 optional: a tool that silently picked between four sources would eventually read
 the wrong one and be believed, and for an audit trail being believed while wrong is
 the worst available failure.
+
+**They are dimmed on a terminal when they say the expected thing, and left at full
+weight when they do not.** Both lines print on every invocation, so a register that
+never varied would be one you learned to skip inside a week — which is exactly the
+week one of them starts saying something you needed to read. Two states, and
+nothing else about the line changes:
+
+| The line says | Weight | Why |
+|---------------|--------|-----|
+| Step 4 answered — the cluster's own sink | dimmed | There was exactly one, so the tool went to the single place the cluster points at. Nothing in it to check. |
+| Step 1, 2 or 3 answered — `--source`, `--sink`, a profile | full weight | Something **shadowed** what discovery would have found: a flag from a shell alias, a stanza written months ago. |
+| The identity came from `--cluster-id` or the context mapping | dimmed | Your own words handed back. |
+| The identity came from the operator's Deployment or from the sink | full weight | The tool worked it out. It is usually right, and when it is not it does not fail — it returns another cluster's history looking exactly like an answer. |
+
+The `→` marker itself never changes weight, so the two markers stay tellable apart
+at a glance whatever the line after them is doing. Neither state is ever promoted
+to a `!` notice: nothing has gone wrong, and that tier means the data on its own
+misleads.
+
+**Under `--color=never`, `NO_COLOR` or a redirect this changes nothing at all** —
+same lines, same words, same order, byte for byte. There is no `--quiet`, and
+deliberately: suppressing provenance would remove the record of where an answer
+came from, which is not a thing an audit reader should be able to switch off by
+accident. `2>/dev/null` is still there, and having to type it is the point.
 
 Steps 2 and 4 read an address a cluster wrote for itself, which is why the first
 thing many people meet is a `no such host` from a laptop. That is the subject of
@@ -1437,7 +1589,7 @@ $ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
 → cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-quickstart.svc:9000: dial tcp: lookup clickhouse.kuberecord-quickstart.svc: no such host
 
-ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so discovery was right and so is
 the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on
@@ -2002,7 +2154,7 @@ reachability
                        cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 
-ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
 …
 ```
 
@@ -2130,7 +2282,7 @@ announced on stderr, and an empty result names it. `--since` widens it.
 
 ```console
 $ kuberecord timeline deploy/checkout -n payments --source ~/archives/kuberecord --since 3d
-→ ~1,240 objects, ~3.1 GiB to scan for 3d: the objectsource backend has no index, so this window is the work
+! ~1,240 objects, ~3.1 GiB to scan for 3d: the objectsource backend has no index, so this window is the work
 ```
 
 The figures come from the listing alone — nothing is opened to produce them — so
@@ -2159,7 +2311,7 @@ stopped being a proxy for cost, so the width no longer decides:
 
 ```console
 $ kuberecord timeline deploy/checkout -n payments --source s3://acme-audit --since 6h
-→ the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
+! the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
 an unmeasured number of objects, because its size could not be determined — continue? [y/N]
 ```
 

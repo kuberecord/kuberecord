@@ -78,7 +78,7 @@ func TestJSONLWritesEachItemBeforeReadingTheNext(t *testing.T) {
 		},
 	}
 
-	if err := runStream(t, engine, streamRequest(0, false), written); err != nil {
+	if err := runStream(t, engine, streamRequest(0), written); err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
 	if got := written.lines(); got != total+1 {
@@ -96,7 +96,7 @@ func TestJSONLIsValidUnderALargeResult(t *testing.T) {
 
 	checker := &lineParser{t: t}
 	engine := &generatedEngine{caps: clickHouseCapabilities(), total: total}
-	if err := runStream(t, engine, streamRequest(0, false), checker); err != nil {
+	if err := runStream(t, engine, streamRequest(0), checker); err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
 
@@ -160,20 +160,22 @@ func liveHeapAtLastItem(t *testing.T, total int) uint64 {
 			live = stats.HeapAlloc
 		},
 	}
-	if err := runStream(t, engine, streamRequest(0, false), io.Discard); err != nil {
+	if err := runStream(t, engine, streamRequest(0), io.Discard); err != nil {
 		t.Fatalf("RunTimeline over %d changes: %v", total, err)
 	}
 	return live
 }
 
-// TestJSONLHoldsAtMostTheLimitWhenReversed pins the one case that cannot stream.
+// TestJSONLHoldsAtMostTheLimitWhenOldestFirst pins the one case that cannot
+// stream, which is the default one.
 //
-// --reverse with --limit has to read the newest N before it can write the oldest of
-// them, and the buffer is bounded by the limit rather than by the result. The
-// engine below returns far more changes than the limit, and the assertion is that
-// the number *read* is the limit — which is what makes the buffer's size a number
-// the user typed.
-func TestJSONLHoldsAtMostTheLimitWhenReversed(t *testing.T) {
+// The rows are displayed oldest first while --limit selects the newest N, so the
+// newest N have to be read before the oldest of them can be written, and the
+// buffer is bounded by the limit rather than by the result. The engine below
+// returns far more changes than the limit, and the assertion is that the number
+// *read* is the limit — which is what makes the buffer's size a number the user
+// typed.
+func TestJSONLHoldsAtMostTheLimitWhenOldestFirst(t *testing.T) {
 	const (
 		total = 10_000
 		limit = 25
@@ -181,7 +183,7 @@ func TestJSONLHoldsAtMostTheLimitWhenReversed(t *testing.T) {
 
 	engine := &generatedEngine{caps: clickHouseCapabilities(), total: total, limitAware: true}
 	var out bytes.Buffer
-	if err := runStream(t, engine, streamRequest(limit, true), &out); err != nil {
+	if err := runStream(t, engine, streamRequest(limit), &out); err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
 
@@ -194,7 +196,7 @@ func TestJSONLHoldsAtMostTheLimitWhenReversed(t *testing.T) {
 	if len(items) != limit {
 		t.Fatalf("%d items were written, want %d", len(items), limit)
 	}
-	// Oldest first, which is what --reverse asked for, over the newest `limit`
+	// Oldest first, which is the default display order, over the newest `limit`
 	// changes, which is what --limit selects. Getting the other end of history
 	// here would mean a cheap query had been turned into a different question.
 	if got := timestampOf(t, items[0]); !strings.HasPrefix(got, generatedStamp(total-limit)) {
@@ -203,12 +205,44 @@ func TestJSONLHoldsAtMostTheLimitWhenReversed(t *testing.T) {
 	}
 }
 
-// streamRequest is a `timeline … -o jsonl` for the generated fixture.
-func streamRequest(limit int, reverse bool) cli.TimelineRequest {
+// TestJSONLStreamsWhenReversed is the other half of the case above, and the
+// reason the buffer is a special case rather than the design.
+//
+// --reverse asks for the order the backend already emits, so nothing has to be
+// held whatever --limit says: the newest change is the first one read and the
+// first one written. Asserting the first item rather than the buffer is what
+// makes this observable from outside — a held answer would arrive oldest first.
+func TestJSONLStreamsWhenReversed(t *testing.T) {
+	const (
+		total = 10_000
+		limit = 25
+	)
+
+	engine := &generatedEngine{caps: clickHouseCapabilities(), total: total, limitAware: true}
+	request := streamRequest(limit)
+	request.Reverse = true
+
+	var out bytes.Buffer
+	if err := runStream(t, engine, request, &out); err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+
+	_, items := decodeJSONL(t, out.String())
+	if len(items) != limit {
+		t.Fatalf("%d items were written, want %d", len(items), limit)
+	}
+	if got := timestampOf(t, items[0]); !strings.HasPrefix(got, generatedStamp(total-1)) {
+		t.Errorf("the first item is %s, want the newest change (%s): --reverse is the order the "+
+			"backend emits, so it is written straight through", got, generatedStamp(total-1))
+	}
+}
+
+// streamRequest is a `timeline … -o jsonl` for the generated fixture, in the
+// default display order.
+func streamRequest(limit int) cli.TimelineRequest {
 	request := defaultRequest()
 	request.Structured = render.StructuredJSONL
 	request.Limit = limit
-	request.Reverse = reverse
 	return request
 }
 

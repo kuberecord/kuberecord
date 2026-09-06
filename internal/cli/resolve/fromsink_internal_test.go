@@ -590,10 +590,13 @@ func TestExplainColoursNothingButColour(t *testing.T) {
 	}
 
 	painted := derived.Explain(true)
-	if !strings.Contains(painted, ansiReset) {
+	if !sgrSequence.MatchString(painted) {
 		t.Fatal("the coloured rendering carries no escape sequences at all")
 	}
-	stripped := strings.NewReplacer(ansiReset, "", ansiBold, "", ansiDim, "").Replace(painted)
+	// Matched by shape rather than against a list of the sequences this rendering
+	// happens to use: a tier swapped for another one is a change to how the message
+	// reads and not a reason for this property to start passing vacuously.
+	stripped := sgrSequence.ReplaceAllString(painted, "")
 	if plain := derived.Explain(false); stripped != plain {
 		t.Errorf("colour changes more than colour.\n--- plain ---\n%s\n--- stripped ---\n%s",
 			plain, stripped)

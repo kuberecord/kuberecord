@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -413,7 +414,7 @@ func (e *UnreachableSinkError) Unwrap() error { return e.cause }
 // that consulted the environment itself would have golden files that changed with
 // the shell they were generated in.
 func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string {
-	paint := diagnosticPalette{enabled: colorize}
+	severity := render.NewSeverity(colorize)
 	d := e.diagnosis
 
 	service, namespace, port := d.serviceTarget()
@@ -426,34 +427,40 @@ func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string 
 	var out strings.Builder
 	line := func(text string) { out.WriteString(text + "\n") }
 
+	// The marker goes on the first line and on no other. This is a paragraph
+	// rather than a notice, so marking every line of it would put a column of "!"
+	// down the side of a page somebody is reading; marking the opening says the
+	// block is a warning, which is the thing that has to survive NO_COLOR.
+	//
 	// The address gets a line to itself, unwrapped, because it is the one string
 	// in this message a reader may need to compare character by character with
 	// what they have in a manifest.
-	line(fmt.Sprintf("%s records the address %s.", d.ref, d.addr))
+	line(render.WarningMarker + " " + severity.Warning(
+		fmt.Sprintf("%s records the address %s.", d.ref, d.addr)))
 	line("")
-	line(paint.dim("That name resolves inside the cluster and nowhere else, so discovery was right and so is"))
-	line(paint.dim("the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on"))
-	line(paint.dim("one, so it will not forward a port for you."))
+	line(severity.Warning("That name resolves inside the cluster and nowhere else, so discovery was right and so is"))
+	line(severity.Warning("the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on"))
+	line(severity.Warning("one, so it will not forward a port for you."))
 	line("")
-	line(paint.dim("Forward it yourself, then re-run against the forwarded address:"))
+	line(severity.Warning("Forward it yourself, then re-run against the forwarded address:"))
 	line("")
-	line(paint.bold(fmt.Sprintf("    kubectl port-forward -n %s svc/%s %s:%s",
+	line(severity.Emphasis(fmt.Sprintf("    kubectl port-forward -n %s svc/%s %s:%s",
 		namespace, service, port, port)))
-	line(paint.bold(fmt.Sprintf("    %s … --%s %s", invocation, options.FlagSinkAddr, forwarded)))
+	line(severity.Emphasis(fmt.Sprintf("    %s … --%s %s", invocation, options.FlagSinkAddr, forwarded)))
 	line("")
-	line(paint.dim("Or write it down once, and every later invocation reads it:"))
+	line(severity.Warning("Or write it down once, and every later invocation reads it:"))
 	line("")
-	line(paint.bold(fmt.Sprintf("    %s config set-profile %s --backend %s \\",
+	line(severity.Emphasis(fmt.Sprintf("    %s config set-profile %s --backend %s \\",
 		d.commandName, localProfileName, BackendClickHouse)))
-	line(paint.bold(fmt.Sprintf("        --addr %s --database %s --username %s \\",
+	line(severity.Emphasis(fmt.Sprintf("        --addr %s --database %s --username %s \\",
 		forwarded, d.database, d.username)))
-	line(paint.bold(fmt.Sprintf("        --password-env %s", passwordEnvName)))
-	line(paint.bold(fmt.Sprintf("    %s config use-profile %s", d.commandName, localProfileName)))
+	line(severity.Emphasis(fmt.Sprintf("        --password-env %s", passwordEnvName)))
+	line(severity.Emphasis(fmt.Sprintf("    %s config use-profile %s", d.commandName, localProfileName)))
 	line("")
-	line(paint.dim(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", passwordEnvName)))
-	line(paint.dim("recommended credential for it, and the operator's own is not. Both routes, and"))
-	line(paint.dim("why this tool will not forward the port for you:"))
-	line(paint.dim(docsOutsideCluster))
+	line(severity.Warning(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", passwordEnvName)))
+	line(severity.Warning("recommended credential for it, and the operator's own is not. Both routes, and"))
+	line(severity.Warning("why this tool will not forward the port for you:"))
+	line(severity.Warning(docsOutsideCluster))
 
 	return out.String()
 }
@@ -481,32 +488,13 @@ func (d diagnosis) serviceTarget() (service, namespace, port string) {
 	return name, d.namespace, port
 }
 
-// diagnosticPalette paints a line of the message, or does not.
+// This file used to carry a two-sequence palette of its own, bold for the
+// commands and dim for the prose around them. It does not any more.
 //
-// It carries two sequences and no more. The message is prose with commands in it,
-// so the whole of what colour has to convey is which lines are meant to be typed;
-// anything richer would be decoration on a page somebody is reading because
-// something went wrong. The disabled palette returns its argument unchanged, so
-// every call site reads the same whether colour is on or off — and so a call site
-// that forgot to check cannot exist.
-//
-// The sequences are written out rather than taken from a dependency for the reason
-// render's own are: a colour library brings a package-level enabled flag and a
-// global writer, and this package deliberately has neither.
-type diagnosticPalette struct{ enabled bool }
-
-const (
-	ansiReset = "\x1b[0m"
-	ansiBold  = "\x1b[1m"
-	ansiDim   = "\x1b[2m"
-)
-
-func (p diagnosticPalette) paint(sequence, text string) string {
-	if !p.enabled || text == "" {
-		return text
-	}
-	return sequence + text + ansiReset
-}
-
-func (p diagnosticPalette) bold(text string) string { return p.paint(ansiBold, text) }
-func (p diagnosticPalette) dim(text string) string  { return p.paint(ansiDim, text) }
+// Dim was the wrong register and the reason is the whole of Task 15.6: this page
+// is printed because a reader would otherwise be left with `no such host` and no
+// idea what to do about it, so rendering it as the quietest thing on the stream
+// made the most load-bearing paragraph in the CLI the easiest one to skip (D30).
+// It is Warning prose with Emphasis on the lines meant to be typed, in the same
+// closed vocabulary every notice uses — which is also what stops this message
+// from being the one rendering nobody remembers to keep consistent with the rest.

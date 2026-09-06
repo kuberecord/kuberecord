@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -356,9 +357,9 @@ func TestObjectRoutesTheHeaderAndStillMarksTheDocument(t *testing.T) {
 
 			// The provenance block reaches standard error whole, rather than as a
 			// summary of itself: it is the same bytes YAML carries as comments.
-			if errOut.String() != render.ObjectProvenance(doc) {
+			if errOut.String() != render.ObjectProvenance(doc, render.NewSeverity(false)) {
 				t.Errorf("stderr is not the provenance block.\n--- want ---\n%s\n--- got ---\n%s",
-					render.ObjectProvenance(doc), errOut.String())
+					render.ObjectProvenance(doc, render.NewSeverity(false)), errOut.String())
 			}
 			if strings.Contains(out.String(), "NOT A DEPLOYABLE MANIFEST") {
 				t.Errorf("the header reached stdout, where it would corrupt a pipe:\n%s", out.String())
@@ -460,7 +461,7 @@ func TestObjectYAMLKeepsItsHeaderAboveTheEnvelope(t *testing.T) {
 		t.Fatalf("WriteObject: %v", err)
 	}
 
-	header := render.ObjectProvenance(doc)
+	header := render.ObjectProvenance(doc, render.NewSeverity(false))
 	body, found := strings.CutPrefix(out.String(), header)
 	if !found {
 		t.Fatalf("the document does not open with the provenance block.\n--- want prefix ---\n%s"+
@@ -521,5 +522,133 @@ func TestReconstructionMarkerCannotDriftFromTheHeader(t *testing.T) {
 			t.Errorf("the header does not carry %q, so it and the marker describe different "+
 				"reconstructions:\n%s", want, out.String())
 		}
+	}
+}
+
+// Figure and ground: what recedes, what does not, and the one line that must
+// survive a skim.
+//
+// The criterion is a claim about two things at once — that the wrapper is painted
+// and that the recorded object is *not* — so both halves are asserted over the
+// same document. Asserting only the first would pass a rendering that painted
+// every line, which is the one outcome that would make the whole pass pointless.
+//
+// Nothing here re-asserts that colour changes nothing but colour. That is one
+// property over the whole CLI's output and it is asserted in one place,
+// TestColourIsNothingButColour in internal/cli/resolve, which carries a case for
+// this document.
+
+// The escape sequences the tiers paint in, spelled out rather than reached
+// through the renderer: a test that asked the code under test what dim means
+// would agree with it however it changed.
+const (
+	dimSequence   = "\x1b[2m"
+	boldSequence  = "\x1b[1m"
+	resetSequence = "\x1b[0m"
+)
+
+// paintedObjectDocument renders the fixture as `get -o yaml` on a terminal does.
+func paintedObjectDocument(t *testing.T) string {
+	t.Helper()
+
+	doc := reconstructedDocument()
+	doc.Coverage = "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)"
+
+	var out bytes.Buffer
+	if err := render.WriteObject(&out, io.Discard, doc, reconstructedHead(),
+		render.StructuredYAML, render.Options{Color: true}); err != nil {
+		t.Fatalf("WriteObject: %v", err)
+	}
+	return out.String()
+}
+
+// TestObjectYAMLRecedesAroundTheRecordedObject is the criterion this task exists
+// for.
+//
+// Everything a reader has already read on the previous invocation — the header,
+// the envelope's own identity and metadata, the six bookkeeping fields — is
+// provenance, and the recorded object is what is left at full intensity. The
+// object is found by everything else receding rather than by anything being done
+// to it, which is why the assertion on the payload is that it carries no escape
+// sequence at all.
+func TestObjectYAMLRecedesAroundTheRecordedObject(t *testing.T) {
+	lines := strings.Split(strings.TrimSuffix(paintedObjectDocument(t), "\n"), "\n")
+
+	objectKey := slices.Index(lines, dimSequence+"  object:"+resetSequence)
+	if objectKey < 0 {
+		t.Fatalf("the item's object key is not in the provenance tier, so the wrapper is not "+
+			"complete:\n%s", strings.Join(lines, "\n"))
+	}
+	if objectKey == len(lines)-1 {
+		t.Fatal("the fixture rendered no recorded object, so this test asserts nothing about one")
+	}
+
+	for _, line := range lines[:objectKey+1] {
+		if !strings.Contains(line, dimSequence) {
+			t.Errorf("a wrapper line renders at full intensity, so the object does not stand "+
+				"out by everything else receding: %q", line)
+		}
+	}
+	for _, line := range lines[objectKey+1:] {
+		if strings.Contains(line, "\x1b") {
+			t.Errorf("the recorded object is painted; it is the one thing here that must be left "+
+				"alone: %q", line)
+		}
+	}
+}
+
+// TestObjectHeaderEmphasisesOneLineAndNoMore.
+//
+// Emphasis is relative to what surrounds it: a block with two emphasised lines
+// has none, and the line that has to survive a reader skipping this block is the
+// one that stops them piping the document into `kubectl apply`. So the count is
+// the assertion, not merely the presence.
+func TestObjectHeaderEmphasisesOneLineAndNoMore(t *testing.T) {
+	painted := paintedObjectDocument(t)
+
+	if count := strings.Count(painted, boldSequence); count != 1 {
+		t.Errorf("the document carries %d emphasised runs, want exactly 1: a second one spends "+
+			"the first\n%s", count, painted)
+	}
+	if want := boldSequence + "NOT A DEPLOYABLE MANIFEST" + resetSequence; !strings.Contains(painted, want) {
+		t.Errorf("the emphasis is not on the sentence the header exists for:\n%s", painted)
+	}
+}
+
+// TestObjectYAMLKeepsABlockScalarInsideTheObject is the edge case the line pass
+// could plausibly get wrong.
+//
+// A recorded value holding a blank line is emitted as a literal block scalar, and
+// the blank line inside it is written with no indentation at all. A pass that read
+// indentation alone would take that as the end of the object and paint the rest of
+// the recorded state as wrapper — so a blank line inherits the block it is inside
+// rather than deciding one.
+func TestObjectYAMLKeepsABlockScalarInsideTheObject(t *testing.T) {
+	doc := reconstructedDocument()
+	doc.State = map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"data":       map[string]any{"nginx.conf": "worker_processes 1;\n\nevents {}\n"},
+	}
+
+	var out bytes.Buffer
+	if err := render.WriteObject(&out, io.Discard, doc, reconstructedHead(),
+		render.StructuredYAML, render.Options{Color: true}); err != nil {
+		t.Fatalf("WriteObject: %v", err)
+	}
+
+	document := out.String()
+	tail, found := strings.CutPrefix(
+		document[strings.Index(document, dimSequence+"  object:"+resetSequence):],
+		dimSequence+"  object:"+resetSequence+"\n")
+	if !found {
+		t.Fatalf("the recorded object is not in the document:\n%s", document)
+	}
+	if !strings.Contains(tail, "events {}") {
+		t.Fatalf("the fixture did not render as a block scalar, so the case is not covered:\n%s", tail)
+	}
+	if strings.Contains(tail, "\x1b") {
+		t.Errorf("a blank line inside a recorded value ended the object, and the rest of the "+
+			"recorded state was painted as wrapper:\n%s", tail)
 	}
 }

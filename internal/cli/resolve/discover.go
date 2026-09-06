@@ -388,6 +388,11 @@ func (r *BackendResolver) findOperatorDeployment(ctx context.Context) (*operator
 		// stderr rather than a vaguer version of it.
 		r.operatorUnseen = fmt.Sprintf("cannot list Deployments%s (%s)",
 			describeNamespace(namespace), reasonFor(err))
+		// Receded: this says a step had nothing, and the chain has another after it
+		// that will announce whatever it does find. On the shape D18 exists to serve
+		// — an archive read from a laptop whose kubeconfig is stale — it fires on
+		// every single invocation, which is exactly the never-varying signal the
+		// provenance tier is for.
 		r.notef("%s, so the cluster identity cannot be read from the operator", r.operatorUnseen)
 		return nil, nil
 	}
@@ -405,7 +410,13 @@ func (r *BackendResolver) findOperatorDeployment(ctx context.Context) (*operator
 		// Several operators is a legitimate installation — one per tenant, one per
 		// team — and picking the first silently would attribute the wrong cluster
 		// identity to a query. Say which was used and how to override it.
-		r.notef("this cluster has %d kuberecord operators; reading the identity from %s/%s "+
+		//
+		// At full weight, because this is the line admitting the tool chose. Every
+		// other notice on this stream reports a step that had one answer; this one
+		// reports a step that had several and took the first the label selector
+		// returned. Dimming it would recede the only warning a reader gets before
+		// they read another tenant's history.
+		r.noteUnusualf("this cluster has %d kuberecord operators; reading the identity from %s/%s "+
 			"(override with --%s)", len(list.Items), info.namespace, info.name, options.FlagClusterID)
 	}
 	r.operator = info

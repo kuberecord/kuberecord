@@ -26,7 +26,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
-	"sigs.k8s.io/yaml"
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
@@ -518,12 +517,15 @@ func writeResolution(out io.Writer, document resolutionDocument, format render.S
 
 	case render.StructuredYAML:
 		// Through the JSON tags, so the two serializations are one document in two
-		// syntaxes rather than two documents that resemble each other.
-		encoded, err := yaml.Marshal(document)
+		// syntaxes rather than two documents that resemble each other — and through
+		// render.YAMLDocument rather than sigs.k8s.io/yaml, so `kind` stays where a
+		// reader of any Kubernetes document expects it. See that file for why the
+		// familiar import puts it last.
+		encoded, err := render.YAMLDocument(document)
 		if err != nil {
 			return exit.RuntimeErrorf("encoding the resolution: %w", err)
 		}
-		return options.WriteAll(out, string(encoded))
+		return options.WriteAll(out, encoded)
 	}
 	// Unreachable through resolutionFormat, which accepts three formats and
 	// refuses the rest by name. Stated rather than ignored, because the

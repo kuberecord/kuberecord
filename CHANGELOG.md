@@ -16,6 +16,199 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Changed — BREAKING: CLI output
+
+- **`timeline` and `diff` display oldest first, and `--reverse` now means newest
+  first.** Both commands read top to bottom in the order the changes happened, so
+  the newest one is the last line printed — the line immediately above your
+  prompt. This CLI does not page, deliberately, in the way `kubectl logs` and
+  `journalctl` do not; under the old newest-first default the answer to "what
+  happened to this recently" sat at the top of a hundred rows and had to be
+  scrolled back to. `git log` survives that ordering because it pages by default,
+  and kuberecord is in the other category.
+
+  **Which changes are selected has not changed, and that is the point.** `--limit`
+  still takes the *newest* N: the query is still asked newest-first and bounded,
+  which is the shape both backends answer cheaply and the one an object archive's
+  short circuit engages on — it stops walking partitions once the limit is filled.
+  Asking the backend for the oldest N instead would return a different set of
+  changes *and* turn a one-partition read into a whole-window scan. Only the
+  layout runs forward, and the flag help now says so.
+
+  `--reverse` remains the flag that reorders without reselecting; what it selects
+  is now the newest-first order rather than the oldest-first one. A script or an
+  alias that passed `--reverse` to get chronological output should drop it; one
+  that depended on the old default should add it. Structured output follows the
+  rendering exactly — `-o json`, `-o yaml` and `-o jsonl` all stream in display
+  order — because a table and a `-o json` that disagreed about order would be
+  worse than either order alone.
+
+- **`data` and `diff` are a real object and a real array in `-o json`, `-o jsonl`
+  and `-o yaml`.** They were strings holding JSON, because the columns they mirror
+  are `String` in ClickHouse — so a document whose entire purpose is to be
+  machine-readable could not be read by a machine without a second parse, and in
+  YAML the escaped payload wrapped mid-token across lines and could not be read by
+  anyone. `jq '.items[0].diff[0].path'` now works; a recipe that reached for
+  `fromjson` first should drop it, and one that treated either field as a string —
+  passing it to `test()`, say — needs rewriting.
+
+  **Empty is `{}` and `[]`, never `null` and never absent.** A first sighting
+  carries no patch and a deletion carries neither column; those are ordinary rows,
+  and a key that vanished would make you branch on presence to learn something the
+  value already tells you. `data` is in this change even though only `diff` was
+  reported, because it has the identical defect over a much larger payload — an
+  `Added`, `Snapshot` or `Checkpoint` row carries a whole serialised object — and
+  fixing one would have left an arbitrary distinction to trip over.
+
+  The recorded bytes are passed through rather than decoded and re-encoded, so a
+  large integer and a value's written form survive exactly. **A column that will
+  not parse now fails the command**: it is corrupt evidence, so the CLI names the
+  row by its `ts` and `uid` and exits `1` rather than printing the raw string in
+  place of a patch, which would hide the corruption an audit tool exists to
+  surface. `table`, `wide` and the `diff` hunk view are untouched — they mark the
+  row `unreadable patch` and render the rest of the history, as they always have.
+
+  Field *names* are unchanged. The agreement with the frozen schema — the one that
+  lets a `jq` recipe move between a SQL result and CLI output — was always an
+  agreement about spelling, and it still holds for every field; these two are the
+  only ones whose *type* the CLI now chooses for itself.
+
+- **`-o yaml` emits keys in declaration order, so every document opens
+  `apiVersion, kind, metadata, items`.** It used to sort them alphabetically,
+  which put `kind` and `metadata` *below* an `items` array that can run to several
+  hundred lines — so `kubectl kuberecord get … -o yaml` opened `apiVersion,
+  items`, and a document that opens that way reads as malformed even when it is
+  not. Nobody chose the sorting: `sigs.k8s.io/yaml` marshals through a Go map, and
+  a map has no order. Every kind is affected — `Timeline`, `Diff`, `Object`,
+  `Coverage`, `Blame` — along with the `Version` and `Resolution` documents, which
+  carry the same `apiVersion` without being envelopes. Within an item the same
+  rule now puts the bulky fields last: `data` and `diff` after the columns that
+  identify a change, and a reconstructed `object` after the provenance a reader
+  judges it by, at the end of the document rather than in the middle of it.
+
+  **Nothing but the order changed.** Quoting, block scalars, indentation, integers
+  too large for an `int64` — all identical, and a test asserts it by rendering
+  both ways and comparing the parsed documents. `jq`, `yq` and every other parser
+  return exactly what they returned before; a consumer that reads `-o yaml`
+  *positionally* — `head -4`, or a diff against a stored expectation — is the only
+  one that will notice, which is why this is recorded here rather than passed over
+  as cosmetic. **`-o json` and `-o jsonl` are untouched**: `encoding/json` has
+  always emitted struct fields in declaration order, and there are now golden
+  files pinning that so a library upgrade cannot quietly re-sort either format.
+
+### Changed
+
+- **`get -o yaml` dims the kuberecord wrapper on a terminal, so the recorded
+  object is the only thing at full intensity.** The envelope's `apiVersion`,
+  `kind` and `metadata`, and the six bookkeeping fields above the state (`at`,
+  `uid`, `base_ts`, `base_event`, `patches_applied`, `sha256`), are provenance —
+  facts you need available and do not need to re-read on every invocation. The
+  reconstructed object is found by everything around it receding rather than by
+  anything being done to it: there is no syntax highlighting, no second YAML
+  renderer, and nothing in the document is parsed to decide what to paint.
+
+  The provenance header recedes with it, **except `NOT A DEPLOYABLE MANIFEST`**,
+  which is emphasised. One line in a block can carry emphasis and two cannot, and
+  that is the line that has to survive somebody skimming past the rest.
+
+  **Redirected output is byte for byte what it was.** Under `--color=never`, under
+  `NO_COLOR`, and any time stdout is not a terminal, this changes nothing at all —
+  `yq`, a `> object.yaml`, and a diff against a file saved last week are all
+  unaffected, and the golden files for the plain rendering are unchanged by this
+  release. `--color=always` forces the escapes on, as it does everywhere else.
+
+- **Every notice is a warning now, and no notice is dim.** The lines that
+  qualify an answer — a backend that records no deletions, a window with no state
+  before it, a filter that dropped the prior values, a cold scan whose window *is*
+  the work, the paragraph that explains an unreachable cluster-internal address —
+  render in one amber register on a terminal, and keep their `!` so the severity
+  survives `--color=never`, `NO_COLOR` and a redirected stream. The proposal was
+  to dim them. It was rejected: these lines exist because the data on its own
+  misleads, and making the most load-bearing lines the least visible inverts what
+  they are for.
+
+  Two markers, two meanings, and now they hold everywhere: `!` is a qualification
+  on the answer, `→` is where the answer came from. The cold-scan estimate wore
+  `→` and now wears `!`, because what it says is not provenance — it is what the
+  next four minutes will cost.
+
+  Plain output is byte for byte what it was, except for the `!` the unreachable-
+  backend page gained on its first line. Nothing else moved: no line was added,
+  dropped or reworded, and a redirect, a pipe or a golden file sees the same
+  characters it saw before.
+
+- **The two resolution notices recede on a terminal, and stop receding when the
+  chain chose something you would not assume.** `→ discovered …` and
+  `→ cluster-id …` print on every invocation, so a register that never varied was
+  one you learned to skip inside a week — which is exactly the week one of them
+  started saying something you needed to read. They are the other half of the
+  rule above: `!` is marked and never dimmed, `→` is provenance and now looks
+  like it.
+
+  The ordinary resolution is dimmed: the backend came from the cluster's own sink
+  because there was exactly one of them, and the identity came from `--cluster-id`
+  or from the context mapping — your own words handed back. **A resolution that
+  shadowed the ordinary one stays at full weight**: `--source`, `--sink` or a
+  profile stanza answering in front of a discoverable sink, and an identity the
+  tool worked out for itself from the operator's Deployment or from the sink's
+  contents. That second pair is not a warning and is not marked as one — nothing
+  has gone wrong — but it is the case where being wrong does not fail the query,
+  it returns another cluster's history looking exactly like an answer. The line
+  announcing that a cluster holds several operators and the tool picked one is at
+  full weight for the same reason. Which state a line is in is derived from the
+  step that answered, so a chain reordered later cannot leave the weights
+  describing a walk that no longer happens.
+
+  **There is no `--quiet`, deliberately.** Suppressing provenance would remove the
+  record of where an answer came from, and that is not a thing an audit reader
+  should be able to switch off by accident; `2>/dev/null` is still there, and
+  having to type it is the point.
+
+  Plain output is byte for byte what it was. Under `--color=never`, `NO_COLOR`,
+  and any time stderr is not a terminal, the same lines are written in the same
+  words in the same order — the `→` marker itself never changes weight either, so
+  the two markers stay tellable apart at a glance whatever the line after them is
+  doing.
+
+- **A patch of several operations is summarized as `3 ops`, not `~3 ops`.** The
+  `~` was borrowed from the operation vocabulary, where it means *replace* and is
+  painted yellow to say so — so the cell read, in the only language that column
+  has, as a replacement of something called "3 ops". Adding a space was proposed
+  and would not have helped: `~ 3 ops` reads as "replace three ops". `+`, `-` and
+  `~` now mean an operation and nothing else, wherever they appear.
+
+- **`timeline` names `--full` in a footer, once, and only when a row was actually
+  shortened.** The hint existed in the `diff` view and not in the timeline
+  summary, which was an accident rather than a decision. It counts the rows it is
+  about — a row summarized as `N ops` and a row whose path the column had to elide
+  are both rows the flag shows more of — and a timeline where everything fits
+  prints no footer at all, so a footer being there means there is something behind
+  it. It goes to stderr with every other notice, which keeps `timeline … | wc -l`
+  counting changes.
+
+### Fixed
+
+- **The incarnation banner no longer offers `diff` and `blame` a flag they
+  reject.** Over a name that has belonged to more than one object, all three
+  object commands print the same banner naming the incarnations they are not
+  showing — and it ended "Pass `--all-incarnations` to see them all", which only
+  `timeline` has. On `diff` and `blame` that answered "how do I see the others?"
+  with `unknown flag`, which is worse than saying nothing: the reader spends the
+  suggestion, is refused, and is left with no second one.
+
+  Those two now read "Pass `--uid` to pin one, or `` `timeline
+  --all-incarnations` `` to see them all" — the flag they do have, and the command
+  that has the other. Neither gains `--all-incarnations`: a diff or a field table
+  spanning two UIDs would attribute one object's changes to another that happened
+  to wear the same name, which is the splice the banner exists to prevent.
+  `timeline`'s banner is unchanged.
+
+  Found by a sweep of every flag that changes what a reader sees rather than what
+  is queried — `--full`, `--with-events`, `--all-incarnations`, `--reverse` — for
+  whether it is named at the point its absence is visible. It was the only gap;
+  a test now asserts that no notice names a bare flag its own command does not
+  define.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`
