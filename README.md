@@ -19,9 +19,10 @@ TIME (UTC)               EVENT     ACTOR                      CHANGE
 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
 2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
 2026-08-28 14:03:20.310  Event     kube-controller-manager    ScalingReplicaSet: Scaled up replica set checkout-7d4f to…
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
 2026-08-28 14:06:44.020  Event     replicaset-controller      ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: excee…
 2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
 At 14:03 an apply cut the memory limit from 2Gi to 512Mi. Ninety seconds later

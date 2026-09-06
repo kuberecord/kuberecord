@@ -236,13 +236,42 @@ func TestChangeCellDescribesRowsWithoutPatches(t *testing.T) {
 
 // TestChangeCellCountsALargerPatch is the multi-operation summary.
 func TestChangeCellCountsALargerPatch(t *testing.T) {
-	ops := []render.Op{
+	if got := cellFor(t, query.Change{EventType: query.EventModified, Diff: "x"}, threeOps(), 80); got != "3 ops" {
+		t.Errorf("the CHANGE cell was %q, want %q", got, "3 ops")
+	}
+}
+
+// TestACollapsedSummaryBorrowsNoOperationGlyph.
+//
+// "+", "-" and "~" are the vocabulary glyph and opColor spell an *operation* in,
+// here and in the hunk view, and the point of a three-character vocabulary is
+// that a reader can rely on each character meaning one thing. The summary used to
+// open with "~", so a cell reading "~3 ops" said, in the only language this column
+// has, that something called "3 ops" had been replaced. Spacing was never the fix:
+// "~ 3 ops" reads as "replace three ops".
+//
+// The assertion is over the isolated cell rather than the rendered line, because
+// the line also carries a timestamp — and a test that looked for "-" in
+// "2026-08-28 14:05:02.117" would fail for a reason that has nothing to do with
+// what it is checking.
+func TestACollapsedSummaryBorrowsNoOperationGlyph(t *testing.T) {
+	cell := cellFor(t, query.Change{EventType: query.EventModified, Diff: "x"}, threeOps(), 80)
+
+	for _, glyph := range []string{"+", "-", "~"} {
+		if strings.Contains(cell, glyph) {
+			t.Errorf("the collapsed summary %q carries %q, which means an operation everywhere "+
+				"else in this package", cell, glyph)
+		}
+	}
+}
+
+// threeOps is a patch the CHANGE column has to collapse: one of each operation,
+// so that a summary borrowing a glyph has three it could have borrowed.
+func threeOps() []render.Op {
+	return []render.Op{
 		{Type: "replace", Path: "/spec/replicas", Value: json.RawMessage("5")},
 		{Type: "add", Path: "/spec/paused", Value: json.RawMessage("true")},
 		{Type: "remove", Path: "/spec/minReadySeconds"},
-	}
-	if got := cellFor(t, query.Change{EventType: query.EventModified, Diff: "x"}, ops, 80); got != "~3 ops" {
-		t.Errorf("the CHANGE cell was %q, want %q", got, "~3 ops")
 	}
 }
 

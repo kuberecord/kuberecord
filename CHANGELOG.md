@@ -117,6 +117,42 @@ than a summary of them.
   unaffected, and the golden files for the plain rendering are unchanged by this
   release. `--color=always` forces the escapes on, as it does everywhere else.
 
+- **Every notice is a warning now, and no notice is dim.** The lines that
+  qualify an answer — a backend that records no deletions, a window with no state
+  before it, a filter that dropped the prior values, a cold scan whose window *is*
+  the work, the paragraph that explains an unreachable cluster-internal address —
+  render in one amber register on a terminal, and keep their `!` so the severity
+  survives `--color=never`, `NO_COLOR` and a redirected stream. The proposal was
+  to dim them. It was rejected: these lines exist because the data on its own
+  misleads, and making the most load-bearing lines the least visible inverts what
+  they are for.
+
+  Two markers, two meanings, and now they hold everywhere: `!` is a qualification
+  on the answer, `→` is where the answer came from. The cold-scan estimate wore
+  `→` and now wears `!`, because what it says is not provenance — it is what the
+  next four minutes will cost.
+
+  Plain output is byte for byte what it was, except for the `!` the unreachable-
+  backend page gained on its first line. Nothing else moved: no line was added,
+  dropped or reworded, and a redirect, a pipe or a golden file sees the same
+  characters it saw before.
+
+- **A patch of several operations is summarized as `3 ops`, not `~3 ops`.** The
+  `~` was borrowed from the operation vocabulary, where it means *replace* and is
+  painted yellow to say so — so the cell read, in the only language that column
+  has, as a replacement of something called "3 ops". Adding a space was proposed
+  and would not have helped: `~ 3 ops` reads as "replace three ops". `+`, `-` and
+  `~` now mean an operation and nothing else, wherever they appear.
+
+- **`timeline` names `--full` in a footer, once, and only when a row was actually
+  shortened.** The hint existed in the `diff` view and not in the timeline
+  summary, which was an accident rather than a decision. It counts the rows it is
+  about — a row summarized as `N ops` and a row whose path the column had to elide
+  are both rows the flag shows more of — and a timeline where everything fits
+  prints no footer at all, so a footer being there means there is something behind
+  it. It goes to stderr with every other notice, which keeps `timeline … | wc -l`
+  counting changes.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`

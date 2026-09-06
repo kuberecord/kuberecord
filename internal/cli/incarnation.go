@@ -76,7 +76,7 @@ func selectIncarnation(
 	incarnations, err := engine.Incarnations(ctx, request.Ref, from, to)
 	if err != nil {
 		return incarnationChoice{uid: request.UID, pinned: pinnedUID(request)},
-			[]render.Notice{{Text: describeIncarnationFailure(err), Warning: true}}
+			[]render.Notice{{Text: describeIncarnationFailure(err)}}
 	}
 
 	uids := make([]string, 0, len(incarnations))
@@ -149,7 +149,6 @@ func pinnedNotices(request TimelineRequest, uids []string) []render.Notice {
 	return []render.Notice{{
 		Text: fmt.Sprintf("no changes are recorded for uid %s in this window; the incarnations that "+
 			"are here are %s", request.UID, strings.Join(uids, ", ")),
-		Warning: true,
 	}}
 }
 

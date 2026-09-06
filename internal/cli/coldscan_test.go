@@ -161,7 +161,12 @@ func TestColdScanStatesWhatTheQuestionWillCost(t *testing.T) {
 	// The window is named beside the figures. The estimate is written before the
 	// notices — it exists to be read before the scan — so at this moment nothing
 	// else on the terminal has said which window the number describes.
-	const want = fixtureScanFigures + " to scan for 6h"
+	//
+	// It is marked as a notice rather than with the resolver's arrow. What this
+	// line says is not where the answer came from, it is what the answer is about
+	// to cost, and wearing the marker a reader has skipped on every invocation
+	// since Tuesday is how a warning stops being one (D30).
+	want := render.WarningMarker + " " + fixtureScanFigures + " to scan for 6h"
 	if !strings.Contains(stderr, want) {
 		t.Errorf("the estimate is missing from stderr.\nwant a line containing %q\ngot:\n%s",
 			want, stderr)

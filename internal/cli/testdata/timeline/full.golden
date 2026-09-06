@@ -9,7 +9,7 @@ TIME (UTC)               EVENT     ACTOR                      CHANGE
 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
 2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
     ~ spec.template.spec.containers[0].resources.limits.memory: 2Gi → 512Mi
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10

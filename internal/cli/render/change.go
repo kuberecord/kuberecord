@@ -322,7 +322,18 @@ func collapseWhitespace(text string) string {
 // The count and not the operations, because a row is a row: five operations
 // rendered into one cell would either elide all five into uselessness or push
 // the table past any terminal. --full is the way to see them, and the count is
-// what tells a reader the flag is worth typing.
+// what tells a reader the flag is worth typing — which is why the timeline names
+// that flag once, in its footer, when a row here was actually collapsed.
+//
+// # Why the count carries no glyph
+//
+// It used to read "~3 ops", and "~" is not free: glyph spells it for a replace,
+// opColor paints it yellow for one, and a reader who has learned those three
+// characters reads this cell as a replacement of something called "3 ops". The
+// spacing was not the defect — "~ 3 ops" reads as "replace three ops", which is
+// no more meaningful — the overloading was. +, - and ~ mean an operation
+// happened, in this column and everywhere else in this package, and a summary is
+// not an operation.
 func multiOpSummary(count int) string {
-	return glyphReplace + strconv.Itoa(count) + " ops"
+	return strconv.Itoa(count) + " ops"
 }

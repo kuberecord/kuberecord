@@ -318,7 +318,7 @@ func TestDiffNoticesGoToStandardError(t *testing.T) {
 	var out, errOut bytes.Buffer
 	doc := render.DiffDocument{
 		Kind:    "apps/Deployment",
-		Notices: []render.Notice{{Text: "a qualification", Warning: true}},
+		Notices: []render.Notice{{Text: "a qualification"}},
 	}
 	if err := render.WriteDiff(&out, &errOut, doc, render.Options{Width: 120}); err != nil {
 		t.Fatalf("WriteDiff: %v", err)

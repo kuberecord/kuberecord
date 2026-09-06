@@ -806,7 +806,6 @@ func deletionsNotice(capabilities query.Capabilities, sawDeleted bool) render.No
 		Text: fmt.Sprintf("the %s backend does not record deletions, so this timeline ending is not "+
 			"evidence that the object still exists; it may have been deleted while unobserved. "+
 			"The `%s` command shows what was being watched", capabilities.Backend, scopesCommand),
-		Warning: true,
 	}
 }
 

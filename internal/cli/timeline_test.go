@@ -616,6 +616,96 @@ func TestTimelineNoticesABackendThatCannotRecordDeletions(t *testing.T) {
 	}
 }
 
+// The three states of the stderr half, in both colour modes.
+//
+// A notice, a collapsed row, and neither. They are golden files rather than
+// assertions because what is under test is how the two halves of the output read
+// *against each other* — whether a warning stands out from the table above it,
+// whether the footer looks like a notice or like a row — and that is a property
+// of the whole document and of no line in it.
+//
+// Both colour modes are pinned for the reason the plain files alone would not
+// catch: the tier a line is painted in is invisible to every existing test, so a
+// notice quietly moved into the dim register would regenerate cleanly and change
+// nothing a plain golden file records.
+
+// shortHistory is a history the CHANGE column shows entire.
+//
+// Every path is short enough to fit and every change carries one operation, so
+// --full would add nothing and the footer must stay away. It opens on a
+// full-state row for a reason that has nothing to do with the footer: without an
+// anchor to replay from, the prior-value notice fires and the "neither" case
+// would have a notice in it after all.
+func shortHistory() []query.Change {
+	return []query.Change{
+		{
+			TS: at("2026-08-28T14:02:58.001Z"), EventType: query.EventAdded, UID: fixtureUID,
+			Actors: []string{"kubectl-client-side-apply"}, ResourceVersion: "1001",
+			APIVersion: "apps/v1", Data: fixtureState,
+		},
+		{
+			TS: at("2026-08-28T14:05:02.117Z"), EventType: query.EventModified, UID: fixtureUID,
+			Actors: []string{"kube-controller-manager"}, ResourceVersion: "1002", APIVersion: "apps/v1",
+			Diff: `[{"op":"replace","path":"/spec/replicas","value":5}]`,
+		},
+	}
+}
+
+// collapsedHistory is shortHistory with one change the column has to summarize.
+//
+// Its operations are chosen to apply cleanly to the state shortHistory leaves
+// behind. A patch that did not would stop the replay and put a notice on stderr,
+// which is the one thing this fixture exists to be without.
+func collapsedHistory() []query.Change {
+	return append(shortHistory(), query.Change{
+		TS: at("2026-08-28T14:09:40.900Z"), EventType: query.EventModified, UID: fixtureUID,
+		Actors: []string{"kube-controller-manager"}, ResourceVersion: "1003", APIVersion: "apps/v1",
+		Diff: `[{"op":"replace","path":"/spec/replicas","value":7},` +
+			`{"op":"add","path":"/spec/paused","value":true},` +
+			`{"op":"remove","path":"/spec/minReadySeconds"}]`,
+	})
+}
+
+// TestTimelineRendersNoticesAndTheFooterInBothColourModes.
+func TestTimelineRendersNoticesAndTheFooterInBothColourModes(t *testing.T) {
+	tests := map[string]struct {
+		golden  string
+		caps    query.Capabilities
+		changes []query.Change
+	}{
+		// The archive's capabilities, which are what produce a notice at all: it
+		// records no deletions and needs a window it was not given.
+		"a notice and nothing collapsed": {
+			golden: "severity-notice", caps: archiveCapabilities(), changes: shortHistory(),
+		},
+		"a collapsed row and no notice": {
+			golden: "severity-collapsed", caps: clickHouseCapabilities(), changes: collapsedHistory(),
+		},
+		"neither": {
+			golden: "severity-plain", caps: clickHouseCapabilities(), changes: shortHistory(),
+		},
+	}
+
+	for name, test := range tests {
+		for mode, color := range map[string]bool{"": false, "-color": true} {
+			t.Run(name+mode, func(t *testing.T) {
+				engine := &fakeEngine{
+					caps:         test.caps,
+					changes:      test.changes,
+					incarnations: checkoutIncarnations(),
+					intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
+				}
+
+				stdout, stderr, err := runTimeline(t, engine, defaultRequest(), render.Options{Color: color})
+				if err != nil {
+					t.Fatalf("RunTimeline: %v", err)
+				}
+				assertGolden(t, test.golden+mode, stdout, stderr)
+			})
+		}
+	}
+}
+
 // TestTimelineSuppressesPriorValuesUnderAFilter is the honesty half of the
 // old-value replay.
 //

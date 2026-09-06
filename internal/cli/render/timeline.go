@@ -112,12 +112,16 @@ type TimelineRow struct {
 }
 
 // Notice is one line of explanation for the document.
+//
+// There is no severity on it, and that is the decision rather than an omission.
+// Every notice this CLI writes is a line the reader would draw a false
+// conclusion without — a window with no state before it, a backend that records
+// no deletions, a scan that is the work, a row the column could not hold — which
+// is one tier, the Warning tier, and a struct field offering a second one would
+// be an invitation to render some of them quietly (D30).
 type Notice struct {
 	// Text is the sentence, without a prefix or a trailing newline.
 	Text string
-	// Warning marks a notice about something missing or unprovable, as opposed
-	// to one merely reporting what was chosen.
-	Warning bool
 }
 
 // TimelineDocument is a rendered timeline, ready to be written.
@@ -215,18 +219,59 @@ type documentHeader struct {
 // reported rather than discarded because a notice that did not arrive is a
 // qualification the reader never saw.
 func WriteTimeline(out, errOut io.Writer, doc TimelineDocument, opts Options) error {
+	// Rendered even when there is nowhere to write it, because the count of rows
+	// the CHANGE column could not hold falls out of the layout and the footer on
+	// the other stream is built from it.
+	table, shortened := renderTimeline(doc, opts)
 	if out != nil {
-		if _, err := io.WriteString(out, renderTimeline(doc, opts)); err != nil {
+		if _, err := io.WriteString(out, table); err != nil {
 			return fmt.Errorf("writing the timeline: %w", err)
 		}
 	}
-	if errOut == nil || len(doc.Notices) == 0 {
+
+	notices := doc.Notices
+	if hint := fullHint(shortened, opts); hint != "" {
+		// Appended to a copy: doc is the caller's, and growing its slice in place
+		// would put a rendering decision into a value the command still holds.
+		notices = append(append([]Notice(nil), notices...), Notice{Text: hint})
+	}
+	if errOut == nil || len(notices) == 0 {
 		return nil
 	}
-	if _, err := io.WriteString(errOut, renderNotices(doc.Notices, opts)); err != nil {
+	if _, err := io.WriteString(errOut, renderNotices(notices, opts)); err != nil {
 		return fmt.Errorf("writing the timeline's notices: %w", err)
 	}
 	return nil
+}
+
+// fullHint is the footer that names --full, or nothing.
+//
+// # Why it is conditional, and why it is one line
+//
+// The flag is named where its absence is visible and nowhere else. A hint on
+// every row would put "(--full)" a hundred times under a timeline of
+// single-field edits, which is a worse noise than the problem it answers; a hint
+// printed unconditionally would appear under documents where nothing was
+// shortened, and a footer that says something untrue about the output above it
+// teaches a reader to stop looking at footers. So it is emitted once, and only
+// when the column actually withheld something.
+//
+// It is silent under --full for the obvious reason and the important one: the
+// flag is already on, so there is nothing left to name, and a line advertising a
+// flag the reader has just used would read as the tool not having noticed.
+//
+// The count is there because it is the difference between "some of this is
+// summarized" and knowing whether the row you are looking at is one of them.
+func fullHint(shortened int, opts Options) string {
+	if shortened == 0 || opts.Full {
+		return ""
+	}
+	verb := "rows are"
+	if shortened == 1 {
+		verb = "row is"
+	}
+	return fmt.Sprintf("%d %s shortened to fit the %s column; pass --full to print every operation",
+		shortened, verb, columnChange)
 }
 
 // WriteNotices writes a document's qualifications to errOut, and nothing to
@@ -249,25 +294,32 @@ func WriteNotices(errOut io.Writer, notices []Notice, opts Options) error {
 
 // renderNotices builds the stderr half.
 //
-// The prefix is "!" rather than the resolver's "→" so that the two are
+// The prefix is WarningMarker rather than the resolver's "→" so that the two are
 // distinguishable in a terminal where they arrive together: one says where the
-// data came from, the other says what to be careful about in it.
+// data came from, the other says what to be careful about in it. It is the half
+// of the severity that survives NO_COLOR, a redirected stream and a golden file,
+// which is why it is a character and not only a colour.
+//
+// The marker itself is left unpainted and the sentence is what carries the tier.
+// A painted marker in front of unpainted prose was what this used to be, and it
+// put the whole of the severity into one character while the sentence — the part
+// that is actually read — rendered at the same weight as the table above it.
 func renderNotices(notices []Notice, opts Options) string {
-	p := palette{enabled: opts.Color}
+	severity := NewSeverity(opts.Color)
 	var built strings.Builder
 	for _, notice := range notices {
-		marker := "!"
-		if notice.Warning {
-			marker = p.red("!")
-		}
-		built.WriteString(marker + " " + notice.Text + "\n")
+		built.WriteString(WarningMarker + " " + severity.Warning(notice.Text) + "\n")
 	}
 	return built.String()
 }
 
 // renderTimeline builds the stdout half: the header, a blank line, and the
 // table.
-func renderTimeline(doc TimelineDocument, opts Options) string {
+//
+// It also reports how many rows the CHANGE column could not show whole, which is
+// a fact only the layout knows — the column's width is whatever the other columns
+// left over — and which the footer on the other stream is built from.
+func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
 	p := palette{enabled: opts.Color}
 
 	var built strings.Builder
@@ -276,11 +328,12 @@ func renderTimeline(doc TimelineDocument, opts Options) string {
 		// No table, not an empty one. Why the result is empty is on stderr, where
 		// every other qualification of the document is; a header row with nothing
 		// under it would imply the question was answered and the answer was none.
-		return built.String()
+		return built.String(), 0
 	}
 	built.WriteString("\n")
-	built.WriteString(renderTable(doc, opts, p))
-	return built.String()
+	table, shortened := renderTable(doc, opts, p)
+	built.WriteString(table)
+	return built.String(), shortened
 }
 
 // renderHeader renders the five facts a reader needs before the first row means
@@ -357,7 +410,7 @@ func renderIncarnations(doc documentHeader, indent int) string {
 // because ANSI escapes have no display width: padding computed over painted
 // cells is padding that includes the escape sequences, which is how a coloured
 // table acquires a wobble that never shows up in a test with colour off.
-func renderTable(doc TimelineDocument, opts Options, p palette) string {
+func renderTable(doc TimelineDocument, opts Options, p palette) (string, int) {
 	showUID := doc.showUID(opts)
 
 	headings := []string{columnTime}
@@ -394,11 +447,15 @@ func renderTable(doc TimelineDocument, opts Options, p palette) string {
 	changeWidth := max(opts.width()-spent, minChangeWidth)
 
 	var built strings.Builder
+	shortened := 0
 	built.WriteString(p.dim(strings.TrimRight(headerLine(headings, widths), " ")) + "\n")
 	for i, row := range doc.Rows {
 		built.WriteString(renderRow(row, plain[i], fixed, widths, changeWidth, opts, p))
+		if elided(row, changeWidth) {
+			shortened++
+		}
 	}
-	return built.String()
+	return built.String(), shortened
 }
 
 // headerLine lays the headings out over the measured widths.
@@ -551,10 +608,7 @@ func fullLines(row TimelineRow, changeWidth int) []string {
 	if row.PatchErr != "" {
 		return []string{"patch could not be decoded: " + row.PatchErr}
 	}
-	if len(row.Ops) == 0 {
-		return nil
-	}
-	if len(row.Ops) == 1 && opText(row.Ops[0], changeWidth) == opText(row.Ops[0], 0) {
+	if !elided(row, changeWidth) {
 		return nil
 	}
 	lines := make([]string, 0, len(row.Ops))
@@ -562,6 +616,38 @@ func fullLines(row TimelineRow, changeWidth int) []string {
 		lines = append(lines, opText(op, 0))
 	}
 	return lines
+}
+
+// elided reports whether the CHANGE column showed this row with something held
+// back.
+//
+// Two cases, and they are the two --full answers: a patch of several operations
+// is summarized as a count, and a single operation the column was too narrow for
+// is shortened. A row whose one operation fitted whole has nothing behind it, and
+// counting it would put a footer under a document where every character of every
+// patch is already on the screen.
+//
+// It is the predicate fullLines decides by, deliberately: the footer promises
+// that --full will show more, and a second reading of "more" would eventually
+// promise it for a row the flag prints nothing extra for. The undecodable-patch
+// row is the one case handled by fullLines and not here — the flag does expand
+// its wording, but the cell above it already carries the same failure, so
+// advertising the flag for it would be advertising a rephrasing.
+func elided(row TimelineRow, changeWidth int) bool {
+	switch row.Change.EventType {
+	case query.EventKubernetes, query.EventDeleted:
+		// changeCell answers both of these from the row itself and never from its
+		// operations, so whatever a patch column held there is not what the cell
+		// is showing and --full would not expand it.
+		return false
+	}
+	switch len(row.Ops) {
+	case 0:
+		return false
+	case 1:
+		return opText(row.Ops[0], changeWidth) != opText(row.Ops[0], 0)
+	}
+	return true
 }
 
 // formatTimestamp renders a change's instant at the precision the format asks

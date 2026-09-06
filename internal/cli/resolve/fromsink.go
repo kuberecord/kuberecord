@@ -28,6 +28,7 @@ import (
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
 // Turning a discovered sink into a written profile: the permanent half of what
@@ -366,16 +367,18 @@ func (r *BackendResolver) verifyCredential(
 // terminal, for the same reason UnreachableSinkError.Render takes it as an
 // argument: a function that consulted the environment itself would have golden
 // files that changed with the shell they were generated in. Only the lines meant
-// to be typed are painted.
+// to be typed are painted, in the Emphasis tier — this message is a report of
+// something that worked, so nothing in it is a warning and the prose around the
+// command stays at full weight rather than receding.
 func (p *SinkProfile) Explain(colorize bool) string {
-	paint := diagnosticPalette{enabled: colorize}
+	severity := render.NewSeverity(colorize)
 
 	var out strings.Builder
 	line := func(text string) { out.WriteString(text + "\n") }
 
 	switch p.Profile.Backend {
 	case BackendClickHouse:
-		p.explainClickHouse(line, paint)
+		p.explainClickHouse(line, severity)
 	case BackendS3:
 		p.explainS3(line)
 	}
@@ -387,7 +390,7 @@ func (p *SinkProfile) Explain(colorize bool) string {
 // The recorded address gets a line to itself, unwrapped, for the reason the
 // unreachable-backend message gives it one: it is the string a reader may need to
 // compare character by character with what they have in a manifest.
-func (p *SinkProfile) explainClickHouse(line func(string), paint diagnosticPalette) {
+func (p *SinkProfile) explainClickHouse(line func(string), severity render.Severity) {
 	stanza := p.Profile.ClickHouse
 
 	line(fmt.Sprintf("%s records %s.", p.Ref, p.RecordedAddr))
@@ -397,7 +400,7 @@ func (p *SinkProfile) explainClickHouse(line func(string), paint diagnosticPalet
 		line("That name resolves inside the cluster and nowhere else, so the profile records")
 		line(fmt.Sprintf("%s instead and expects a forwarded port beside it:", stanza.Addr))
 		line("")
-		line(paint.bold("    " + p.PortForward))
+		line(severity.Emphasis("    " + p.PortForward))
 	case p.AddrOverridden:
 		line(fmt.Sprintf("The profile records %s instead, as --%s asked.", stanza.Addr, options.FlagAddr))
 	default:

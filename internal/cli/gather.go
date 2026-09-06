@@ -232,7 +232,6 @@ func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, s
 			Text: fmt.Sprintf("%d changes are recorded for %s in %s, and none of them touched %s; "+
 				"the window itself is not empty", scanned, describeObject(request.Ref),
 				options.DescribeWindow(from, to), paths),
-			Warning: true,
 		}
 	}
 	return render.Notice{Text: fmt.Sprintf(

@@ -45,6 +45,7 @@ import (
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/kuberecord/kuberecord/internal/query"
 )
@@ -105,6 +106,17 @@ type Options struct {
 	// whether stderr is a terminal. It is stderr rather than stdout because that
 	// is where the line goes: `-o json > file` on a terminal should still narrate.
 	ShowProgress bool
+
+	// Color enables the colour half of a notice's severity. It is decided by the
+	// command from --color, NO_COLOR and whether stderr is a terminal, for the
+	// same reason Interactive and ShowProgress are: what the user asked for is a
+	// flag and where the output is going is a property of the invocation, and a
+	// package that read the environment itself could not be tested without one.
+	//
+	// Nothing here depends on it for meaning. What a cold scan has to say is
+	// carried by render.WarningMarker and the sentence after it, both of which
+	// survive a redirected stream unchanged.
+	Color bool
 }
 
 // OptionsFrom reads the safety surface out of the flags and the streams.
@@ -114,6 +126,7 @@ func OptionsFrom(flags *options.GlobalFlags, streams genericiooptions.IOStreams)
 		MaxObjects:   flags.MaxObjects,
 		Interactive:  options.IsTerminal(streams.Out) && options.IsTerminalIn(streams.In),
 		ShowProgress: options.IsTerminal(streams.ErrOut),
+		Color:        options.ShouldColorize(flags.Color, streams.ErrOut),
 	}
 }
 
@@ -243,7 +256,7 @@ func Begin(
 		return &Scan{Ctx: ctx}, nil
 	}
 
-	size := estimateColdScan(ctx, backend.Engine, clusterID, from, to, streams)
+	size := estimateColdScan(ctx, backend.Engine, clusterID, from, to, opts, streams)
 	if err := confirmColdScan(size, capabilities, from, to, opts, streams); err != nil {
 		return nil, err
 	}
@@ -310,7 +323,7 @@ type scanEstimate struct {
 // scan of thousands of objects is the trade this whole file is built on.
 func estimateColdScan(
 	ctx context.Context, engine query.QueryEngine, clusterID string, from, to time.Time,
-	streams genericiooptions.IOStreams,
+	opts Options, streams genericiooptions.IOStreams,
 ) scanEstimate {
 	estimator, ok := engine.(query.ScanEstimator)
 	if !ok {
@@ -327,8 +340,12 @@ func estimateColdScan(
 		// broken listing is diagnosable rather than merely reported. What follows from
 		// it — a question on a terminal, an assumed confirmation anywhere else — is
 		// said by the next line, because this function cannot know which applies.
-		_ = options.WriteLine(streams.ErrOut, fmt.Sprintf(
-			"→ the size of this scan could not be estimated (%v), so it is unknown", err))
+		//
+		// The write is discarded here alone in this file: the caller's next line is
+		// the confirmation, which is written and checked, so a stderr that has gone
+		// away is reported there rather than twice.
+		_ = writeNotice(streams, opts, fmt.Sprintf(
+			"the size of this scan could not be estimated (%v), so it is unknown", err))
 		return scanEstimate{unmeasured: true}
 	}
 	return scanEstimate{figures: estimate, known: true}
@@ -359,14 +376,14 @@ func confirmColdScan(
 			// about the same absence.
 			return nil
 		}
-		return options.WriteLine(streams.ErrOut, fmt.Sprintf(
-			"→ %s to scan%s: the %s backend has no index, so this window is the work",
+		return writeNotice(streams, opts, fmt.Sprintf(
+			"%s to scan%s: the %s backend has no index, so this window is the work",
 			figures, describeScanSpan(from, to), capabilities.Backend))
 	}
 
 	if opts.AssumeYes || !opts.Interactive {
-		return options.WriteLine(streams.ErrOut, fmt.Sprintf(
-			"→ %s to scan: %s. %s",
+		return writeNotice(streams, opts, fmt.Sprintf(
+			"%s to scan: %s. %s",
 			figures, describeConfirmReason(size, capabilities, from, to), assumedReason(opts)))
 	}
 
@@ -381,6 +398,28 @@ func confirmColdScan(
 			options.FlagMaxObjects, options.FlagAssumeYes)
 	}
 	return nil
+}
+
+// writeNotice puts one line about the scan's cost on standard error.
+//
+// # Why these lines are notices and not resolution lines
+//
+// They used to be written with the resolver's "→", which is the marker for where
+// an answer came from — the sink that was discovered, the profile that was used,
+// the cluster identity that was inferred. What a cold scan has to say is not
+// that. "~1,240 objects, ~3.1 GiB to scan" is a statement about what is about to
+// happen and what it will cost, and a reader who skips it because it wore the
+// same marker as two lines they have read on every invocation since Tuesday has
+// skipped the only warning they were given (D30). It is a "!" for the same reason
+// the deletions notice is.
+//
+// Routing through render rather than formatting the marker here is what keeps
+// that true: the marker, the spacing and the tier are one decision in one place,
+// so a cold-scan line and a timeline notice arriving on the same stream cannot
+// end up looking like two different kinds of thing.
+func writeNotice(streams genericiooptions.IOStreams, opts Options, text string) error {
+	return render.WriteNotices(
+		streams.ErrOut, []render.Notice{{Text: text}}, render.Options{Color: opts.Color})
 }
 
 // describeConfirmReason says why this scan is a decision, in the words of

@@ -139,7 +139,6 @@ func AttributeRun(seed []byte, rows []render.TimelineRow) Attribution {
 				Text: fmt.Sprintf("this incarnation was deleted at %s, so the fields below are what it "+
 					"held immediately before the deletion rather than what it holds now",
 					render.FormatInstant(row.Change.TS)),
-				Warning: true,
 			})
 			return result
 		}
@@ -168,7 +167,6 @@ func (a *Attribution) record(row render.TimelineRow) {
 			Text: fmt.Sprintf("the patch recorded at %s could not be decoded (%s), so the fields it "+
 				"moved are still attributed to whatever wrote them before it",
 				render.FormatInstant(row.Change.TS), row.PatchErr),
-			Warning: true,
 		})
 	case len(row.Ops) > 0:
 		for _, op := range row.Ops {
@@ -251,7 +249,6 @@ func (a *Attribution) advance(row render.TimelineRow) {
 			"recorded there did not apply to the reconstructed state (%v), so anything added or "+
 			"removed after it is missing from the list. The attribution of the fields that are "+
 			"listed is unaffected", render.FormatInstant(row.Change.TS), err),
-		Warning: true,
 	})
 }
 

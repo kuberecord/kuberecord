@@ -150,7 +150,6 @@ func replayGroup(
 		return render.Notice{
 			Text: fmt.Sprintf("prior values are not shown: %s. The new value of each change "+
 				"is still exact; only the value it replaced is missing", err),
-			Warning: true,
 		}, true
 	}
 
@@ -163,7 +162,6 @@ func replayGroup(
 			return render.Notice{
 				Text: fmt.Sprintf("prior values stop at %s: %s. Rows after it show the new value only",
 					render.FormatInstant(row.Change.TS), advanceErr),
-				Warning: true,
 			}, true
 		}
 		state = next

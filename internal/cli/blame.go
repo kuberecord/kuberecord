@@ -393,7 +393,6 @@ func fallbackSeed(ascending []render.TimelineRow, err error) ([]byte, string, re
 		Text: fmt.Sprintf("the object's state could not be established (%s), so only the fields the "+
 			"changes in this window wrote are listed; the rest of the object is missing from the "+
 			"table rather than shown as %s", replay.DescribeStateFailure(err), render.BeforeWindow),
-		Warning: true,
 	}
 }
 
@@ -434,7 +433,6 @@ func blameFilterNotice(request BlameRequest, gathered gatherResult, shown int) r
 		Text: fmt.Sprintf("%s has no field at or beneath %s in %s; the object itself is not empty",
 			describeObject(request.Timeline.Ref), strings.Join(request.Fields, ", "),
 			options.DescribeWindow(gathered.From, gathered.To)),
-		Warning: true,
 	}
 }
 

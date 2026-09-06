@@ -227,13 +227,21 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 TIME (UTC)               EVENT     ACTOR                      CHANGE
 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
 2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
 2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
 The header and the table go to **stdout**; every banner, notice and explanation
 goes to **stderr**. One sentence: stdout is the data, stderr explains it. That is
 what makes `timeline … | wc -l` count changes.
+
+Lines opening `!` are notices. They are the qualifications on the answer — a
+backend that records no deletions, a window with no state before it, a column
+that could not show a row whole — and they are the one thing on the screen a
+reader cannot skip and still read the table correctly, so they are marked and
+never dimmed. Lines opening `→` are provenance: which sink, which cluster
+identity, which step of the resolution chain answered.
 
 **Rows read oldest first, so the newest change is the last line printed** — the
 one immediately above your prompt, because this CLI does not page. Which changes
@@ -253,7 +261,7 @@ the top.
 | `--field` | Field-path prefixes, repeatable. Either spelling works: `spec.containers[0].image` or `spec.containers.0.image`. |
 | `--uid` | Pin the timeline to one incarnation. |
 | `--all-incarnations` | Show every incarnation in the window, with a `UID` column. |
-| `--full` | Print every operation of every patch, unshortened. |
+| `--full` | Print every operation of every patch, unshortened. The footer names it when a row was shortened without it. |
 | `--with-events` | Interleave the Kubernetes Events recorded about the object. |
 
 `-o wide` adds the full UID and the resource version, and prints timestamps at the
@@ -267,15 +275,25 @@ Against an object archive the window is not a filter, it is the work — see
 
 A one-operation patch is one line, with the operation's glyph — `+` added, `-`
 removed, `~` replaced — the field path, and the values. A larger patch is
-summarized as `~N ops`, and `--full` expands it:
+summarized as `N ops`, and `--full` expands it:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments --full
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10
 ```
+
+The count carries no glyph. `+`, `-` and `~` mean an operation happened, here and
+in the hunk view, and a summary is not an operation — `~3 ops` said, in the only
+vocabulary this column has, that something called "3 ops" had been replaced.
+
+**`--full` is named once, in the footer, and only when a row was actually
+shortened.** A row summarized as a count and a row whose path the column had to
+elide are both rows the flag would show more of; a timeline where every row fits
+prints no footer at all, so a footer that is there means there is something
+behind it.
 
 Paths are RFC 6901 JSON Pointers converted to a dotted form with bracketed array
 indices, elided in the middle when they exceed the column. The head is kept
@@ -971,7 +989,7 @@ for which step decided what, run `kuberecord config resolve --check`
 
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 
-ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
 …
 ```
 
@@ -1530,7 +1548,7 @@ $ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
 → cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-quickstart.svc:9000: dial tcp: lookup clickhouse.kuberecord-quickstart.svc: no such host
 
-ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so discovery was right and so is
 the sink: this machine is simply outside it. kuberecord reads a cluster and never acts on
@@ -2095,7 +2113,7 @@ reachability
                        cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000: …
 
-ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
+! ClickHouseSink/default records the address clickhouse.kuberecord-system.svc:9000.
 …
 ```
 
@@ -2223,7 +2241,7 @@ announced on stderr, and an empty result names it. `--since` widens it.
 
 ```console
 $ kuberecord timeline deploy/checkout -n payments --source ~/archives/kuberecord --since 3d
-→ ~1,240 objects, ~3.1 GiB to scan for 3d: the objectsource backend has no index, so this window is the work
+! ~1,240 objects, ~3.1 GiB to scan for 3d: the objectsource backend has no index, so this window is the work
 ```
 
 The figures come from the listing alone — nothing is opened to produce them — so
@@ -2252,7 +2270,7 @@ stopped being a proxy for cost, so the width no longer decides:
 
 ```console
 $ kuberecord timeline deploy/checkout -n payments --source s3://acme-audit --since 6h
-→ the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
+! the size of this scan could not be estimated (listing s3://acme-audit: AccessDenied), so it is unknown
 an unmeasured number of objects, because its size could not be determined — continue? [y/N]
 ```
 

@@ -119,7 +119,7 @@ func TestBlameWritesNoTableForNoFields(t *testing.T) {
 		Kind: "apps/Deployment", Object: "payments/checkout", Cluster: "prod-eu-1",
 		Window: "all recorded history", Base: "not established",
 		Coverage: "none recorded for this scope",
-		Notices:  []render.Notice{{Text: "nothing was ever watching this", Warning: true}},
+		Notices:  []render.Notice{{Text: "nothing was ever watching this"}},
 	}
 	if err := render.WriteBlame(&out, &errOut, doc, render.Options{Width: 120}); err != nil {
 		t.Fatalf("WriteBlame: %v", err)
