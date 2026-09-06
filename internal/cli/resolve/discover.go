@@ -229,6 +229,32 @@ func (r *BackendResolver) listSinks(ctx context.Context) ([]sinkCandidate, error
 	return found, nil
 }
 
+// ListSinkRefs names every sink custom resource this kubeconfig can see.
+//
+// It is the exported face of listSinks and adds nothing to it — the same
+// best-effort walk of both kinds, the same classification of a forbidden list,
+// the same silence about a CRD that is not installed. What it drops is the
+// fetched object, because its one caller is a menu: the interactive
+// `config set-profile`, whose first question is whether to read the settings
+// from a sink and whose second is which one.
+//
+// Dropping the object is the point rather than an economy. The chosen ref goes
+// back through ProfileFromSink, which reads the custom resource again by the same
+// path --from-sink reads it — so a sink offered in a menu and a sink named on the
+// command line are decoded by one implementation, and nothing here becomes a
+// second way of turning a custom resource into a profile.
+func (r *BackendResolver) ListSinkRefs(ctx context.Context) ([]SinkRef, error) {
+	candidates, err := r.listSinks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]SinkRef, 0, len(candidates))
+	for _, candidate := range candidates {
+		refs = append(refs, candidate.ref)
+	}
+	return refs, nil
+}
+
 // sinkCandidate is one sink the cluster holds, before anything has been resolved
 // from it.
 type sinkCandidate struct {

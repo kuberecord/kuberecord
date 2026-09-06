@@ -57,6 +57,13 @@ const (
 	// internalAddr is what examples/quickstart/sink.yaml records, and what every
 	// in-cluster install records: the address the operator itself dials.
 	internalAddr = "clickhouse.kuberecord-quickstart.svc:9000"
+
+	// sinkUsername is the user the fixture's ClickHouseSink authenticates as, and
+	// archivePrefix the prefix its S3Sink writes under. One word in two roles,
+	// named twice because they are two facts: renaming the operator's ClickHouse
+	// user must not silently move where an archive is read from.
+	sinkUsername  = "kuberecord"
+	archivePrefix = "kuberecord"
 )
 
 // fromSinkFixture builds a resolver over the fixture cluster, with the
@@ -75,7 +82,7 @@ func fromSinkFixture(t *testing.T) (*resolve.BackendResolver, genericiooptions.I
 		"spec": map[string]any{"connection": map[string]any{
 			"addr":                 internalAddr,
 			"database":             resolve.DefaultClickHouseDatabase,
-			"username":             "kuberecord",
+			"username":             sinkUsername,
 			"credentialsSecretRef": map[string]any{"name": sinkSecret},
 		}},
 	}}
@@ -84,7 +91,7 @@ func fromSinkFixture(t *testing.T) (*resolve.BackendResolver, genericiooptions.I
 		"kind":       resolve.KindS3Sink,
 		"metadata":   map[string]any{"name": "archive"},
 		"spec": map[string]any{
-			"bucket": "acme-audit", "prefix": "kuberecord",
+			"bucket": "acme-audit", "prefix": archivePrefix,
 			"region": "eu-west-1", "forcePathStyle": true,
 		},
 	}}
@@ -179,7 +186,7 @@ func TestFromSinkWritesAUsableProfileAndNoCredential(t *testing.T) {
 		t.Errorf("clickhouse.addr = %q, want the forwarded port", profile.ClickHouse.Addr)
 	}
 	if profile.ClickHouse.Database != resolve.DefaultClickHouseDatabase ||
-		profile.ClickHouse.Username != "kuberecord" ||
+		profile.ClickHouse.Username != sinkUsername ||
 		profile.ClickHouse.PasswordEnv == "" {
 		t.Errorf("the stanza is not complete: %+v", profile.ClickHouse)
 	}
@@ -216,7 +223,7 @@ func TestFromSinkWritesAnArchiveStanza(t *testing.T) {
 	if profile.Backend != resolve.BackendS3 || profile.S3 == nil {
 		t.Fatalf("the stanza is not an S3 one: %+v", profile)
 	}
-	if profile.S3.Bucket != "acme-audit" || profile.S3.Prefix != "kuberecord" ||
+	if profile.S3.Bucket != "acme-audit" || profile.S3.Prefix != archivePrefix ||
 		profile.S3.Region != "eu-west-1" || !profile.S3.ForcePathStyle {
 		t.Errorf("the archive did not transfer: %+v", profile.S3)
 	}

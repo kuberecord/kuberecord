@@ -73,7 +73,7 @@ func diagnoseFixture(t *testing.T) (*resolve.Backend, genericiooptions.IOStreams
 		"spec": map[string]any{"connection": map[string]any{
 			"addr":                 diagnoseAddr,
 			"database":             resolve.DefaultClickHouseDatabase,
-			"username":             "kuberecord",
+			"username":             sinkUsername,
 			"credentialsSecretRef": map[string]any{"name": diagnoseSecret},
 		}},
 	}}

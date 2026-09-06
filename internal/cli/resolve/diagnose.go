@@ -97,9 +97,19 @@ const DefaultClickHousePort = "9000"
 // apart from each other or from docs/CLI.md, which uses the same variable.
 const (
 	localProfileName = "local"
-	passwordEnvName  = "KUBERECORD_CLICKHOUSE_PASSWORD"
 	loopbackHost     = "127.0.0.1"
 )
+
+// DefaultPasswordEnv is the environment variable every route suggests for a
+// ClickHouse profile's password.
+//
+// It is exported because a third route now names it: the interactive
+// `config set-profile`, which offers it as the answer to "which environment
+// variable?" — the same value --from-sink writes when nothing else is said, and
+// the one the unreachable-backend message tells the reader to export. Three
+// spellings of one suggestion would be three, and the one nobody compiles is the
+// one that drifts.
+const DefaultPasswordEnv = "KUBERECORD_CLICKHOUSE_PASSWORD"
 
 // The two sections of docs/CLI.md a rendered message can send a reader to.
 //
@@ -475,7 +485,7 @@ func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string 
 	line(severity.Warning("and takes the database and the user from it. The forward is still yours to run:"))
 	line(severity.Warning("a profile records an address, it does not open a tunnel."))
 	line("")
-	line(severity.Warning(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", passwordEnvName)))
+	line(severity.Warning(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", DefaultPasswordEnv)))
 	line(severity.Warning("recommended credential for it, and the operator's own is not. Both routes, and"))
 	line(severity.Warning("why this tool will not forward the port for you:"))
 	line(severity.Warning(docsOutsideCluster))

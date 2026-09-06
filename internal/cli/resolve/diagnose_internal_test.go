@@ -345,7 +345,7 @@ func TestTheMessageCarriesNoCredential(t *testing.T) {
 	if strings.Contains(rendered, "--password ") || strings.Contains(rendered, "--password=") {
 		t.Errorf("the message offers to put a password on a command line:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, passwordEnvName) {
+	if !strings.Contains(rendered, DefaultPasswordEnv) {
 		t.Error("the profile route does not say where the password comes from")
 	}
 	// The permanent route names the sink and nothing else it read from it. That

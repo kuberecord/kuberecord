@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
@@ -151,32 +153,31 @@ func writeConfig(out io.Writer, cfg *resolve.Config, format options.OutputFormat
 }
 
 // newConfigSetProfileCommand writes one profile.
+//
+// Three routes reach one write. The per-field flags are the first, --from-sink is
+// the second, and a bare invocation on a terminal is the third: the prompting
+// layer in setprofilewizard.go asks for exactly what those flags would have
+// carried, assembles the same struct, and calls the same writer. It is a layer
+// over this path and never a second one beside it (D33).
 func newConfigSetProfileCommand(
 	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
 ) *cobra.Command {
 	var (
-		fromSink       string
-		backend        string
-		addr           string
-		database       string
-		username       string
-		passwordEnv    string
-		passwordFile   string
-		useTLS         bool
-		bucket         string
-		region         string
-		endpoint       string
-		forcePathStyle bool
-		prefix         string
-		path           string
+		fromSink string
+		fields   profileFields
 	)
 
 	command := &cobra.Command{
-		Use:   "set-profile NAME",
+		Use:   "set-profile [NAME]",
 		Short: "Create or replace a profile",
 		Long: `Create or replace a profile in the kuberecord configuration file.
 
 A profile says where to read recorded history from.
+
+With no flags at all, on a terminal, it asks. The first question is whether to
+read the settings from a sink this cluster already holds, which is --from-sink
+reached without having to know it exists; the last thing printed is the flag
+command that would have done the same thing without the questions.
 
 --from-sink <kind>/<name> writes the whole stanza from a sink custom resource the
 cluster already holds, so there is nothing to look up and nothing to mistype. A
@@ -193,7 +194,10 @@ A profile never holds a password either way: for ClickHouse, name an environment
 variable with --password-env or a file with --password-file. For S3 and MinIO
 there is nothing to name — credentials come from the AWS credential chain, which
 every tool on the machine already reads.`,
-		Example: `  # From the sink the operator already streams to. No values to look up.
+		Example: `  # Answer questions instead of knowing the flags. Prints the flag form at the end.
+  kuberecord config set-profile
+
+  # From the sink the operator already streams to. No values to look up.
   kuberecord config set-profile local --from-sink ClickHouseSink/default
 
   # By hand, for a backend no custom resource in this cluster describes:
@@ -208,20 +212,50 @@ every tool on the machine already reads.`,
 
   # An archive synced to a laptop.
   kuberecord config set-profile laptop --backend local --path ~/archives/kuberecord`,
+		ValidArgsFunction: cobra.NoFileCompletions,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
+			// Refused ahead of everything else, and therefore on all three routes
+			// rather than only under --from-sink. --sink-addr replaces the endpoint
+			// of one invocation's *resolved* backend (D25); this command resolves
+			// nothing and dials nothing, so a value given here would parse, change
+			// no field, and leave its author believing they had set the address the
+			// profile records. That is a silent no-op, which this release is
+			// closing rather than adding to (D31).
+			if cmd.Flags().Changed(options.FlagSinkAddr) {
+				return errSinkAddrWritesNoFile()
+			}
+
+			if len(args) > 1 {
 				return exit.UsageErrorf("config set-profile takes one argument, the profile name")
 			}
-			name := args[0]
-			if name == "" {
-				return exit.UsageErrorf("the profile name is empty")
+			name, named := "", len(args) == 1
+			if named {
+				name = args[0]
+			}
+
+			// Mode selection, and the whole of it. No flag of this command's own
+			// means the user has not said what they want, so ask; any of them means
+			// they have, and the path below runs exactly as it did before this
+			// command could ask anything. There is no --interactive, because a flag
+			// to request the behaviour you get by typing nothing is a flag nobody
+			// finds.
+			if !setProfileFlagsGiven(cmd) {
+				return runSetProfileWizard(cmd, flags, streams, invokedAs, name)
+			}
+
+			if !named {
+				return exit.UsageErrorf("config set-profile takes one argument, the profile name")
+			}
+			if err := requireProfileName(name); err != nil {
+				return err
 			}
 
 			if fromSink != "" {
 				derived, err := deriveProfile(cmd, flags, streams, invokedAs, fromSink,
 					resolve.ProfileOverrides{
-						Addr: addr, Username: username, PasswordEnv: passwordEnv,
-						PasswordFile: passwordFile, TLS: useTLS,
+						Addr: fields.Addr, Username: fields.Username, PasswordEnv: fields.PasswordEnv,
+						PasswordFile: fields.PasswordFile, TLS: fields.TLS,
 					})
 				if err != nil {
 					return err
@@ -240,31 +274,10 @@ every tool on the machine already reads.`,
 				}, streams)
 			}
 
-			profile := resolve.Profile{Backend: resolve.BackendKind(backend)}
-			switch profile.Backend {
-			case resolve.BackendClickHouse:
-				profile.ClickHouse = &resolve.ClickHouseProfile{
-					Addr: addr, Database: database, Username: username,
-					PasswordEnv: passwordEnv, PasswordFile: passwordFile, TLS: useTLS,
-				}
-			case resolve.BackendS3:
-				profile.S3 = &resolve.S3Profile{
-					Bucket: bucket, Prefix: prefix, Region: region,
-					Endpoint: endpoint, ForcePathStyle: forcePathStyle,
-				}
-			case resolve.BackendLocal:
-				profile.Local = &resolve.LocalProfile{Path: path, Prefix: prefix}
-			default:
-				// Named here because this is where a user who does not know
-				// --from-sink exists actually lands: the flag that reads all of
-				// these out of the cluster is worth one clause at the moment
-				// somebody is typing them by hand.
-				return exit.UsageErrorf("--%s %q is not one of %s; or give --%s <kind>/<name> to read "+
-					"the whole stanza from a sink custom resource",
-					options.FlagBackend, backend, options.JoinValues(resolve.BackendKinds),
-					options.FlagFromSink)
+			profile, err := fields.stanza()
+			if err != nil {
+				return err
 			}
-
 			return writeProfile(profileWrite{name: name, profile: profile}, streams)
 		},
 	}
@@ -274,34 +287,72 @@ every tool on the machine already reads.`,
 			"ClickHouseSink/default). A cluster-internal address is rewritten to a forwarded "+
 			"loopback port, and the notice on stderr says so.")
 	mustCompleteFlag(command, options.FlagFromSink, completeSinkRefs)
-	command.Flags().StringVar(&backend, options.FlagBackend, "",
-		fmt.Sprintf("Which backend this profile reads. One of: %s.", options.JoinValues(resolve.BackendKinds)))
-	mustCompleteFlag(command, options.FlagBackend, fixedEnum(resolve.BackendKinds, backendDescriptions))
-	command.Flags().StringVar(&addr, options.FlagAddr, "",
-		"ClickHouse native-protocol endpoint, as host:port.")
-	command.Flags().StringVar(&database, options.FlagDatabase, "",
-		"ClickHouse database holding the frozen v1 tables.")
-	command.Flags().StringVar(&username, options.FlagUsername, "",
-		"ClickHouse user. A read-only user is the recommended posture; see docs/CLI.md.")
-	command.Flags().StringVar(&passwordEnv, options.FlagPasswordEnv, "",
-		"Name of an environment variable holding the ClickHouse password.")
-	command.Flags().StringVar(&passwordFile, options.FlagPasswordFile, "",
-		"Path to a file holding the ClickHouse password.")
-	command.Flags().BoolVar(&useTLS, options.FlagTLS, false,
-		"Connect to ClickHouse over TLS, using the platform's trust store.")
-	command.Flags().StringVar(&bucket, options.FlagBucket, "", "S3 bucket holding the archive.")
-	command.Flags().StringVar(&region, options.FlagRegion, "",
-		fmt.Sprintf("Bucket region. Defaults to %s, which MinIO ignores.", resolve.DefaultS3Region))
-	command.Flags().StringVar(&endpoint, options.FlagEndpoint, "",
-		"S3 API endpoint, with scheme, for MinIO and other S3-compatible stores.")
-	command.Flags().BoolVar(&forcePathStyle, options.FlagForcePathStyle, false,
-		"Address the bucket as <endpoint>/<bucket>/<key>, which most MinIO deployments need.")
-	command.Flags().StringVar(&prefix, options.FlagPrefix, "",
-		"The archive's key prefix within the bucket or directory, with no leading or trailing slash.")
-	command.Flags().StringVar(&path, options.FlagPath, "",
-		"Directory holding a local archive — the one containing format=jsonl-v1/.")
+
+	// Registered from the table rather than one line each, because the table is
+	// what the prompting layer walks and a flag registered beside it would be a
+	// field with no question (see profileFieldFlags).
+	for _, field := range profileFieldFlags {
+		switch {
+		case field.str != nil:
+			command.Flags().StringVar(field.str(&fields), field.name, "", field.usage)
+		case field.boolean != nil:
+			command.Flags().BoolVar(field.boolean(&fields), field.name, false, field.usage)
+		}
+		if field.complete != nil {
+			mustCompleteFlag(command, field.name, field.complete)
+		}
+	}
 
 	return command
+}
+
+// errSinkAddrWritesNoFile refuses the per-invocation endpoint override.
+//
+// It is a function so that the sentence lives once. Every route through
+// set-profile raises it, and a message spelled at each of them would be three
+// spellings of one refusal.
+func errSinkAddrWritesNoFile() error {
+	return exit.UsageErrorf("--%s overrides the endpoint of one invocation's backend, and this "+
+		"command writes a file rather than reading one: give --%s to set the address the "+
+		"profile records", options.FlagSinkAddr, options.FlagAddr)
+}
+
+// setProfileFlagsGiven reports whether this invocation said anything about the
+// profile it wants written.
+//
+// It asks about this command's own flags and no others, which is the difference
+// between a rule and a rule that works. --kubeconfig, --context and
+// --operator-namespace decide *which cluster's sinks* the first question can
+// offer, so an invocation carrying one of them is precisely an invocation that
+// wants to be asked; suppressing the questions for it would answer "which
+// cluster?" by refusing to ask anything at all. --color, --output and -v say how
+// this process renders and logs and have no opinion about a profile either.
+//
+// The set walked is the same table the flags were registered from, so a field
+// added later cannot be one this question forgets about.
+func setProfileFlagsGiven(cmd *cobra.Command) bool {
+	if cmd.Flags().Changed(options.FlagFromSink) {
+		return true
+	}
+	for _, field := range profileFieldFlags {
+		if cmd.Flags().Changed(field.name) {
+			return true
+		}
+	}
+	return false
+}
+
+// requireProfileName is the one rule both routes apply to a profile name.
+//
+// It is a function for the same reason the validator is called rather than
+// reimplemented: the prompting layer re-asks on exactly this message, and a
+// second copy of the check is a second thing that can decide differently about an
+// empty string.
+func requireProfileName(name string) error {
+	if name == "" {
+		return exit.UsageErrorf("the profile name is empty")
+	}
+	return nil
 }
 
 // profileWrite is one profile on its way into the configuration file.
@@ -438,32 +489,281 @@ func backendForSinkKind(kind string) (resolve.BackendKind, error) {
 		options.FlagFromSink, kind)
 }
 
-// profileFieldFlags is every per-field flag this command carries, paired with the
-// backend it configures.
+// profileFields is one profile's worth of answers, in the shape both routes to a
+// write fill in.
 //
-// It exists so that --from-sink can refuse the ones it has no use for by name and
-// with a reason, rather than accepting them and quietly writing something else —
-// a flag that parsed and did nothing is a silent error whose symptom is a profile
-// reading somewhere its author did not choose (Invariant 4).
-var profileFieldFlags = []struct {
+// It exists so that the prompting layer can be a layer (D33). The flags bind
+// directly into it, the questions write into it, and stanza() is the one function
+// that turns it into something resolve.Profile.Validate has an opinion about — so
+// a value typed at a prompt and the same value passed as a flag are assembled by
+// one implementation and judged by one validator. Adding a field here without
+// adding it to profileFieldFlags gives it neither.
+type profileFields struct {
+	Backend        string
+	Addr           string
+	Database       string
+	Username       string
+	PasswordEnv    string
+	PasswordFile   string
+	TLS            bool
+	Bucket         string
+	Region         string
+	Endpoint       string
+	ForcePathStyle bool
+	Prefix         string
+	Path           string
+}
+
+// profileField is one settable field of a profile: the flag that carries it, the
+// backend it belongs to, and where its value lives.
+type profileField struct {
+	// name is the flag name, and the word the equivalent command prints.
 	name string
-	// backend is the one this flag belongs to. --backend itself belongs to none,
-	// since it is the flag that selects one.
+
+	// backend is the one this flag belongs to, for the purpose of refusing it
+	// beside --from-sink. --backend itself belongs to none, since it is the flag
+	// that selects one.
 	backend resolve.BackendKind
-}{
-	{options.FlagBackend, ""},
-	{options.FlagAddr, resolve.BackendClickHouse},
-	{options.FlagDatabase, resolve.BackendClickHouse},
-	{options.FlagUsername, resolve.BackendClickHouse},
-	{options.FlagPasswordEnv, resolve.BackendClickHouse},
-	{options.FlagPasswordFile, resolve.BackendClickHouse},
-	{options.FlagTLS, resolve.BackendClickHouse},
-	{options.FlagBucket, resolve.BackendS3},
-	{options.FlagRegion, resolve.BackendS3},
-	{options.FlagEndpoint, resolve.BackendS3},
-	{options.FlagForcePathStyle, resolve.BackendS3},
-	{options.FlagPrefix, resolve.BackendS3},
-	{options.FlagPath, resolve.BackendLocal},
+
+	// usage is the flag's help text and the prompt's question, in that order of
+	// authorship and with no second copy. This is the whole of what the acceptance
+	// criterion's "driven from the same field metadata the flags use" can mean
+	// here: a sentence that describes what a field is for reads identically above
+	// a `--help` entry and above a prompt, and a wizard carrying its own wording
+	// would be a second description of one field, drifting from the first the day
+	// somebody clarifies either.
+	usage string
+
+	// str and boolean locate the field within profileFields. Exactly one is
+	// non-nil; the pair is how one table registers both StringVar and BoolVar
+	// flags and asks both free-text and yes/no questions without a type switch at
+	// every call site.
+	str     func(*profileFields) *string
+	boolean func(*profileFields) *bool
+
+	// prompts are the backends whose questions include this field, defaulting to
+	// the one in backend. It is separate because the two are not the same
+	// question: backend says which backend *owns* the flag for a conflict message,
+	// and --prefix is owned by s3 there while being a legitimate field of a local
+	// profile too. Collapsing them would either stop asking a local profile for
+	// its prefix or change what --from-sink says when it refuses one.
+	prompts []resolve.BackendKind
+
+	// complete is the flag's shell completion, for the fields whose values are a
+	// closed set.
+	complete cobra.CompletionFunc
+}
+
+// asks reports whether a profile of this backend is asked for this field.
+func (f profileField) asks(backend resolve.BackendKind) bool {
+	if f.prompts != nil {
+		return slices.Contains(f.prompts, backend)
+	}
+	return f.backend == backend
+}
+
+// profileFieldFlags is every per-field flag `config set-profile` carries.
+//
+// It is the single description of that surface, and four things read it: the flag
+// registration, the refusal of a flag --from-sink has no use for, the questions
+// the prompting layer asks, and the equivalent command it prints at the end. A
+// fifth field added to a profile is one row here and is picked up by all four; a
+// field added anywhere else is a field with no flag, no question, or no way to be
+// refused — and the first two of those are silent (Invariant 4).
+//
+// The order is the order `--help` lists the flags in, the order docs/CLI.md's
+// table lists them in, and the order the questions are asked in. That last use is
+// load-bearing, and it is why each backend's *required* field comes before its
+// optional ones: the prompting layer validates the profile it has built so far
+// after every answer, and attributing the complaint to the field just typed is
+// only sound because every earlier field was already accepted in a profile that
+// contained it. --path before --prefix is that rule and not a preference — with
+// them the other way round, a local profile's prefix would be refused by a
+// sentence about its missing path. See setProfileWizard.askFields.
+var profileFieldFlags = []profileField{
+	{
+		name:  options.FlagBackend,
+		usage: fmt.Sprintf("Which backend this profile reads. One of: %s.", options.JoinValues(resolve.BackendKinds)),
+		str:   func(f *profileFields) *string { return &f.Backend },
+		// Asked by no backend, because it is the question that chooses one. See
+		// setProfileWizard.askBackend, which puts it through this same table entry.
+		prompts:  []resolve.BackendKind{},
+		complete: fixedEnum(resolve.BackendKinds, backendDescriptions),
+	},
+	{
+		name:    options.FlagAddr,
+		backend: resolve.BackendClickHouse,
+		usage:   "ClickHouse native-protocol endpoint, as host:port.",
+		str:     func(f *profileFields) *string { return &f.Addr },
+	},
+	{
+		name:    options.FlagDatabase,
+		backend: resolve.BackendClickHouse,
+		usage: "ClickHouse database holding the frozen v1 tables. Empty leaves the server's own " +
+			"default, which is rarely right: the operator writes to " + resolve.DefaultClickHouseDatabase + ".",
+		str: func(f *profileFields) *string { return &f.Database },
+	},
+	{
+		name:    options.FlagUsername,
+		backend: resolve.BackendClickHouse,
+		usage:   "ClickHouse user. A read-only user is the recommended posture; see docs/CLI.md.",
+		str:     func(f *profileFields) *string { return &f.Username },
+	},
+	{
+		name:    options.FlagPasswordEnv,
+		backend: resolve.BackendClickHouse,
+		usage:   "Name of an environment variable holding the ClickHouse password.",
+		str:     func(f *profileFields) *string { return &f.PasswordEnv },
+		// Neither password reference is asked for by field. The two are mutually
+		// exclusive and the wizard asks where the password comes from instead, which
+		// makes the refused state unreachable rather than reachable and corrected.
+		prompts: []resolve.BackendKind{},
+	},
+	{
+		name:    options.FlagPasswordFile,
+		backend: resolve.BackendClickHouse,
+		usage:   "Path to a file holding the ClickHouse password.",
+		str:     func(f *profileFields) *string { return &f.PasswordFile },
+		prompts: []resolve.BackendKind{},
+	},
+	{
+		name:    options.FlagTLS,
+		backend: resolve.BackendClickHouse,
+		usage:   "Connect to ClickHouse over TLS, using the platform's trust store.",
+		boolean: func(f *profileFields) *bool { return &f.TLS },
+	},
+	{
+		name:    options.FlagBucket,
+		backend: resolve.BackendS3,
+		usage:   "S3 bucket holding the archive.",
+		str:     func(f *profileFields) *string { return &f.Bucket },
+	},
+	{
+		name:    options.FlagRegion,
+		backend: resolve.BackendS3,
+		usage:   fmt.Sprintf("Bucket region. Defaults to %s, which MinIO ignores.", resolve.DefaultS3Region),
+		str:     func(f *profileFields) *string { return &f.Region },
+	},
+	{
+		name:    options.FlagEndpoint,
+		backend: resolve.BackendS3,
+		usage:   "S3 API endpoint, with scheme, for MinIO and other S3-compatible stores.",
+		str:     func(f *profileFields) *string { return &f.Endpoint },
+	},
+	{
+		name:    options.FlagForcePathStyle,
+		backend: resolve.BackendS3,
+		usage:   "Address the bucket as <endpoint>/<bucket>/<key>, which most MinIO deployments need.",
+		boolean: func(f *profileFields) *bool { return &f.ForcePathStyle },
+	},
+	{
+		name:    options.FlagPath,
+		backend: resolve.BackendLocal,
+		usage:   "Directory holding a local archive — the one containing format=jsonl-v1/.",
+		str:     func(f *profileFields) *string { return &f.Path },
+	},
+	{
+		name:    options.FlagPrefix,
+		backend: resolve.BackendS3,
+		usage:   "The archive's key prefix within the bucket or directory, with no leading or trailing slash.",
+		str:     func(f *profileFields) *string { return &f.Prefix },
+		prompts: []resolve.BackendKind{resolve.BackendS3, resolve.BackendLocal},
+	},
+}
+
+// stanza assembles the profile these answers describe.
+//
+// It is the only assembler. The flag path calls it with what pflag parsed, the
+// prompting layer calls it after every answer, and both are therefore refused by
+// one sentence for a backend that is not one of the three — which is what makes
+// the shared table in setprofilewizard_internal_test.go able to assert that the
+// two routes accept and reject the same inputs at all.
+func (f profileFields) stanza() (resolve.Profile, error) {
+	profile := resolve.Profile{Backend: resolve.BackendKind(f.Backend)}
+	switch profile.Backend {
+	case resolve.BackendClickHouse:
+		profile.ClickHouse = &resolve.ClickHouseProfile{
+			Addr: f.Addr, Database: f.Database, Username: f.Username,
+			PasswordEnv: f.PasswordEnv, PasswordFile: f.PasswordFile, TLS: f.TLS,
+		}
+	case resolve.BackendS3:
+		profile.S3 = &resolve.S3Profile{
+			Bucket: f.Bucket, Prefix: f.Prefix, Region: f.Region,
+			Endpoint: f.Endpoint, ForcePathStyle: f.ForcePathStyle,
+		}
+	case resolve.BackendLocal:
+		profile.Local = &resolve.LocalProfile{Path: f.Path, Prefix: f.Prefix}
+	default:
+		// Named here because this is where a user who does not know --from-sink
+		// exists actually lands: the flag that reads all of these out of the
+		// cluster is worth one clause at the moment somebody is typing them by
+		// hand.
+		return resolve.Profile{}, exit.UsageErrorf("--%s %q is not one of %s; or give --%s <kind>/<name> "+
+			"to read the whole stanza from a sink custom resource",
+			options.FlagBackend, f.Backend, options.JoinValues(resolve.BackendKinds),
+			options.FlagFromSink)
+	}
+	return profile, nil
+}
+
+// validate reports the first thing wrong with these answers, through the
+// validator the configuration file itself is read with.
+//
+// There is deliberately nothing here but the two existing calls. A second
+// validator — even one that agreed today — is one that drifts into accepting a
+// value the file will later refuse, and the prompt would then be a friendlier way
+// to write a profile that does not load.
+func (f profileFields) validate() error {
+	profile, err := f.stanza()
+	if err != nil {
+		return err
+	}
+	return profile.Validate()
+}
+
+// equivalent renders the flag command that produces this profile without the
+// questions.
+//
+// It walks the same table the questions came from, so a field that can be asked
+// for is a field that appears here — a wizard that could write something its
+// printed command could not reproduce would be teaching a flag interface that
+// does not exist.
+//
+// fromSink and addr are handled by the caller rather than read off the struct,
+// because the derived route has no --backend and prints --addr on a rule of its
+// own. See setProfileWizard.equivalentCommand.
+func (f profileFields) equivalent(invokedAs, name string) []string {
+	parts := []string{commandNameOr(invokedAs), "config", "set-profile", shellArg(name)}
+	for _, field := range profileFieldFlags {
+		switch {
+		case field.boolean != nil:
+			if *field.boolean(&f) {
+				parts = append(parts, "--"+field.name)
+			}
+		case field.str != nil:
+			if value := *field.str(&f); value != "" {
+				parts = append(parts, "--"+field.name, shellArg(value))
+			}
+		}
+	}
+	return parts
+}
+
+// shellArg quotes a value that a shell would not read back as one word.
+//
+// The printed command is meant to be pasted — into a terminal, into a bug report,
+// into a CI job — so a password file path with a space in it has to survive the
+// round trip. Single quotes because they are literal in every POSIX shell; the
+// embedded-quote case is spelled the way shells require rather than escaped,
+// since there is no escape for a single quote inside single quotes.
+func shellArg(value string) string {
+	if value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
+			!strings.ContainsRune("@%+=:,./-_", r)
+	}) < 0 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // fromSinkOverrides are the flags --from-sink accepts beside itself, by backend.
@@ -483,16 +783,11 @@ var fromSinkOverrides = map[resolve.BackendKind][]string{
 }
 
 // refuseFromSinkConflicts rejects a flag the named sink already answers.
+//
+// --sink-addr is not among them and is not checked here. It is refused for the
+// whole command before any route is chosen, because it names nothing this command
+// writes on any of them — see the top of set-profile's RunE.
 func refuseFromSinkConflicts(cmd *cobra.Command, ref resolve.SinkRef, backend resolve.BackendKind) error {
-	// --sink-addr is a per-invocation override of a *resolved* backend (D25), and
-	// this command resolves nothing and dials nothing. Accepting it here would
-	// parse a value and write a different one to disk.
-	if cmd.Flags().Changed(options.FlagSinkAddr) {
-		return exit.UsageErrorf("--%s overrides the endpoint of one invocation's backend, and this "+
-			"command writes a file rather than reading one: give --%s to set the address the "+
-			"profile records", options.FlagSinkAddr, options.FlagAddr)
-	}
-
 	allowed := fromSinkOverrides[backend]
 	for _, field := range profileFieldFlags {
 		if !cmd.Flags().Changed(field.name) || slices.Contains(allowed, field.name) {

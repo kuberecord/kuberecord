@@ -1760,7 +1760,10 @@ sink's Secret: the profile names an environment variable, and what you export
 there should be [a read-only ClickHouse user](#the-read-only-clickhouse-user)
 rather than the operator's own credential, which can write to the audit trail.
 The whole subcommand, including which flags survive `--from-sink` and what an
-`S3Sink` does instead, is [`--from-sink`](#--from-sink).
+`S3Sink` does instead, is [`--from-sink`](#--from-sink). If you would rather not
+learn a flag to get here, `kubectl kuberecord config set-profile` with nothing after
+it [asks](#asking-instead-of-knowing-the-flags), reaches the same place, and prints
+the command above at the end.
 
 ### The CLI will not forward the port for you
 
@@ -2034,6 +2037,9 @@ A few rules the file enforces rather than documents:
 ### `kuberecord config`
 
 ```console
+# Answer questions instead of knowing the flags. It prints the flag form at the end.
+$ kuberecord config set-profile
+
 # Write a profile. The first one in an empty file becomes the active one.
 $ kuberecord config set-profile prod --backend clickhouse \
     --addr clickhouse.example:9000 --database kuberecord \
@@ -2067,7 +2073,7 @@ Five subcommands, and two of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
-| `config set-profile` | `NAME` | the table below |
+| `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags) |
 | `config use-profile` | `NAME` | none |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
@@ -2167,6 +2173,83 @@ for it is not a guess this command makes.
 the `config use-profile` line to run next is printed instead. The one exception is
 the rule the whole subcommand already follows: the first profile in an empty file
 becomes the active one, and says so.
+
+#### Asking instead of knowing the flags
+
+`config set-profile` with **no flags of its own**, on a terminal, asks. There is no
+`--interactive`: a flag to request the behaviour you get by typing nothing is a flag
+nobody finds, and `gh auth login` sets the precedent.
+
+The first question is whether to read the settings out of a sink this cluster
+already holds — which is [`--from-sink`](#--from-sink) reached without having had
+to know it exists. That ordering is the whole point. A wizard whose first question
+is "what is the address?" has not helped anybody, because not knowing the address
+is why they are here.
+
+```console
+$ kuberecord config set-profile local
+
+Writing a profile: where this command reads recorded history from.
+A profile never holds a password — it names an environment variable or a file.
+Ctrl-D at any question stops, and writes nothing.
+
+Read the settings from a sink custom resource in this cluster? [Y/n] y
+
+Which sink should this profile read from?
+  1) ClickHouseSink/default — the frozen v1 schema in a ClickHouse instance
+  2) S3Sink/archive — a jsonl-v1 archive in an S3-compatible bucket
+> [ClickHouseSink/default] 1
+
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+That name resolves inside the cluster and nowhere else.
+
+ClickHouse native-protocol endpoint, as host:port.
+> [127.0.0.1:9000]
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+…
+→ to make it the active profile: `kuberecord config use-profile local`
+
+The same thing without the questions:
+  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000
+```
+
+Five things about it are worth stating, because each is a decision rather than an
+accident:
+
+- **The last line is the point.** The questions are for somebody who does not know
+  the flags; the equivalent command is what they are holding afterwards. It is the
+  line to paste into a bug report, the line to lift into a CI job, and the reason a
+  second profile does not need a second conversation. It reproduces the profile
+  exactly — a test writes one both ways and compares the file.
+- **Nothing here validates anything.** Every answer is put through the same
+  validator the file is read with and the flags are checked by, so a value the flags
+  refuse is refused here in the same sentence, and a value they take is taken. A
+  shared test table drives both routes and asserts exactly that. A second validator
+  — even one that agreed on the day it was written — is one that drifts into
+  accepting a value the file will later refuse.
+- **There is no password prompt**, and cannot be: a profile never stores a password
+  inline, so what is asked for is the *name* of an environment variable or the path
+  of a file. Nothing secret is typed, echoed, held in memory or left in scrollback.
+- **Off a terminal it is an error, never a wait.** Standard input that is not a
+  terminal exits `2` naming both flag forms. A wizard that blocked in CI would hang
+  the pipeline until something killed it, and the message saying what was wanted
+  would never arrive.
+- **Ctrl-D at any question writes nothing.** The file is written after the last
+  answer, so stopping earlier leaves nothing to undo — and it says so rather than
+  returning silently to a shell prompt.
+
+A global flag is not one of this command's flags. `--context`, `--kubeconfig` and
+`--operator-namespace` say which cluster the first question would list sinks from,
+so an invocation carrying one is precisely an invocation that wants to be asked;
+`--color`, `-o` and `-v` have no opinion about a profile either. Anything from the
+table above, or `--from-sink`, means you have said what you want, and the flag path
+runs unchanged.
+
+`--sink-addr` is refused here whichever route you are on. It replaces the endpoint
+of one invocation's *resolved* backend ([`--sink-addr`](#--sink-addr)), and this
+command resolves nothing and dials nothing — so a value given here would parse,
+change no field, and leave you believing you had set the address the profile
+records. `--addr` is the flag that sets it.
 
 #### `config resolve`
 

@@ -16,6 +16,51 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`kuberecord config set-profile` with no flags asks, on a terminal.**
+  Configuring a profile used to require knowing flags a new user does not have.
+  Now the bare subcommand prompts, and the **first question is whether to read the
+  settings out of a sink this cluster already holds** — which is `--from-sink`
+  reached without having had to know it exists. A wizard whose first question is
+  "what is the address?" would not have helped anybody, because not knowing the
+  address is why you are there.
+
+  **It prints the flag command at the end**, with your values in it:
+
+  ```
+  The same thing without the questions:
+    kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000
+  ```
+
+  That line is the point of the feature rather than a courtesy. It teaches the
+  flag interface instead of replacing it, it is the paste-able artifact for a bug
+  report, and it is what somebody lifts into a CI job — so the second profile
+  needs no second conversation.
+
+  Three properties are worth knowing:
+
+  - **No new validation.** Every answer goes through the same validator the
+    configuration file is read with and the flags are checked by, so a value the
+    flags refuse is refused here in the same sentence, and one they take is taken.
+    A shared test table drives both routes and asserts exactly that.
+  - **No password prompt**, and there cannot be one: a profile never stores a
+    password inline, so what is asked for is the *name* of an environment variable
+    or the path of a file. Nothing secret is typed, echoed, held or left in
+    scrollback.
+  - **Off a terminal it exits `2` naming both flag forms**, rather than waiting.
+    A wizard that blocked in CI would hang the pipeline until something killed it,
+    and the message saying what was wanted would never arrive. `Ctrl-D` at any
+    question writes nothing.
+
+  There is no `--interactive` flag: a flag to request the behaviour you get by
+  typing nothing is a flag nobody finds. Any flag of the subcommand's own —
+  `--from-sink` or a field flag — means you have said what you want, and the
+  existing path runs unchanged. Global flags are not among them: `--context`,
+  `--kubeconfig` and `--operator-namespace` say which cluster the first question
+  would list sinks from, so an invocation carrying one is precisely one that wants
+  to be asked.
+
 ### Changed — BREAKING: CLI output
 
 - **`timeline` and `diff` display oldest first, and `--reverse` now means newest
@@ -97,6 +142,13 @@ than a summary of them.
   files pinning that so a library upgrade cannot quietly re-sort either format.
 
 ### Changed
+
+- **`config set-profile --sink-addr` is refused on every route, not only beside
+  `--from-sink`.** It replaces the endpoint of one invocation's *resolved* backend,
+  and this subcommand resolves nothing and dials nothing — so given here it parsed,
+  changed no field, and left its author believing they had set the address the
+  profile records. It now says so and names `--addr`, which is the flag that sets
+  it. A command that combined the two never wrote what it looked like it wrote.
 
 - **`timeline --full` closes each expanded block with a blank line, and dims the
   operations inside it.** An eleven-operation patch used to expand into a wall of

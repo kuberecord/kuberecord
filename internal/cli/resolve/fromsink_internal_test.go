@@ -307,8 +307,8 @@ func TestProfileFromSinkDefaultsToTheDocumentedVariable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProfileFromSink: %v", err)
 	}
-	if got := derived.Profile.ClickHouse.PasswordEnv; got != passwordEnvName {
-		t.Errorf("clickhouse.passwordEnv = %q, want %q", got, passwordEnvName)
+	if got := derived.Profile.ClickHouse.PasswordEnv; got != DefaultPasswordEnv {
+		t.Errorf("clickhouse.passwordEnv = %q, want %q", got, DefaultPasswordEnv)
 	}
 }
 
