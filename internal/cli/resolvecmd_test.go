@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -576,6 +577,35 @@ func TestResolveYAMLIsTheSameDocument(t *testing.T) {
 	if fmt.Sprint(fromJSON) != fmt.Sprint(fromYAML) {
 		t.Errorf("the two serializations are different documents.\n--- json ---\n%s\n--- yaml ---\n%s",
 			asJSON, asYAML)
+	}
+}
+
+// TestResolveYAMLOpensLikeAKubernetesDocument.
+//
+// `kind: Resolution` is the field that says what this document is, and the
+// document is pasted into support threads — so it has to be the second line, not
+// the last. Sorted alphabetically it was the last: apiVersion, backend, check,
+// clusterID, kind.
+//
+// It is asserted by reading the left margin rather than by parsing, because a
+// parse would hand the question back to a library and because the property is
+// what somebody sees when they open the paste.
+func TestResolveYAMLOpensLikeAKubernetesDocument(t *testing.T) {
+	stdout, _, err := resolveCase{
+		sinks: discoverableCluster(),
+		objects: []runtime.Object{
+			credentialsSecret(operatorNamespace),
+			operatorDeployment(operatorNamespace, theCluster),
+		},
+		format: render.StructuredYAML,
+	}.run(t)
+	if err != nil {
+		t.Fatalf("RunResolve -o yaml: %v", err)
+	}
+
+	want := []string{"apiVersion", "kind", "backend", "clusterID", "check"}
+	if got := topLevelYAMLKeys(stdout); !slices.Equal(got, want) {
+		t.Errorf("the resolution document opens %v, want %v\n%s", got, want, stdout)
 	}
 }
 

@@ -489,20 +489,23 @@ $ kuberecord get deploy/checkout -n payments --at 2h
 apiVersion: cli.kuberecord.io/v1alpha1
 kind: Object
 metadata:
-  backend: clickhouse
   cluster_id: prod-eu-1
+  backend: clickhouse
   coverage: ...
   reconstruction:
-    at: "2026-08-28T13:00:00Z"
-    base_event: Checkpoint
-    base_ts: "2026-08-28T14:05:02.117Z"
-    not_deployable: true
-    patches_applied: 0
     reconstructed: true
+    not_deployable: true
+    at: "2026-08-28T13:00:00Z"
+    base_ts: "2026-08-28T14:05:02.117Z"
+    base_event: Checkpoint
+    patches_applied: 0
 items:
 - at: "2026-08-28T13:00:00Z"
-  base_event: Checkpoint
+  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
   base_ts: "2026-08-28T14:05:02.117Z"
+  base_event: Checkpoint
+  patches_applied: 0
+  sha256: 283f5a59…
   object:
     apiVersion: apps/v1
     kind: Deployment
@@ -510,10 +513,11 @@ items:
       name: checkout
       namespace: payments
     ...
-  patches_applied: 0
-  sha256: 283f5a59…
-  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
 ```
+
+The reconstructed state is the **last** key of the item, under the six facts a
+reader judges it by — how old the base row is, how many patches were replayed over
+it — so a document of any length ends with the object it was run for.
 
 The state is at `.items[0].object`, inside the same [envelope](#structured-output)
 every other command answers in — so `kubectl apply -f` on this file fails loudly
@@ -1112,6 +1116,21 @@ exists and the pipeline keeps running while producing empty findings.
 `items` is always a list, including when it is empty. `metadata` carries
 `cluster_id`, `backend` and `coverage` on every kind, and `reconstruction` on
 `Object` alone.
+
+**Key order is declaration order, in every format.** A YAML envelope opens
+`apiVersion`, `kind`, `metadata`, `items` — the order every Kubernetes document
+opens in, and the order `-o json` has always emitted. A document that began
+`apiVersion, items` pushed the two fields that say what it is below a
+several-hundred-line array, and read as malformed even when it was not. Items
+follow the same rule, which puts the bulky fields at the end of each one: `data`
+and `diff` after the eight columns that identify a change, and the reconstructed
+`object` after the six facts a reader judges a reconstruction by. The
+[`version`](#version) and [`config resolve`](#config-resolve) documents open the
+same way.
+
+It is a property of the rendering rather than of the contract. Nothing `jq` or
+`yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
+only one that notices.
 
 **Three documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,

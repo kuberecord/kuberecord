@@ -73,6 +73,29 @@ than a summary of them.
   agreement about spelling, and it still holds for every field; these two are the
   only ones whose *type* the CLI now chooses for itself.
 
+- **`-o yaml` emits keys in declaration order, so every document opens
+  `apiVersion, kind, metadata, items`.** It used to sort them alphabetically,
+  which put `kind` and `metadata` *below* an `items` array that can run to several
+  hundred lines — so `kubectl kuberecord get … -o yaml` opened `apiVersion,
+  items`, and a document that opens that way reads as malformed even when it is
+  not. Nobody chose the sorting: `sigs.k8s.io/yaml` marshals through a Go map, and
+  a map has no order. Every kind is affected — `Timeline`, `Diff`, `Object`,
+  `Coverage`, `Blame` — along with the `Version` and `Resolution` documents, which
+  carry the same `apiVersion` without being envelopes. Within an item the same
+  rule now puts the bulky fields last: `data` and `diff` after the columns that
+  identify a change, and a reconstructed `object` after the provenance a reader
+  judges it by, at the end of the document rather than in the middle of it.
+
+  **Nothing but the order changed.** Quoting, block scalars, indentation, integers
+  too large for an `int64` — all identical, and a test asserts it by rendering
+  both ways and comparing the parsed documents. `jq`, `yq` and every other parser
+  return exactly what they returned before; a consumer that reads `-o yaml`
+  *positionally* — `head -4`, or a diff against a stored expectation — is the only
+  one that will notice, which is why this is recorded here rather than passed over
+  as cosmetic. **`-o json` and `-o jsonl` are untouched**: `encoding/json` has
+  always emitted struct fields in declaration order, and there are now golden
+  files pinning that so a library upgrade cannot quietly re-sort either format.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`

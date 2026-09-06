@@ -116,6 +116,32 @@ func decodeYAML(t *testing.T, document string) map[string]any {
 	return decoded
 }
 
+// topLevelYAMLKeys reads a YAML document's keys at the left margin, in order.
+//
+// Every structured document this CLI writes has to open the way a Kubernetes
+// document opens — apiVersion, then kind, then the rest — because a reader who
+// has opened one YAML document has opened all of them, and one that begins
+// `apiVersion, items` reads as malformed even when it is not. The full order per
+// envelope kind is pinned in internal/cli/render; what the callers here assert is
+// the property for the two documents that are not envelopes.
+//
+// It scans the text rather than parsing it, deliberately. A parse would go
+// through the same library the encoder uses, so a library that sorted would be
+// asked to report on its own sorting — and the property under test is what a
+// person sees when they open the file, which is text.
+func topLevelYAMLKeys(document string) []string {
+	var keys []string
+	for line := range strings.SplitSeq(document, "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '-' || line[0] == '#' {
+			continue
+		}
+		if key, _, found := strings.Cut(line, ":"); found {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 // decodeJSONL parses the streaming rendering: the head line, then the items.
 //
 // It asserts the shape the format promises rather than assuming it, because that

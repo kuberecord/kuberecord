@@ -23,8 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"sigs.k8s.io/yaml"
-
 	"github.com/kuberecord/kuberecord/internal/query"
 )
 
@@ -644,7 +642,7 @@ type ObjectItem struct {
 //     not scale with the number of items.
 //   - json and yaml hold the items until Close, because a single document cannot
 //     be finished before it is complete. YAML additionally cannot stream even in
-//     principle here: sigs.k8s.io/yaml produces YAML by transforming the complete
+//     principle here: YAMLDocument produces YAML by transforming the complete
 //     JSON document, which is exactly what makes the two formats the same
 //     document in two syntaxes.
 //
@@ -748,11 +746,14 @@ func (s *Stream) writeLine(value any) error {
 
 // encodeEnvelope serializes a whole envelope.
 //
-// YAML goes through sigs.k8s.io/yaml, which marshals via JSON and therefore emits
-// the same field names, the same ordering rules and the same scalar spellings the
-// JSON form does. A reader comparing the two must see one document in two
-// syntaxes, not two documents — the same agreement encodeObject keeps for a
-// reconstruction.
+// Both formats are reached through the JSON tags, so they emit the same field
+// names in the same order with the same scalar spellings. A reader comparing the
+// two must see one document in two syntaxes, not two documents.
+//
+// The YAML half goes through YAMLDocument rather than through the familiar
+// sigs.k8s.io/yaml, and that file is where the reason lives: the familiar import
+// transforms the JSON through a Go map, and a map is what sorted `kind` and
+// `metadata` below a several-hundred-line `items` array.
 func encodeEnvelope(envelope Envelope, format StructuredFormat) (string, error) {
 	switch format {
 	case StructuredJSON:
@@ -762,11 +763,11 @@ func encodeEnvelope(envelope Envelope, format StructuredFormat) (string, error) 
 		}
 		return string(encoded) + "\n", nil
 	case StructuredYAML:
-		encoded, err := yaml.Marshal(envelope)
+		encoded, err := YAMLDocument(envelope)
 		if err != nil {
 			return "", fmt.Errorf("encoding the %s envelope as YAML: %w", envelope.Kind, err)
 		}
-		return string(encoded), nil
+		return encoded, nil
 	}
 	return "", fmt.Errorf("%q is not a structured serialization", format)
 }

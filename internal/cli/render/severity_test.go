@@ -18,8 +18,6 @@ package render_test
 
 import (
 	"flag"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,10 +33,14 @@ import (
 // diagnostic and these three tiers together, so that a second copy of it cannot
 // drift away from the first.
 
-// updateSeverityGolden rewrites the rendered block instead of comparing to it.
+// updateGolden rewrites the golden files instead of comparing against them.
 //
-//	go test ./internal/cli/render/ -run Severity -update
-var updateSeverityGolden = flag.Bool("update", false, "rewrite the golden files")
+//	go test ./internal/cli/render/ -update
+//
+// One flag for every golden suite in this package — the severity block here and
+// the per-kind envelope documents in yaml_test.go — because a second -update path
+// is a second place for the write half to drift from the compare half.
+var updateGolden = flag.Bool("update", false, "rewrite the golden files")
 
 // The lines the block is built from, which are the lines Tasks 15.5 and 15.6 will
 // spend the vocabulary on. Nothing renders this block in the CLI: the vocabulary
@@ -158,22 +160,5 @@ func TestSeverityTiersAreDistinguishable(t *testing.T) {
 func assertSeverityGolden(t *testing.T, name, got string) {
 	t.Helper()
 
-	path := filepath.Join("testdata", "severity", name+".golden")
-	if *updateSeverityGolden {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("creating the golden directory: %v", err)
-		}
-		if err := os.WriteFile(path, []byte(got), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", path, err)
-		}
-		return
-	}
-
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s (run `go test ./internal/cli/render/ -update` to create it): %v", path, err)
-	}
-	if got != string(want) {
-		t.Errorf("the rendering of %s changed.\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
-	}
+	assertRenderGolden(t, "severity", name, got)
 }
