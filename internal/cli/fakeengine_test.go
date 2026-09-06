@@ -71,9 +71,19 @@ type fakeEngine struct {
 	coverageErr     error
 	stateErr        error
 
+	// eventCoverageErr fails only the coverage read about Kubernetes Events,
+	// which coverageErr cannot express: a command asks about the object's own
+	// scope first, so a fake that failed every coverage read would never reach
+	// the second question at all.
+	eventCoverageErr error
+
 	// queries records what was asked, so a test can assert the query the command
 	// built rather than only the output it produced.
 	queries []query.TimelineQuery
+	// scopeQueries records the coverage questions, for the same reason. A command
+	// asks more than one of them — the object's own scope, and the Events about
+	// it — and which scopes it named is a claim no rendering can carry.
+	scopeQueries []query.ScopeQuery
 	// opened and closed count the iterators handed out and released, which is how
 	// the drain's Close-on-every-path discipline is checked. A query that failed
 	// hands out no iterator, so the two counters are not the same thing as the
@@ -209,11 +219,49 @@ func newestUIDAt(changes []query.Change, at time.Time) string {
 	return uid
 }
 
-func (f *fakeEngine) Coverage(_ context.Context, _ query.ScopeQuery) ([]query.ScopeInterval, error) {
+// Coverage answers the scope log, applying the query's own predicates.
+//
+// It filters rather than handing back the whole fixture, because which scope a
+// command asks about is part of its behaviour and is invisible in output: a
+// timeline that explained an absence of Kubernetes Events by consulting coverage
+// for Deployments would print a confident, well-formed and false sentence, and a
+// fake that ignored its query would certify it.
+func (f *fakeEngine) Coverage(_ context.Context, q query.ScopeQuery) ([]query.ScopeInterval, error) {
+	f.scopeQueries = append(f.scopeQueries, q)
 	if f.coverageErr != nil {
 		return nil, f.coverageErr
 	}
-	return f.intervals, nil
+	if q.Kind == eventKindName && f.eventCoverageErr != nil {
+		return nil, f.eventCoverageErr
+	}
+	var matched []query.ScopeInterval
+	for _, interval := range f.intervals {
+		if matchesScope(interval, q) {
+			matched = append(matched, interval)
+		}
+	}
+	return matched, nil
+}
+
+// matchesScope applies ScopeQuery's matching rules to one interval.
+//
+// The namespace predicate has the contract's *covering* reading rather than the
+// scope log's own: a query for one namespace matches that namespace's scope and
+// the all-namespaces scope, because a cluster-wide rule genuinely was watching an
+// object in that namespace. An empty APIGroup is every group and not the core
+// one, which is the ambiguity ScopeQuery documents and the reason a caller that
+// wants the core group alone filters the answer itself.
+func matchesScope(interval query.ScopeInterval, q query.ScopeQuery) bool {
+	switch {
+	case q.APIGroup != "" && interval.APIGroup != q.APIGroup:
+		return false
+	case q.Kind != "" && interval.Kind != q.Kind:
+		return false
+	case q.Namespace != "" && interval.Namespace != "" && interval.Namespace != q.Namespace:
+		return false
+	default:
+		return true
+	}
 }
 
 func (f *fakeEngine) Incarnations(

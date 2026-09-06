@@ -360,6 +360,37 @@ A backend with no scope log to read says that instead, and exits `0`: it cannot
 tell the three apart, and pretending otherwise would be the failure this section
 exists to prevent.
 
+### `--with-events` that finds no Events
+
+The same rule applies to the question `--with-events` asks inside the first one.
+When the flag is given and nothing is interleaved, the watch scopes are consulted
+about `Event` — **both** API spellings, `v1` and `events.k8s.io/v1`, since a rule
+may name either and gets the same stream — and the three answers are the same
+three:
+
+| What was found | What you get |
+|----------------|--------------|
+| Events were being recorded | `Events were confirmed recorded over <interval>` — nothing was said about this object while that scope was open. |
+| No rule streams Events | The gap, and the YAML that closes it. |
+| No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
+
+The second is what a fresh [quickstart](../examples/quickstart/) produces: its
+rule streams `apps/v1 Deployment` and `v1 ConfigMap` and nothing else, so there
+are no Event rows to interleave and the flag is correct about an archive that is
+also correct.
+
+```
+! --with-events found no Events: no rule streams Events to this sink.
+  Add them to a rule and they will appear here:
+      - group: ""
+        version: v1
+        kind: Event
+```
+
+A bare `timeline` says none of this. The notice is owed to somebody who asked for
+Events; a command that volunteered it to everyone would be answering a question
+nobody put to it, and the coverage read that builds it is not paid for either.
+
 ### What a backend cannot record
 
 An object archive holds no deletions at all (see [`docs/TEE.md`](TEE.md) and the

@@ -190,7 +190,58 @@ func gatherChanges(
 		result.Notices = append(result.Notices, emptyNotices...)
 		result.Empty = emptyErr
 	}
+
+	// Last, and after the object's own emptiness has been explained: this is the
+	// sub-question --with-events asked inside the main one, and a reader works
+	// outwards. It is still inside the cold-scan guard, which is where any query
+	// that may walk partitions belongs.
+	result.Notices = appendNotice(result.Notices,
+		eventsNotice(ctx, backend, request, from, to, sawEvent(result.Rows)))
 	return result, nil
+}
+
+// eventsNotice explains a --with-events that interleaved nothing, and says
+// nothing when the flag was not passed.
+//
+// The gate is the flag and not the archive's contents, which is the whole of
+// Invariant 9's reading here: a bare `timeline` over a cluster that records no
+// Events is not an unanswered question, because nothing asked it. Only a reader
+// who typed --with-events is owed a sentence, and D31 says they are owed it
+// whatever the answer turns out to be.
+//
+// The consultation costs one extra round trip and is paid only on the path that
+// needs it — the flag was passed and no Event came back. An invocation that
+// interleaved Events has its answer in front of it and is asked nothing further.
+//
+// A failed read degrades into the notice rather than ending the command. See
+// explainNoEvents, which states why.
+func eventsNotice(
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
+	from, to time.Time, interleaved bool,
+) render.Notice {
+	if !request.WithEvents || interleaved {
+		return render.Notice{}
+	}
+	coverage, err := askCoverage(
+		ctx, backend, eventScopeQuery(request, from, to), describeEventScope(request))
+	// Narrowed after the query rather than in it, because the query had to ask
+	// about every group in order to reach the core one. See eventIntervals.
+	coverage.Intervals = eventIntervals(coverage.Intervals)
+	return explainNoEvents(request, from, to, coverage, err)
+}
+
+// describeEventScope names the scope the Event coverage question was asked about,
+// for the failure message.
+//
+// It spells the unrestricted half out — a cluster-scoped subject has no namespace
+// of its own, so the question really is about every namespace — for the reason
+// ScopesRequest.describeScope does: an answer about a scope is only actionable if
+// the reader can see how wide the scope was.
+func describeEventScope(request TimelineRequest) string {
+	if namespace := request.Ref.Namespace; namespace != "" {
+		return "Kubernetes Events in namespace " + namespace
+	}
+	return "Kubernetes Events in every namespace"
 }
 
 // displayRows narrows a gathered run to the paths a command was asked to show.

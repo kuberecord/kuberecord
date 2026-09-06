@@ -121,6 +121,18 @@ type TimelineRow struct {
 // be an invitation to render some of them quietly (D30).
 type Notice struct {
 	// Text is the sentence, without a prefix or a trailing newline.
+	//
+	// It may hold newlines, and a few notices need to: one that answers "how do
+	// I fix this?" with a fragment of YAML has to print the fragment in a shape
+	// the reader can copy, and prose that spelled the same three fields inline
+	// would be prose they have to reassemble. Every line is rendered in the same
+	// tier, because the block is one notice and not a notice with quieter lines
+	// after it.
+	//
+	// Indentation inside the text is relative: renderNotices aligns the
+	// continuation lines under the first one, so an author writes the shape the
+	// block has rather than the shape the marker leaves room for. Nothing here
+	// should know how wide WarningMarker is.
 	Text string
 }
 
@@ -304,11 +316,34 @@ func WriteNotices(errOut io.Writer, notices []Notice, opts Options) error {
 // A painted marker in front of unpainted prose was what this used to be, and it
 // put the whole of the severity into one character while the sentence — the part
 // that is actually read — rendered at the same weight as the table above it.
+//
+// A notice spanning several lines is painted a line at a time and marked only on
+// the first, which is the shape the unreachable-sink diagnostic already renders
+// its paragraph in. Both halves of that matter. Marking every line would put a
+// column of "!" down the side of a block somebody is reading, and one colour span
+// straddling the newlines would be a single escape sequence that anything reading
+// stderr a line at a time — a pager without -R, a log collector — splits down the
+// middle.
+//
+// The continuation lines are indented to the marker's own width, so that a block
+// hangs under its first character and the notice's text can be written with the
+// relative shape it has. An empty line is left empty rather than padded: trailing
+// whitespace is invisible on a terminal and permanent in a golden file.
 func renderNotices(notices []Notice, opts Options) string {
 	severity := NewSeverity(opts.Color)
+	hang := strings.Repeat(" ", len(WarningMarker)+1)
+
 	var built strings.Builder
 	for _, notice := range notices {
-		built.WriteString(WarningMarker + " " + severity.Warning(notice.Text) + "\n")
+		for i, line := range strings.Split(notice.Text, "\n") {
+			switch {
+			case i == 0:
+				built.WriteString(WarningMarker + " ")
+			case line != "":
+				built.WriteString(hang)
+			}
+			built.WriteString(severity.Warning(line) + "\n")
+		}
 	}
 	return built.String()
 }

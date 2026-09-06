@@ -530,6 +530,295 @@ func TestTimelineInterleavesKubernetesEvents(t *testing.T) {
 	}
 }
 
+// Invariant 9 applied to the sub-query --with-events asks.
+//
+// The flag was the one place in this CLI where an empty answer was presented as
+// nothing at all: the quickstart's rule streams Deployments and ConfigMaps, so
+// the archive holds no Event rows, and `timeline --with-events` produced output
+// byte-identical to a bare invocation. The tests below pin the three states apart
+// — and, as importantly, pin the two silences that must stay silent.
+
+// eventKindName is the Kind both Kubernetes Event APIs use, as the scope log
+// records it.
+//
+// Spelled here because these tests are an external package and cannot see the
+// CLI's own constant: a test asserting the command asked about "Event" must name
+// the string independently, or it is asserting that the code agrees with itself.
+const eventKindName = "Event"
+
+// eventsWatchedSince is when every Event scope below opens: the same instant the
+// object's own scope does, so that nothing in these fixtures turns on one scope
+// having started before another.
+const eventsWatchedSince = "2026-07-02T09:14:00Z"
+
+// eventsWatchedBy is a scope over Kubernetes Events, opened and still open.
+//
+// The group is a parameter because both spellings are real. v1/Event and
+// events.k8s.io/v1/Event are one storage behind two APIs, and a rule may name
+// either — so a fixture that only ever used one would let a regression that
+// consulted only that one pass.
+func eventsWatchedBy(group, rule string) query.ScopeInterval {
+	return query.ScopeInterval{
+		APIGroup: group, Kind: eventKindName, RuleRef: rule, From: at(eventsWatchedSince),
+	}
+}
+
+// withEventsEngine is the fixture the states below vary: a readable history, no
+// Event rows to interleave, and whatever the scope log is made to say.
+//
+// shortHistory rather than checkoutHistory, for the reason the severity fixtures
+// use it: nothing in it is shortened and nothing needs a replay anchor it does not
+// have, so the only line on stderr is the one under test.
+func withEventsEngine(intervals []query.ScopeInterval) *fakeEngine {
+	return &fakeEngine{
+		caps:         clickHouseCapabilities(),
+		changes:      shortHistory(),
+		incarnations: checkoutIncarnations(),
+		intervals:    intervals,
+	}
+}
+
+// withEventsRequest is `timeline deploy/checkout -n payments --with-events`.
+func withEventsRequest() cli.TimelineRequest {
+	request := defaultRequest()
+	request.WithEvents = true
+	return request
+}
+
+// deploymentScope is the object's own coverage, present in every case below so
+// that the timeline itself is never the thing being explained.
+func deploymentScope() []query.ScopeInterval {
+	return watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads")
+}
+
+// TestTimelineExplainsAnEmptyWithEventsResult covers the three states, in both
+// colour modes.
+//
+// They are golden files rather than substring assertions because two of the three
+// are prose a reader has to act on and the third is four lines of YAML they are
+// meant to copy — and because the tier a line is painted in is invisible to a
+// plain-text assertion, so a notice quietly demoted to the dim register would
+// change nothing any other test records (D30).
+func TestTimelineExplainsAnEmptyWithEventsResult(t *testing.T) {
+	tests := map[string]struct {
+		golden    string
+		intervals []query.ScopeInterval
+		coverErr  error
+	}{
+		// The quickstart's own state: a rule streams the object's kind and no rule
+		// streams Events, so the flag is correct, the archive is correct, and the
+		// answer is empty for a reason the reader can fix.
+		"no rule streams Events": {
+			golden:    "with-events-not-watched",
+			intervals: deploymentScope(),
+		},
+		// Events were being recorded and this object drew none. The silence is
+		// real, and the interval is the evidence for saying so.
+		"Events were watched and none happened": {
+			golden: "with-events-nothing-recorded",
+			intervals: append(deploymentScope(),
+				eventsWatchedBy("", "ClusterStreamRule/all-events")),
+		},
+		// No scope log at all. The two states above cannot be told apart, and the
+		// notice says exactly that rather than picking one.
+		"the backend cannot say": {
+			golden:   "with-events-cannot-say",
+			coverErr: query.ErrCapabilityUnsupported,
+		},
+	}
+
+	for name, test := range tests {
+		for mode, color := range map[string]bool{"": false, "-color": true} {
+			t.Run(name+mode, func(t *testing.T) {
+				engine := withEventsEngine(test.intervals)
+				engine.coverageErr = test.coverErr
+
+				stdout, stderr, err := runTimeline(
+					t, engine, withEventsRequest(), render.Options{Color: color})
+				if err != nil {
+					t.Fatalf("RunTimeline: %v", err)
+				}
+				assertGolden(t, test.golden+mode, stdout, stderr)
+			})
+		}
+	}
+}
+
+// TestTimelineAsksAboutEventsInTheObjectsNamespace pins the question, which no
+// rendering can carry.
+//
+// A notice explaining an absence of Kubernetes Events by consulting the coverage
+// of Deployments would be confident, well-formed and false, and it would read
+// identically to the correct one.
+func TestTimelineAsksAboutEventsInTheObjectsNamespace(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+	if _, _, err := runTimeline(t, engine, withEventsRequest(), render.Options{}); err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+
+	var asked *query.ScopeQuery
+	for i, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			asked = &engine.scopeQueries[i]
+		}
+	}
+	if asked == nil {
+		t.Fatalf("no coverage question was asked about %s: %+v", eventKindName, engine.scopeQueries)
+	}
+	if asked.Namespace != fixtureRef().Namespace {
+		t.Errorf("the Event coverage question named namespace %q, want %q",
+			asked.Namespace, fixtureRef().Namespace)
+	}
+	if asked.APIGroup != "" {
+		t.Errorf("the Event coverage question pinned the group to %q; an empty APIGroup is the only "+
+			"spelling that reaches both v1/Event and events.k8s.io/v1/Event, because the core group "+
+			"is itself the empty string (query.ScopeQuery)", asked.APIGroup)
+	}
+	if asked.ClusterID != fixtureCluster {
+		t.Errorf("the Event coverage question named cluster %q, want %q", asked.ClusterID, fixtureCluster)
+	}
+}
+
+// TestTimelineReachesBothEventGroupSpellings is the other half of that question:
+// what the answer is allowed to count.
+//
+// Both Event groups count, because a rule may name either and gets the same
+// stream. A kind named Event in somebody else's group does not, because the query
+// had to ask about every group in order to reach the core one — and reporting
+// "Events were being recorded" off the back of an unrelated custom resource is the
+// expensive mistake here: a reader told that stops looking.
+func TestTimelineReachesBothEventGroupSpellings(t *testing.T) {
+	const watched = "Events were confirmed recorded"
+
+	for name, test := range map[string]struct {
+		interval query.ScopeInterval
+		want     bool
+	}{
+		"the core group": {
+			interval: eventsWatchedBy("", "ClusterStreamRule/core-events"),
+			want:     true,
+		},
+		"events.k8s.io": {
+			interval: eventsWatchedBy("events.k8s.io", "ClusterStreamRule/modern-events"),
+			want:     true,
+		},
+		"a kind called Event in another group": {
+			interval: eventsWatchedBy("monitoring.example.com", "ClusterStreamRule/alerts"),
+			want:     false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine := withEventsEngine(append(deploymentScope(), test.interval))
+
+			_, stderr, err := runTimeline(t, engine, withEventsRequest(), render.Options{})
+			if err != nil {
+				t.Fatalf("RunTimeline: %v", err)
+			}
+			if got := strings.Contains(stderr, watched); got != test.want {
+				t.Errorf("the notice reports Events watched = %v, want %v:\n%s", got, test.want, stderr)
+			}
+		})
+	}
+}
+
+// TestTimelineSaysNothingAboutEventsWithoutTheFlag is the silence half, and it is
+// as load-bearing as the notices above.
+//
+// A bare `timeline` over an archive holding no Events is not an unanswered
+// question, because nothing asked it. The notice is owed to somebody who typed the
+// flag, and to nobody else — and the coverage question that builds it must not be
+// asked either, since it is a round trip bought for a sentence nobody will read.
+func TestTimelineSaysNothingAboutEventsWithoutTheFlag(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+
+	_, stderr, err := runTimeline(t, engine, defaultRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if strings.Contains(stderr, "--with-events") {
+		t.Errorf("a bare invocation volunteered a notice about a flag it was not given:\n%s", stderr)
+	}
+	for _, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			t.Errorf("a bare invocation paid for a coverage question about %s: %+v", eventKindName, q)
+		}
+	}
+}
+
+// TestTimelineSaysNothingWhenEventsWereInterleaved is the other silence: the flag
+// worked, so there is nothing to explain.
+func TestTimelineSaysNothingWhenEventsWereInterleaved(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+	engine.events = []query.Change{{
+		TS: at("2026-08-28T14:03:20.310Z"), EventType: query.EventKubernetes,
+		UID: "e1", Actors: []string{"kube-controller-manager"}, APIVersion: "v1",
+		Data: `{"type":"Normal","reason":"ScalingReplicaSet","message":"Scaled up"}`,
+	}}
+
+	_, stderr, err := runTimeline(t, engine, withEventsRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if strings.Contains(stderr, "--with-events") {
+		t.Errorf("a timeline that interleaved an Event explained itself anyway:\n%s", stderr)
+	}
+	for _, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			t.Errorf("an answered question was asked again of the scope log: %+v", q)
+		}
+	}
+}
+
+// TestTimelineDegradesWhenTheEventScopeLogCannotBeRead covers the fourth state,
+// which is a failure rather than a finding.
+//
+// A scope log this backend has and could not read is reported as the inability it
+// is, with the cause named (Invariant 4) — and it must not cost the reader the
+// timeline, which was gathered successfully and answers the question they asked
+// (Invariant 5).
+func TestTimelineDegradesWhenTheEventScopeLogCannotBeRead(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+	engine.eventCoverageErr = errors.New("dial tcp 10.0.0.5:9000: connection refused")
+
+	stdout, stderr, err := runTimeline(t, engine, withEventsRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("a failed sub-query discarded a timeline that had already been read: %v", err)
+	}
+	if !strings.Contains(stdout, "spec.replicas") {
+		t.Errorf("the timeline itself was not rendered:\n%s", stdout)
+	}
+	for _, want := range []string{"--with-events", "could not be read", "connection refused"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the notice does not say %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestTimelineExplainsAnEmptyWithEventsResultWhenStructured keeps the two
+// renderings honest about the same fact.
+//
+// The structured path is a second sequence and therefore a second place for the
+// consultation to be dropped (see timelinestream.go). It matters more here than
+// for a rendering detail: `-o json` is what a script reads, and a flag that
+// silently did nothing is exactly as invisible to one as to a person.
+func TestTimelineExplainsAnEmptyWithEventsResultWhenStructured(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+
+	request := withEventsRequest()
+	request.Structured = render.StructuredJSON
+
+	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if !strings.Contains(stderr, "no rule streams Events to this sink") {
+		t.Errorf("the structured rendering explained nothing:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "--with-events") {
+		t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
+	}
+}
+
 // TestTimelineExplainsAnEmptyResultAgainstCoverage is the "nothing changed" half
 // of Invariant 9: the scope was watched across the window, so the silence is real.
 func TestTimelineExplainsAnEmptyResultAgainstCoverage(t *testing.T) {

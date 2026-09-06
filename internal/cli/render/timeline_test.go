@@ -142,6 +142,53 @@ func TestANoticeIsNeverDimmed(t *testing.T) {
 	}
 }
 
+// TestAMultiLineNoticeHangsUnderItsMarker pins the shape of a notice that has to
+// print something a reader will copy.
+//
+// Three properties, and each of them is the failure that would otherwise ship
+// quietly. The marker goes on the first line only, because a column of "!" down
+// the side of a YAML fragment is not a fragment anybody pastes. The continuation
+// lines hang at the marker's own width, so an author writes the block's relative
+// shape and never has to know how wide WarningMarker is. And every line is painted
+// separately, so no colour span straddles a newline — a single escape sequence
+// spanning five lines is one that a pager without -R, or anything reading stderr a
+// line at a time, splits down the middle.
+func TestAMultiLineNoticeHangsUnderItsMarker(t *testing.T) {
+	const text = "--with-events found no Events: no rule streams Events to this sink.\n" +
+		"Add them to a rule and they will appear here:\n" +
+		"    - group: \"\"\n" +
+		"      version: v1\n" +
+		"      kind: Event"
+
+	var plain strings.Builder
+	if err := render.WriteNotices(
+		&plain, []render.Notice{{Text: text}}, render.Options{}); err != nil {
+		t.Fatalf("WriteNotices: %v", err)
+	}
+
+	want := render.WarningMarker + " --with-events found no Events: no rule streams Events to this sink.\n" +
+		"  Add them to a rule and they will appear here:\n" +
+		"      - group: \"\"\n" +
+		"        version: v1\n" +
+		"        kind: Event\n"
+	if plain.String() != want {
+		t.Errorf("the block does not hang under its marker.\n--- want ---\n%s\n--- got ---\n%s",
+			want, plain.String())
+	}
+
+	var painted strings.Builder
+	if err := render.WriteNotices(
+		&painted, []render.Notice{{Text: text}}, render.Options{Color: true}); err != nil {
+		t.Fatalf("WriteNotices: %v", err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSuffix(painted.String(), "\n"), "\n") {
+		if !strings.HasSuffix(line, "\x1b[0m") {
+			t.Errorf("a line of a coloured notice does not close its own colour, so the span "+
+				"straddles a newline: %q", line)
+		}
+	}
+}
+
 // TestTheFullHintIsEmittedOnlyWhenARowWasCollapsed.
 //
 // Both halves matter and the absent half matters more. A footer that appears

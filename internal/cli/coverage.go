@@ -152,3 +152,147 @@ func explainEmpty(
 			"%s, so nothing changed in that period", object, window, describeInterval(earliest)),
 	}}, nil
 }
+
+// Invariant 9 applied to a sub-query.
+//
+// `--with-events` asks a second question inside the first one, and until Task
+// 16.1 it was the only question this CLI answered with nothing at all: an archive
+// holding no Event rows produced output byte-identical to a bare invocation, so
+// the flag named in the README's hero block and in `--help`'s examples was
+// indistinguishable from a flag that had been ignored. Nothing was broken — the
+// quickstart's rule watches Deployments and ConfigMaps and no rule streams Events
+// — and "nothing was broken" is precisely the state a reader cannot tell from the
+// output.
+//
+// What follows is explainEmpty's shape, deliberately, and the two are meant to be
+// read together: the same three states, distinguished the same way, in the same
+// order, so that a change to how this CLI reasons about a silence is made once
+// rather than in two places that then drift. The one difference is the
+// consequence. explainEmpty can return a finding, because a timeline with no
+// coverage behind it is not an answer; this returns only notices, because the
+// object's own history may be complete and interesting and it is the commentary
+// beside it that is missing.
+
+// The kinds a Kubernetes Event is recorded under.
+//
+// Both spellings, because v1/Event and events.k8s.io/v1/Event are one storage
+// behind two APIs and a cluster's rules may name either — the operator records
+// each stream under whichever api_group its rule asked for, so a scope log can
+// hold either or both. Consulting one of them would report "Events were not
+// watched" to somebody whose rule names the other, which is the false conclusion
+// this whole file exists to prevent.
+//
+// They are spelled here rather than imported. internal/pipeline states the same
+// pair for the write path (ephemeralKind) and internal/query/clickhouse states it
+// for the read path (mergeEvents), and D20 puts the first of those out of the
+// CLI's reach on purpose: the CLI is a client of the frozen schema, not of the
+// operator's runtime. A copy that names its sources is the shape that decision
+// asks for.
+const (
+	eventKind        = "Event"
+	eventGroupCore   = ""
+	eventGroupModern = "events.k8s.io"
+)
+
+// eventScopeQuery asks whether Events were being recorded where the object was.
+//
+// The kind is pinned and the group deliberately is not. ScopeQuery.APIGroup reads
+// an empty value as *every group* rather than as the core group — the core group
+// is itself the empty string and cannot be spelled — so this is the only query
+// that reaches both Event spellings at once, and eventIntervals narrows the
+// answer back to them. Asking twice would not have been two questions: a query
+// for every group already contains the one for events.k8s.io.
+//
+// The namespace carries ScopeQuery's covering reading, exactly as the object's
+// own scope query does: a cluster-wide rule streaming Events genuinely was
+// recording the ones about this object.
+func eventScopeQuery(request TimelineRequest, from, to time.Time) query.ScopeQuery {
+	return query.ScopeQuery{
+		ClusterID: request.Ref.ClusterID,
+		Kind:      eventKind,
+		Namespace: request.Ref.Namespace,
+		From:      from,
+		To:        to,
+	}
+}
+
+// eventIntervals keeps the intervals that are about Kubernetes Events.
+//
+// The query above had to ask about every group to reach the core one, so the
+// answer may carry a kind named Event that is not a Kubernetes Event — a custom
+// resource in somebody's own group. Counting it would report that Events were
+// being recorded when they were not, which is the more expensive of the two
+// mistakes available here: a reader told "Events were watched, none happened"
+// stops looking, while one told "Events were not watched" goes and reads the rule.
+func eventIntervals(intervals []query.ScopeInterval) []query.ScopeInterval {
+	kept := make([]query.ScopeInterval, 0, len(intervals))
+	for _, interval := range intervals {
+		if interval.APIGroup == eventGroupCore || interval.APIGroup == eventGroupModern {
+			kept = append(kept, interval)
+		}
+	}
+	return kept
+}
+
+// explainNoEvents says why --with-events interleaved nothing.
+//
+// coverage is the answer to eventScopeQuery, already narrowed by eventIntervals,
+// and readErr is a scope log that exists and could not be read. The three states
+// are explainEmpty's:
+//
+//   - The backend cannot say, because it has no scope log — or, here, because
+//     reading it failed. Both are reported as the inability they are rather than
+//     resolved into a guess.
+//   - Nothing was watching Events. That is the quickstart's own state, and it is
+//     the one with a fix, so the fix is printed rather than described.
+//   - Events were being recorded. Then the silence is real, and the interval that
+//     confirms it is the evidence for the claim.
+//
+// The third case's claim is scoped to the confirmed interval rather than to the
+// window. A rule that started streaming Events halfway through the window covers
+// half of it, and "nothing was said about this object" would be a statement about
+// the other half that the scope log does not support.
+func explainNoEvents(
+	request TimelineRequest, from, to time.Time, coverage coverageAnswer, readErr error,
+) render.Notice {
+	object := describeObject(request.Ref)
+	window := options.DescribeWindow(from, to)
+
+	switch {
+	case readErr != nil:
+		// A scope log this backend has and could not read. It is the same
+		// inability as the case below and is reported as one, with the failure
+		// named: a notice that dropped it would be the silent error Invariant 4
+		// forbids, and a command that failed over it would throw away a timeline
+		// that had already been gathered — in the streaming case, already written.
+		return render.Notice{Text: fmt.Sprintf(
+			"--with-events found no Events for %s in %s, and the watch scopes could not be read to "+
+				"say why: %v", object, window, readErr)}
+	case coverage.Gap != nil:
+		return render.Notice{Text: fmt.Sprintf(
+			"--with-events found no Events for %s in %s, and this backend has no scope log: it cannot "+
+				"say whether that means nothing was recorded about it or that no rule streams Events "+
+				"to this sink", object, window)}
+	case len(coverage.Intervals) == 0:
+		// The fix is three lines of YAML and every other route to it — read the
+		// rule, find the field, learn that `group` is the empty string for a core
+		// kind — is longer than printing it. Both Event spellings work here and
+		// the core one is given, because it is the shorter of the two and a rule
+		// naming either gets the same stream.
+		return render.Notice{Text: fmt.Sprintf(
+			"--with-events found no Events: no rule streams Events to this sink.\n"+
+				"Add them to a rule and they will appear here:\n"+
+				"    - group: %q\n"+
+				"      version: v1\n"+
+				"      kind: %s", eventGroupCore, eventKind)}
+	}
+
+	// The earliest interval, as explainEmpty names the earliest one: it is the
+	// oldest evidence there is that something was recording, and describeInterval
+	// prints both ends of it so a reader can see for themselves how much of their
+	// window it covers.
+	return render.Notice{Text: fmt.Sprintf(
+		"--with-events found no Events for %s in %s. Events were confirmed recorded over %s, so "+
+			"nothing was said about it while that scope was open",
+		object, window, describeInterval(coverage.Intervals[0]))}
+}

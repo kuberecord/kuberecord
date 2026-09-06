@@ -53,6 +53,9 @@ import (
 //   - A backend that cannot record deletions gets a notice saying so, because a
 //     timeline that simply stops is otherwise indistinguishable from an object
 //     that is still there (Invariant 4).
+//   - --with-events that interleaves nothing is explained against the coverage of
+//     Events themselves, because a flag whose output is identical to its absence
+//     cannot be told from a flag that was ignored (Invariant 9, D31).
 //
 // The command writes the document to stdout and every qualification of it to
 // stderr. See internal/cli/render for the rule and why it is worth keeping.
@@ -850,6 +853,23 @@ func deletionsNotice(capabilities query.Capabilities, sawDeleted bool) render.No
 func sawDeletion(rows []render.TimelineRow) bool {
 	return slices.ContainsFunc(rows, func(row render.TimelineRow) bool {
 		return row.Change.EventType == query.EventDeleted
+	})
+}
+
+// sawEvent reports whether a rendered run holds a merged Kubernetes Event.
+//
+// It is the predicate --with-events is judged by, and it asks about the rows that
+// were *rendered* rather than about the ones the query returned. That is the
+// honest reading of "the flag produced no visible effect": a reader looking at a
+// document with no Event line in it is owed the explanation whether the Events
+// were never recorded or were fetched and then set aside.
+//
+// It is a function for the reason sawDeletion is: the streaming path never holds
+// the rows and answers the same question with a flag maintained as they go past,
+// and both callers have to be asking about the same enum value.
+func sawEvent(rows []render.TimelineRow) bool {
+	return slices.ContainsFunc(rows, func(row render.TimelineRow) bool {
+		return row.Change.EventType == query.EventKubernetes
 	})
 }
 

@@ -188,6 +188,37 @@ than a summary of them.
 
 ### Fixed
 
+- **`--with-events` says why it found nothing.** Against the quickstart it
+  produced output byte-identical to a bare invocation: the rule streams
+  `apps/v1 Deployment` and `v1 ConfigMap`, so the archive holds no Event rows and
+  there was nothing to interleave. Nothing was broken, and "nothing was broken" is
+  exactly the state the output could not distinguish from the flag being ignored —
+  on the flag the README's opening example and `--help` both put in front of a new
+  user first.
+
+  It now consults the watch scopes about `Event` — both API spellings, `v1` and
+  `events.k8s.io/v1`, since a rule may name either and gets the same stream — and
+  reports the three states `timeline` already distinguishes for an empty result.
+  Events were being recorded, so the silence is real and the confirming interval
+  is printed as the evidence. No rule streams Events, so the gap is named and the
+  three lines of YAML that close it are printed to be copied. Or the backend has no
+  scope log, in which case it says it cannot tell those two apart rather than
+  picking one.
+
+  ```
+  ! --with-events found no Events: no rule streams Events to this sink.
+    Add them to a rule and they will appear here:
+        - group: ""
+          version: v1
+          kind: Event
+  ```
+
+  A bare `timeline` still says nothing about Events, and pays for no extra
+  coverage read: the notice is owed to somebody who asked for them. It goes to
+  stderr with every other notice, in the table and in `-o json`, `-o yaml` and
+  `-o jsonl` alike — a flag that silently does nothing is as invisible to a script
+  as to a person.
+
 - **The incarnation banner no longer offers `diff` and `blame` a flag they
   reject.** Over a name that has belonged to more than one object, all three
   object commands print the same banner naming the incarnations they are not
