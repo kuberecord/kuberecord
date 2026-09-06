@@ -449,6 +449,45 @@ func TestTheMessageRendersInBothColourModes(t *testing.T) {
 	}
 }
 
+// reconstructedObjectDocument renders `get -o yaml` as the command renders it:
+// the provenance header and the envelope, on the two streams they travel on.
+//
+// Both streams are returned as one string because the property is about the
+// invocation's whole output — the header moves between them by format, and a
+// rendering that painted only the stream this helper happened to read would pass
+// while the other one changed.
+func reconstructedObjectDocument(t *testing.T, colorize bool) string {
+	t.Helper()
+
+	document := render.ObjectDocument{
+		Kind:      "apps/Deployment",
+		Ref:       "payments/checkout",
+		Cluster:   "prod-eu-1",
+		UID:       "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+		At:        time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC),
+		BaseTS:    time.Date(2026, 8, 28, 14, 5, 2, 0, time.UTC),
+		BaseEvent: "Checkpoint",
+		Coverage:  "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+		State: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata":   map[string]any{"name": "checkout", "namespace": "payments"},
+		},
+	}
+	head := render.EnvelopeHead{
+		APIVersion: render.EnvelopeAPIVersion,
+		Kind:       render.KindObject,
+		Metadata:   render.EnvelopeMetadata{ClusterID: "prod-eu-1", Backend: "clickhouse"},
+	}
+
+	var out, errOut strings.Builder
+	if err := render.WriteObject(&out, &errOut, document, head,
+		render.StructuredYAML, render.Options{Color: colorize}); err != nil {
+		t.Fatalf("rendering the reconstruction: %v", err)
+	}
+	return out.String() + errOut.String()
+}
+
 // sgrSequence matches an ANSI colour sequence — a CSI ending in `m` — and nothing
 // else.
 //
@@ -499,6 +538,15 @@ func TestColourIsNothingButColour(t *testing.T) {
 		"the emphasis tier": {
 			painted: render.NewSeverity(true).Emphasis(line),
 			plain:   render.NewSeverity(false).Emphasis(line),
+		},
+		// The one rendering that spends the vocabulary over a whole document
+		// rather than over a line. It is here for a reason the three tiers above
+		// are not: `get -o yaml` is what `yq` reads and what a redirect captures,
+		// so "the plain rendering is byte for byte what it was" is a promise to
+		// tooling and not only to a reader.
+		"the reconstructed object document": {
+			painted: reconstructedObjectDocument(t, true),
+			plain:   reconstructedObjectDocument(t, false),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

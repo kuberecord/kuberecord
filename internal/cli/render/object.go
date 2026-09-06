@@ -17,6 +17,7 @@ limitations under the License.
 package render
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -134,7 +135,13 @@ func WriteObject(
 	out, errOut io.Writer, doc ObjectDocument, head EnvelopeHead,
 	format StructuredFormat, opts Options,
 ) error {
-	provenance := ObjectProvenance(doc)
+	// The colour question is answered once, here, and every line rendered below
+	// is spelled the same way afterwards — including the block that travels on
+	// standard error, so the two routings stay one block rather than becoming two
+	// that resemble each other.
+	severity := NewSeverity(opts.Color)
+
+	provenance := ObjectProvenance(doc, severity)
 	reconstruction := ReconstructionOf(doc)
 	head.Metadata.Reconstruction = &reconstruction
 
@@ -144,7 +151,7 @@ func WriteObject(
 				return fmt.Errorf("writing the reconstructed object's header: %w", err)
 			}
 		}
-		if err := writeObjectEnvelope(out, doc, head, format); err != nil {
+		if err := writeObjectEnvelope(out, doc, head, format, severity); err != nil {
 			return err
 		}
 	}
@@ -165,13 +172,39 @@ func WriteObject(
 	return nil
 }
 
-// writeObjectEnvelope writes the one-item envelope a reconstruction is.
+// writeObjectEnvelope writes the one-item envelope a reconstruction is, and —
+// for YAML on a terminal — lets the recorded object stand out of it.
+//
+// The colour pass is a post-pass over the very bytes the plain path writes, which
+// is the shape rather than an implementation detail: there is one document, and
+// the coloured rendering of it can differ only by the escapes this function then
+// wraps some of its lines in. Every other format, and YAML with colour off, does
+// not go near it — a JSON document with escape sequences in it is not a JSON
+// document.
+func writeObjectEnvelope(
+	out io.Writer, doc ObjectDocument, head EnvelopeHead, format StructuredFormat, severity Severity,
+) error {
+	if format != StructuredYAML || !severity.enabled {
+		return streamObjectEnvelope(out, doc, head, format)
+	}
+
+	var document bytes.Buffer
+	if err := streamObjectEnvelope(&document, doc, head, format); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(out, provenanceAroundObject(document.String(), severity)); err != nil {
+		return fmt.Errorf("writing the reconstructed object's envelope: %w", err)
+	}
+	return nil
+}
+
+// streamObjectEnvelope writes the envelope itself.
 //
 // It goes through the same Stream every other structured answer does, so that a
 // reconstruction and a timeline are the same document shape in the same
 // serializations — including `jsonl`, where an answer of exactly one item is a
 // head line and one item line rather than a special case.
-func writeObjectEnvelope(
+func streamObjectEnvelope(
 	out io.Writer, doc ObjectDocument, head EnvelopeHead, format StructuredFormat,
 ) error {
 	stream, err := NewStream(out, format, head)
@@ -182,6 +215,125 @@ func writeObjectEnvelope(
 		return errors.Join(writeErr, stream.Close())
 	}
 	return stream.Close()
+}
+
+// Figure and ground in a document that serves two readers.
+//
+// # The decision this records
+//
+// The envelope is read by a machine and by a person, and it was designed for the
+// machine. `-o yaml` is at once the format a script parses and the format
+// somebody reaches for to look at a reconstructed object, and the two want
+// opposite things: a script wants every fact at the same depth and in one
+// spelling, a person wants the six bookkeeping fields out of the way of the
+// object they ran the command for. Nothing decided which reader won; the machine
+// simply got there first, and the person had been reading around the result ever
+// since.
+//
+// Phase 15 resolved it in favour of owing humans readable output, and three tasks
+// are what that cost. Task 15.3 gave `data` and `diff` real types, so the
+// document reads without a second parse. Task 15.4 fixed key order, so it opens
+// the way every other Kubernetes document a reader has met opens. This task, Task
+// 15.5, makes the recorded object the only thing in it at full intensity. None of
+// the three took anything away from the machine — the field names still mirror
+// the frozen schema, and the plain rendering is byte for byte what it was — which
+// is why the resolution was affordable at all.
+//
+// # The alternative that was not taken
+//
+// The other answer was a second document: leave the envelope machine-shaped and
+// give `get` a human-oriented default format that prints the object with its
+// provenance somewhere beside it. It is a real option, and it was rejected for
+// one reason — it makes two renderings of one answer, and the second one then has
+// to be kept true. Every field added to the envelope afterwards would need a
+// decision about whether the human format shows it, and the rendering nobody
+// scripts against is the one that quietly stops matching. A future
+// reconsideration should start from these two options, not from this file.
+//
+// # Why colour rather than structure
+//
+// The proposal was to syntax-highlight the object. That means parsing the YAML
+// and colouring by token: a second YAML renderer to keep correct, and a standing
+// risk to the property that colour changes nothing but colour. Inverting it buys
+// the same figure-ground separation for none of that — dim what surrounds the
+// object, and the object is what is left.
+
+// provenanceAroundObject paints every line of an Object envelope except the
+// recorded object's own content in the provenance tier.
+//
+// # What it knows, and what it deliberately does not
+//
+// Two facts, and both are properties of the envelope this package emits rather
+// than of YAML: an item's keys are written at indent 2, and `object` is the last
+// of them (Task 15.4 fixed that order, and the goldens in testdata/envelope pin
+// it). So a line at the envelope's own indentation decides which block follows
+// it, and a line indented past every envelope key — or a blank one, which a
+// literal block scalar inside a recorded value can produce — belongs to the block
+// it is already inside.
+//
+// That is the whole model: two states and one key name. It does not parse, it
+// does not tokenise, and it cannot tell a `spec` from an `annotations`. A change
+// that needed it to understand the document any further than this would be the
+// lift this approach exists to avoid, and the right response to that change is to
+// stop and say so rather than to grow a parser here.
+//
+// The `object:` key line is painted with the wrapper rather than with the object.
+// It is the envelope's field name, not the recorded state, and dimming it leaves
+// the reader a signpost to stop at immediately before the payload lights up —
+// which also means an empty `object: {}` needs no case of its own.
+//
+// # Why colour off returns early
+//
+// The uncoloured tier is the identity function, so the pass would be a no-op
+// either way. Returning makes it a no-op by construction rather than by every
+// line agreeing to be one: under --color=never, NO_COLOR and a redirected stdout
+// these are the exact bytes the plain path wrote, which is what leaves golden
+// files, `yq` and every redirect untouched.
+func provenanceAroundObject(document string, severity Severity) string {
+	if !severity.enabled {
+		return document
+	}
+
+	lines := strings.Split(document, "\n")
+	inObject := false
+	for i, line := range lines {
+		wrapper := true
+		if line == "" || strings.HasPrefix(line, objectContentIndent) {
+			// Deeper than any envelope key, so it belongs to whichever block is
+			// open — the recorded object, or the coverage report above it.
+			wrapper = !inObject
+		} else {
+			// At the envelope's own indentation, which is where the document says
+			// what comes next. The key line itself is wrapper either way.
+			inObject = isRecordedObjectKey(line)
+		}
+		if wrapper {
+			lines[i] = severity.Provenance(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// The two spellings provenanceAroundObject reads the envelope's shape from.
+//
+// They are constants rather than literals in the pass above because they are a
+// claim about what this package emits, and a claim is worth a name: the recorded
+// state hangs off an item key at indent 2, so nothing inside it can appear at a
+// shallower indent than four.
+const (
+	objectKeyLine       = "  object:"
+	objectContentIndent = "    "
+)
+
+// isRecordedObjectKey reports whether a line is the item key the recorded state
+// hangs off.
+//
+// Both spellings count. A state with fields is `  object:` with the document
+// beneath it; a state with none is `  object: {}`, which the emitter writes
+// inline, and reading only the first would leave the empty case in whichever
+// block preceded it.
+func isRecordedObjectKey(line string) bool {
+	return line == objectKeyLine || strings.HasPrefix(line, objectKeyLine+" ")
 }
 
 // objectItem is the reconstruction as the envelope carries it.
@@ -233,7 +385,27 @@ func ReconstructionOf(doc ObjectDocument) ReconstructionReport {
 // of the two formats. It is also the *only* definition of that wording: the
 // machine-readable marker beside it carries fields rather than prose precisely so
 // that this stays the single place the sentence lives.
-func ObjectProvenance(doc ObjectDocument) string {
+//
+// # Why the block recedes and one phrase in it does not
+//
+// A reader passes this block on every invocation, and by the third one they are
+// reading past it to the document below — so it is provenance in the sense the
+// tier means: facts that have to be available and do not have to be re-read.
+// Every line of it is painted that way except one phrase, because one line in a
+// block can be emphasised and two cannot: the second spends the first, and a
+// block with two emphasised lines has none.
+//
+// The phrase that keeps it is NOT A DEPLOYABLE MANIFEST. It is the line that
+// stops somebody piping this into `kubectl apply` — the misuse Phase 11 went as
+// far as making the document structurally incapable of, rather than trusting
+// words with it. The emphasis covers the phrase rather than the sentence around
+// it, so what survives a skim is the warning and not its punctuation.
+//
+// severity is a parameter rather than a colour flag because the tiers are the
+// vocabulary and the choice between them is what this function is deciding. With
+// colour off every tier is the identity function, so the block is exactly the
+// characters it always was.
+func ObjectProvenance(doc ObjectDocument, severity Severity) string {
 	// Read from the report rather than from doc, so the three facts the header
 	// shares with the marker are literally the same values (see ReconstructionOf).
 	reconstruction := ReconstructionOf(doc)
@@ -254,16 +426,25 @@ func ObjectProvenance(doc ObjectDocument) string {
 		width = max(width, displayWidth(field[0]))
 	}
 
+	// Painted a line at a time, with the newline outside the escapes: a sequence
+	// left open across a line break is one a pager, a partial copy or a terminal
+	// with its own idea of line ends renders differently from this file.
 	var built strings.Builder
-	built.WriteString("# Reconstructed state — " + notDeployable + ".\n#\n")
+	built.WriteString(severity.Provenance("# Reconstructed state — ") +
+		severity.Emphasis(notDeployable) + severity.Provenance(".") + "\n")
+	built.WriteString(severity.Provenance("#") + "\n")
 	for _, field := range fields {
-		built.WriteString("# " + pad(field[0]+":", width+1) + " " + field[1] + "\n")
+		built.WriteString(severity.Provenance("# "+pad(field[0]+":", width+1)+" "+field[1]) + "\n")
 	}
-	built.WriteString("#\n")
-	built.WriteString("# This is what kuberecord recorded, not what the API server held. Do not\n")
-	built.WriteString("# `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and\n")
-	built.WriteString("# metadata.generation were stripped at capture, and every field a redaction\n")
-	built.WriteString("# policy covers carries the sentinel " + RedactionSentinel + " in place of its value.\n")
+	built.WriteString(severity.Provenance("#") + "\n")
+	for _, line := range []string{
+		"# This is what kuberecord recorded, not what the API server held. Do not",
+		"# `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and",
+		"# metadata.generation were stripped at capture, and every field a redaction",
+		"# policy covers carries the sentinel " + RedactionSentinel + " in place of its value.",
+	} {
+		built.WriteString(severity.Provenance(line) + "\n")
+	}
 	return built.String()
 }
 

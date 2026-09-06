@@ -565,11 +565,31 @@ old and two patches deserves more confidence than one assembled from a base thre
 months old and four hundred, and `base row` and `patches applied` are what let a
 reader judge which they have.
 
+On a terminal the block is **dimmed** — all of it except `NOT A DEPLOYABLE
+MANIFEST`, which is not. Provenance is a fact you need available and do not need
+to re-read; that one phrase is the line that has to survive you skimming past the
+rest of them.
+
 The header solves this for a person and not for a script: stderr is the stream
 `2>/dev/null` discards and a pipe never reads, so `get … -o json | jq` would
 otherwise receive a reconstruction with nothing in its input saying so. The same
 facts are therefore carried as fields on stdout, in every format, as
 [`metadata.reconstruction`](#metadatareconstruction-on-get).
+
+### Everything but the object recedes
+
+`-o yaml` on a terminal dims the whole kuberecord wrapper: the envelope's
+`apiVersion`, `kind` and `metadata`, and the six bookkeeping fields above the
+state (`at`, `uid`, `base_ts`, `base_event`, `patches_applied`, `sha256`). **The
+recorded object is the only thing left at full intensity**, so you find it by
+everything around it receding rather than by counting keys.
+
+Nothing is highlighted, and that matters when you redirect: under
+`--color=never`, under `NO_COLOR`, and any time stdout is not a terminal, the
+document is byte for byte what it has always been. `yq '.items[0].object'`, a
+`> object.yaml`, and a diff against a file you saved last week are all unaffected.
+`--color=always` forces the escapes on, which is worth knowing before piping that
+into a parser.
 
 ### `--verify`
 

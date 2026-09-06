@@ -120,10 +120,21 @@ func runGet(
 ) (stdout, stderr string, err error) {
 	t.Helper()
 
+	return runGetWith(t, engine, request, render.Options{Width: goldenWidth})
+}
+
+// runGetWith is runGet for a test that has something to say about the rendering
+// surface — which, for this command, means colour. The two share one body so that
+// a coloured run and a plain one can differ in nothing but the option that was
+// set.
+func runGetWith(
+	t *testing.T, engine *fakeEngine, request cli.GetRequest, opts render.Options,
+) (stdout, stderr string, err error) {
+	t.Helper()
+
 	var out, errOut bytes.Buffer
 	backend := &resolve.Backend{Engine: engine, ClusterID: fixtureCluster}
-	err = cli.RunGet(context.Background(), backend, request,
-		ioStreams(&out, &errOut), render.Options{Width: goldenWidth})
+	err = cli.RunGet(context.Background(), backend, request, ioStreams(&out, &errOut), opts)
 	return out.String(), errOut.String(), err
 }
 
@@ -148,6 +159,24 @@ func TestGetReconstructsStateAsYAML(t *testing.T) {
 	if !strings.Contains(stdout, "NOT A DEPLOYABLE MANIFEST") {
 		t.Errorf("the mandatory header is missing, so somebody will apply this:\n%s", stdout)
 	}
+}
+
+// TestGetReconstructsStateAsYAMLInColour is the same document on a terminal.
+//
+// The golden beside the plain one is the whole assertion, and the pair is the
+// point: the plain file is unchanged by this task, so a reader comparing the two
+// sees a document that gained escape sequences and nothing else. What the
+// escapes do — the wrapper receding, the recorded object left alone, one
+// emphasised phrase — is asserted next to the renderer; what is pinned here is
+// that the command really reaches it, with the colour decision the invocation
+// made.
+func TestGetReconstructsStateAsYAMLInColour(t *testing.T) {
+	stdout, stderr, err := runGetWith(t, checkpointEngine(t), getRequest(render.StructuredYAML),
+		render.Options{Width: goldenWidth, Color: true})
+	if err != nil {
+		t.Fatalf("RunGet: %v", err)
+	}
+	assertGoldenIn(t, "get", "yaml-color", stdout, stderr)
 }
 
 // TestGetReconstructsStateAsJSON covers the format with no comment syntax.

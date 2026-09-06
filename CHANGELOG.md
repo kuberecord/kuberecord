@@ -96,6 +96,27 @@ than a summary of them.
   always emitted struct fields in declaration order, and there are now golden
   files pinning that so a library upgrade cannot quietly re-sort either format.
 
+### Changed
+
+- **`get -o yaml` dims the kuberecord wrapper on a terminal, so the recorded
+  object is the only thing at full intensity.** The envelope's `apiVersion`,
+  `kind` and `metadata`, and the six bookkeeping fields above the state (`at`,
+  `uid`, `base_ts`, `base_event`, `patches_applied`, `sha256`), are provenance —
+  facts you need available and do not need to re-read on every invocation. The
+  reconstructed object is found by everything around it receding rather than by
+  anything being done to it: there is no syntax highlighting, no second YAML
+  renderer, and nothing in the document is parsed to decide what to paint.
+
+  The provenance header recedes with it, **except `NOT A DEPLOYABLE MANIFEST`**,
+  which is emphasised. One line in a block can carry emphasis and two cannot, and
+  that is the line that has to survive somebody skimming past the rest.
+
+  **Redirected output is byte for byte what it was.** Under `--color=never`, under
+  `NO_COLOR`, and any time stdout is not a terminal, this changes nothing at all —
+  `yq`, a `> object.yaml`, and a diff against a file saved last week are all
+  unaffected, and the golden files for the plain rendering are unchanged by this
+  release. `--color=always` forces the escapes on, as it does everywhere else.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`
