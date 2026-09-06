@@ -582,3 +582,259 @@ func equalStrings(table, structured []string) bool {
 	}
 	return true
 }
+
+// The two columns the schema stores as strings, through a whole command.
+//
+// render's own tests pin the item shape; what these add is the path — every
+// command that emits a change, in every serialization it emits one in, including
+// the streaming one that builds its items on a second code path.
+
+// corruptedHistory is the fixture's history with one row's patch damaged.
+//
+// The marker is planted inside the value so an assertion can prove the raw column
+// never reached an output stream. The row chosen is the flagship modification, so
+// the damage sits in the middle of a history rather than at either edge: a
+// refusal that only worked on the first row would pass a test built on a
+// one-change fixture.
+func corruptedHistory(marker string) []query.Change {
+	history := checkoutHistory()
+	history[1].Diff = `[{"op":"replace","path":"/spec/replicas"` + marker
+	return history
+}
+
+// corruptedEngine is fixtureEngine with that history.
+func corruptedEngine(marker string) *fakeEngine {
+	engine := fixtureEngine()
+	engine.changes = corruptedHistory(marker)
+	return engine
+}
+
+// TestRecordedColumnsArriveAsStructures is the acceptance criterion, asserted
+// through the command rather than through the item type.
+//
+// All three serializations are covered because they are three code paths: `json`
+// and `yaml` buffer the items and encode a document, `jsonl` writes each item as
+// it arrives, and the timeline's streaming renderer builds its items in a second
+// place from the one the gathered renderer uses.
+func TestRecordedColumnsArriveAsStructures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format render.StructuredFormat
+		items  func(t *testing.T, stdout string) []map[string]any
+	}{
+		{
+			name: "json", format: render.StructuredJSON,
+			items: func(t *testing.T, stdout string) []map[string]any {
+				return objectItems(t, decodeJSON(t, stdout))
+			},
+		},
+		{
+			name: "yaml", format: render.StructuredYAML,
+			items: func(t *testing.T, stdout string) []map[string]any {
+				return objectItems(t, decodeYAML(t, stdout))
+			},
+		},
+		{
+			name: "jsonl", format: render.StructuredJSONL,
+			items: func(t *testing.T, stdout string) []map[string]any {
+				_, items := decodeJSONL(t, stdout)
+				return items
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _, err := runTimeline(t, fixtureEngine(), structuredRequest(tc.format),
+				render.Options{})
+			if err != nil {
+				t.Fatalf("RunTimeline: %v", err)
+			}
+			items := tc.items(t, stdout)
+			if len(items) != len(checkoutHistory()) {
+				t.Fatalf("%d items, want %d", len(items), len(checkoutHistory()))
+			}
+
+			// The first sighting carries full state and no patch; the second carries
+			// a patch and no state. Between them they pin both columns in both of
+			// their populated and empty forms.
+			state, ok := items[0]["data"].(map[string]any)
+			if !ok {
+				t.Fatalf("`.items[0].data` is %#v, want an object a consumer can index into "+
+					"without a second parse", items[0]["data"])
+			}
+			if state["kind"] != "Deployment" {
+				t.Errorf("`.items[0].data.kind` is %#v, want \"Deployment\"", state["kind"])
+			}
+			if patch, present := items[0]["diff"]; !present {
+				t.Error("a full-state row omits `diff` entirely; an absent patch and an empty " +
+					"patch are different facts and the key must say which this is")
+			} else if ops, isList := patch.([]any); !isList || len(ops) != 0 {
+				t.Errorf("`.items[0].diff` is %#v, want an empty list", patch)
+			}
+
+			ops, ok := items[1]["diff"].([]any)
+			if !ok || len(ops) != 1 {
+				t.Fatalf("`.items[1].diff` is %#v, want a one-operation array", items[1]["diff"])
+			}
+			op, ok := ops[0].(map[string]any)
+			if !ok {
+				t.Fatalf("`.items[1].diff[0]` is %#v, want an object", ops[0])
+			}
+			if op["op"] != "replace" {
+				t.Errorf("`.items[1].diff[0].op` is %#v, want \"replace\"", op["op"])
+			}
+			if empty, present := items[1]["data"]; !present {
+				t.Error("a patch row omits `data` entirely; it must be an empty object")
+			} else if state, isMap := empty.(map[string]any); !isMap || len(state) != 0 {
+				t.Errorf("`.items[1].data` is %#v, want an empty object", empty)
+			}
+		})
+	}
+}
+
+// objectItems narrows a decoded envelope's items to objects.
+func objectItems(t *testing.T, decoded map[string]any) []map[string]any {
+	t.Helper()
+
+	items := assertEnvelope(t, decoded, render.KindTimeline)
+	objects := make([]map[string]any, 0, len(items))
+	for i, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("item %d is not an object: %#v", i, item)
+		}
+		objects = append(objects, object)
+	}
+	return objects
+}
+
+// TestACorruptColumnFailsStructuredOutput is the loud path, end to end.
+//
+// A stored patch that will not parse is corrupt evidence, and the refusal is what
+// keeps the parse honest: a fallback to the raw string would hide exactly the
+// corruption an audit tool exists to surface, and an empty array in its place
+// would report that the change touched nothing.
+//
+// Both commands and all three serializations are covered, because each pairing is
+// a different route to the same item — and a refusal that held on one of them
+// would be a rule with a hole a consumer could not see.
+func TestACorruptColumnFailsStructuredOutput(t *testing.T) {
+	const marker = "CORRUPTION-MARKER"
+
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, engine *fakeEngine) (stdout, stderr string, err error)
+	}{
+		{
+			name: "timeline -o json",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runTimeline(t, engine, structuredRequest(render.StructuredJSON),
+					render.Options{})
+			},
+		},
+		{
+			name: "timeline -o yaml",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runTimeline(t, engine, structuredRequest(render.StructuredYAML),
+					render.Options{})
+			},
+		},
+		{
+			name: "timeline -o jsonl",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runTimeline(t, engine, structuredRequest(render.StructuredJSONL),
+					render.Options{})
+			},
+		},
+		{
+			name: "diff -o json",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				request := defaultDiffRequest()
+				request.Timeline.Structured = render.StructuredJSON
+				return runDiff(t, engine, request, render.Options{})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, err := tc.run(t, corruptedEngine(marker))
+			if err == nil {
+				t.Fatalf("a corrupt patch was rendered rather than reported:\n%s", stdout)
+			}
+			if code := exit.CodeFor(err); code != exit.RuntimeError {
+				t.Errorf("the failure exits %d, want %d: corrupt evidence is a runtime finding "+
+					"rather than a malformed invocation", code, exit.RuntimeError)
+			}
+
+			// Named by the two fields that identify the row, so the reader can go and
+			// look at the stored value themselves.
+			for _, want := range []string{"2026-08-28T14:03:11.482Z", fixtureUID, "diff"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the finding does not name %q: %v", want, err)
+				}
+			}
+			// And the raw column reaches neither stream. Printing it on stdout would
+			// be the fallback being refused; printing it on stderr would be the same
+			// fallback one stream over.
+			if strings.Contains(stdout, marker) || strings.Contains(stderr, marker) ||
+				strings.Contains(err.Error(), marker) {
+				t.Errorf("the recorded column was emitted anyway.\nstdout:\n%s\nstderr:\n%s\nerror: %v",
+					stdout, stderr, err)
+			}
+		})
+	}
+}
+
+// TestTheHumanRenderingsStillShowACorruptRow is the other half of the rule, and
+// the reason it is not simply "the CLI refuses corrupt patches".
+//
+// The tables and the hunk view already parse these columns to lay a row out, and
+// they already have somewhere inside the row to say the patch was unreadable. A
+// table that dropped four hundred readable changes over one damaged one would be
+// a worse audit tool rather than a stricter one, so this is a change to structured
+// output alone and these renderings are untouched by it.
+func TestTheHumanRenderingsStillShowACorruptRow(t *testing.T) {
+	const marker = "CORRUPTION-MARKER"
+
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, engine *fakeEngine) (stdout, stderr string, err error)
+	}{
+		{
+			name: "timeline",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runTimeline(t, engine, defaultRequest(), render.Options{})
+			},
+		},
+		{
+			name: "timeline -o wide",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runTimeline(t, engine, defaultRequest(), render.Options{Wide: true})
+			},
+		},
+		{
+			name: "diff",
+			run: func(t *testing.T, engine *fakeEngine) (string, string, error) {
+				return runDiff(t, engine, defaultDiffRequest(), render.Options{})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _, err := tc.run(t, corruptedEngine(marker))
+			if err != nil {
+				t.Fatalf("a human rendering failed over one unreadable patch: %v", err)
+			}
+			if !strings.Contains(stdout, "unreadable patch") {
+				t.Errorf("the damaged row is not marked unreadable, so the reader is not told "+
+					"the patch was lost:\n%s", stdout)
+			}
+			// The rest of the history still renders: the row is qualified, not
+			// dropped, and its neighbours are untouched. The first and last changes
+			// are checked because the damaged one sits between them.
+			for _, want := range []string{"14:02:58.001", "14:09:40.900"} {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("the change at %s is missing, so one unreadable patch cost the "+
+						"reader the rest of the history:\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}

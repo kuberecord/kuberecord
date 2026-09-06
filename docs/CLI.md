@@ -1084,10 +1084,16 @@ exists and the pipeline keeps running while producing empty findings.
       "uid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
       "resource_version": "1002",
       "api_version": "apps/v1",
-      "data": "",
-      "diff": "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/memory\",\"value\":\"512Mi\"}]",
       "sha256": "",
-      "labels": {}
+      "labels": {},
+      "data": {},
+      "diff": [
+        {
+          "op": "replace",
+          "path": "/spec/template/spec/containers/0/resources/limits/memory",
+          "value": "512Mi"
+        }
+      ]
     }
   ]
 }
@@ -1128,6 +1134,35 @@ governed by — the same `apiVersion`, and therefore the same
 data reached two ways. A `jq` recipe written against a SQL result transfers here
 unchanged, which is the point of the mirroring rather than a detail of it. An
 empty `actors` or `labels` is `[]` and `{}`, never `null`.
+
+**The names are the schema's; two of the types are not.** `data` and `diff` are
+`String` columns in ClickHouse because ClickHouse stores strings, and emitting
+them as strings would mean handing a consumer a JSON document with JSON inside a
+string — a second parse before any path can be reached, and in YAML an escaped
+payload that wraps mid-token and cannot be read at all. So structured output
+carries them as what they are:
+
+| Field | Type in `-o json`, `-o jsonl` and `-o yaml` | Empty |
+|-------|---------------------------------------------|-------|
+| `data` | **Object** — the full recorded state, as recorded. | `{}` on a row that carries no state: a modification, a deletion. |
+| `diff` | **Array** — the RFC 6902 operations, in order, exactly as recorded. Each entry keeps its `path` as a JSON Pointer, which is what a patch library takes. | `[]` on a row that carries no patch: a first sighting, a snapshot, a deletion. |
+
+Empty is the empty structure and never `null`, and the key is never omitted: an
+absent patch and an empty patch are different facts, and dropping the key would
+make you test for presence to learn something the value already says.
+
+The bytes are carried through untouched, so a large integer, a float's written
+form and the key order of the recorded object all survive the trip. On a
+`Checkpoint`, `diff` describes the transition `data` already reflects and **must
+not be applied over it** — parsing the column does nothing to change that.
+
+**A column that will not parse fails the command.** A stored `diff` that is not a
+JSON array is corrupt evidence, and printing the raw string in its place would
+hide exactly what an audit tool exists to surface. The CLI names the row by its
+`ts` and `uid`, exits `1`, and emits nothing for it. The tables and the hunk view
+are unaffected — they mark the row `unreadable patch` and render the rest of the
+history — so a damaged row is still visible in the renderings that have somewhere
+to say so.
 
 A `Diff` item adds `hunks`, one per patch operation:
 
@@ -1213,7 +1248,14 @@ document is unchanged too. A reader gets both; a parser gets one.
 
 Within one `apiVersion`, fields may be **added** and are never renamed, removed or
 repurposed — the same policy the frozen schema carries. Consumers must ignore
-fields they do not recognize. Anything else is a new `apiVersion`.
+fields they do not recognize. Anything else — including a field's type — is a
+break, and is recorded as one in
+[`CHANGELOG.md`](https://github.com/kuberecord/kuberecord/blob/main/CHANGELOG.md).
+
+`v1alpha1` is where such a break is still affordable, and v0.4.0 spent it once:
+`data` and `diff` stopped being strings. An `alpha` version is the part of the
+contract that says so out loud, and the intent is that it is spent rarely and
+never quietly.
 
 ### `jsonl` streams
 
@@ -1223,8 +1265,8 @@ six-figure timeline can be piped into something that reads it a line at a time:
 
 ```
 {"apiVersion":"cli.kuberecord.io/v1alpha1","kind":"Timeline","metadata":{…}}
-{"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…}
-{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…}
+{"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…,"data":{},"diff":[{"op":"replace","path":"/spec/replicas","value":5}]}
+{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…,"data":{},"diff":[{"op":"replace","path":"/metadata/annotations/deployment.kubernetes.io~1revision","value":"2"}]}
 ```
 
 The head line carries no `items` key — it cannot, since nothing has been read yet
@@ -1248,12 +1290,15 @@ The flagship question — who changed what — as one line per change:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments -o jsonl \
-  | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \(.diff)"'
-2026-08-28T14:03:11.482Z  kubectl-client-side-apply  [{"op":"replace","path":"/spec/template/spec/…
-2026-08-28T14:05:02.117Z  kube-controller-manager    [{"op":"replace","path":"/spec/replicas",…
+  | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \([.diff[].path] | join(" "))"'
+2026-08-28T14:03:11.482Z  kubectl-client-side-apply  /spec/template/spec/containers/0/resources/limits/memory
+2026-08-28T14:05:02.117Z  kube-controller-manager    /spec/replicas /spec/paused /spec/minReadySeconds
 ```
 
 `select(.ts)` is what skips the head line: it is the only line with no `ts`.
+`.diff` is an array, so `[.diff[].path]` reaches the paths directly — there is
+nothing to parse first, and a row with no patch yields an empty line rather than
+an error.
 
 Or, with the field paths already decoded, from `diff`:
 

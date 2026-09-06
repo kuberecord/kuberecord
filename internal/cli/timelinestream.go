@@ -174,8 +174,8 @@ func emitChanges(
 			held = append(held, change)
 			continue
 		}
-		if writeErr := stream.Write(changeItem(change)); writeErr != nil {
-			return emitted, sawDeleted, exit.RuntimeErrorf("%w", writeErr)
+		if writeErr := writeChange(stream, change); writeErr != nil {
+			return emitted, sawDeleted, writeErr
 		}
 		emitted++
 	}
@@ -187,12 +187,30 @@ func emitChanges(
 	// order is the default, oldest first.
 	slices.Reverse(held)
 	for _, change := range held {
-		if writeErr := stream.Write(changeItem(change)); writeErr != nil {
-			return emitted, sawDeleted, exit.RuntimeErrorf("%w", writeErr)
+		if writeErr := writeChange(stream, change); writeErr != nil {
+			return emitted, sawDeleted, writeErr
 		}
 		emitted++
 	}
 	return emitted, sawDeleted, nil
+}
+
+// writeChange prepares one change and writes it, so that the two emission orders
+// above cannot come to prepare a row differently.
+//
+// Both failures it can report end the invocation. A row whose recorded columns
+// will not parse is corrupt evidence and is refused rather than flattened into a
+// string (see render.NewChangeItem); a write that fails is a broken output
+// stream, and continuing to feed it would produce a document nothing can parse.
+func writeChange(stream *render.Stream, change query.Change) error {
+	item, err := changeItem(change)
+	if err != nil {
+		return err
+	}
+	if err := stream.Write(item); err != nil {
+		return exit.RuntimeErrorf("%w", err)
+	}
+	return nil
 }
 
 // holdForDisplayOrder reports whether the emission order and the display order

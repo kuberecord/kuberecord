@@ -303,13 +303,22 @@ func writeDiffAnswer(
 		return nil
 	}
 
+	// Built before the envelope is opened rather than inside it. A corrupt row is
+	// refused (see render.NewChangeItem), and refusing it here means the failure
+	// leaves no half-written document on stdout — which is the honest outcome for a
+	// format whose whole point is that a consumer can parse it.
+	items, err := diffItems(gathered.Rows)
+	if err != nil {
+		return err
+	}
+
 	stream, err := render.NewStream(
 		streams.Out, request.Timeline.Structured,
 		envelopeHead(backend, render.KindDiff, gathered.Coverage))
 	if err != nil {
 		return exit.RuntimeErrorf("%w", err)
 	}
-	if err := writeItems(stream, diffItems(gathered.Rows)); err != nil {
+	if err := writeItems(stream, items); err != nil {
 		return err
 	}
 	if err := render.WriteNotices(streams.ErrOut, notices, opts); err != nil {
@@ -325,16 +334,27 @@ func writeDiffAnswer(
 // destroyed where the replay established it. An operation whose prior value could
 // not be established carries old_known false rather than a null that would read as
 // "the field was null" — the distinction render.Hunk exists to keep.
-func diffItems(rows []render.TimelineRow) []any {
+//
+// It reports rather than renders a row whose recorded columns will not parse. The
+// two failures are different sizes and get different answers: a patch that
+// decodes as JSON and not as a patch is a defect in one entry, and the row is
+// emitted with patch_error naming it, exactly as the hunk view prints "unreadable
+// patch"; a column that is not JSON of the right shape at all is corrupt evidence,
+// and structured output refuses the invocation rather than paper over it.
+func diffItems(rows []render.TimelineRow) ([]any, error) {
 	items := make([]any, 0, len(rows))
 	for _, row := range rows {
+		item, err := changeItem(row.Change)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, render.DiffItem{
-			Change:     changeItem(row.Change),
+			ChangeItem: item,
 			PatchError: row.PatchErr,
 			Hunks:      render.Hunks(row.Ops),
 		})
 	}
-	return items
+	return items, nil
 }
 
 // errChangesFound is what --exit-code returns when the answer is "yes".

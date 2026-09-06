@@ -43,6 +43,36 @@ than a summary of them.
   order — because a table and a `-o json` that disagreed about order would be
   worse than either order alone.
 
+- **`data` and `diff` are a real object and a real array in `-o json`, `-o jsonl`
+  and `-o yaml`.** They were strings holding JSON, because the columns they mirror
+  are `String` in ClickHouse — so a document whose entire purpose is to be
+  machine-readable could not be read by a machine without a second parse, and in
+  YAML the escaped payload wrapped mid-token across lines and could not be read by
+  anyone. `jq '.items[0].diff[0].path'` now works; a recipe that reached for
+  `fromjson` first should drop it, and one that treated either field as a string —
+  passing it to `test()`, say — needs rewriting.
+
+  **Empty is `{}` and `[]`, never `null` and never absent.** A first sighting
+  carries no patch and a deletion carries neither column; those are ordinary rows,
+  and a key that vanished would make you branch on presence to learn something the
+  value already tells you. `data` is in this change even though only `diff` was
+  reported, because it has the identical defect over a much larger payload — an
+  `Added`, `Snapshot` or `Checkpoint` row carries a whole serialised object — and
+  fixing one would have left an arbitrary distinction to trip over.
+
+  The recorded bytes are passed through rather than decoded and re-encoded, so a
+  large integer and a value's written form survive exactly. **A column that will
+  not parse now fails the command**: it is corrupt evidence, so the CLI names the
+  row by its `ts` and `uid` and exits `1` rather than printing the raw string in
+  place of a patch, which would hide the corruption an audit tool exists to
+  surface. `table`, `wide` and the `diff` hunk view are untouched — they mark the
+  row `unreadable patch` and render the rest of the history, as they always have.
+
+  Field *names* are unchanged. The agreement with the frozen schema — the one that
+  lets a `jq` recipe move between a SQL result and CLI output — was always an
+  agreement about spelling, and it still holds for every field; these two are the
+  only ones whose *type* the CLI now chooses for itself.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -49,6 +50,12 @@ import (
 // query.Change's own JSON tags are used unchanged rather than being restated
 // here: a second spelling of "resource_version" is a spelling that eventually
 // disagrees.
+//
+// The mirroring is of names, and only of names. Two columns are carried at a type
+// the schema does not have — see ChangeItem — because the column type is a
+// statement about what ClickHouse stores rather than about what a consumer needs,
+// and a `jq` recipe depends on the spelling of a field rather than on its being a
+// string. Changing one is still a break, and it was recorded as one.
 //
 // # The additive-only policy
 //
@@ -266,21 +273,236 @@ type Envelope struct {
 	Items []any `json:"items"`
 }
 
-// DiffItem is one change with its operations decoded.
+// ChangeItem is one change as an envelope carries it.
 //
-// The embedded Change contributes the schema's own columns, inline and unrenamed,
-// so a Diff item is a Timeline item plus the two things `diff` computes that
-// nothing else does: the decoded hunks, and the reason a patch could not be
-// decoded when that happened.
-type DiffItem struct {
+// # Why two columns are re-typed and the other eight are not
+//
+// The item is query.Change embedded, so every field name is the frozen schema's
+// column name by construction rather than by a mapping somebody has to keep in
+// step. Two of those columns are then shadowed here with a different Go type, and
+// that is the whole of what this type does.
+//
+// The schema stores `data` and `diff` as String because ClickHouse stores
+// strings. Emitting them as strings meant emitting a JSON document with JSON
+// inside a string: every consumer had to parse a second time before it could
+// reach a path, and in YAML the escaped payload wrapped mid-token across lines
+// and could not be read at all. A format whose purpose is to be machine-readable
+// failing to be machine-readable without a second parse is a defect rather than a
+// preference, and the contract never required otherwise — it fixes the *names* of
+// the fields, and it says nothing about their types. Names are what a `jq` recipe
+// written against a SQL result depends on, and those are unchanged.
+//
+// # Why the bytes are carried rather than decoded
+//
+// Both fields are json.RawMessage, so the recorded bytes reach the output
+// untouched. Decoding through map[string]any would route every number through
+// float64, which rewrites an integer past 2^53 into a different integer and a
+// value's written form into another one — in the output of a tool whose subject
+// is what was recorded. It is also the cheaper path for a `data` column holding a
+// full serialized object.
+//
+// # The two absences
+//
+// A row with no patch and a row with no full state are ordinary — a first
+// sighting carries no diff, a deletion carries neither — and they serialize as
+// `[]` and `{}`. Not null, and not omitted: an absent patch and an empty patch
+// are different facts, and either spelling would make a consumer branch on
+// presence to learn something the value already says.
+//
+// The same reasoning fixes the two collection columns, which is why NewChangeItem
+// is the only way to build one of these. See there.
+type ChangeItem struct {
 	query.Change `json:",inline"`
 
-	// PatchError says why the recorded diff could not be decoded. Present only
-	// when it could not.
+	// Data is the full recorded state of the object, present on full-state rows
+	// and `{}` on every other. It shadows query.Change.Data, whose string is the
+	// column as the backend returns it.
+	Data json.RawMessage `json:"data"`
+
+	// Diff is the RFC 6902 patch against the previous state, present on
+	// modifications and checkpoints and `[]` on every other row. It shadows
+	// query.Change.Diff for the reason Data shadows its own column.
 	//
-	// Without it, a row whose patch is unreadable would arrive as a non-empty
-	// `diff` column with an empty `hunks` list, which reads as a change that
-	// touched nothing — a silent error of exactly the kind Invariant 4 forbids.
+	// On a checkpoint it describes the transition Data already reflects and must
+	// not be re-applied over it — the same warning query.Change.Diff carries,
+	// which parsing the value does nothing to change.
+	Diff []json.RawMessage `json:"diff"`
+}
+
+// NewChangeItem prepares one change for the envelope, or reports the row as
+// corrupt.
+//
+// It is the single place a Timeline item and a Diff item are built, so the two
+// cannot come to disagree about what a change looks like on stdout.
+//
+// # The two shapes it fixes
+//
+// A nil slice and a nil map encode as JSON null, and the columns they mirror are
+// an array and a map that a backend returns empty. The contract already says
+// which reading is the honest one — of an actorless deletion, query.Change.Actors
+// says "an empty list is the honest answer rather than a missing one" — and null
+// is the other reading. It also breaks the obvious consumer: `.actors[]` fails on
+// a null and yields nothing on an empty list, and failing is not what "this
+// deletion had no actors" should do to somebody's pipeline.
+//
+// # Why a parse failure is a finding rather than a fallback
+//
+// A stored `diff` that will not parse is corrupt evidence. Emitting the raw
+// string in its place would hide exactly the corruption an audit tool exists to
+// surface, and emitting an empty array would say the change touched nothing,
+// which is a stronger and more dangerous lie. So the row is named — by the two
+// fields that identify it, ts and uid — and the invocation fails.
+//
+// The human renderings are deliberately not held to this. They already parse
+// these columns to lay a row out, they already have somewhere to say "unreadable
+// patch" inside the row, and a table that dropped four hundred readable changes
+// over one damaged one would be a worse audit tool rather than a stricter one.
+// Structured output has no such cell, and its consumer is a script.
+func NewChangeItem(change query.Change) (ChangeItem, error) {
+	if change.Actors == nil {
+		change.Actors = []string{}
+	}
+	if change.Labels == nil {
+		change.Labels = map[string]string{}
+	}
+	item := ChangeItem{Change: change}
+
+	data, err := recordedValue(change.Data, '{', emptyObject)
+	if err != nil {
+		return ChangeItem{}, corruptColumn(change, "data", "a JSON object", err)
+	}
+	item.Data = data
+
+	diff, err := recordedValue(change.Diff, '[', emptyArray)
+	if err != nil {
+		return ChangeItem{}, corruptColumn(change, "diff", "a JSON array", err)
+	}
+	// An array always decodes into a slice of raw elements, so this cannot fail
+	// once recordedValue has established the shape. It is checked rather than
+	// discarded because "cannot fail" is a claim about today's standard library,
+	// and Invariant 4 does not have an exception for claims.
+	if err := json.Unmarshal(diff, &item.Diff); err != nil {
+		return ChangeItem{}, corruptColumn(change, "diff", "a JSON array", err)
+	}
+	if item.Diff == nil {
+		item.Diff = []json.RawMessage{}
+	}
+	return item, nil
+}
+
+// The empty renderings of the two columns. Spelled once so that the value a
+// patchless row carries and the value the documentation promises cannot drift,
+// and as strings rather than as package-level byte slices so that every item gets
+// its own copy: an item's fields belong to whoever holds the item.
+const (
+	emptyObject = "{}"
+	emptyArray  = "[]"
+)
+
+// recordedValue validates one recorded column and returns its bytes unchanged.
+//
+// Validation is two steps rather than one decode into the destination type, and
+// the reason is the message a user reads. Unmarshalling `{"op":…}` straight into
+// a []json.RawMessage reports "cannot unmarshal object into Go value of type
+// []json.RawMessage", which names this program's implementation rather than the
+// reader's data. Decoding into a json.RawMessage first separates the two findings
+// a reader actually has — the value is not JSON at all, or it is JSON of the
+// wrong shape — and keeps the recorded bytes for the output either way.
+//
+// A blank column is the absent case, not a failure: a deletion records no state
+// and no patch, and a first sighting records no patch.
+func recordedValue(recorded string, open byte, empty string) (json.RawMessage, error) {
+	if strings.TrimSpace(recorded) == "" {
+		return json.RawMessage(empty), nil
+	}
+	var value json.RawMessage
+	if err := json.Unmarshal([]byte(recorded), &value); err != nil {
+		return nil, fmt.Errorf("it is not valid JSON: %w", err)
+	}
+	if len(value) == 0 || value[0] != open {
+		return nil, fmt.Errorf("the recorded value is %s", jsonKind(value))
+	}
+	return value, nil
+}
+
+// jsonKind names the shape of a validated JSON value, for a message that has to
+// say what was found rather than what could not be done with it.
+func jsonKind(value json.RawMessage) string {
+	if len(value) == 0 {
+		return "empty"
+	}
+	switch value[0] {
+	case '{':
+		return "a JSON object"
+	case '[':
+		return "a JSON array"
+	case '"':
+		return "a JSON string"
+	case 't', 'f':
+		return "a JSON boolean"
+	case 'n':
+		return "JSON null"
+	}
+	return "a JSON number"
+}
+
+// corruptColumn phrases the finding: which row, which column, what is wrong, and
+// what to do next.
+//
+// The row is named by ts and uid because those are the two fields that identify
+// it — ts at the precision the schema records, since two changes a microsecond
+// apart are two changes — and the reader's next step is to look at the stored
+// value themselves, which the message says how to do.
+//
+// The recorded value is deliberately not quoted into the message. Printing it
+// would be the fallback this refusal exists to avoid, one stream over, and the
+// column can hold a full object whose contents nobody asked to have on their
+// terminal.
+func corruptColumn(change query.Change, column, want string, err error) error {
+	return fmt.Errorf(
+		"the change recorded at %s (%s) has an unreadable %s column, which must be %s: %w. "+
+			"That is corrupt evidence rather than a formatting problem, so structured output will "+
+			"not print the raw column in its place; `-o table` still renders the row, and reading "+
+			"the stored value out of the backend is how to judge it",
+		change.TS.UTC().Format(time.RFC3339Nano), describeUID(change.UID), column, want, err)
+}
+
+// describeUID names the incarnation a corrupt row belongs to, including when the
+// row does not name one.
+//
+// A blank rendered as `uid ""` would read as a quoting accident. A row genuinely
+// carrying no UID is a real state — an archive line written before the identity
+// was known — and saying so is what keeps the reader looking at the timestamp
+// rather than at the message.
+func describeUID(uid string) string {
+	if uid == "" {
+		return "no uid recorded"
+	}
+	return "uid " + uid
+}
+
+// DiffItem is one change with its operations decoded.
+//
+// The embedded ChangeItem contributes the schema's own columns, inline and
+// unrenamed, so a Diff item is a Timeline item plus the two things `diff`
+// computes that nothing else does: the decoded hunks, and the reason a patch
+// could not be decoded when that happened.
+type DiffItem struct {
+	ChangeItem `json:",inline"`
+
+	// PatchError says why the recorded diff could not be decoded as a *patch*.
+	// Present only when it could not.
+	//
+	// Its scope is narrower than it looks, and narrower than it once was. A diff
+	// that is not a JSON array at all never reaches an item: NewChangeItem reports
+	// the row as corrupt and the invocation fails. What is left for this field is
+	// the value that parses as an array and is not a patch — an operation whose
+	// `op` is a number, say — which is a defect in one entry rather than in the
+	// column.
+	//
+	// Without it, such a row would arrive as a populated `diff` with an empty
+	// `hunks` list, which reads as a change that touched nothing — a silent error
+	// of exactly the kind Invariant 4 forbids.
 	PatchError string `json:"patch_error,omitempty"`
 
 	// Hunks are the operations the patch recorded. Empty for a row that carries

@@ -73,6 +73,11 @@ is what lets a `jq` recipe written against a SQL result work unchanged against C
 output. Where the CLI's answer and a query here disagree, that is a bug in one of
 them rather than a difference of opinion.
 
+Two fields transfer by name and not by type. `data` and `diff` come back from SQL
+as the strings this schema stores; the CLI parses them, so `-o json` gives you an
+object and an array. A recipe reaching into either one drops its `fromjson` on the
+way across, and every other field is the same value under the same name.
+
 ## Parameters
 
 Every query is written with ClickHouse-native query parameters, so it can be run

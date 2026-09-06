@@ -21,6 +21,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
@@ -252,5 +255,263 @@ func TestOnlyAReconstructionIsMarkedAsOne(t *testing.T) {
 					"assembled rather than recorded: %#v", kind, metadata)
 			}
 		})
+	}
+}
+
+// The two columns the schema stores as strings and the envelope carries as
+// structures.
+//
+// What is asserted here is the property the change exists for — a consumer reads
+// a path out of `diff` or `data` with one parse rather than two — and the three
+// ways it could have been given away: an empty column serialized as something a
+// consumer has to branch on, a corrupt column flattened back into a string, or a
+// patch that survived the round trip as valid JSON while ceasing to be the patch
+// that was recorded.
+
+// changeWithPatch is the fixture both halves of the round trip use: a first
+// sighting carrying full state, then the modification whose patch is applied to
+// it.
+func changeWithPatch() (base, patched query.Change) {
+	const state = `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"checkout"},` +
+		`"spec":{"replicas":3,"minReadySeconds":10}}`
+	const patch = `[{"op":"replace","path":"/spec/replicas","value":5},` +
+		`{"op":"remove","path":"/spec/minReadySeconds"},` +
+		`{"op":"add","path":"/spec/paused","value":true}]`
+
+	base = query.Change{
+		TS: mustInstant("2026-08-28T14:02:58Z"), EventType: query.EventAdded,
+		UID: "7c9e6679-7425-40de-944b-e07fc1f90ae7", ResourceVersion: "1001", Data: state,
+	}
+	patched = query.Change{
+		TS: mustInstant("2026-08-28T14:05:02Z"), EventType: query.EventModified,
+		UID: "7c9e6679-7425-40de-944b-e07fc1f90ae7", ResourceVersion: "1002", Diff: patch,
+	}
+	return base, patched
+}
+
+// TestRecordedColumnsAreStructuresNotStrings is the defect this shape fixes.
+//
+// A document containing JSON inside a string is not machine-readable without a
+// second parse, which for a format whose purpose is to be machine-readable is a
+// defect rather than a preference. The assertion is deliberately made against the
+// decoded document rather than against its text: what a consumer gets from
+// `.diff[0].op` is the property, and a substring check would pass on a cleverly
+// escaped string.
+func TestRecordedColumnsAreStructuresNotStrings(t *testing.T) {
+	base, patched := changeWithPatch()
+
+	var out bytes.Buffer
+	stream, err := render.NewStream(&out, render.StructuredJSON, testHead(render.KindTimeline))
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	for _, change := range []query.Change{base, patched} {
+		item, itemErr := render.NewChangeItem(change)
+		if itemErr != nil {
+			t.Fatalf("NewChangeItem: %v", itemErr)
+		}
+		if err := stream.Write(item); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var decoded struct {
+		Items []struct {
+			Data map[string]any   `json:"data"`
+			Diff []map[string]any `json:"diff"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("the envelope did not decode with data as an object and diff as an array: %v\n%s",
+			err, out.String())
+	}
+	if len(decoded.Items) != 2 {
+		t.Fatalf("%d items, want 2", len(decoded.Items))
+	}
+	if got := decoded.Items[0].Data["kind"]; got != "Deployment" {
+		t.Errorf("`.items[0].data.kind` is %#v, want \"Deployment\": a full-state row's object must "+
+			"be reachable without a second parse", got)
+	}
+	if got := len(decoded.Items[1].Diff); got != 3 {
+		t.Fatalf("`.items[1].diff` holds %d operations, want 3", got)
+	}
+	if got := decoded.Items[1].Diff[0]["path"]; got != "/spec/replicas" {
+		t.Errorf("`.items[1].diff[0].path` is %#v, want \"/spec/replicas\"", got)
+	}
+}
+
+// TestAbsentColumnsAreEmptyStructures pins the shape of the two ordinary
+// absences.
+//
+// A deletion carries neither column and a first sighting carries no patch. Both
+// are ordinary rows rather than edge cases, so `.diff[]` must yield nothing and
+// `.data.spec` must be absent rather than fail — and neither key may be dropped,
+// because a consumer branching on presence would be doing so to learn something
+// the value already says.
+func TestAbsentColumnsAreEmptyStructures(t *testing.T) {
+	item, err := render.NewChangeItem(query.Change{
+		TS: mustInstant("2026-08-28T14:11:00Z"), EventType: query.EventDeleted,
+		UID: "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+	})
+	if err != nil {
+		t.Fatalf("NewChangeItem: %v", err)
+	}
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("encoding a deletion: %v", err)
+	}
+	for _, want := range []string{`"data":{}`, `"diff":[]`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Errorf("a deletion does not carry %s:\n%s", want, encoded)
+		}
+	}
+
+	// And in YAML, which is the syntax the two absences are read in most often.
+	document, err := yaml.Marshal(item)
+	if err != nil {
+		t.Fatalf("encoding a deletion as YAML: %v", err)
+	}
+	for _, want := range []string{"data: {}", "diff: []"} {
+		if !strings.Contains(string(document), want) {
+			t.Errorf("a deletion does not carry %q in YAML:\n%s", want, document)
+		}
+	}
+}
+
+// TestACorruptColumnIsAFindingNotAFallback is the rule that makes the parse safe
+// to rely on.
+//
+// A stored column that will not parse is corrupt evidence. Emitting the raw
+// string in its place would hide exactly the corruption an audit tool exists to
+// surface, and emitting an empty structure would say the change touched nothing,
+// which is a stronger lie than the one it replaced. So the row is named — by ts
+// and by uid, the two fields that identify it — and nothing is emitted for it.
+func TestACorruptColumnIsAFindingNotAFallback(t *testing.T) {
+	const marker = "CORRUPTION-MARKER"
+	ts := mustInstant("2026-08-28T14:05:02Z")
+	const uid = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+	for _, tc := range []struct {
+		name    string
+		change  query.Change
+		wantFor string
+	}{
+		{
+			name:    "a patch that is not JSON at all",
+			change:  query.Change{TS: ts, UID: uid, Diff: `[{"op":"replace"` + marker},
+			wantFor: "diff",
+		},
+		{
+			name:    "a patch that is JSON of the wrong shape",
+			change:  query.Change{TS: ts, UID: uid, Diff: `{"op":"replace","path":"/` + marker + `"}`},
+			wantFor: "diff",
+		},
+		{
+			name:    "a state that is not JSON at all",
+			change:  query.Change{TS: ts, UID: uid, Data: `{"kind":"Deployment"` + marker},
+			wantFor: "data",
+		},
+		{
+			name:    "a state that is JSON of the wrong shape",
+			change:  query.Change{TS: ts, UID: uid, Data: `["` + marker + `"]`},
+			wantFor: "data",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item, err := render.NewChangeItem(tc.change)
+			if err == nil {
+				encoded, _ := json.Marshal(item)
+				t.Fatalf("a corrupt %s column was accepted and emitted as:\n%s", tc.wantFor, encoded)
+			}
+
+			// The row has to be identifiable, or the finding is a rumour: an
+			// engineer reading it must be able to go to the backend and look at the
+			// value themselves.
+			for _, want := range []string{ts.Format(time.RFC3339Nano), uid, tc.wantFor} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the finding does not name %q, so the row cannot be located: %v", want, err)
+				}
+			}
+			// And the stored value must not be in it. Printing it is the fallback
+			// this refusal exists to avoid, one stream over.
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("the finding quotes the recorded value back, which is the fallback it "+
+					"exists to refuse: %v", err)
+			}
+		})
+	}
+}
+
+// TestACorruptRowIsNamedEvenWithoutAUID keeps the message honest about the one
+// identifier it may not have.
+//
+// A row carrying no UID is a real state rather than a defect, and rendering the
+// blank as `uid ""` would read as a quoting accident in a message whose whole job
+// is to be believed.
+func TestACorruptRowIsNamedEvenWithoutAUID(t *testing.T) {
+	_, err := render.NewChangeItem(query.Change{
+		TS: mustInstant("2026-08-28T14:05:02Z"), Diff: "not json",
+	})
+	if err == nil {
+		t.Fatal("a corrupt patch was accepted")
+	}
+	if !strings.Contains(err.Error(), "no uid recorded") {
+		t.Errorf("a row with no UID is not described as such: %v", err)
+	}
+}
+
+// TestTheEmittedPatchIsStillThePatchThatWasRecorded is the round trip.
+//
+// Producing valid JSON is not the property that matters; producing the *same*
+// patch is. So the emitted array is serialized back and replayed over the same
+// base through the same procedure a reconstruction uses, and the two states must
+// be identical. A parse that reordered operations, coerced a number or dropped an
+// entry would pass every assertion above and fail this one.
+func TestTheEmittedPatchIsStillThePatchThatWasRecorded(t *testing.T) {
+	base, patched := changeWithPatch()
+
+	item, err := render.NewChangeItem(patched)
+	if err != nil {
+		t.Fatalf("NewChangeItem: %v", err)
+	}
+	emitted, err := json.Marshal(item.Diff)
+	if err != nil {
+		t.Fatalf("re-serializing the emitted patch: %v", err)
+	}
+
+	history := []query.ReplayRow{
+		{TS: base.TS, EventType: base.EventType, Data: base.Data},
+		{TS: patched.TS, EventType: patched.EventType, Diff: patched.Diff},
+	}
+	recorded, err := query.Replay(history, query.BaseRow(history))
+	if err != nil {
+		t.Fatalf("replaying the recorded patch: %v", err)
+	}
+
+	// The same history with the emitted array standing in for the stored string.
+	history[1].Diff = string(emitted)
+	roundTripped, err := query.Replay(history, query.BaseRow(history))
+	if err != nil {
+		t.Fatalf("replaying the emitted patch: %v", err)
+	}
+
+	want, err := json.Marshal(recorded.Object)
+	if err != nil {
+		t.Fatalf("encoding the recorded state: %v", err)
+	}
+	got, err := json.Marshal(roundTripped.Object)
+	if err != nil {
+		t.Fatalf("encoding the round-tripped state: %v", err)
+	}
+	if !bytes.Equal(want, got) {
+		t.Errorf("replaying the emitted patch produced a different state.\nrecorded: %s\nemitted:  %s",
+			want, got)
+	}
+	if roundTripped.PatchesApplied != 1 {
+		t.Errorf("%d patches were applied, want 1: the emitted array must still be a patch",
+			roundTripped.PatchesApplied)
 	}
 }
