@@ -26,6 +26,18 @@
 # endpoint stays authenticated, and the RBAC is the shipped aggregated-ClusterRole
 # model with only the `core-workloads` preset enabled — which is what grants the
 # Deployment and ConfigMap reads examples/quickstart/rule.yaml needs.
+#
+# That rule also streams `v1/Event`, and `core-workloads` grants no `events`. The
+# grant is *not* a fifth delta here, for a mechanical reason worth knowing before
+# you try to add one: kustomize's default load restrictor refuses a resource file
+# outside the kustomization's own directory, and every nesting of the problem
+# hits the same rule, because each base becomes its own root. The alternatives
+# are relaxing the restrictor for every build or copying a shipped file into this
+# overlay — the drift this overlay exists to avoid. So the quickstart applies
+# `config/rbac/presets/events.yaml` directly, in the same step as this install
+# and three steps before the rule that needs it. Aggregation is by label, so a
+# preset applied with `kubectl -f` and one folded in here are the same grant —
+# see docs/RBAC.md and the preset's own comment.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

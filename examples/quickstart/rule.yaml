@@ -31,6 +31,48 @@ spec:
   - group: ""
     version: v1
     kind: ConfigMap
+  # Kubernetes Events — the one entry in this file to think about before copying
+  # it. It is here because `kuberecord timeline --with-events` is the command the
+  # README opens with, and an environment that cannot demonstrate it teaches a
+  # reader that the flag does nothing. The quickstart's scale-up makes the
+  # deployment-controller emit a ScalingReplicaSet Event about checkout-api, and
+  # that is the row the flag interleaves.
+  #
+  # Three things to know before this entry goes anywhere near a production rule:
+  #
+  #   Scope. Events are captured for the whole watched scope — every Event in a
+  #   selected namespace, not only the ones about the kinds above — and correlated
+  #   to a subject when the archive is *read*. Deliberately: the Events worth
+  #   having (FailedScheduling, FailedCreate, Killing) are about objects that
+  #   failed to exist or are ceasing to, so correlating at capture time against
+  #   the objects that do exist would drop exactly those.
+  #
+  #   Cost. An Event bump is a full row, not a diff. The API server updates
+  #   `count` in place, so every bump changes the content, hash dedup does not
+  #   suppress it, and Events are written as full state by design — no diff, no
+  #   Checkpoint rows. A crash-looping pod emitting BackOff a hundred times writes
+  #   a hundred whole JSON rows.
+  #
+  #   Blast radius. Here that is nothing: one namespace, three pause pods, a few
+  #   dozen rows, and the run prints the count. In a cluster-wide rule during a
+  #   bad rollout Events are the dominant term in write volume. That makes them a
+  #   sizing decision rather than a checkbox: prefer a namespaced StreamRule, and
+  #   size retention before you widen the scope.
+  #
+  # docs/SCHEMA.md#kubernetes-events is what the rows look like — including why an
+  # expiring Event gets no Deleted row — and docs/CLI.md is what they cost to read
+  # back.
+  #
+  # Two other things have to agree, or this entry streams nothing: the sink's
+  # policy.allowedGVKs must admit it (sink.yaml — that refusal is all-or-nothing,
+  # so it refuses the whole rule rather than narrowing it), and the operator needs
+  # get,list,watch on events, which the core-workloads preset does not grant. The
+  # quickstart applies config/rbac/presets/events.yaml for that, in the same step
+  # as the operator install; on your own cluster that one apply is the whole
+  # grant, with nothing patched and no restart (docs/RBAC.md).
+  - group: ""
+    version: v1
+    kind: Event
   # Namespace *labels*, not object labels. This one narrows the quickstart to the
   # demo namespace (examples/quickstart/demo.yaml carries the label) so the first
   # query returns a handful of rows you can read at a glance rather than every

@@ -490,6 +490,91 @@ func TestQuickstartShowsTheOutsideTheClusterRoute(t *testing.T) {
 	}
 }
 
+// TestQuickstartCapturesEvents keeps the environment built to demonstrate the
+// product able to demonstrate its opening example (Task 16.2).
+//
+// `--with-events` leads the README's hero block and `--help`'s examples, and the
+// quickstart's rule streamed Deployments and ConfigMaps and nothing else: there
+// were no Event rows to interleave, so the flag produced output byte-identical to
+// a bare invocation. Task 16.1 made that silence explicable. This makes it untrue.
+//
+// The check is here rather than left to the run because *three* files have to
+// agree before one Event row exists, and each fails somewhere different:
+//
+//   - the rule must name the kind;
+//   - the sink's policy must admit it — `allowedGVKs` is all-or-nothing, so a
+//     missing entry does not narrow the rule, it refuses the whole thing with
+//     PolicyAllowed=False;
+//   - the operator must hold `get,list,watch` on `events`, which the
+//     `core-workloads` preset does not grant. Without it the rule reports
+//     RBACGranted=False and streams nothing at all.
+//
+// Every one of those is invisible until somebody stands a cluster up, and then
+// visible only as a condition on a custom resource that nobody reads until the
+// flag they were promised does nothing.
+func TestQuickstartCapturesEvents(t *testing.T) {
+	var rule v1alpha1.ClusterStreamRule
+	decodeOneDocument(t, "examples/quickstart/rule.yaml", &rule)
+
+	if !slices.ContainsFunc(rule.Spec.Resources, func(res v1alpha1.WatchedResource) bool {
+		return res.Group == "" && res.Version == "v1" && res.Kind == "Event"
+	}) {
+		t.Fatal("examples/quickstart/rule.yaml no longer streams v1/Event; " +
+			"`kuberecord timeline --with-events` then has nothing to interleave in the one " +
+			"environment built to demonstrate it")
+	}
+
+	var sink v1alpha1.ClickHouseSink
+	decodeOneDocument(t, "examples/quickstart/sink.yaml", &sink)
+
+	// The same reading checkPolicy applies: an empty allow-list admits everything
+	// but the hard deny-list, and a non-empty one is exhaustive.
+	allowed := sink.Spec.Policy.AllowedGVKs
+	if len(allowed) > 0 && !slices.ContainsFunc(allowed, func(sel v1alpha1.GVKSelector) bool {
+		return sel.Group == "" && sel.Version == "v1" &&
+			(slices.Contains(sel.Kinds, "Event") || slices.Contains(sel.Kinds, "*"))
+	}) {
+		t.Error("examples/quickstart/sink.yaml does not admit v1/Event in spec.policy.allowedGVKs; " +
+			"the refusal is all-or-nothing, so the rule above would be refused whole with " +
+			"PolicyAllowed=False rather than narrowed to the kinds that are listed")
+	}
+
+	overlay := readFile(t, "examples/quickstart/operator/kustomization.yaml")
+	if !strings.Contains(overlay, "config/rbac/presets/events.yaml") {
+		t.Error("the quickstart overlay no longer enables the `events` watch preset; " +
+			"core-workloads grants no `events`, so the rule would report RBACGranted=False " +
+			"and stream nothing")
+	}
+
+	// And the demonstration itself, in the two places a reader meets it: an
+	// assertion in the script, so a regression fails a CI job rather than a
+	// stranger's first ten minutes, and the walkthrough that shows what it prints.
+	if !strings.Contains(readFile(t, "examples/quickstart/quickstart.sh"), "kind = 'Event'") {
+		t.Error("examples/quickstart/quickstart.sh no longer asserts that an Event was recorded; " +
+			"the flag would be back to demonstrating itself in prose only")
+	}
+	if !strings.Contains(readFile(t, "examples/quickstart/README.md"), "--with-events") {
+		t.Error("examples/quickstart/README.md no longer walks through --with-events")
+	}
+}
+
+// decodeOneDocument decodes a single-document manifest into obj with unknown
+// fields rejected.
+//
+// See TestTeeExampleCustomResourcesDecode for why a decode beats a substring
+// match on a hand-written example: a CRD prunes an unknown field silently, so a
+// misspelled one applies cleanly and behaves as the default.
+func decodeOneDocument(t *testing.T, file string, obj any) {
+	t.Helper()
+	documents := splitYAML(t, readFile(t, file))
+	if len(documents) != 1 {
+		t.Fatalf("%s holds %d documents, expected exactly 1", file, len(documents))
+	}
+	if err := yaml.UnmarshalStrict(documents[0], obj); err != nil {
+		t.Fatalf("%s does not decode into %T: %v", file, obj, err)
+	}
+}
+
 //
 // The tee example is complete, self-consistent and CI-tested (Task 7.1)
 //

@@ -374,10 +374,11 @@ three:
 | No rule streams Events | The gap, and the YAML that closes it. |
 | No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
 
-The second is what a fresh [quickstart](../examples/quickstart/) produces: its
-rule streams `apps/v1 Deployment` and `v1 ConfigMap` and nothing else, so there
-are no Event rows to interleave and the flag is correct about an archive that is
-also correct.
+The second is the common one, because the `events` watch preset ships disabled
+and a rule has to name `Event` before anything is captured. It is no longer what
+a fresh [quickstart](../examples/quickstart/) produces: that rule streams
+`v1/Event` from its demo namespace, so the flag has Events to interleave in the
+environment that exists to demonstrate it.
 
 ```
 ! --with-events found no Events: no rule streams Events to this sink.

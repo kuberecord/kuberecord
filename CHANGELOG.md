@@ -189,9 +189,9 @@ than a summary of them.
 ### Fixed
 
 - **`--with-events` says why it found nothing.** Against the quickstart it
-  produced output byte-identical to a bare invocation: the rule streams
-  `apps/v1 Deployment` and `v1 ConfigMap`, so the archive holds no Event rows and
-  there was nothing to interleave. Nothing was broken, and "nothing was broken" is
+  produced output byte-identical to a bare invocation: that rule streamed
+  `apps/v1 Deployment` and `v1 ConfigMap`, so the archive held no Event rows and
+  there was nothing to interleave (the entry below gives it some). Nothing was broken, and "nothing was broken" is
   exactly the state the output could not distinguish from the flag being ignored —
   on the flag the README's opening example and `--help` both put in front of a new
   user first.
@@ -218,6 +218,34 @@ than a summary of them.
   stderr with every other notice, in the table and in `-o json`, `-o yaml` and
   `-o jsonl` alike — a flag that silently does nothing is as invisible to a script
   as to a person.
+
+- **The quickstart captures Kubernetes Events, so `--with-events` demonstrates
+  itself.** The flag leads the README's opening example and `--help`'s, and the
+  one environment built to demonstrate the product could not demonstrate it. `make
+  quickstart` now streams `v1/Event` from its demo namespace, and the scale-up it
+  already performed supplies the correlated row the hero block promises — a
+  `ScalingReplicaSet` Event eight milliseconds after the `~ spec.replicas: 1 → 3`
+  that caused it. The run asserts that row arrived rather than hoping, prints the
+  Events it recorded beside the diff and the redaction proof, and says how many of
+  its rows are Events.
+
+  **The rule entry carries a warning, because the quickstart is what people
+  copy.** Events are captured for the whole watched scope and correlated at read
+  time, and an Event bump writes a full row rather than a diff: the API server
+  updates `count` in place, so each bump changes the content, hash dedup cannot
+  suppress it, and a crash-looping pod emitting `BackOff` a hundred times writes a
+  hundred whole JSON rows. One namespace with three `pause` pods produces eleven.
+  A cluster-wide Event rule during a bad rollout is the dominant term in write
+  volume, which makes it a sizing decision rather than a checkbox — and the
+  comment says so in the file being copied, not only in the documentation.
+
+  Two other files moved with it, and neither is a quickstart-only shortcut. The
+  sink's `policy.allowedGVKs` admits `v1/Event`, because that refusal is
+  all-or-nothing: a missing entry refuses the whole rule rather than narrowing it
+  to the kinds that are listed. And the install applies the `events` watch preset,
+  which ships disabled in every install because the storage bill belongs to
+  whoever asked for it. Both are what granting a new kind looks like on any
+  cluster.
 
 - **The incarnation banner no longer offers `diff` and `blame` a flag they
   reject.** Over a name that has belonged to more than one object, all three
