@@ -42,9 +42,20 @@ import (
 // Nothing here is broken. Discovery worked, the custom resource says exactly what
 // it should, and the address is correct for every reader that runs inside the
 // cluster. What is missing is a sentence, and this file is that sentence: the CLI
-// already holds the address, the database, the user, the sink's own name and the
-// namespace its credentials live in, and it can spell out both routes out of the
-// problem without the reader opening a document.
+// already holds the address, the sink's own name and the namespace its credentials
+// live in, and it can spell out both routes out of the problem without the reader
+// opening a document.
+//
+// # The two routes, and why only one of them is typed out
+//
+// The one-off is a `kubectl port-forward` and a `--sink-addr`, and it has to be
+// spelled in full because there is nothing to derive it from. The permanent one is
+// a profile, and it used to be spelled in full too — four lines of `set-profile`
+// with the address, the database and the user copied out of the custom resource
+// this message had just read. `--from-sink` reads the same resource and writes the
+// same stanza, so that block is now one line naming the sink (Task 16.4). Every
+// value it used to carry was a value the reader could mistype, and none of them
+// was a value the reader had any way of checking.
 //
 // # Why it is its own file
 //
@@ -231,11 +242,17 @@ type diagnosis struct {
 	// host and therefore carries no namespace of its own.
 	namespace string
 
-	// The three connection values the remediation commands are pre-filled from.
-	// A user who has to retype them is a user who mistypes one.
-	addr     string
-	database string
-	username string
+	// addr is the endpoint that could not be reached, and the only connection
+	// value this struct carries.
+	//
+	// The database and the username used to be here too, because the profile
+	// route spelled a whole `set-profile` stanza out and a user who has to retype
+	// a value is a user who mistypes one. That route is now `--from-sink`, which
+	// reads both of them out of the same custom resource this diagnosis names
+	// (Task 16.4) — so they are no longer fields, for the reason this struct
+	// declines to carry the password: a value a message does not print is a value
+	// one edit away from being printed.
+	addr string
 
 	// commandName is how this process was invoked — `kuberecord` or
 	// `kubectl kuberecord` — so that the `config` commands name something the
@@ -450,12 +467,13 @@ func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string 
 	line("")
 	line(severity.Warning("Or write it down once, and every later invocation reads it:"))
 	line("")
-	line(severity.Emphasis(fmt.Sprintf("    %s config set-profile %s --backend %s \\",
-		d.commandName, localProfileName, BackendClickHouse)))
-	line(severity.Emphasis(fmt.Sprintf("        --addr %s --database %s --username %s \\",
-		forwarded, d.database, d.username)))
-	line(severity.Emphasis(fmt.Sprintf("        --password-env %s", passwordEnvName)))
+	line(severity.Emphasis(fmt.Sprintf("    %s config set-profile %s --%s %s",
+		d.commandName, localProfileName, options.FlagFromSink, d.ref)))
 	line(severity.Emphasis(fmt.Sprintf("    %s config use-profile %s", d.commandName, localProfileName)))
+	line("")
+	line(severity.Warning(fmt.Sprintf("That reads this same sink, records %s in place of the address above,", forwarded)))
+	line(severity.Warning("and takes the database and the user from it. The forward is still yours to run:"))
+	line(severity.Warning("a profile records an address, it does not open a tunnel."))
 	line("")
 	line(severity.Warning(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", passwordEnvName)))
 	line(severity.Warning("recommended credential for it, and the operator's own is not. Both routes, and"))

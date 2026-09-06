@@ -876,8 +876,6 @@ func (r *BackendResolver) clickHouseTarget(
 			ref:         ref,
 			namespace:   namespace,
 			addr:        dial.Addr,
-			database:    dial.Database,
-			username:    dial.Username,
 			commandName: r.commandName(),
 		},
 		// The AC's shape exactly: the sink, then host:port/database, then the

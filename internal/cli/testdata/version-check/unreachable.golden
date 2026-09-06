@@ -34,10 +34,12 @@ Forward it yourself, then re-run against the forwarded address:
 
 Or write it down once, and every later invocation reads it:
 
-    kuberecord config set-profile local --backend clickhouse \
-        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \
-        --password-env KUBERECORD_CLICKHOUSE_PASSWORD
+    kuberecord config set-profile local --from-sink ClickHouseSink/default
     kuberecord config use-profile local
+
+That reads this same sink, records 127.0.0.1:9000 in place of the address above,
+and takes the database and the user from it. The forward is still yours to run:
+a profile records an address, it does not open a tunnel.
 
 Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
 recommended credential for it, and the operator's own is not. Both routes, and

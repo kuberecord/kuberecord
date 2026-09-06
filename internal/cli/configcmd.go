@@ -176,22 +176,31 @@ func newConfigSetProfileCommand(
 		Short: "Create or replace a profile",
 		Long: `Create or replace a profile in the kuberecord configuration file.
 
-A profile says where to read recorded history from. It never holds a password:
-for ClickHouse, name an environment variable with --password-env or a file with
---password-file. For S3 and MinIO there is nothing to name — credentials come
-from the AWS credential chain, which every tool on the machine already reads.
+A profile says where to read recorded history from.
 
---from-sink <kind>/<name> fills in the whole stanza from a sink custom resource
-the cluster already holds, which is every field except the ones a reader outside
-the cluster has to decide: the endpoint, the user and where the password comes
-from.`,
-		Example: `  # A read-only ClickHouse user, with the password in the environment.
+--from-sink <kind>/<name> writes the whole stanza from a sink custom resource the
+cluster already holds, so there is nothing to look up and nothing to mistype. A
+cluster-internal address is recorded as a forwarded loopback port instead, and
+the notice on stderr says so. It is the shortest route to a working profile, and
+the one to reach for after a query has failed to reach the address a sink
+records.
+
+The per-field flags below are the escape hatch, for a profile with no custom
+resource behind it: an archive synced to a laptop, a ClickHouse in a cluster this
+kubeconfig does not reach, a machine with no kubeconfig at all.
+
+A profile never holds a password either way: for ClickHouse, name an environment
+variable with --password-env or a file with --password-file. For S3 and MinIO
+there is nothing to name — credentials come from the AWS credential chain, which
+every tool on the machine already reads.`,
+		Example: `  # From the sink the operator already streams to. No values to look up.
+  kuberecord config set-profile local --from-sink ClickHouseSink/default
+
+  # By hand, for a backend no custom resource in this cluster describes:
+  # a read-only ClickHouse user, with the password in the environment.
   kuberecord config set-profile prod --backend clickhouse \
       --addr clickhouse.example:9000 --database kuberecord \
       --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD
-
-  # The same thing, read from the sink the operator is already streaming to.
-  kuberecord config set-profile local --from-sink ClickHouseSink/default
 
   # An archive in MinIO.
   kuberecord config set-profile archive --backend s3 --bucket acme-audit \

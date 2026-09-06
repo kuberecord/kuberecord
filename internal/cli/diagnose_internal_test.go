@@ -163,7 +163,7 @@ func TestAnUnreachableClusterInternalSinkExplainsItself(t *testing.T) {
 	for _, want := range []string{
 		"kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000",
 		"--" + options.FlagSinkAddr + " 127.0.0.1:9000",
-		"config set-profile local --backend clickhouse",
+		"config set-profile local --" + options.FlagFromSink + " ClickHouseSink/default",
 		"config use-profile local",
 	} {
 		if !strings.Contains(advice, want) {

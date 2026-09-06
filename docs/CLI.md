@@ -158,9 +158,9 @@ plugs into.
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). |
+| `--source <dir\|s3://bucket/prefix>` | — | Read directly from a location, bypassing sink discovery. A plain path or a `file://` URL is a directory holding `format=jsonl-v1/`. Step 1 of [where the data comes from](#where-the-data-comes-from). It replaces the chain; `--sink-addr` corrects one field of it — see [`--source` versus `--sink-addr`](#--source-versus---sink-addr). |
 | `--sink <Kind>/<name>` | — | Read through a configured sink custom resource, named explicitly — `ClickHouseSink/default`, `S3Sink/cold`. Step 2. |
-| `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr) and [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster). |
+| `--sink-addr <host:port>` | — | Dial this endpoint instead of the one the resolved ClickHouse backend recorded, which is what a forwarded port needs. It replaces the address and **nothing else**, and the notice on stderr says so — see [`--sink-addr`](#--sink-addr), [`--source` versus `--sink-addr`](#--source-versus---sink-addr) and [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster). |
 | `--profile <name>` | the file's `currentProfile` | Use this profile from [the configuration file](#the-configuration-file). Step 3. |
 | `--cluster-id <id>` | resolved, and the answer printed | Selects **which cluster's records to read from the sink** — the `cluster_id` column stamped on every row. Resolved in five steps if you omit it; see [The cluster identity](#the-cluster-identity). |
 | `--cluster <name>` *(kubectl's)* | the current context's cluster | Selects **a cluster entry from your kubeconfig** — which API server `kubectl` connects to. It is kubectl's own flag, described here rather than in the list below only because of the pair note that follows. |
@@ -1581,6 +1581,47 @@ For a setup you come back to, write it down once with
 a colleague's cluster, a CI job that forwards and then queries, a debugging
 session that should leave nothing on disk.
 
+### `--source` versus `--sink-addr`
+
+They are routinely read as two spellings of "read from somewhere else", and they
+are not alternatives at all. `--source` **replaces** the resolution chain:
+step 1 answers, and no custom resource, Secret or kubeconfig is consulted after
+it. `--sink-addr` **corrects one field** of what the chain already found: the
+endpoint, with the database, the username, the credentials, the TLS setting and
+the dial timeout still coming from the custom resource discovery read. Given
+together they are a usage error — under `--source` nothing recorded an endpoint,
+so there is nothing for the override to replace.
+
+| | `--source` | `--sink-addr` |
+|---|---|---|
+| **The question it answers** | "Read this archive, here." | "Everything the cluster recorded is right except that I am not in it." |
+| **Position in [the chain](#where-the-data-comes-from)** | **Step 1**, and it wins outright: steps 2, 3 and 4 never run. | **No step.** A modifier on whichever of steps 2, 3 and 4 answered — the notice still names that step, because the custom resource really was read. |
+| **Contacts the cluster** | No. No kubeconfig, no custom resource, no Secret. One exception, and it is not about the data: expanding a short kind like `deploy` reads the server's [discovery data](#reading-an-archive-without-a-cluster). Give `Deployment.apps` and even that goes. | Whatever the step it modifies did. On a discovered or `--sink`-named custom resource, yes: the sink is read and its `credentialsSecretRef` resolved exactly as without the flag. On a ClickHouse profile, no — the file already held everything but the address. |
+| **Backends it applies to** | `s3` and `local` — a `format=jsonl-v1/` archive in a bucket or a directory. Never ClickHouse: a server is dialled, not enumerated. | `clickhouse` only, wherever the chain lands on it — a discovered sink, `--sink ClickHouseSink/<name>`, or a ClickHouse profile. Every other route [refuses it by name](#--sink-addr). |
+| **What it supplies** | The whole location, and nothing else: bucket and prefix, or a directory. Credentials come from the AWS credential chain, region from `AWS_REGION`. | One field, `host:port`. Five things a `ClickHouseSink` answers, four of them untouched. |
+| **What the notice says** | `using --source …` — at full weight, because something shadowed what discovery would have found. | The step that answered, with `address from --sink-addr` inside the parentheses. |
+
+Four cases, and the fourth is the common one:
+
+- **`--source`**, when the recorded history is an archive you can already reach:
+  an `S3Sink` bucket, a directory synced to a laptop, [evaluation
+  mode](#evaluation-mode). It is the answer for an auditor with no cluster access
+  at all, and the only one of the four that works on a plane.
+- **`--sink-addr`**, when discovery is right and you are somewhere it did not
+  expect: a `kubectl port-forward` you have just opened, a colleague's cluster, a
+  CI job that forwards and then queries. One invocation, nothing left on disk.
+- **A profile**, when either of those is something you will type more than once.
+  [`config set-profile --from-sink`](#--from-sink) writes one from the sink
+  itself — the forwarded address substituted, the database and the user carried
+  over, the password still read from your own environment. It survives the
+  kubeconfig context changing under it, which a shell alias holding a flag does
+  not.
+- **Neither**, when the CLI runs where the operator does, or the recorded address
+  resolves from where you are — an in-cluster job, a `kubectl exec`, a ClickHouse
+  on a public endpoint or across a VPN. Discovery answers, the notice is dimmed
+  because there is nothing in it to check, and both of these flags would be a way
+  of overriding something that was already correct.
+
 ### Discovery, and why it degrades
 
 Discovery reads the `ClickHouseSink` and `S3Sink` custom resources through your
@@ -1649,10 +1690,12 @@ Forward it yourself, then re-run against the forwarded address:
 
 Or write it down once, and every later invocation reads it:
 
-    kubectl kuberecord config set-profile local --backend clickhouse \
-        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \
-        --password-env KUBERECORD_CLICKHOUSE_PASSWORD
+    kubectl kuberecord config set-profile local --from-sink ClickHouseSink/default
     kubectl kuberecord config use-profile local
+
+That reads this same sink, records 127.0.0.1:9000 in place of the address above,
+and takes the database and the user from it. The forward is still yours to run:
+a profile records an address, it does not open a tunnel.
 
 Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
 recommended credential for it, and the operator's own is not. Both routes, and
@@ -1661,8 +1704,11 @@ docs/CLI.md#running-the-cli-outside-the-cluster
 ```
 
 The Service and its namespace come out of the address itself, so the
-`port-forward` line is the one to run rather than a template to fill in. Below is
-what each route is for.
+`port-forward` line is the one to run rather than a template to fill in. The
+second route names the sink for the same reason: [`--from-sink`](#--from-sink)
+reads the stanza back out of the custom resource the first line of the message
+already named, so neither block leaves you a value to supply. Below is what each
+route is for.
 
 ### The one-off: a forwarded port and `--sink-addr`
 
@@ -1772,7 +1818,10 @@ $ kuberecord timeline Deployment.apps/checkout-api -n quickstart-demo \
 That is not a workaround for the friction on this page — it is what
 [evaluation mode](#evaluation-mode) and an `S3Sink` archive are, and it is why
 an auditor with a synced directory and no cluster access can answer the same
-questions from a plane. The whole path is
+questions from a plane. It is also why `--source` is not a third route out of
+the failure above and `--sink-addr` is not a way of reading an archive: they sit
+at different layers, and which one a given situation calls for is
+[`--source` versus `--sink-addr`](#--source-versus---sink-addr). The whole path is
 [`examples/zero-infra/`](../examples/zero-infra/). What it costs is query
 performance on wide questions, stated in [Backend capability
 differences](#backend-capability-differences) and [Cold scans](#cold-scans).

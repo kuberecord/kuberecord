@@ -72,8 +72,6 @@ func fixtureDiagnosis() diagnosis {
 		ref:         SinkRef{Kind: KindClickHouseSink, Name: "default"},
 		namespace:   fixtureNamespace,
 		addr:        fixtureAddr,
-		database:    DefaultClickHouseDatabase,
-		username:    "kuberecord",
 		commandName: "kuberecord",
 	}
 }
@@ -297,8 +295,9 @@ func TestTheExitCodeIsUnchanged(t *testing.T) {
 // the struct without noticing. A test over a fixture the test itself wrote could
 // not catch that.
 //
-// The username may appear — a profile needs it and it is not a secret. The
-// password may not, on any stream, at any verbosity.
+// The sink's name and its Secret's namespace may appear — they are how a reader
+// finds the thing they are about to mint a read-only alternative to. The password
+// may not, on any stream, at any verbosity.
 func TestTheMessageCarriesNoCredential(t *testing.T) {
 	const secretName = "clickhouse-credentials"
 
@@ -349,8 +348,12 @@ func TestTheMessageCarriesNoCredential(t *testing.T) {
 	if !strings.Contains(rendered, passwordEnvName) {
 		t.Error("the profile route does not say where the password comes from")
 	}
-	if !strings.Contains(rendered, "--username kuberecord") {
-		t.Error("the profile route omits the username discovery found, which a user would have to guess")
+	// The permanent route names the sink and nothing else it read from it. That
+	// is the whole of Task 16.4: a command carrying no values carries no value
+	// that could be a credential, and the one it does carry is a resource name
+	// this message has already printed twice.
+	if !strings.Contains(rendered, "--"+options.FlagFromSink+" "+ref.String()) {
+		t.Errorf("the profile route does not name the sink to read the stanza from:\n%s", rendered)
 	}
 }
 
@@ -371,10 +374,14 @@ func TestTheMessageNamesBothRoutes(t *testing.T) {
 		// address, and the port carried over.
 		"kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000",
 		"kuberecord timeline … --sink-addr 127.0.0.1:9000",
-		// The profile route, complete enough to paste.
-		"kuberecord config set-profile local --backend clickhouse",
-		"--addr 127.0.0.1:9000 --database kuberecord --username kuberecord",
+		// The profile route: the sink to read the stanza from, and the command
+		// that makes the written profile the active one.
+		"kuberecord config set-profile local --from-sink ClickHouseSink/default",
 		"kuberecord config use-profile local",
+		// And what that one line will do to the address, which is the reason the
+		// profile is worth writing and the one thing the command no longer spells
+		// out for itself.
+		"records 127.0.0.1:9000 in place of the address above",
 		// And the sentence that says the tool will not do it for the user (D23).
 		"will not forward a port",
 	} {
@@ -422,7 +429,8 @@ func TestABareHostFallsBackToTheOperatorNamespace(t *testing.T) {
 	rendered := (&UnreachableSinkError{diagnosis: bare, cause: connectionRefused()}).Render("", false)
 	for _, want := range []string{
 		"kubectl port-forward -n " + fixtureNamespace + " svc/clickhouse 9440:9440",
-		"--addr 127.0.0.1:9440",
+		"--sink-addr 127.0.0.1:9440",
+		"records 127.0.0.1:9440 in place of the address above",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the message does not carry %q:\n%s", want, rendered)

@@ -1828,3 +1828,106 @@ func TestZeroInfraExampleIsLinked(t *testing.T) {
 		}
 	}
 }
+
+// TestSourceAndSinkAddrAreComparedAndLinked keeps the one page that can settle
+// the question able to settle it (Task 16.4).
+//
+// `--source` and `--sink-addr` are read as alternatives because they are adjacent
+// on this page and both end a sentence with "instead". They are not: one replaces
+// the resolution chain and the other corrects one field of what it found, which is
+// why giving both is a usage error rather than a preference. A reader who has that
+// wrong reaches for `--source` against a ClickHouse and gets a refusal whose reason
+// they do not have the model to read.
+//
+// The comparison is checked by its rows rather than by its heading alone, because
+// a table that loses the "contacts the cluster" row is still a table and still
+// resolves every link into it. Each of the five is a question somebody actually
+// asks, and the answers differ between the two flags in every one of them.
+//
+// The inbound links are the other half. A section nothing points at is a section
+// found only by the reader who already knew it was there — which is not the reader
+// it was written for — and the existing anchor check catches a link that rots,
+// never a link that was never added.
+func TestSourceAndSinkAddrAreComparedAndLinked(t *testing.T) {
+	reference := readFile(t, "docs/CLI.md")
+
+	const heading = "### `--source` versus `--sink-addr`\n"
+	_, section, found := strings.Cut(reference, heading)
+	if !found {
+		t.Fatalf("docs/CLI.md has no %q section: the two flags are compared nowhere",
+			strings.TrimSpace(heading))
+	}
+	if next := strings.Index(section, "\n### "); next >= 0 {
+		section = section[:next]
+	}
+
+	// The five rows the comparison exists to carry, each named by a phrase from
+	// its own row label rather than by the whole of it, so rewording a heading is
+	// allowed and dropping the subject is not.
+	for _, tc := range []struct{ want, why string }{
+		{"question it answers", "what each flag is for, before what it does"},
+		{"Position in", "that one is a step of the chain and the other is a modifier on one"},
+		{"Contacts the cluster", "the difference that decides which works with no kubeconfig"},
+		{"Backends it applies to", "that an archive is never dialled and ClickHouse is never enumerated"},
+		{"What it supplies", "one field against a whole location, which is the whole distinction"},
+	} {
+		if !strings.Contains(section, tc.want) {
+			t.Errorf("the %q comparison no longer covers %q — %s",
+				strings.TrimSpace(heading), tc.want, tc.why)
+		}
+	}
+
+	// And the guidance under it, which is the half a reader acts on. The fourth
+	// case is the one that has to be said out loud: most people need neither flag,
+	// and a page that only described two overrides would read as though everybody
+	// does.
+	for _, tc := range []struct{ want, why string }{
+		{"**A profile**", "when writing it down once beats passing a flag twice"},
+		{"**Neither**", "the common case, which is not overriding anything at all"},
+	} {
+		if !strings.Contains(section, tc.want) {
+			t.Errorf("the %q guidance no longer covers %q — %s",
+				strings.TrimSpace(heading), tc.want, tc.why)
+		}
+	}
+
+	// The three places a reader is standing when they need it. Each is located by
+	// the line or section that must carry the link, not by a count of links in the
+	// page: three links all in one paragraph would satisfy a count and help nobody.
+	const link = "(#--source-versus---sink-addr)"
+	for _, tc := range []struct{ where, anchoredAt, why string }{
+		{
+			where:      "the `--source` row of the flag table",
+			anchoredAt: "| `--source <dir\\|s3://bucket/prefix>` |",
+			why:        "a reader meets the flag in the table before they meet either section",
+		},
+		{
+			where:      "the `--sink-addr` row of the flag table",
+			anchoredAt: "| `--sink-addr <host:port>` |",
+			why:        "the same reader, one row down, with the same question",
+		},
+		{
+			where:      "the \"Running the CLI outside the cluster\" section",
+			anchoredAt: "## Running the CLI outside the cluster\n",
+			why:        "the page a failed dial sends people to, where both flags are already in play",
+		},
+	} {
+		_, rest, ok := strings.Cut(reference, tc.anchoredAt)
+		if !ok {
+			t.Errorf("docs/CLI.md no longer contains %s, so nothing can link the comparison from it", tc.where)
+			continue
+		}
+		// A table row ends at its newline; a section ends at the next `## `. An
+		// unterminated one runs to the end of the page, which is what Cut returns
+		// when it finds nothing.
+		ends := "\n## "
+		if strings.HasPrefix(tc.anchoredAt, "|") {
+			ends = "\n"
+		}
+		scope, _, _ := strings.Cut(rest, ends)
+		if !strings.Contains(scope, link) {
+			t.Errorf("%s does not link the `--source` versus `--sink-addr` comparison — %s",
+				tc.where, tc.why)
+		}
+	}
+}
