@@ -124,9 +124,10 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
 			"(2026-08-20, 2026-08-20T14:00:00Z).",
 		"Only changes at or before this point, in the same forms as --since.")
 	command.Flags().IntVar(&local.limit, "limit", local.limit,
-		"Examine at most this many changes, newest first. Zero means no limit.")
+		"Examine at most this many changes. It selects the newest ones, which are then "+
+			"displayed oldest first. Zero means no limit.")
 	command.Flags().BoolVar(&local.reverse, "reverse", local.reverse,
-		"Show the same changes oldest first. It reorders the blocks; it does not select different ones.")
+		"Show the same changes newest first. It reorders the blocks; it does not select different ones.")
 	command.Flags().StringVar(&local.uid, "uid", local.uid,
 		"Pin the diff to one incarnation by UID.")
 	command.Flags().StringSliceVar(&local.fields, "field", local.fields,

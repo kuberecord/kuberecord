@@ -225,15 +225,21 @@ UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
 TIME (UTC)               EVENT     ACTOR                      CHANGE
-2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
-2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:05:02.117  Modified  kube-controller-manager    ~3 ops
+2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
 ```
 
 The header and the table go to **stdout**; every banner, notice and explanation
 goes to **stderr**. One sentence: stdout is the data, stderr explains it. That is
 what makes `timeline … | wc -l` count changes.
+
+**Rows read oldest first, so the newest change is the last line printed** — the
+one immediately above your prompt, because this CLI does not page. Which changes
+are selected is a separate matter and has not moved: `--limit` still takes the
+**newest** N, and only their layout runs forward. `--reverse` puts the newest at
+the top.
 
 ### Flags
 
@@ -241,8 +247,8 @@ what makes `timeline … | wc -l` count changes.
 |------|--------------|
 | `--since`, `--until` | Bound the window. Either a duration — `90m`, `6h`, `3d`, `2w`, `1d6h` — or an instant: `2026-08-20`, `2026-08-20 14:00:00`, `2026-08-20T14:00:00Z`. Both read as *ago*. |
 | `--from`, `--to` | Aliases for `--since` and `--until`, spelled the way the structured output and the query contract spell these bounds. Giving one bound under both names with two different values is a usage error. |
-| `--limit` | At most this many changes, newest first. Default `100`; `0` means no limit. |
-| `--reverse` | Show the same changes oldest first. It reorders rows; it does not select different ones. |
+| `--limit` | At most this many changes. It selects the **newest** N, and they are displayed oldest first. Default `100`; `0` means no limit. |
+| `--reverse` | Show the same changes newest first. It reorders rows; it does not select different ones. |
 | `--actor`, `--exclude-actor` | Field-manager predicates. Repeatable. `--exclude-actor` is applied second and wins on conflict. |
 | `--field` | Field-path prefixes, repeatable. Either spelling works: `spec.containers[0].image` or `spec.containers.0.image`. |
 | `--uid` | Pin the timeline to one incarnation. |
@@ -374,6 +380,11 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
+2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+  ~ spec.template.spec.containers[0].resources.limits.memory
+      - 2Gi
+      + 512Mi
+
 2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
   ~ spec.replicas
       - 3
@@ -382,14 +393,11 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
       + true
   - spec.minReadySeconds
       - 10
-
-2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
-  ~ spec.template.spec.containers[0].resources.limits.memory
-      - 2Gi
-      + 512Mi
 ```
 
-`+` is green, `-` is red, `~` is yellow.
+`+` is green, `-` is red, `~` is yellow. Blocks read oldest first, as
+[`timeline`](#timeline)'s rows do and for the same reason; `--reverse` puts the
+newest at the top.
 
 ### Flags
 
@@ -398,8 +406,8 @@ Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 | `--since` | Only changes at or after this point: a duration (`6h`, `90m`, `3d`, `2w`) or an instant (`2026-08-20`, `2026-08-20T14:00:00Z`). |
 | `--until` | Only changes at or before this point, in the same forms. |
 | `--from`, `--to` | Aliases for `--since` and `--until`. |
-| `--limit` | Examine at most this many changes, newest first. Default 100; zero means no limit. |
-| `--reverse` | Oldest first. It reorders the blocks; it does not select different ones. |
+| `--limit` | Examine at most this many changes. It selects the **newest** N, and they are displayed oldest first. Default 100; zero means no limit. |
+| `--reverse` | Newest first. It reorders the blocks; it does not select different ones. |
 | `--uid` | Pin the diff to one incarnation. |
 | `--field` | Only changes touching one of these paths, matched by prefix, with every hunk of those changes. |
 | `--full` | Print every operation and every value in full. |
@@ -1215,8 +1223,8 @@ six-figure timeline can be piped into something that reads it a line at a time:
 
 ```
 {"apiVersion":"cli.kuberecord.io/v1alpha1","kind":"Timeline","metadata":{…}}
-{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…}
 {"ts":"2026-08-28T14:05:02.117Z","event_type":"Modified",…}
+{"ts":"2026-08-28T14:09:40.9Z","event_type":"Modified",…}
 ```
 
 The head line carries no `items` key — it cannot, since nothing has been read yet
@@ -1225,10 +1233,11 @@ the stream as it arrives already knows whether an empty stream means "nothing
 changed" or "nothing was watching".
 
 One case holds items back, and it is bounded by a number you typed rather than by
-the result: `--reverse` with `--limit N` has to read the newest N changes before
-it can write the oldest of them, so at most N are held. Without a limit the two
-orderings select the same changes, so the query is simply asked oldest-first and
-nothing is held at all.
+the result: the display order is oldest first while `--limit N` selects the
+newest N, so those N have to be read before the oldest of them can be written, and
+at most N are held. `--limit 0` makes the two orderings select the same changes,
+so the query is simply asked oldest-first and nothing is held at all; `--reverse`
+asks for the order the backend already emits and holds nothing either.
 
 `json` and `yaml` are single documents and are complete before they are written,
 which is what a single document means.
@@ -1240,8 +1249,8 @@ The flagship question — who changed what — as one line per change:
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments -o jsonl \
   | jq -r 'select(.ts) | "\(.ts)  \(.actors | join(","))  \(.diff)"'
-2026-08-28T14:05:02.117Z  kube-controller-manager    [{"op":"replace","path":"/spec/replicas",…
 2026-08-28T14:03:11.482Z  kubectl-client-side-apply  [{"op":"replace","path":"/spec/template/spec/…
+2026-08-28T14:05:02.117Z  kube-controller-manager    [{"op":"replace","path":"/spec/replicas",…
 ```
 
 `select(.ts)` is what skips the head line: it is the only line with no `ts`.
@@ -1251,8 +1260,8 @@ Or, with the field paths already decoded, from `diff`:
 ```console
 $ kubectl kuberecord diff deploy/checkout -n payments --since 24h -o json \
   | jq -r '.items[] | . as $c | .hunks[] | "\($c.ts)  \($c.actors[0])  \(.path): \(.old) → \(.new)"'
-2026-08-28T14:05:02.117Z   kube-controller-manager    spec.replicas: 3 → 5
 2026-08-28T14:03:11.482Z   kubectl-client-side-apply  spec.template.spec.containers[0].resources.limits.memory: 2Gi → 512Mi
+2026-08-28T14:05:02.117Z   kube-controller-manager    spec.replicas: 3 → 5
 ```
 
 An operation whose prior value the replay could not establish renders `null`

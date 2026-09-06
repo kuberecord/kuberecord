@@ -59,11 +59,17 @@ import (
 
 // defaultLimit is how many changes a bare invocation renders.
 //
-// A hundred, newest first, because the question that brings somebody here is
-// "what happened to this recently" and because both backends answer a
-// reverse-limited query cheaply — the object archive has a short circuit that
-// stops walking partitions once the limit is filled, which an unlimited query
-// would forfeit.
+// A hundred, and they are the *newest* hundred, because the question that brings
+// somebody here is "what happened to this recently" and because both backends
+// answer a reverse-limited query cheaply — the object archive has a short circuit
+// that stops walking partitions once the limit is filled, which an unlimited
+// query would forfeit.
+//
+// Which hundred are selected and which way up they are printed are separate
+// decisions, and only the second is a matter of taste. They are printed oldest
+// first, because this CLI does not page: the last line written sits immediately
+// above the prompt, so the newest change belongs there rather than a hundred rows
+// up. See holdForDisplayOrder for the trap in conflating the two.
 const defaultLimit = 100
 
 // scopesCommand is the command a notice points a reader at when the answer
@@ -120,7 +126,7 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   # Only the changes that touched the container images, with every operation.
   kuberecord timeline deploy/checkout -n payments --field spec.template.spec.containers --full
 
-  # With the Kubernetes Events that were recorded about it, oldest first.
+  # With the Kubernetes Events that were recorded about it, newest first.
   kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse`,
 
 		// The kind completes from the static short-name table; the name is an
@@ -144,9 +150,10 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
 			"(2026-08-20, 2026-08-20T14:00:00Z).",
 		"Only changes at or before this point, in the same forms as --since.")
 	command.Flags().IntVar(&local.limit, "limit", local.limit,
-		"Show at most this many changes, newest first. Zero means no limit.")
+		"Show at most this many changes. It selects the newest ones, which are then "+
+			"displayed oldest first. Zero means no limit.")
 	command.Flags().BoolVar(&local.reverse, "reverse", local.reverse,
-		"Show the same changes oldest first. It reorders the rows; it does not select different ones.")
+		"Show the same changes newest first. It reorders the rows; it does not select different ones.")
 	command.Flags().StringSliceVar(&local.actors, "actor", local.actors,
 		"Only changes with one of these field managers. Repeatable. "+
 			"Note that a deletion records no actors, so any --actor excludes every deletion.")
@@ -556,9 +563,11 @@ type TimelineRequest struct {
 	// Limit caps the changes rendered; zero means no cap.
 	Limit int
 
-	// Reverse displays the same changes oldest first. It is a rendering choice
-	// and deliberately not the query's own Reverse: the query always asks for
-	// the newest first, because that is the shape both backends answer cheaply.
+	// Reverse displays the same changes newest first, against a default of oldest
+	// first. It is a rendering choice and deliberately not the query's own
+	// Reverse: the query always asks for the newest first, because that is the
+	// shape both backends answer cheaply, and only how they are laid out follows
+	// this field.
 	Reverse bool
 
 	// WithEvents interleaves the Kubernetes Events recorded about the object.
@@ -667,11 +676,12 @@ func timelineBounds(
 
 // timelineQuery builds the read-plane query.
 //
-// Reverse is always set, whatever --reverse asked for. The flag reorders the
-// rendered rows; the query always fetches the newest first, which is the shape
-// both backends answer cheaply — the object archive stops walking partitions
-// once a reverse-limited query's limit is filled, and an oldest-first query would
-// forfeit that.
+// Reverse is always set, whatever --reverse asked for, and whatever the rows are
+// laid out as. The flag reorders the rendered rows; the query always fetches the
+// newest first, which is the shape both backends answer cheaply — the object
+// archive stops walking partitions once a reverse-limited query's limit is
+// filled, and an oldest-first query would forfeit that as well as selecting the
+// oldest N rather than the newest.
 func (r TimelineRequest) timelineQuery(selection incarnationChoice, from, to time.Time) query.TimelineQuery {
 	return query.TimelineQuery{
 		Ref:             r.Ref,
@@ -756,12 +766,14 @@ func timelineQueryError(ctx context.Context, request TimelineRequest, err error)
 // priorValueNotices recovers the value each operation replaced, or explains why
 // it did not.
 //
-// rows arrive newest first and the replay must run oldest first, so it walks a
-// reversed clone. The clone copies the row structs, but each row's Ops field is a
-// slice header over the same backing array, so the Op.Old values the replay fills
-// in are visible through the original rows — which is what the renderer reads.
-// Reversing in place instead would leave the caller holding the display order it
-// did not ask for.
+// rows arrive in the query's own order — newest first — because this runs before
+// the display order is applied, and the replay must run oldest first, so it walks
+// a reversed clone. The clone copies the row structs, but each row's Ops field is
+// a slice header over the same backing array, so the Op.Old values the replay
+// fills in are visible through the original rows — which is what the renderer
+// reads. Reversing in place instead would leave the caller holding an order it did
+// not ask for, and calling this after the display flip would reverse rows that
+// were already ascending and attribute every prior value to the wrong change.
 func priorValueNotices(
 	ctx context.Context, engine query.QueryEngine, request TimelineRequest, rows []render.TimelineRow,
 ) []render.Notice {

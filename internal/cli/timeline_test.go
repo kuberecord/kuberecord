@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -328,6 +329,98 @@ func TestTimelineReversesOnlyTheDisplayOrder(t *testing.T) {
 		t.Error("--reverse changed the query's own order; it must only change the rendering, " +
 			"or a limited query stops selecting the newest changes")
 	}
+}
+
+// TestTimelineDefaultQueryStaysReverseLimited is the cost half of the display
+// flip, and the half a rendering test cannot see.
+//
+// The rows are laid out oldest first, but --limit selects the newest N and the
+// query must keep saying so. A query asked oldest-first would return the oldest N
+// — different changes, not the same ones reordered — and it would forfeit the
+// object archive's short circuit, which stops walking partitions once a
+// reverse-limited query's limit is filled. Both renderings are checked because the
+// streaming one rewrites the order the gathered one fixes.
+func TestTimelineDefaultQueryStaysReverseLimited(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		format render.StructuredFormat
+	}{
+		{name: "table", format: ""},
+		{name: "jsonl", format: render.StructuredJSONL},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			engine := watchedCheckoutEngine()
+
+			request := defaultRequest()
+			request.Structured = test.format
+			if _, _, err := runTimeline(t, engine, request, render.Options{}); err != nil {
+				t.Fatalf("RunTimeline: %v", err)
+			}
+
+			if len(engine.queries) == 0 {
+				t.Fatal("no timeline query was issued")
+			}
+			asked := engine.queries[0]
+			if !asked.Reverse {
+				t.Error("the default invocation asked an oldest-first query; it must stay " +
+					"newest-first, or --limit selects the oldest changes and the object " +
+					"archive's reverse-limit short circuit never engages")
+			}
+			if asked.Limit != request.Limit {
+				t.Errorf("the default invocation asked for a limit of %d, want %d: the limit is "+
+					"what the short circuit stops on", asked.Limit, request.Limit)
+			}
+		})
+	}
+}
+
+// TestTimelineDefaultSelectsTheNewestChanges is the other half: the display flip
+// must not have moved which changes come back.
+//
+// The fixture holds more changes than the limit, so the two ends of it are
+// distinguishable. What is asserted is a *set* — the newest limit changes, which
+// is what a default invocation selected before the display order flipped — and
+// then, separately, that they are laid out oldest first. Two assertions rather
+// than one golden, so a regression says which of the two properties moved.
+func TestTimelineDefaultSelectsTheNewestChanges(t *testing.T) {
+	const limit = 2
+
+	request := defaultRequest()
+	request.Limit = limit
+	stdout, _, err := runTimeline(t, watchedCheckoutEngine(), request, render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+
+	got := tableTimestamps(stdout)
+	want := newestTimestamps(checkoutHistory(), limit)
+	if !slices.Equal(sortedCopy(got), sortedCopy(want)) {
+		t.Errorf("the default invocation shows %v, want the newest %d changes %v: the display "+
+			"order flipped, and which changes are selected must not have", got, limit, want)
+	}
+	if !slices.IsSorted(got) {
+		t.Errorf("the default invocation shows %v; the rows must read top to bottom in the order "+
+			"the changes happened", got)
+	}
+}
+
+// newestTimestamps is the tail of a fixture's history, spelled the way
+// tableTimestamps spells the TIME column.
+//
+// The fixture is written oldest first, so the newest n are its last n.
+func newestTimestamps(history []query.Change, n int) []string {
+	stamps := make([]string, 0, n)
+	for _, change := range history[len(history)-n:] {
+		stamps = append(stamps, change.TS.UTC().Format("2006-01-02T15:04:05.000"))
+	}
+	return stamps
+}
+
+// sortedCopy sorts without disturbing the order under test.
+func sortedCopy(values []string) []string {
+	out := slices.Clone(values)
+	slices.Sort(out)
+	return out
 }
 
 // TestTimelineBannersOtherIncarnations covers Invariant 7's visible half.

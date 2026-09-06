@@ -270,16 +270,25 @@ func RunBlame(
 	ctx context.Context, backend *resolve.Backend, request BlameRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
+	// Not a display choice this command has: its table is ordered by when each
+	// field was last written, not by when the changes arrived, so there is no
+	// --reverse to honour. It is pinned rather than assumed because the replay
+	// below depends on it, and a caller that set it would get an attribution that
+	// credited every field to the change before the one that wrote it — wrong,
+	// plausible, and silent.
+	request.Timeline.Reverse = false
+
 	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
 	if err != nil {
 		return err
 	}
 
-	// The rows arrive newest first, because that is the order both backends answer
-	// cheaply. The replay must run in the order history happened in, so it walks a
-	// reversed clone rather than reversing what the caller holds.
-	ascending := slices.Clone(gathered.Rows)
-	slices.Reverse(ascending)
+	// The rows arrive in display order, which is oldest first — the order history
+	// happened in, and the order this replay has to run in. It is named here rather
+	// than used as gathered.Rows because every function below reads the name as the
+	// guarantee: an attribution walked backwards would credit each field to the
+	// change *before* the one that wrote it, silently and plausibly.
+	ascending := gathered.Rows
 
 	seed, base, seedNotice := seedBlameState(ctx, backend.Engine, request, gathered, ascending)
 	attributed := replay.AttributeRun(seed, ascending)

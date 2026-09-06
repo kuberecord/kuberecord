@@ -105,9 +105,9 @@ func TestDiffAttributesEachChange(t *testing.T) {
 	}
 }
 
-// TestDiffOldestFirst covers --reverse, which reorders the blocks and must not
+// TestDiffNewestFirst covers --reverse, which reorders the blocks and must not
 // select different ones.
-func TestDiffOldestFirst(t *testing.T) {
+func TestDiffNewestFirst(t *testing.T) {
 	request := defaultDiffRequest()
 	request.Timeline.Reverse = true
 

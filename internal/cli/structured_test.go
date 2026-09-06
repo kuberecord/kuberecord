@@ -250,20 +250,21 @@ func TestTimelineJSONLStreamsOneItemPerLine(t *testing.T) {
 // across renderings.
 //
 // The streaming path asks the backend for a different order than the gathered one
-// does, and with a limit in force it holds the answer back and reverses it here.
-// Those are optimizations, and an optimization that changed which changes came
-// back — or the order they came back in — would be a bug that only a script would
-// ever see.
+// does, and with a limit in force — the default — it holds the answer back and
+// reverses it here. Those are optimizations, and an optimization that changed
+// which changes came back — or the order they came back in — would be a bug that
+// only a script would ever see.
 func TestTimelineStructuredOrderMatchesTheTable(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		reverse bool
 		limit   int
 	}{
-		{name: "newest first", reverse: false, limit: 100},
-		{name: "oldest first, unlimited", reverse: true, limit: 0},
-		{name: "oldest first, limited", reverse: true, limit: 2},
-		{name: "newest first, limited", reverse: false, limit: 2},
+		{name: "oldest first, limited", reverse: false, limit: 100},
+		{name: "oldest first, truncated", reverse: false, limit: 2},
+		{name: "oldest first, unlimited", reverse: false, limit: 0},
+		{name: "newest first, truncated", reverse: true, limit: 2},
+		{name: "newest first, unlimited", reverse: true, limit: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tabular := defaultRequest()

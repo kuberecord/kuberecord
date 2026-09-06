@@ -99,9 +99,14 @@ type gatherResult struct {
 // window is completed first because every later call is bounded by it, the
 // incarnation is chosen before the query so that the header and the rows cannot
 // disagree about which object they describe (Invariant 7), the replay runs over
-// the rows in historical order before they are reversed for display, and coverage
-// is consulted on every invocation rather than only on an empty one — because a
-// timeline whose rows stop at a scope's edge is as misleading as an empty one.
+// the rows in the query's own order before they are turned into the display's,
+// and coverage is consulted on every invocation rather than only on an empty one
+// — because a timeline whose rows stop at a scope's edge is as misleading as an
+// empty one.
+//
+// The rows come back in display order, which by default is oldest first. Only the
+// *query* is newest-first, and it stays that way whatever is displayed: see
+// timelineQuery.
 func gatherChanges(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams,
@@ -153,7 +158,10 @@ func gatherChanges(
 	// they did not ask for and not the prior values they did.
 	scanned := len(result.Rows)
 	result.Rows = displayRows(result.Rows, request.DisplayFieldPaths)
-	if request.Reverse {
+	if !request.Reverse {
+		// The query answered newest first, and the default display is oldest first,
+		// so the default is the case that reverses. --reverse asks for the query's
+		// own order and leaves the rows alone.
 		slices.Reverse(result.Rows)
 	}
 

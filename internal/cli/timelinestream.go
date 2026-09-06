@@ -53,13 +53,14 @@ import (
 //
 // # Where the memory actually goes
 //
-// One case cannot stream, and it is bounded rather than hidden. --reverse asks
-// for the oldest change first, while --limit selects the *newest* N — so with
-// both set, the newest N have to be read before the oldest of them can be
-// written. The buffer is therefore at most --limit items: bounded by a number the
-// user typed, never by the size of the result. With no limit the two orderings
-// select the same set, so the query is simply asked oldest-first and nothing is
-// held at all.
+// One case cannot stream, and it is bounded rather than hidden. The default
+// rendering is oldest first, while --limit selects the *newest* N — so with a
+// limit in force, which is the default, the newest N have to be read before the
+// oldest of them can be written. The buffer is therefore at most --limit items:
+// bounded by a number the user typed, never by the size of the result. --limit 0
+// makes the two orderings select the same set, so the query is simply asked
+// oldest-first and nothing is held at all, and --reverse asks for the newest
+// first, which is the order the backend already emits.
 
 // runTimelineStructured answers a timeline request into the versioned envelope.
 //
@@ -149,9 +150,10 @@ func emitChanges(
 	hold := holdForDisplayOrder(request)
 	if !hold {
 		// The query is asked in the order the output is written in, so nothing has
-		// to be held back. See the file comment for why --reverse without a limit
-		// selects the same changes either way.
-		q.Reverse = !request.Reverse
+		// to be held back. The two spellings of Reverse mean the same thing —
+		// newest first — so this is an assignment rather than a negation. See the
+		// file comment for why --limit 0 selects the same changes either way.
+		q.Reverse = request.Reverse
 	}
 
 	iterator, err := engine.Timeline(ctx, q)
@@ -181,7 +183,8 @@ func emitChanges(
 		return emitted, sawDeleted, timelineQueryError(ctx, request, iterErr)
 	}
 
-	// At most --limit items, and only when --reverse and --limit are both set.
+	// At most --limit items, and only when a limit is in force and the display
+	// order is the default, oldest first.
 	slices.Reverse(held)
 	for _, change := range held {
 		if writeErr := stream.Write(changeItem(change)); writeErr != nil {
@@ -195,13 +198,13 @@ func emitChanges(
 // holdForDisplayOrder reports whether the emission order and the display order
 // disagree, so that items must be held back and reversed.
 //
-// They disagree in exactly one case, and the reasoning is worth stating because
-// the obvious simplification is wrong. --limit takes the first N changes in the
-// *query's* order (see query.TimelineQuery.Limit), so a limited query asked
-// oldest-first would return the oldest N — a different set of changes from the
-// one the table shows, not merely the same set in another order. So when both
-// flags are set the query keeps its newest-first shape, the answer is bounded by
-// the limit, and the reversal happens here.
+// They disagree in exactly one case — the default one — and the reasoning is
+// worth stating because the obvious simplification is wrong. --limit takes the
+// first N changes in the *query's* order (see query.TimelineQuery.Limit), so a
+// limited query asked oldest-first would return the oldest N — a different set of
+// changes from the one the table shows, not merely the same set in another order.
+// So a limited query keeps its newest-first shape, the answer is bounded by the
+// limit, and the reversal into the display's oldest-first order happens here.
 func holdForDisplayOrder(request TimelineRequest) bool {
-	return request.Reverse && request.Limit > 0
+	return !request.Reverse && request.Limit > 0
 }

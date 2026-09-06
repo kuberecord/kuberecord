@@ -16,6 +16,33 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Changed — BREAKING: CLI output
+
+- **`timeline` and `diff` display oldest first, and `--reverse` now means newest
+  first.** Both commands read top to bottom in the order the changes happened, so
+  the newest one is the last line printed — the line immediately above your
+  prompt. This CLI does not page, deliberately, in the way `kubectl logs` and
+  `journalctl` do not; under the old newest-first default the answer to "what
+  happened to this recently" sat at the top of a hundred rows and had to be
+  scrolled back to. `git log` survives that ordering because it pages by default,
+  and kuberecord is in the other category.
+
+  **Which changes are selected has not changed, and that is the point.** `--limit`
+  still takes the *newest* N: the query is still asked newest-first and bounded,
+  which is the shape both backends answer cheaply and the one an object archive's
+  short circuit engages on — it stops walking partitions once the limit is filled.
+  Asking the backend for the oldest N instead would return a different set of
+  changes *and* turn a one-partition read into a whole-window scan. Only the
+  layout runs forward, and the flag help now says so.
+
+  `--reverse` remains the flag that reorders without reselecting; what it selects
+  is now the newest-first order rather than the oldest-first one. A script or an
+  alias that passed `--reverse` to get chronological output should drop it; one
+  that depended on the old default should add it. Structured output follows the
+  rendering exactly — `-o json`, `-o yaml` and `-o jsonl` all stream in display
+  order — because a table and a `-o json` that disagreed about order would be
+  worse than either order alone.
+
 ## [0.3.2] - 2026-09-04
 
 A documentation-only release. Nothing in the operator, the CLI, the `v1alpha1`
