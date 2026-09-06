@@ -98,6 +98,28 @@ than a summary of them.
 
 ### Changed
 
+- **`timeline --full` closes each expanded block with a blank line, and dims the
+  operations inside it.** An eleven-operation patch used to expand into a wall of
+  text with no visible boundary between one timestamp's changeset and the next.
+  The blank line is written for a row that actually expanded and for no other, so
+  a timeline the `CHANGE` column held entirely is byte for byte the document it
+  was — and because it is a character rather than a colour, the separation is
+  still there under `--color=never`, under `NO_COLOR` and in a redirected file.
+
+  On a terminal the expanded operations also recede into the provenance tier: they
+  are the detail you asked to see, and the row above them becomes the spine of the
+  page without being touched. **The `+`, `-` and `~` stay at full intensity inside
+  the dimmed line**, because the operation vocabulary is how you scan a block for
+  the kind of change in it, and dimming it uniformly would flatten the one signal
+  the block has.
+
+  The proposal was to bold the timestamp instead. It was rejected twice over:
+  emphasis is the line that must survive its block being skimmed, so emphasising
+  every row in a screen of rows emphasises none of them; and a timestamp is not
+  more *severe* than the operations beneath it, it is structurally their parent.
+  Figure and ground are separated by receding the ground, which is what `get -o
+  yaml` already does with the envelope around a recorded object.
+
 - **`get -o yaml` dims the kuberecord wrapper on a terminal, so the recorded
   object is the only thing at full intensity.** The envelope's `apiVersion`,
   `kind` and `metadata`, and the six bookkeeping fields above the state (`at`,

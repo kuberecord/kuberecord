@@ -269,20 +269,95 @@ func TestTimelineRendersTheFlagshipTable(t *testing.T) {
 	}
 }
 
-// TestTimelineRendersEveryOperationWithFull covers --full.
+// TestTimelineRendersEveryOperationWithFull covers --full, in both colour modes.
+//
+// # What the two files are for
+//
+// An expanded block is separated from the row beneath it twice over: the
+// operations recede into the provenance tier, and a blank line closes the block.
+// Only the second of those survives --color=never, NO_COLOR and a redirect to a
+// file, and only the first is visible to a reader on a terminal — so a plain
+// golden file alone would pin half of the separation and a coloured one alone
+// would pin the other half.
+//
+// The fixture is the mixed timeline: a full-state row that expands nothing, two
+// rows whose single operation the column had to elide, and one summarized as a
+// count. What it is really showing is that the flag's structure is legible in a
+// document where only some of the rows have any.
 func TestTimelineRendersEveryOperationWithFull(t *testing.T) {
-	engine := &fakeEngine{
-		caps:         clickHouseCapabilities(),
-		changes:      checkoutHistory(),
-		incarnations: checkoutIncarnations(),
-		intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("mixed"+mode, func(t *testing.T) {
+			engine := &fakeEngine{
+				caps:         clickHouseCapabilities(),
+				changes:      checkoutHistory(),
+				incarnations: checkoutIncarnations(),
+				intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
+			}
+
+			stdout, stderr, err := runTimeline(t, engine, defaultRequest(),
+				render.Options{Full: true, Color: color})
+			if err != nil {
+				t.Fatalf("RunTimeline: %v", err)
+			}
+			assertGolden(t, "full"+mode, stdout, stderr)
+		})
 	}
 
-	stdout, stderr, err := runTimeline(t, engine, defaultRequest(), render.Options{Full: true})
-	if err != nil {
-		t.Fatalf("RunTimeline: %v", err)
+	// The contrast within one document: a single operation the column showed
+	// whole is not repeated and gets no blank line, and the row summarized as a
+	// count immediately after it gets both. A reader looking at these two files is
+	// answering "can I tell where a changeset ends", which is a question about the
+	// two rows together and not about either of them.
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("one row expanded"+mode, func(t *testing.T) {
+			engine := &fakeEngine{
+				caps:         clickHouseCapabilities(),
+				changes:      collapsedHistory(),
+				incarnations: checkoutIncarnations(),
+				intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
+			}
+
+			stdout, stderr, err := runTimeline(t, engine, defaultRequest(),
+				render.Options{Full: true, Color: color})
+			if err != nil {
+				t.Fatalf("RunTimeline: %v", err)
+			}
+			assertGolden(t, "full-one-expanded"+mode, stdout, stderr)
+		})
 	}
-	assertGolden(t, "full", stdout, stderr)
+}
+
+// TestFullChangesNothingWhenThereIsNothingToExpand.
+//
+// The blank line is written for a row that actually expanded and for no other, so
+// a timeline the CHANGE column held entirely is byte for byte the document it was
+// before --full learned to separate anything. Asserted as an equality rather than
+// as a third golden file, because what has to hold is that the two renderings are
+// *the same document* — two files would say it by agreeing today.
+//
+// It is also the reason the flag is safe to leave in an alias: a user who passes
+// --full always sees no spacing they did not earn.
+func TestFullChangesNothingWhenThereIsNothingToExpand(t *testing.T) {
+	document := func(t *testing.T, full bool) string {
+		t.Helper()
+
+		engine := &fakeEngine{
+			caps:         clickHouseCapabilities(),
+			changes:      shortHistory(),
+			incarnations: checkoutIncarnations(),
+			intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
+		}
+		stdout, stderr, err := runTimeline(t, engine, defaultRequest(), render.Options{Full: full})
+		if err != nil {
+			t.Fatalf("RunTimeline: %v", err)
+		}
+		return stdout + stderr
+	}
+
+	if with, without := document(t, true), document(t, false); with != without {
+		t.Errorf("--full changed a timeline that had nothing to expand.\n--- without ---\n%s\n--- with ---\n%s",
+			without, with)
+	}
 }
 
 // TestTimelineRendersWideColumns covers -o wide: full UIDs, resource versions,

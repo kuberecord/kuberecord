@@ -285,7 +285,22 @@ $ kubectl kuberecord timeline deploy/checkout -n payments --full
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10
+
+2026-08-28 14:09:40.900  Modified  deployment-controller      ~ spec.replicas: 5 → 7
 ```
+
+An expanded block is closed by a blank line, and only a row that actually
+expanded gets one — a timeline the `CHANGE` column held entirely reads exactly as
+it does without the flag. On a terminal the expanded operations also **recede**:
+they are the detail you asked to see, so they are dimmed and the row above them
+becomes the spine of the page without being touched. The `+`, `-` and `~` stay at
+full intensity inside the dimmed line, because they are how you scan an
+eleven-operation patch for the *kind* of change in it.
+
+Nothing is highlighted, here as in [`get`](#everything-but-the-object-recedes),
+and the blank line is why: under `--color=never`, under `NO_COLOR` and any time
+stdout is not a terminal, the separation is still there in the characters. A
+`--full` redirected to a file is the same document with the escapes gone.
 
 The count carries no glyph. `+`, `-` and `~` mean an operation happened, here and
 in the hunk view, and a summary is not an operation — `~3 ops` said, in the only

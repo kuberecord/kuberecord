@@ -542,8 +542,21 @@ func renderRow(
 	built.WriteString("\n")
 
 	if opts.Full {
-		for _, line := range fullLines(row, changeWidth) {
-			built.WriteString("    " + line + "\n")
+		if lines := fullLines(row, changeWidth, p); len(lines) > 0 {
+			for _, line := range lines {
+				built.WriteString(fullIndent + line + "\n")
+			}
+			// The half of the separation that is not colour, and the reason the
+			// blank line is here rather than being left to the tier. Under
+			// --color=never, under NO_COLOR and in a redirected file the
+			// provenance tier is the identity function, so an eleven-operation
+			// block would run into the next timestamp with nothing between them —
+			// which is the state this task was reported from.
+			//
+			// It is written only for a row that actually expanded, so a timeline
+			// where the CHANGE column held everything is byte for byte the
+			// document it was before any of this existed.
+			built.WriteString("\n")
 		}
 	}
 	return built.String()
@@ -632,6 +645,13 @@ func eventCell(row TimelineRow, width int, p palette) string {
 	return p.red(WarningGlyph) + strings.TrimPrefix(fitted, WarningGlyph)
 }
 
+// fullIndent hangs an expanded operation under the row it belongs to.
+//
+// Four columns rather than the gutter's two, so that the block sits clear of the
+// TIME column's left edge and a reader scanning down the timestamps is scanning
+// down a straight line with nothing in it.
+const fullIndent = "    "
+
 // fullLines renders every operation of a patch, unelided, for --full.
 //
 // A single operation the summary already showed whole is not repeated: --full
@@ -639,16 +659,50 @@ func eventCell(row TimelineRow, width int, p palette) string {
 // single-field edits would make the flag cost more than it gives. A single
 // operation the column *did* shorten is expanded, which is the case the flag
 // exists for.
-func fullLines(row TimelineRow, changeWidth int) []string {
+//
+// # Why the block recedes instead of the row standing out
+//
+// An eleven-operation patch expands into a wall with no visible boundary between
+// one timestamp's changeset and the next, and the obvious answer — emphasise the
+// row above it — is the wrong one twice over. Emphasis is the line that must
+// survive its block being skimmed (see severity.go), so emphasising every row in
+// a screen of rows emphasises none of them and spends a tier on the way; and a
+// timestamp is not more *severe* than the operations beneath it, it is
+// structurally their parent. Expressing structure through a severity register is
+// the category error the closed vocabulary (D27) exists to refuse, so Emphasis is
+// not spent here and is not spent anywhere in this document.
+//
+// What is left is contrast, which is the move Task 15.5 already made for `get`:
+// the recorded object became findable by dimming the wrapper around it rather
+// than by brightening it. Here the expanded operations are the detail the reader
+// asked to see and the row is the spine, so the detail takes the provenance tier
+// and the row is not touched at all.
+//
+// The operation's glyph stays at full intensity inside the dimmed line. +, - and
+// ~ are how a reader scans a block for the *kind* of change in it, and dimming
+// them uniformly would flatten the one signal the block has; opTextParts is the
+// split that allows it without the renderer having to be rearranged for it.
+func fullLines(row TimelineRow, changeWidth int, p palette) []string {
+	// The table's own colour decision rather than a second reading of it, and the
+	// vocabulary rather than the mechanism underneath it: a call to p.dim here
+	// would be a register chosen at a call site, which is the drift severity.go
+	// exists to stop.
+	severity := Severity{palette: p}
+
 	if row.PatchErr != "" {
-		return []string{"patch could not be decoded: " + row.PatchErr}
+		// The block recedes whole, this line included. The failure is already
+		// stated at full intensity in the CHANGE cell above — this is its
+		// expansion and not a second announcement of it — so Invariant 4 is
+		// carried by the spine rather than by the detail hanging off it.
+		return []string{severity.Provenance("patch could not be decoded: " + row.PatchErr)}
 	}
 	if !elided(row, changeWidth) {
 		return nil
 	}
 	lines := make([]string, 0, len(row.Ops))
 	for _, op := range row.Ops {
-		lines = append(lines, opText(op, 0))
+		marker, detail := opTextParts(op)
+		lines = append(lines, marker+severity.Provenance(detail))
 	}
 	return lines
 }
