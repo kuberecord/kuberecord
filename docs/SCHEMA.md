@@ -170,21 +170,137 @@ it cannot manufacture the deletions the previous paragraph rules out.
 `Stopped` rows like any other, so "when was this cluster's Event stream being
 captured?" is answerable exactly as it is for every other kind.
 
-Two operational notes:
-
-- **Volume.** Events are typically the highest-cardinality, highest-churn kind in
-  a cluster. Enable them per namespace with a `StreamRule` before reaching for a
-  cluster-wide `ClusterStreamRule`, and size retention accordingly — this is why
-  the `events` watch preset does not ship enabled (see
-  [`docs/RBAC.md`](RBAC.md)).
-- **Warm-up cost.** Because Events never get a `Deleted` row, nothing tombstones
-  them in `resource_states`, so the warm-up query for an Events scope returns
-  every Event still in ClickHouse for that scope. A retention TTL on
-  `resource_states` (see [Suggested TTL](#suggested-ttl-optional-non-mandatory))
-  is what bounds both that query and the memory its result seeds.
-
 Query recipes for Events — including "everything that happened to object X around
-time T" — are in [`docs/QUERIES.md`](QUERIES.md).
+time T" — are in [`docs/QUERIES.md`](QUERIES.md). What an Event rule costs to run,
+and the one knob that looks like it narrows it and does not, are below.
+
+#### Event volume
+
+Everything above is about what an Event row *means*. This is what it costs, and
+it is the part to read before an `Event` entry goes into a rule rather than after
+the first bill.
+
+**Capture is scope-wide; correlation happens at read time.** A rule naming
+`Event` streams **every** Event in the namespaces it selects — not only the ones
+whose `involvedObject` is one of the other kinds that same rule names. There is no
+`involvedObject` filter anywhere on the write path, deliberately (see [The knob
+that is not there](#the-knob-that-is-not-there)); the predicate that ties an Event
+to a subject lives entirely in the reader, in `kuberecord timeline --with-events`
+and in the `involvedObject` recipes in [`docs/QUERIES.md`](QUERIES.md). So the
+width of the Event stream is the width of the **scope**, and nothing else in the
+rule narrows it.
+
+**A `count` bump writes a whole row.** This is the amplifier, and what makes it
+one is that it scales with how often Events *recur*, not with how many distinct
+Events a cluster has. The API server does not create a second Event when the same
+thing happens again — it **updates the existing one in place**, bumping `count`
+and moving `lastTimestamp`. That changes the object's content, so the hash dedup
+that silently absorbs a no-op resync does not absorb it; and because Events are
+never diffed (above), what gets stored is another complete copy rather than a
+one-line patch.
+
+The case to picture is a crash-looping pod. `kubelet` re-emits `BackOff` for it on
+the restart back-off, up to once every five minutes and far more often at the
+start; every re-emission is a `count` bump and every bump is one more full Event
+JSON in `resource_states`. A handful of pods stuck overnight is hundreds of rows
+describing a situation that has not changed since the first one, and a bad
+rollout under a cluster-wide scope makes Events the dominant term in write
+volume. **The amplifier peaks exactly when a cluster is unhealthy** — which is
+when the write path has least headroom, and when somebody is reading the audit
+trail.
+
+**A `labelSelector` does not narrow this, and looks as though it should.** A
+selector on a `WatchedResource` is matched against the *watched object's own*
+labels (`scopeInterest.matches`, [`internal/watch/interest.go`](../internal/watch/interest.go)),
+so on an `Event` entry it is matched against the Event's labels — not against the
+labels of whatever the Event is about. Events are written by kubelet, the
+scheduler and the controllers, and essentially none of them set any labels at all.
+The result is not a narrower stream but an empty one: the entry matches nothing,
+records nothing, and the rule stays `Ready=True` the whole time. **Narrow the
+namespaces, not the objects.**
+
+**Warm-up cost scales with whatever is retained.** Because Events never get a
+`Deleted` row, nothing tombstones them in `resource_states`, so the warm-up query
+for an Events scope returns every Event still stored for that scope. A retention
+TTL (see [Suggested TTL](#suggested-ttl-optional-non-mandatory)) is what bounds
+both that query and the memory its result seeds.
+
+#### Sizing an Event rule
+
+In descending order of how much they buy:
+
+1. **Prefer a namespaced `StreamRule`.** One namespace's Events are a bounded,
+   measurable quantity, and the rule's owner is the team whose workloads generate
+   them. This is the shape [`examples/quickstart/`](../examples/quickstart/) uses,
+   and its `rule.yaml` carries the reasoning at the point where the entry is
+   copied.
+2. **Otherwise, a `namespaceSelector` on the `ClusterStreamRule`.** It is the
+   only knob that actually reduces the Event stream, because scope is the only
+   thing the Event stream is a function of.
+3. **Treat a cluster-wide Event rule as a decision.** It is defensible — an
+   Event stream nobody scoped is also an Event stream nobody has to remember to
+   widen — but take it having looked at two numbers first: the retention TTL on
+   `resource_states` ([Suggested TTL](#suggested-ttl-optional-non-mandatory), and
+   [`docs/RETENTION.md`](RETENTION.md)), which bounds both storage and the warm-up
+   query above; and, for an `S3Sink`, `spec.rotation.maxObjectBytes`, since Events
+   are the workload most likely to make rotation size- rather than age-driven and
+   `workers × maxObjectBytes` is resident memory.
+
+The `events` watch preset does not ship enabled for this reason and no other
+(see [`docs/RBAC.md`](RBAC.md)). Granting it is one `kubectl apply` and needs no
+restart, so nothing here is hard to undo — but the volume arrives before the
+invoice does.
+
+#### The knob that is not there
+
+The obvious proposal is `collectEvents: true` on a rule: capture only the Events
+whose `involvedObject` names something this rule already matches. It is intuitive,
+it would cut the stream by an order of magnitude, and it is **rejected** — so that
+it is rejected once here rather than re-argued each time it is proposed.
+
+**The objection is correctness, not cost.** The lookup is cheap and already
+exists: the subject's labels and existence are in the informer's own indexer, and
+[`internal/watch/manager.go`](../internal/watch/manager.go)'s `WatchManager.Get`
+performs exactly this lookup today, in one call, on a cache the process already
+holds. The problem is what that cache contains. It contains the objects that
+**exist** — and the Events worth having most are about objects that failed to
+exist or are ceasing to:
+
+| Event | Why capture-time correlation drops it |
+|---|---|
+| `FailedScheduling` | The Pod is unschedulable, so there is no matching object to correlate against in the way that matters — and this is the Event that says why. |
+| `FailedCreate` | The controller could not create the object. The subject named in the message never entered any cache. |
+| `Killing` / `Preempting` | The subject is on its way out; whether it is still cached when its own Event arrives is a race. |
+
+A filter that is accurate for healthy objects and lossy for failing ones is
+precisely backwards for an audit trail.
+
+**And it would make the archive non-deterministic.** What got recorded would
+depend on informer cache warmth and on the arrival order of two independent watch
+streams, so the same rule against the same cluster would capture different Events
+on two runs. That breaks a property the rest of this schema is built to hold:
+today, "which Events were being recorded, over which interval, under whose rule"
+is answerable from `watch_scopes` and `rule_ref` alone (see [`watch_scopes`](#watch_scopes)).
+With capture-time correlation it would not be — Event coverage would become a
+function of runtime state nothing records, and a coverage claim that cannot be
+reconstructed from the rule is not a claim anyone should make.
+
+**Where this is likely to go instead.** Both of these are **v0.5.0 candidates and
+neither is a commitment**; they are recorded so the rejection above reads as a
+direction rather than a dead end:
+
+- **Filtering on fields the Event itself carries** — `type: Warning`, a list of
+  `reason`s, an `involvedObject.kind`. Every one of those is decided by the Event
+  in hand, needs no lookup against anything, and is reconstructible from the rule
+  — so it is deterministic and coverage stays attestable, which is exactly what
+  `collectEvents` is not.
+- **Count-bump coalescing** — attacking the amplifier rather than the width of the
+  stream. The rows a crash-loop writes are near-identical by construction, and
+  that is a different lever from deciding which Events to capture at all.
+
+**No CRD change ships in v0.4.0.** `spec.resources` takes a Kind and an optional
+`labelSelector` today and takes exactly that after this release; sizing is done
+with the scope, as above.
 
 ### Redaction
 

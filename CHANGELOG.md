@@ -143,6 +143,43 @@ than a summary of them.
 
 ### Changed
 
+- **`kubectl explain streamrule.spec.resources` now says what `kind: Event` costs,
+  and `docs/SCHEMA.md` has the model behind it.** Events are captured for the
+  **whole watched scope** — every Event in the selected namespaces, not only those
+  about the other kinds the rule names — and correlated to a subject when the
+  archive is *read*. On top of that, the API server bumps an Event's `count` in
+  place rather than creating a second Event, which changes the object's content,
+  so hash dedup cannot suppress it and every recurrence stores another full row.
+  A crash-looping namespace, not a busy one, is what dominates write volume.
+
+  Both facts were true before this release and written down nowhere a rule author
+  looks. The field comments are the important half of the fix: they are what
+  `kubectl explain` prints, and typing the entry is the moment the decision is
+  actually made.
+
+  **A `labelSelector` does not narrow this**, and that is now stated on the field
+  itself. It matches the watched object's *own* labels, so on an `Event` entry it
+  matches the Event's labels rather than the subject's — and Events, written by
+  kubelet, the scheduler and the controllers, carry essentially none. The result
+  is an empty scope rather than a narrower one, on a rule that stays `Ready=True`
+  throughout. Narrow by namespace instead.
+
+  The new [Event volume](docs/SCHEMA.md#event-volume) section also records the
+  design that was **rejected**, so it is not re-proposed from scratch:
+  `collectEvents: true`, capturing only the Events whose `involvedObject` this
+  rule already matches. **The objection is correctness, not cost** — the lookup is
+  one call against an informer indexer the process already holds — but that cache
+  holds the objects that *exist*, and `FailedScheduling`, `FailedCreate` and
+  `Killing` are about objects that failed to exist or are ceasing to. It would
+  also make the archive non-deterministic, and Event coverage is currently
+  reconstructible from `watch_scopes` and `rule_ref` alone.
+
+  The direction it points at instead — filtering on fields the Event itself
+  carries (`type: Warning`, a `reason` list, `involvedObject.kind`), and
+  count-bump coalescing — is recorded as **v0.5.0 candidates and not commitments**.
+  **No CRD field changes in this release**; `spec.resources` takes exactly what it
+  took before.
+
 - **`config set-profile --sink-addr` is refused on every route, not only beside
   `--from-sink`.** It replaces the endpoint of one invocation's *resolved* backend,
   and this subcommand resolves nothing and dials nothing — so given here it parsed,

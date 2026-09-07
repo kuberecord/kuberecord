@@ -576,6 +576,89 @@ func decodeOneDocument(t *testing.T, file string, obj any) {
 }
 
 //
+// The Event volume model is documented where a rule author meets it (Task 16.6)
+//
+
+// eventVolumeClaims is what docs/SCHEMA.md's Event volume section has to keep
+// saying. Each entry is one thing a rule author cannot work out from the rest of
+// the page, and that they need at the moment they type `kind: Event`.
+//
+// Presence is checked, never wording: the prose should stay free to improve. What
+// must not happen is the section quietly losing a half — the sizing guidance
+// without the model that explains it, or the rejection without the reason, which
+// is the shape a rejected design comes back in.
+var eventVolumeClaims = []struct {
+	want string
+	why  string
+}{
+	{"capture is scope-wide", "the model: a rule naming Event streams every Event in its namespaces"},
+	{"read time", "the other half of the model — correlation to a subject happens in the reader"},
+	{"bump writes a whole row", "the amplifier: count is updated in place, so hash dedup cannot suppress it"},
+	{"crash-looping pod", "the worked example, and the case where the amplifier peaks"},
+	{"does not narrow this", "labelSelector is the knob a reader reaches for, and it yields an empty scope"},
+	{"namespaceSelector", "the knob that does narrow it"},
+	{"maxObjectBytes", "the S3 number a cluster-wide Event rule has to be sized against"},
+	{"Suggested TTL", "the retention number it has to be sized against"},
+	{"collectEvents", "the rejected alternative, named so it is not re-proposed from scratch"},
+	{"correctness, not cost", "the precise objection — the lookup is cheap and already exists"},
+	{"FailedScheduling", "the class of Event capture-time correlation would drop"},
+	{"non-deterministic", "why the rejection is not merely a preference"},
+	{"rule_ref", "what determinism buys: Event coverage reconstructible from the rule"},
+	{"v0.5.0 candidates", "the forward direction, marked as a direction and not a promise"},
+}
+
+// TestSchemaPageCoversEventVolume keeps the two halves of Task 16.6 in step: the
+// section that explains what an Event rule costs, and the CRD field descriptions
+// that send an author to it.
+//
+// The field comments are the load-bearing half. A rule author types `kind: Event`
+// into a `resources` list having read `kubectl explain
+// streamrule.spec.resources` and nothing else; a volume model that lives only in
+// a document they have no reason to open is one they meet for the first time in a
+// storage graph. So this asserts the comment in the Go source *and* in the
+// generated CRD, because those are two artifacts and only one of them is written
+// by hand — a comment edited without `make manifests` publishes to godoc and to
+// nothing a cluster ever shows anyone.
+func TestSchemaPageCoversEventVolume(t *testing.T) {
+	page := readFile(t, "docs/SCHEMA.md")
+	if !strings.Contains(page, "#### Event volume") {
+		t.Fatal("docs/SCHEMA.md has no `#### Event volume` heading; three pages and two CRD " +
+			"descriptions link to #event-volume, and a heading rename silently breaks all five")
+	}
+	for _, tc := range eventVolumeClaims {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(page), strings.ToLower(tc.want)) {
+				t.Errorf("docs/SCHEMA.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
+	}
+
+	// The two field comments an author actually reads. `resources` is where the
+	// entry is typed; `labelSelector` is the knob they reach for next, and the one
+	// that fails silently.
+	types := readFile(t, "api/v1alpha1/shared_types.go")
+	for _, want := range []string{"Capture is scope-wide", "dominates write volume", `"Event volume"`} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api/v1alpha1/shared_types.go no longer says %q; the resources and "+
+				"labelSelector comments are what a rule author reads while typing the entry", want)
+		}
+	}
+
+	// And the same text where a cluster serves it. Both rule CRDs embed
+	// StreamRuleSpec, so both descriptions have to carry it.
+	for _, crd := range []string{
+		"config/crd/bases/kuberecord.io_streamrules.yaml",
+		"config/crd/bases/kuberecord.io_clusterstreamrules.yaml",
+	} {
+		if !strings.Contains(readFile(t, crd), "Event volume") {
+			t.Errorf("%s does not point at the Event volume section; run `make manifests` "+
+				"(and `make build-installer helm-sync`), since this description is what "+
+				"`kubectl explain` prints", crd)
+		}
+	}
+}
+
+//
 // The tee example is complete, self-consistent and CI-tested (Task 7.1)
 //
 

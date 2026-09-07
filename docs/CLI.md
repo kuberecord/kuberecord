@@ -407,6 +407,12 @@ A bare `timeline` says none of this. The notice is owed to somebody who asked fo
 Events; a command that volunteered it to everyone would be answering a question
 nobody put to it, and the coverage read that builds it is not paid for either.
 
+Closing that gap is a sizing decision as much as a configuration one: Events are
+captured for the whole watched scope and correlated to a subject here, at read
+time, and an occurrence-count bump writes a full row rather than a diff. Read
+[Event volume](SCHEMA.md#event-volume) before widening the rule beyond a
+namespace.
+
 ### What a backend cannot record
 
 An object archive holds no deletions at all (see [`docs/TEE.md`](TEE.md) and the

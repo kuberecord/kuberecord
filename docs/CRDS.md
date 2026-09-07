@@ -238,7 +238,10 @@ because the operator that must release it is not running.
 
 ## See also
 
-- [`docs/SCHEMA.md`](SCHEMA.md) — what the rows these resources produce look like.
+- [`docs/SCHEMA.md`](SCHEMA.md) — what the rows these resources produce look like,
+  and — before putting `kind: Event` in a `resources` list —
+  [Event volume](SCHEMA.md#event-volume), which is the one entry whose cost is not
+  proportional to how many objects it names.
 - [`docs/RBAC.md`](RBAC.md) — what a rule is allowed to watch, and how to grant more.
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — the operator-level settings that
   back a sink's omitted writer fields.

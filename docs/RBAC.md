@@ -118,8 +118,10 @@ every rule reports `RBACGranted=False` until a preset arrives.
 
 `events` is worth a deliberate decision rather than a reflex: Events are usually
 the highest-volume kind in a cluster, and kuberecord streams them in a mode that
-writes the full Event on every occurrence count bump (see
-[SCHEMA.md](SCHEMA.md#kubernetes-events)). Grant it when you want the Event
+writes the full Event on every occurrence count bump — capture is scope-wide, so
+a `labelSelector` narrows nothing and a `namespaceSelector` is the only knob that
+does. [SCHEMA.md](SCHEMA.md#event-volume) has the model, the crash-loop
+arithmetic and the sizing guidance. Grant this preset when you want the Event
 stream persisted, and prefer a namespaced `StreamRule` over a cluster-wide one
 until you have measured what it costs.
 
