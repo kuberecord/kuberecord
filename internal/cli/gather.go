@@ -179,9 +179,18 @@ func gatherChanges(
 
 	result.Notices = appendNotice(result.Notices,
 		displayFilterNotice(request, from, to, scanned, len(result.Rows)))
-	if len(result.Rows) > 0 || scanned == 0 {
-		// An emptiness the display filter produced has already been explained by
-		// the notice above, and it is an explanation the watch scopes cannot
+
+	// The same question about the predicates the *query* carried, which the two
+	// counts above cannot answer: those rows were removed before they arrived, so
+	// scanned and len(Rows) are both zero and an emptiness the filter produced is
+	// indistinguishable from an empty window. See predicateNotice.
+	predicate, attributed := predicateNotice(
+		ctx, backend.Engine, request, selection, from, to, sawChange(result.Rows))
+	result.Notices = appendNotice(result.Notices, predicate)
+
+	if !attributed && (len(result.Rows) > 0 || scanned == 0) {
+		// An emptiness a filter produced has already been explained by one of the
+		// two notices above, and it is an explanation the watch scopes cannot
 		// improve on: changes were recorded, and the filter removed them.
 		// Consulting coverage about it would answer a question nobody asked and
 		// could report "nothing was watching" about a window that demonstrably
@@ -289,4 +298,62 @@ func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, s
 		"%d of the %d changes examined touched %s; the rest were read and replayed so that the values "+
 			"shown are exact, then set aside. --limit bounds the changes examined, not the ones shown",
 		shown, scanned, paths)}
+}
+
+// predicateNotice explains a timeline the query's own predicates emptied.
+//
+// The gate is two facts. A predicate was in force — otherwise there is nothing to
+// attribute an emptiness to — and no *object change* was rendered, which is the
+// honest reading of "the flag produced no visible effect" here: the predicates
+// narrow the object's own changes and deliberately leave merged Kubernetes Events
+// alone (an Event's actors are the field managers of the Event object, not of
+// whoever changed the subject), so a document holding nothing but Event rows is
+// one where --actor still removed everything it could have kept.
+//
+// The consultation costs one extra query and is paid only on that path, which is
+// the bargain eventsNotice already strikes. It is the cheapest question either
+// backend can be asked — one row, newest first, which is the shape the object
+// archive short-circuits on — and it is asked inside the cold-scan guard, where
+// every query that may walk partitions belongs.
+//
+// A failed probe degrades into the notice rather than ending the command. See
+// explainNoMatches, which states why, and why its second return value suppresses
+// the coverage explanation.
+func predicateNotice(
+	ctx context.Context, engine query.QueryEngine, request TimelineRequest,
+	selection incarnationChoice, from, to time.Time, renderedChange bool,
+) (render.Notice, bool) {
+	if !request.filtered() || renderedChange {
+		return render.Notice{}, false
+	}
+	hadChanges, err := anyChangeInWindow(ctx, engine, request, selection, from, to)
+	return explainNoMatches(request, from, to, hadChanges, err)
+}
+
+// anyChangeInWindow asks whether this window holds a single change at all.
+//
+// It is the same question the timeline just asked, minus the predicates: the same
+// bounds, the same incarnation, the same ordering. Everything but the predicates
+// is kept deliberately — a probe that widened the window or unpinned the
+// incarnation would answer about a different question and could report that a
+// filter emptied a window which was empty for the object being shown.
+//
+// Events are excluded because they are not what the predicates narrow, and the
+// limit is one because existence is the whole of what the answer turns on. A count
+// would be a nicer sentence and would cost the reader an unbounded read of a
+// window that has already proved slow enough to be filtered.
+func anyChangeInWindow(
+	ctx context.Context, engine query.QueryEngine, request TimelineRequest,
+	selection incarnationChoice, from, to time.Time,
+) (bool, error) {
+	q := request.timelineQuery(selection, from, to)
+	q.Actors, q.ExcludeActors, q.FieldPaths = nil, nil, nil
+	q.IncludeEvents = false
+	q.Limit = 1
+
+	changes, err := collectChanges(ctx, engine, q)
+	if err != nil {
+		return false, err
+	}
+	return len(changes) > 0, nil
 }

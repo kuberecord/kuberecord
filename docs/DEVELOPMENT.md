@@ -52,6 +52,35 @@ sink.
 Anything touching goroutines, mutexes or channels carries a `-race` test, and
 long-lived goroutines carry a `goleak`-style shutdown test.
 
+### The silent no-op sweep
+
+`internal/cli/noop_test.go` holds a standing check on **D31: a no-op is never
+silent.** Every flag the command tree carries has a row in `noopAudit` recording
+one of three verdicts and the reason for it:
+
+| Verdict | Meaning |
+|---|---|
+| `always visible` | No invocation of it produces output identical to its absence. |
+| `explained` | It can, and the CLI says why — the row names what says it. |
+| `deliberately silent` | It can, and a notice would cost more than it is worth. The reason is the whole justification. |
+
+`TestEveryFlagIsAuditedForSilentNoOps` walks the real cobra tree, so **a flag with
+no row fails `make test`**, and a row for a flag that no longer exists fails too.
+`cli-runtime`'s inherited flags are enumerated individually, at the cost of a
+one-line addition on a client-go bump, for the reason
+[`docs/CLI.md`](CLI.md) enumerates the same set: a rule that skipped them would be
+a sweep with a hole in it exactly the width of somebody else's flag surface.
+
+**When you add a flag, answer the question in the row rather than in review:** can
+this produce output identical to its absence, and if so does the CLI say why?
+`deliberately silent` is a correct answer — `--limit` reaching its bound is the
+flag working, not a defect — but it is an answer that has to be written down.
+
+The check exists because this class shipped three times: an unreachable address
+that named no fix, a shortened row that never mentioned `--full`, and a
+`--with-events` that interleaved nothing and said nothing. Each was found by
+somebody at a terminal, in a place nobody had looked.
+
 ### The sink conformance suite
 
 `internal/sink/conformance` holds the properties every `sink.Writer` must uphold

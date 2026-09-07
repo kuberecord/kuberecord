@@ -419,12 +419,17 @@ func patchWord(count int) string {
 	return "patches"
 }
 
-// blameFilterNotice reports a table emptied by --field or --depth rather than by
-// the data.
+// blameFilterNotice reports a table emptied by --field rather than by the data.
 //
 // It matters because those two emptinesses lead a reader in opposite directions,
 // and because the object demonstrably has fields: without this line, a mistyped
 // path produces a page that reads as an object with nothing in it.
+//
+// --depth is deliberately not part of the predicate, and its absence is the
+// answer rather than an omission: it collapses every path onto its first N
+// tokens and merges the rows that then coincide, so it can make a table shorter
+// and can never make it empty. A flag that cannot produce this emptiness has
+// nothing to explain about one.
 func blameFilterNotice(request BlameRequest, gathered gatherResult, shown int) render.Notice {
 	if shown > 0 || len(request.Fields) == 0 || gathered.Empty != nil {
 		return render.Notice{}

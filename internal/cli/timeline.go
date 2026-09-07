@@ -873,6 +873,25 @@ func sawEvent(rows []render.TimelineRow) bool {
 	})
 }
 
+// sawChange reports whether a rendered run holds a change to the object itself,
+// as opposed to a merged Kubernetes Event.
+//
+// It is the predicate the query's own filters are judged by, and the distinction
+// it draws is the one that makes the judgement honest. --actor, --exclude-actor
+// and --field narrow the object's changes and are deliberately not applied to
+// Events, whose actors column holds the field managers of the Event object rather
+// than of whoever changed the subject — so a `--with-events` document holding
+// nothing but Event rows is not an answer to the filter, it is the absence of one.
+//
+// It is a function for the reason sawDeletion and sawEvent are: the streaming
+// path never holds the rows and answers the same question with a flag maintained
+// as they go past, and both callers have to be asking about the same enum value.
+func sawChange(rows []render.TimelineRow) bool {
+	return slices.ContainsFunc(rows, func(row render.TimelineRow) bool {
+		return row.Change.EventType != query.EventKubernetes
+	})
+}
+
 // appendNotice adds a notice only when there is one, so that callers can build a
 // list without a conditional at every site.
 func appendNotice(notices []render.Notice, notice render.Notice) []render.Notice {

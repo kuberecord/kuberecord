@@ -339,8 +339,30 @@ func stateFailure(
 			request.Ref.ClusterID, instant, scopesCommand)
 	}
 	return exit.RuntimeErrorf("no recorded state for %s at %s: it had not been observed by then, or it had "+
-		"already been deleted. The scope was watched over %s",
-		object, instant, describeInterval(coverage.Intervals[0]))
+		"already been deleted%s. The scope was watched over %s",
+		object, instant, pinnedIncarnationClause(request), describeInterval(coverage.Intervals[0]))
+}
+
+// pinnedIncarnationClause names --uid where it is one of the reasons nothing was
+// found.
+//
+// Without it this command answers a mistyped UID with an explanation that never
+// mentions the flag that caused it: the reader is told the object had not been
+// observed or had been deleted, and neither is true — the state is there, under
+// an incarnation they did not ask for. `timeline`, `diff` and `blame` do not need
+// this because pinnedNotices names the incarnations that *are* in the window
+// beside their own empty result; a reconstruction has no listing to say it with,
+// so it says it here.
+//
+// It is a clause rather than a second sentence because it is a third item in a
+// list of reasons, and the two that were already there are not made less likely
+// by a UID having been given.
+func pinnedIncarnationClause(request GetRequest) string {
+	if request.UID == "" {
+		return ""
+	}
+	return fmt.Sprintf(", or --uid pinned the reconstruction to %s and the state recorded at that "+
+		"instant belongs to another incarnation of this name", request.UID)
 }
 
 // verifyReconstruction re-hashes the reconstructed state and compares it against

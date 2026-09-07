@@ -375,6 +375,32 @@ A backend with no scope log to read says that instead, and exits `0`: it cannot
 tell the three apart, and pretending otherwise would be the failure this section
 exists to prevent.
 
+### A filter that matched nothing is not an empty window
+
+`--actor`, `--exclude-actor` and `--field` are pushed into the *query*, so the
+changes they remove never arrive. That makes a filtered timeline that matched
+nothing look, from the renderer's side, exactly like a window in which nothing
+happened — and the three answers above would then explain a filter's doing against
+coverage, which is a different and false claim.
+
+So when a predicate is in force and no change survived it, the same window is read
+once more with the predicates taken out, and what comes back decides:
+
+| What the re-read found | What you get |
+|------------------------|--------------|
+| Changes are there | `changes are recorded … and --actor nobody matched none of them; the window itself is not empty` — the filter's answer, not the object's. |
+| Nothing is there | The filter is not what emptied it, so the three answers above apply unchanged — including exit **3** when no scope ever covered it. |
+| The re-read failed | It says so, and names the failure. Neither reading is asserted. |
+
+The notice prints the values as well as the flags, because the usual cause is a
+field manager spelled the way a person remembers it rather than the way the API
+server records it, and seeing the string back is what makes that visible. Note too
+that **a deletion records no actors**, so any `--actor` excludes every deletion.
+
+`diff` and `blame` need no re-read: their `--field` narrows what is *rendered*
+rather than what is read, so both counts are already in hand and the notice
+carries them.
+
 ### `--with-events` that finds no Events
 
 The same rule applies to the question `--with-events` asks inside the first one.
@@ -1152,6 +1178,14 @@ Each ❌ has a reason, and the error says it:
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
 - **`config resolve` refuses `diff` too**, and for the same reason: it reports two
   chains of decisions, and there is no patch anywhere in it.
+
+And one ✅ is worth a sentence, because it looks like a flag being ignored and is
+not. **`wide` on `version`, `config view` and `config resolve` renders exactly what
+`table` does.** `wide` means *the same table with nothing elided*, and each of
+those three is a document that elides nothing at any width — a build identity, a
+configuration file, two chains of decisions — so the flag's guarantee is met
+rather than dropped. Where a command genuinely cannot produce a format it refuses
+it by name, which is the case the list above enumerates.
 
 For `table`, `wide` and `diff` the header, the notices and every explanation go to
 **stderr** and the rows go to **stdout**. For `json`, `jsonl` and `yaml` the

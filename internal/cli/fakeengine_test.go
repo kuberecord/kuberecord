@@ -77,6 +77,13 @@ type fakeEngine struct {
 	// the second question at all.
 	eventCoverageErr error
 
+	// probeErr fails every Timeline call after the first, which is the unfiltered
+	// probe a filtered-empty timeline runs to find out whether there was anything
+	// to match. timelineErr cannot express it for the same reason
+	// eventCoverageErr exists: a fake that failed every query would never reach
+	// the second question at all.
+	probeErr error
+
 	// queries records what was asked, so a test can assert the query the command
 	// built rather than only the output it produced.
 	queries []query.TimelineQuery
@@ -107,6 +114,9 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 	f.queries = append(f.queries, q)
 	if f.timelineErr != nil {
 		return nil, f.timelineErr
+	}
+	if f.probeErr != nil && len(f.queries) > 1 {
+		return nil, f.probeErr
 	}
 	if f.caps.TimeBoundRequired && q.From.IsZero() && q.To.IsZero() {
 		return nil, query.ErrTimeBoundRequired

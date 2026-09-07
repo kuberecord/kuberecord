@@ -109,11 +109,17 @@ func runTimelineStructured(
 		ctx, backend.Engine, request, request.timelineQuery(selection, from, to), stream)
 
 	// Asked before the scan is stopped, because Stop cancels the context every
-	// query of a cold read must be issued with — and this one may walk partitions
-	// like any other. It is skipped when the emission failed, since the notice
+	// query of a cold read must be issued with — and these may walk partitions
+	// like any other. They are skipped when the emission failed, since the notices
 	// would be explaining the shape of an answer that was never produced.
-	var eventNotice render.Notice
+	var (
+		predicate   render.Notice
+		attributed  bool
+		eventNotice render.Notice
+	)
 	if emitErr == nil {
+		predicate, attributed = predicateNotice(
+			ctx, backend.Engine, request, selection, from, to, emitted.sawChange)
 		eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent)
 	}
 
@@ -134,8 +140,19 @@ func runTimelineStructured(
 	}
 
 	notices = appendNotice(notices, deletionsNotice(capabilities, emitted.sawDeleted))
-	emptyNotices, emptyErr := explainEmpty(request, from, to, emitted.items > 0, coverage)
-	notices = append(notices, emptyNotices...)
+
+	// Same order and same gate as the gathered path's, which is the half of this
+	// file that is duplicated on purpose: an emptiness a query predicate produced
+	// is explained by the predicate rather than by coverage, and consulting
+	// coverage about it could report "nothing was watching" over a window that
+	// demonstrably held changes.
+	notices = appendNotice(notices, predicate)
+	var emptyErr error
+	if !attributed {
+		emptyNotices, err := explainEmpty(request, from, to, emitted.items > 0, coverage)
+		notices = append(notices, emptyNotices...)
+		emptyErr = err
+	}
 	notices = appendNotice(notices, eventNotice)
 
 	if writeErr := render.WriteNotices(streams.ErrOut, notices, opts); writeErr != nil {
@@ -161,6 +178,10 @@ type emission struct {
 	sawDeleted bool
 	// sawEvent reports whether a merged Kubernetes Event was.
 	sawEvent bool
+	// sawChange reports whether a change to the object itself was — which is not
+	// the complement of items, since a --with-events document can be made
+	// entirely of Event rows. See sawChange, whose question this answers.
+	sawChange bool
 }
 
 // emitChanges runs the query and writes each change into the envelope.
@@ -233,9 +254,17 @@ func emitChanges(
 func (e *emission) observe(change query.Change) {
 	switch change.EventType {
 	case query.EventDeleted:
-		e.sawDeleted = true
+		e.sawDeleted, e.sawChange = true, true
 	case query.EventKubernetes:
 		e.sawEvent = true
+	default:
+		// Every other event type is a change to the object: an addition, a
+		// modification, a checkpoint. Spelled as the default rather than
+		// enumerated so that a type added to the schema is counted as a change
+		// until somebody decides otherwise, which is the conservative direction —
+		// the alternative is a new row type silently reading as "the filter
+		// matched nothing".
+		e.sawChange = true
 	}
 }
 

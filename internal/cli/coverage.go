@@ -18,6 +18,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kuberecord/kuberecord/internal/cli/options"
@@ -295,4 +296,119 @@ func explainNoEvents(
 		"--with-events found no Events for %s in %s. Events were confirmed recorded over %s, so "+
 			"nothing was said about it while that scope was open",
 		object, window, describeInterval(coverage.Intervals[0]))}
+}
+
+// Invariant 9 applied to a predicate, and D31's fourth instance.
+//
+// `timeline`'s --actor, --exclude-actor and --field are pushed into the *query*.
+// That is the right place for them — a backend that can filter should — and it is
+// why the emptiness they produce is invisible from here: the rows never arrive,
+// so a filtered timeline that matched nothing is byte-identical to a window in
+// which nothing happened. explainEmpty was then handed that emptiness and did
+// what it exists to do, which in this one case is to state something false:
+//
+//	no changes recorded for payments/checkout in the last 24 hours. The scope was
+//	confirmed watched over 2026-07-02T09:14:00Z → open, so nothing changed in that
+//	period
+//
+// A hundred changes had been recorded and a predicate removed all of them. Worse
+// than the sentence is the exit code: a scope log with no interval for the scope
+// turns the same path into query.ErrNoCoverage, so a filter matching nothing
+// could report "nothing was ever watching" and exit 3 — the one code this release
+// tells people to script against.
+//
+// `diff` never reached that state because its --field narrows the *rendering*
+// (TimelineRequest.DisplayFieldPaths), which leaves displayFilterNotice holding
+// both counts. This is the same finding for the predicates that are gone before
+// anything can be counted, and the answer is to go and ask: one query, the same
+// window and the same incarnation, with the predicates taken out.
+//
+// The shape below is explainNoEvents's and explainEmpty's, deliberately, because
+// all three are one piece of reasoning about a silence and a change to how this
+// CLI thinks about silences should be made once. The three states are theirs too.
+
+// explainNoMatches says why a predicate matched nothing, and whether the
+// emptiness has been accounted for.
+//
+// hadChanges is what the unfiltered probe found and probeErr is its failure. The
+// second return value says the emptiness now has an explanation better than
+// coverage can give, and is what suppresses explainEmpty at the call site — the
+// same gate displayFilterNotice's counts already open for `diff --field`.
+//
+// It is true for a failed probe as well as for a successful one, and that is the
+// deliberate half. A probe that could not run leaves "the filter did it" and
+// "the window is empty" equally possible, and of the two available mistakes —
+// saying nothing, or asserting the one this file exists to prevent — only the
+// second is unrecoverable for the reader. So the inability is reported as an
+// inability and coverage is not invited to answer a question it was not asked.
+//
+// A probe that found nothing is the case that returns false: the window really
+// is empty of changes, the predicate is not what emptied it, and explainEmpty's
+// three answers are the right ones. That is also what keeps the no-coverage
+// finding — and its exit 3 — reachable under a filter, since a window nobody was
+// watching holds no changes to find.
+func explainNoMatches(
+	request TimelineRequest, from, to time.Time, hadChanges bool, probeErr error,
+) (render.Notice, bool) {
+	object := describeObject(request.Ref)
+	window := options.DescribeWindow(from, to)
+	predicates := describePredicates(request)
+
+	switch {
+	case probeErr != nil:
+		return render.Notice{Text: fmt.Sprintf(
+			"%s matched nothing for %s in %s, and the same window could not be re-read without it "+
+				"to say whether there was anything to match: %v",
+			predicates, object, window, probeErr)}, true
+	case hadChanges:
+		return render.Notice{Text: fmt.Sprintf(
+			"changes are recorded for %s in %s and %s matched none of them; the window itself is "+
+				"not empty, so this is the filter's answer rather than the object's",
+			object, window, predicates)}, true
+	}
+	return render.Notice{}, false
+}
+
+// describePredicates names the flags that were in force, with their values.
+//
+// The flags are `timeline`'s, and only `timeline` can reach this: `diff` and
+// `blame` narrow their rendering rather than their query, so TimelineRequest.filtered
+// is false for both and the notice cannot be printed under a command that would
+// reject the flags it names. That is a property worth keeping rather than a
+// coincidence, which is why the affordance sweep asserts it.
+//
+// The values are printed because "--actor matched nothing" is not actionable and
+// "--actor kube-controller-manager matched nothing" is: the most common cause is
+// a field manager spelled the way a person remembers it rather than the way the
+// API server records it, and seeing the string back is what makes that visible.
+func describePredicates(request TimelineRequest) string {
+	var parts []string
+	if len(request.Actors) > 0 {
+		parts = append(parts, "--actor "+strings.Join(request.Actors, ", "))
+	}
+	if len(request.ExcludeActors) > 0 {
+		parts = append(parts, "--exclude-actor "+strings.Join(request.ExcludeActors, ", "))
+	}
+	if len(request.FieldPaths) > 0 {
+		parts = append(parts, "--field "+strings.Join(request.FieldPaths, ", "))
+	}
+	return joinClauses(parts)
+}
+
+// joinClauses reads a list back as a sentence rather than as a list.
+//
+// "--actor a, --field b" reads as two items of one flag's value where
+// "--actor a and --field b" reads as two flags, which is the distinction the
+// notice depends on being obvious.
+func joinClauses(parts []string) string {
+	switch len(parts) {
+	case 0:
+		// Unreachable: the caller gates on TimelineRequest.filtered, which is true
+		// only when one of the three is non-empty. Stated rather than assumed away,
+		// because the alternative is a notice with a hole where its subject was.
+		return "the filter in force"
+	case 1:
+		return parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 }

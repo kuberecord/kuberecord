@@ -299,6 +299,52 @@ than a summary of them.
 
 ### Fixed
 
+- **A `timeline` filter that matched nothing no longer reports that nothing
+  changed.** `--actor`, `--exclude-actor` and `--field` are pushed into the query,
+  so the changes they remove never arrive — which made a filtered timeline that
+  matched nothing indistinguishable, from the renderer's side, from a window in
+  which nothing happened. `timeline deploy/checkout --actor nobody` over a hundred
+  recorded changes printed:
+
+  ```
+  ! no changes recorded for payments/checkout in the last 24 hours. The scope was
+    confirmed watched over 2026-07-02T09:14:00Z → open, so nothing changed in that period
+  ```
+
+  That sentence was false, and the exit code could be worse than the sentence: a
+  scope log holding no interval for the scope turned the same path into the
+  no-coverage finding, so **a filter matching nothing could exit `3`** — the one
+  code the CLI tells you to script against.
+
+  When a predicate is in force and no change survived it, the same window is now
+  read once more with the predicates removed, and the answer decides what is said:
+
+  ```
+  ! changes are recorded for payments/checkout in the last 24 hours and --actor nobody
+    matched none of them; the window itself is not empty, so this is the filter's
+    answer rather than the object's
+  ```
+
+  If the re-read finds nothing, the filter is not what emptied the window and the
+  three coverage answers apply unchanged, exit `3` included. If it fails, that is
+  said and neither reading is asserted. The extra read costs one row, newest
+  first, and is paid only on the path that needs it. `diff` and `blame` were never
+  affected: their `--field` narrows what is rendered rather than what is read.
+
+- **`get --uid` names itself when nothing was found.** A mistyped UID was answered
+  with an explanation that never mentioned the pin — the object had not been
+  observed, or had already been deleted — when in fact the state was there under
+  an incarnation you had not asked for. The third reason is now in the sentence.
+
+- **A standing check on silent no-ops.** Every flag in the command tree is now
+  audited in `internal/cli/noop_test.go` as *always visible*, *explained*, or
+  *deliberately silent with a reason*, and the sweep walks the real command tree —
+  so a flag with no verdict fails `make test` rather than reaching a terminal. The
+  sweep found the two entries above and nothing else; `--limit`, `--depth`,
+  `--reverse`, `--exit-code`, `--at`, `--yes`, `--max-objects` and the inherited
+  kubectl flags are recorded as deliberately silent, each with why. See
+  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#the-silent-no-op-sweep).
+
 - **`--with-events` says why it found nothing.** Against the quickstart it
   produced output byte-identical to a bare invocation: that rule streamed
   `apps/v1 Deployment` and `v1 ConfigMap`, so the archive held no Event rows and
