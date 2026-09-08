@@ -27,11 +27,15 @@ import (
 	"testing"
 
 	"github.com/spf13/pflag"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 
@@ -868,3 +872,246 @@ The archive's key prefix within the bucket or directory, with no leading or trai
 The same thing without the questions:
   kuberecord config set-profile laptop --backend local --path /archives/kuberecord --prefix kuberecord
 `
+
+// The read-only engineer's path, which is the shape most people who need a
+// profile actually have (D7): a kubeconfig that can list custom resources and not
+// read the operator's Secrets.
+//
+// Everything below asserts one property from two directions — a Secret this
+// kubeconfig may not read is not a discovery failure, and every other way
+// ProfileFromSink can fail still is. The carve-out is one carve-out, and the tests
+// that matter are the ones holding its edges.
+
+// forbidSecretReads makes every Secret read on a fixture's cluster forbidden.
+//
+// Prepended rather than seeded as an absent Secret, because the two are different
+// states and only this one is the read-only engineer's: the Secret exists, the
+// operator reads it, and this kubeconfig may not.
+func forbidSecretReads(t *testing.T, resolver *resolve.BackendResolver) {
+	t.Helper()
+
+	typed, ok := resolver.Clients.Typed.(*k8sfake.Clientset)
+	if !ok {
+		t.Fatalf("the fixture's typed client is %T, not one a reactor can be added to", resolver.Clients.Typed)
+	}
+	typed.PrependReactor("get", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(corev1.Resource("secrets"), sinkSecret, errors.New("no"))
+	})
+}
+
+// TestTheWizardSurvivesASecretItCannotRead is Task 17.1, and the case is the
+// common one.
+//
+// Four questions have been answered by the time the Secret is read, and the read
+// confirms a value the profile was never going to store — the address, the
+// database and the user are already in hand from the custom resource. So the
+// answer to a forbidden read is one more question rather than a discarded
+// conversation, and the paragraph above it says why the question is being asked at
+// all (Invariant 4).
+func TestTheWizardSurvivesASecretItCannotRead(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+	forbidSecretReads(t, resolver)
+	seedActiveProfile(t, path)
+
+	// y — read it from a sink; 1 — the ClickHouseSink; then the offered address,
+	// the environment, and the offered variable name, all by pressing return.
+	wizard, errOut := scriptedWizard(t, "y", "1", "", "", "")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("a Secret this kubeconfig may not read ended the wizard: %v\n%s", err, errOut)
+	}
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("the wizard did not write a loadable configuration: %v\n%s", err, errOut)
+	}
+	stanza := cfg.Profiles["local"].ClickHouse
+	if stanza == nil {
+		t.Fatalf("the file holds no ClickHouse profile named local: %+v", cfg)
+	}
+	// Complete and usable: every field the custom resource answered is still
+	// there, and the one the Secret would have confirmed is the reader's own.
+	want := resolve.ClickHouseProfile{
+		Addr:        "127.0.0.1:9000",
+		Database:    resolve.DefaultClickHouseDatabase,
+		Username:    sinkUsername,
+		PasswordEnv: resolve.DefaultPasswordEnv,
+	}
+	if *stanza != want {
+		t.Errorf("the profile is %+v, want %+v", *stanza, want)
+	}
+
+	for _, said := range []string{
+		"Read the connection settings from ClickHouseSink/default.",
+		"Cannot read its Secret (forbidden) — that is fine: a profile stores where",
+		"your password lives, not the operator's.",
+		"Where does the ClickHouse password come from?",
+		// And the equivalent reproduces what was assembled, password source
+		// included: without it the printed line would write a profile whose
+		// password came from somewhere the reader did not choose.
+		"  kuberecord config set-profile local --from-sink ClickHouseSink/default " +
+			"--addr 127.0.0.1:9000 --password-env " + resolve.DefaultPasswordEnv,
+	} {
+		if !strings.Contains(errOut.String(), said) {
+			t.Errorf("stderr never says %q:\n%s", said, errOut)
+		}
+	}
+	// The third answer of the typed path's question is not offered here, because
+	// resolve.ProfileOverrides cannot express it and the derivation would supply
+	// the default variable anyway — a choice taken and disregarded (D31).
+	if strings.Contains(errOut.String(), "a server with no password") {
+		t.Errorf("the derived branch offered an answer it cannot honour:\n%s", errOut)
+	}
+}
+
+// TestTheEquivalentReproducesAProfileDerivedWithoutItsSecret closes the same loop
+// TestTheEquivalentCommandReproducesTheProfile closes, on the branch this task
+// adds a flag to.
+//
+// The printed line gained --password-env from an answer rather than from a flag,
+// which is exactly the way a printed command drifts from the profile it claims to
+// reproduce. So it is parsed back out of stderr and put through the derivation the
+// flag path performs.
+func TestTheEquivalentReproducesAProfileDerivedWithoutItsSecret(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+	forbidSecretReads(t, resolver)
+
+	wizard, errOut := scriptedWizard(t, "y", "1", "127.0.0.1:19000", "file", "/run/secrets/ch")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+
+	replayed := replayFromSink(t, resolver, equivalentArgs(t, errOut.String()))
+	if *replayed.Profile.ClickHouse != *cfg.Profiles["local"].ClickHouse {
+		t.Errorf("the printed command derives\n%+v\nwhere the questions wrote\n%+v",
+			replayed.Profile.ClickHouse, cfg.Profiles["local"].ClickHouse)
+	}
+}
+
+// replayFromSink runs a printed `config set-profile --from-sink` line through the
+// derivation the flag path runs.
+//
+// The flags are parsed from profileFieldFlags — the table the command itself
+// registers from, which TestEveryProfileFlagIsInTheTable pins — and mapped through
+// profileFields.overrides, the one function that says which of them --from-sink
+// can carry. So a printed flag the command does not have, or one the flag path
+// would not apply, fails here rather than in somebody's CI job.
+//
+// The whole binary is not used because it would build a resolver from a kubeconfig
+// this test does not have; the fixture's resolver is the half that differs.
+func replayFromSink(t *testing.T, resolver *resolve.BackendResolver, args []string) *resolve.SinkProfile {
+	t.Helper()
+
+	if len(args) < 4 || args[1] != "config" || args[2] != "set-profile" {
+		t.Fatalf("the printed command is not a config set-profile invocation: %v", args)
+	}
+
+	var (
+		fields   profileFields
+		fromSink string
+	)
+	set := pflag.NewFlagSet("replay", pflag.ContinueOnError)
+	set.StringVar(&fromSink, options.FlagFromSink, "", "")
+	for _, field := range profileFieldFlags {
+		switch {
+		case field.str != nil:
+			set.StringVar(field.str(&fields), field.name, "", "")
+		case field.boolean != nil:
+			set.BoolVar(field.boolean(&fields), field.name, false, "")
+		}
+	}
+	if err := set.Parse(args[4:]); err != nil {
+		t.Fatalf("the printed command does not parse: %v", err)
+	}
+
+	ref, err := resolve.ParseSinkRef(options.FlagFromSink, fromSink)
+	if err != nil {
+		t.Fatalf("the printed --%s does not parse: %v", options.FlagFromSink, err)
+	}
+	derived, err := resolver.ProfileFromSink(t.Context(), ref, fields.overrides())
+	if err != nil {
+		t.Fatalf("the printed command fails to derive: %v", err)
+	}
+	return derived
+}
+
+// TestEveryOtherDerivationFailureStillEndsTheWizard holds the other edge.
+//
+// The carve-out is the Secret read and nothing else. Each case below is a failure
+// of the thing the user named in the menu, and a wizard that carried on past one
+// would write a profile describing a sink it never read.
+//
+// The object-store guard — refusing every override for an S3Sink — is absent
+// because it is unreachable from here rather than because it is exempt: the wizard
+// asks an archive nothing, so it never hands ProfileFromSink an override to refuse.
+// resolve's own table covers it.
+func TestEveryOtherDerivationFailureStillEndsTheWizard(t *testing.T) {
+	badSpec := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": v1alpha1.GroupVersion.String(),
+		"kind":       resolve.KindClickHouseSink,
+		"metadata":   map[string]any{"name": "default"},
+		// An addr that is not a string: the CRD forbids it, and something that
+		// reached the API server another way does not.
+		"spec": map[string]any{"connection": map[string]any{"addr": int64(9000)}},
+	}}
+
+	for _, tc := range []struct {
+		name  string
+		react clienttesting.ReactionFunc
+		want  string
+	}{
+		{
+			name: "a sink the menu listed and this kubeconfig may not read",
+			react: func(clienttesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "clickhousesinks"},
+					"default", errors.New("no"))
+			},
+			want: "cannot read ClickHouseSink/default (forbidden)",
+		},
+		{
+			name: "a sink that is gone by the time it is chosen",
+			react: func(clienttesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewNotFound(
+					schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "clickhousesinks"},
+					"default")
+			},
+			want: "cannot read ClickHouseSink/default",
+		},
+		{
+			name:  "a sink whose spec does not decode",
+			react: func(clienttesting.Action) (bool, runtime.Object, error) { return true, badSpec, nil },
+			want:  "decoding ClickHouseSink/default",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver, _, path := fromSinkFixture(t)
+			dynamic, ok := resolver.Clients.Dynamic.(*dynamicfake.FakeDynamicClient)
+			if !ok {
+				t.Fatalf("the fixture's dynamic client is %T", resolver.Clients.Dynamic)
+			}
+			dynamic.PrependReactor("get", "clickhousesinks", tc.react)
+
+			wizard, errOut := scriptedWizard(t, "y", "1", "", "", "")
+			wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+			err := wizard.run(t.Context(), "local")
+			if err == nil {
+				t.Fatalf("the wizard carried on past a sink it could not read:\n%s", errOut)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the wizard failed with %q, want it to name %q", err, tc.want)
+			}
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Errorf("a failed derivation wrote %s anyway", path)
+			}
+		})
+	}
+}

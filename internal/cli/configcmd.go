@@ -252,11 +252,7 @@ every tool on the machine already reads.`,
 			}
 
 			if fromSink != "" {
-				derived, err := deriveProfile(cmd, flags, streams, invokedAs, fromSink,
-					resolve.ProfileOverrides{
-						Addr: fields.Addr, Username: fields.Username, PasswordEnv: fields.PasswordEnv,
-						PasswordFile: fields.PasswordFile, TLS: fields.TLS,
-					})
+				derived, err := deriveProfile(cmd, flags, streams, invokedAs, fromSink, fields.overrides())
 				if err != nil {
 					return err
 				}
@@ -512,6 +508,22 @@ type profileFields struct {
 	ForcePathStyle bool
 	Prefix         string
 	Path           string
+}
+
+// overrides is the subset of these fields --from-sink may put over what a sink
+// records.
+//
+// A method rather than a literal at the call site so that the mapping is stated
+// once. It is the boundary resolve.ProfileOverrides documents — the endpoint, the
+// TLS setting, the user and where the credential lives — and everything absent
+// from it is a fact about where the sink writes, refused by
+// refuseFromSinkConflicts before the cluster is contacted rather than dropped
+// here.
+func (f profileFields) overrides() resolve.ProfileOverrides {
+	return resolve.ProfileOverrides{
+		Addr: f.Addr, Username: f.Username, PasswordEnv: f.PasswordEnv,
+		PasswordFile: f.PasswordFile, TLS: f.TLS,
+	}
 }
 
 // profileField is one settable field of a profile: the flag that carries it, the

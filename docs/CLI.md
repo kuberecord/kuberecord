@@ -2194,7 +2194,10 @@ names `KUBERECORD_CLICKHOUSE_PASSWORD` unless `--password-env` or `--password-fi
 says otherwise, and the file rule above applies to it exactly as it does to a
 hand-written stanza. A Secret you may not read is a notice, not a failure: nothing
 in the written profile depends on it, and being unable to read it is the ordinary
-state this whole subcommand exists for.
+state this whole subcommand exists for. Both routes rest on that — the questions
+[behave the same way](#asking-instead-of-knowing-the-flags), and differ only in
+asking where the password comes from rather than assuming the default, because
+there is somebody there to ask.
 
 Four flags survive `--from-sink`, and they are the ones a `ClickHouseSink` cannot
 state or must not state for a *reader*: `--addr`, `--username`, `--password-env` /
@@ -2277,6 +2280,32 @@ accident:
 - **Ctrl-D at any question writes nothing.** The file is written after the last
   answer, so stopping earlier leaves nothing to undo — and it says so rather than
   returning silently to a shell prompt.
+- **A Secret it cannot read costs one more question, not the conversation.** The
+  operator's ClusterRole reads Secrets in its own namespace and most engineers have
+  less than that, so this is the ordinary shape rather than the edge. Everything the
+  profile needs came out of the custom resource; the Secret was being read only to
+  confirm a key, and the value was never going to be stored. So the questions carry
+  on:
+
+  ```console
+  ClickHouse native-protocol endpoint, as host:port.
+  > [127.0.0.1:9000]
+
+  Read the connection settings from ClickHouseSink/default.
+  Cannot read its Secret (forbidden) — that is fine: a profile stores where
+  your password lives, not the operator's.
+
+  Where does the ClickHouse password come from?
+    1) environment — an environment variable, named next
+    2) file — a file, named next
+  > [environment]
+  ```
+
+  The equivalent command printed at the end gains the `--password-env` or
+  `--password-file` the answer chose, so it still reproduces the profile exactly.
+  Every *other* way reading the sink can fail — a custom resource that is gone, one
+  you may not read, one whose spec does not decode — still ends the command, because
+  each is a failure of the thing you named in the menu.
 
 A global flag is not one of this command's flags. `--context`, `--kubeconfig` and
 `--operator-namespace` say which cluster the first question would list sinks from,

@@ -231,6 +231,15 @@ type derivedProfile struct {
 	ref     resolve.SinkRef
 	profile *resolve.SinkProfile
 	addr    string
+
+	// passwordEnv and passwordFile are the answer to the password-source question,
+	// carried for the same reason addr is: the equivalent command has to print the
+	// flag that reproduces the stanza, and only one of the two is ever set.
+	//
+	// They are empty on the ordinary path, where the question is not asked and the
+	// derivation supplies its own default — see askDerivedPassword.
+	passwordEnv  string
+	passwordFile string
 }
 
 // askDiscovery is the first question, and the reason this command is worth
@@ -243,6 +252,12 @@ type derivedProfile struct {
 // user never heard the result of (Invariant 4). What it will not do is fall
 // through after a sink was *chosen* and could not be read: that is a failure of
 // something the user asked for by name, and it is reported as one.
+//
+// A Secret the sink names and this kubeconfig may not read is not that failure,
+// and ProfileFromSink does not report it as one — see its file's "Why a Secret it
+// cannot read is not a failure". The derivation is complete without it, so the
+// only thing lost is a check, and askDerivedPassword turns that into one more
+// question rather than into a discarded conversation.
 func (w *setProfileWizard) askDiscovery(ctx context.Context) (*derivedProfile, error) {
 	yes, err := w.askYesNo(ctx,
 		"Read the settings from a sink custom resource in this cluster?", true)
@@ -324,16 +339,6 @@ func (w *setProfileWizard) askDerivedAddr(
 	}
 
 	derived := &derivedProfile{ref: ref, profile: profile}
-	if answer != stanza.Addr {
-		// Re-derived rather than patched, so that the paragraph printed after the
-		// write describes the profile that was written: SinkProfile.Explain says
-		// "as --addr asked" from AddrOverridden, and a stanza edited behind its
-		// back would have the flag's effect without the flag's explanation.
-		derived.profile, err = resolver.ProfileFromSink(ctx, ref, resolve.ProfileOverrides{Addr: answer})
-		if err != nil {
-			return nil, err
-		}
-	}
 	// --addr is printed when the profile records something other than what the
 	// sink records, which is the condition under which the flag is load-bearing.
 	// Deriving it from the *recorded* address rather than from whether the user
@@ -342,7 +347,85 @@ func (w *setProfileWizard) askDerivedAddr(
 	if answer != profile.RecordedAddr {
 		derived.addr = answer
 	}
+	if err := w.askDerivedPassword(ctx, derived); err != nil {
+		return nil, err
+	}
+
+	// Re-derived rather than patched, so that the paragraph printed after the
+	// write describes the profile that was written: SinkProfile.Explain says "as
+	// --addr asked" from AddrOverridden, and a stanza edited behind its back would
+	// have the flag's effect without the flag's explanation. Once, with every
+	// override the questions produced, because two derivations would each discard
+	// the other's.
+	over := resolve.ProfileOverrides{
+		PasswordEnv: derived.passwordEnv, PasswordFile: derived.passwordFile,
+	}
+	if answer != stanza.Addr {
+		over.Addr = answer
+	}
+	if over == (resolve.ProfileOverrides{}) {
+		return derived, nil
+	}
+	derived.profile, err = resolver.ProfileFromSink(ctx, ref, over)
+	if err != nil {
+		return nil, err
+	}
 	return derived, nil
+}
+
+// askDerivedPassword asks where the password comes from, when the sink's own
+// Secret could not be read.
+//
+// This is the read-only engineer's path, and it is the shape most of them have:
+// the operator's aggregated ClusterRole reads Secrets in its own namespace and
+// most people have less than that (D7). Everything the profile needs came out of
+// the custom resource — address, database, user — and the only thing missing is
+// confirmation of a value the profile was never going to store, so ending the
+// conversation here would throw away four answers over a check that was a nicety.
+// resolve/fromsink.go's "Why a Secret it cannot read is not a failure" is the
+// paragraph this implements; CredentialUnreadable is the fact it reads.
+//
+// It fires on a Secret that could not be *read*, and not on one that was read and
+// holds no password key. That second case says nothing about this reader's
+// permissions — it is a broken sink, which the operator reports on its own status
+// and Explain names the present keys for — so the derivation's default is as good
+// an answer there as it ever was.
+//
+// The notice is plain prose at full weight rather than a tier. It is not a Warning:
+// nothing here misleads, and the sentence exists precisely to stop the reader
+// concluding that something broke. It is not Provenance either, since it varies
+// between invocations and has to be read once rather than kept available. And the
+// emphasis in this block belongs to the equivalent command at the end (D27, D30).
+func (w *setProfileWizard) askDerivedPassword(ctx context.Context, derived *derivedProfile) error {
+	unreadable := derived.profile.CredentialUnreadable
+	if unreadable == "" {
+		return nil
+	}
+	if err := w.say("",
+		fmt.Sprintf("Read the connection settings from %s.", derived.ref),
+		fmt.Sprintf("Cannot read its Secret (%s) — that is fine: a profile stores where", unreadable),
+		"your password lives, not the operator's.",
+	); err != nil {
+		return err
+	}
+
+	// The typed path's question, over a profileFields carrying what the sink
+	// already answered, so the two references are refused and accepted by
+	// resolve.Profile.Validate on both routes rather than by a rule this branch
+	// invented (D33).
+	stanza := derived.profile.Profile.ClickHouse
+	fields := &profileFields{
+		Backend:  string(resolve.BackendClickHouse),
+		Addr:     stanza.Addr,
+		Database: stanza.Database,
+		Username: stanza.Username,
+		TLS:      stanza.TLS,
+	}
+	if err := w.askPassword(ctx, fields, false); err != nil {
+		return err
+	}
+	derived.passwordEnv, derived.passwordFile = fields.PasswordEnv, fields.PasswordFile
+	return nil
 }
 
 // declineDiscovery says why the first question had nothing to offer, and moves on.
@@ -368,6 +451,13 @@ func (w *setProfileWizard) writeDerived(name string, derived *derivedProfile) er
 }
 
 // equivalentFromSink is the flag command for the discovery branch.
+//
+// Every override the questions produced is printed, and only those: the flags
+// below are exactly what askDerivedAddr handed to ProfileFromSink, so the command
+// re-run reaches the same derivation with the same inputs and writes the same
+// stanza. A password reference appears only when the Secret could not be read and
+// the reader was therefore asked — on the ordinary path the derivation supplies
+// its own default, and naming it here would print a flag that changed nothing.
 func (w *setProfileWizard) equivalentFromSink(name string, derived *derivedProfile) []string {
 	parts := []string{
 		commandNameOr(w.invokedAs), "config", "set-profile", shellArg(name),
@@ -375,6 +465,12 @@ func (w *setProfileWizard) equivalentFromSink(name string, derived *derivedProfi
 	}
 	if derived.addr != "" {
 		parts = append(parts, "--"+options.FlagAddr, shellArg(derived.addr))
+	}
+	switch {
+	case derived.passwordEnv != "":
+		parts = append(parts, "--"+options.FlagPasswordEnv, shellArg(derived.passwordEnv))
+	case derived.passwordFile != "":
+		parts = append(parts, "--"+options.FlagPasswordFile, shellArg(derived.passwordFile))
 	}
 	return parts
 }
@@ -422,7 +518,7 @@ func (w *setProfileWizard) askFields(ctx context.Context) (profileFields, error)
 		// unreachable instead. It happens here, at --password-env's position in
 		// the table, so the question keeps its place in the order.
 		if field.name == options.FlagPasswordEnv && backend == resolve.BackendClickHouse {
-			if err := w.askPassword(ctx, &fields); err != nil {
+			if err := w.askPassword(ctx, &fields, true); err != nil {
 				return fields, err
 			}
 			continue
@@ -475,15 +571,32 @@ func (w *setProfileWizard) askBackend(ctx context.Context, fields *profileFields
 
 // askPassword asks where a ClickHouse profile's password comes from.
 //
-// Three answers, and none of them is the password. The value asked for afterwards
-// is the *name* of an environment variable or the path of a file, so nothing
-// secret is typed, echoed or held — see this file's opening comment.
-func (w *setProfileWizard) askPassword(ctx context.Context, fields *profileFields) error {
-	answer, err := w.menu(ctx, "Where does the ClickHouse password come from?", []wizardChoice{
+// None of the answers is the password. The value asked for afterwards is the
+// *name* of an environment variable or the path of a file, so nothing secret is
+// typed, echoed or held — see this file's opening comment.
+//
+// offerNone adds "nowhere — a server with no password", and the derived branch
+// does not ask for it. resolve.ProfileOverrides has no way to express *no
+// reference at all*: empty overrides are what --from-sink is given when nobody
+// names a password, and the derivation answers them with the default environment
+// variable on purpose (see resolve.clickHouseProfile). So an answer of "none"
+// there would produce KUBERECORD_CLICKHOUSE_PASSWORD anyway — a choice offered,
+// taken, and silently disregarded, which is the exact shape D31 is about. A
+// ClickHouseSink's credentialsSecretRef is a required field, so the sink whose
+// settings are being copied authenticates with a password; the answer is not one
+// this branch has to have.
+func (w *setProfileWizard) askPassword(
+	ctx context.Context, fields *profileFields, offerNone bool,
+) error {
+	choices := []wizardChoice{
 		{value: "environment", description: "an environment variable, named next"},
 		{value: "file", description: "a file, named next"},
-		{value: "none", description: "nowhere — a server with no password"},
-	}, true)
+	}
+	if offerNone {
+		choices = append(choices,
+			wizardChoice{value: "none", description: "nowhere — a server with no password"})
+	}
+	answer, err := w.menu(ctx, "Where does the ClickHouse password come from?", choices, true)
 	if err != nil {
 		return err
 	}

@@ -17,12 +17,14 @@ limitations under the License.
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +32,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/kuberecord/kuberecord/api/v1alpha1"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
@@ -298,5 +301,56 @@ func TestFromSinkIntoAnEmptyFileActivatesAndSaysSo(t *testing.T) {
 	}
 	if strings.Contains(stderr, "config use-profile local") {
 		t.Errorf("the next-step line was printed for a profile that is already active:\n%s", stderr)
+	}
+}
+
+// TestFromSinkWritesWithoutReadingTheSecret is the non-interactive half of Task
+// 17.1's carve-out, and it is deliberately the same carve-out.
+//
+// Two paths through one function disagreeing about whether a forbidden Secret is
+// fatal is the drift D33 exists to prevent, so --from-sink survives it exactly as
+// the wizard does: a complete stanza, the default password reference, and a
+// sentence saying what could not be checked. What the flag path does *not* do is
+// ask where the password comes from — there is nobody to ask, and the flags for it
+// were available on the command line the user already typed.
+func TestFromSinkWritesWithoutReadingTheSecret(t *testing.T) {
+	resolver, streams, path := fromSinkFixture(t)
+	resolver.Clients.Typed.(*k8sfake.Clientset).PrependReactor("get", "secrets",
+		func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				corev1.Resource("secrets"), sinkSecret, errors.New("no"))
+		})
+
+	// The call deriveProfile makes, with the overrides an invocation naming no
+	// per-field flag produces.
+	derived, err := resolver.ProfileFromSink(t.Context(),
+		resolve.SinkRef{Kind: resolve.KindClickHouseSink, Name: "default"}, profileFields{}.overrides())
+	if err != nil {
+		t.Fatalf("a Secret this kubeconfig may not read failed --%s: %v", options.FlagFromSink, err)
+	}
+	if err := writeProfile(profileWrite{
+		name: "local", profile: derived.Profile, explanation: derived.Explain(false),
+		nextStep: true, invokedAs: options.StandaloneName,
+	}, streams); err != nil {
+		t.Fatalf("writeProfile: %v", err)
+	}
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	want := resolve.ClickHouseProfile{
+		Addr:        "127.0.0.1:9000",
+		Database:    resolve.DefaultClickHouseDatabase,
+		Username:    sinkUsername,
+		PasswordEnv: resolve.DefaultPasswordEnv,
+	}
+	if stanza := cfg.Profiles["local"].ClickHouse; stanza == nil || *stanza != want {
+		t.Errorf("the stanza is %+v, want %+v", stanza, want)
+	}
+
+	stderr := streams.ErrOut.(*strings.Builder).String()
+	if !strings.Contains(stderr, "That Secret was not checked: it could not be read (forbidden).") {
+		t.Errorf("stderr does not say what could not be checked:\n%s", stderr)
 	}
 }
