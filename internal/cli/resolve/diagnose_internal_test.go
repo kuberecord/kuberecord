@@ -577,6 +577,14 @@ func TestColourIsNothingButColour(t *testing.T) {
 			painted: failure.Render("kuberecord timeline", true),
 			plain:   failure.Render("kuberecord timeline", false),
 		},
+		// The other block the top of the CLI prints under an `error:` line, and
+		// the reason this case is not redundant with the one above it: the two
+		// are assembled by different files, and only one of them was covered
+		// when the property was written.
+		"the failing-profile routes": {
+			painted: profileBlock(t, true),
+			plain:   profileBlock(t, false),
+		},
 		"the warning tier": {
 			painted: render.NewSeverity(true).Warning(line),
 			plain:   render.NewSeverity(false).Warning(line),

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
@@ -675,15 +676,22 @@ func yesNo(declared bool) string {
 	return "no"
 }
 
-// padRight pads text to width with spaces.
+// padRight pads text to width with spaces, counting runes.
 //
-// It counts bytes rather than runes, which is correct for everything that reaches
-// it: step names are flags and fixed English nouns, and outcomes are the five
-// words resolve.StepOutcome defines. A value that could carry a multi-byte rune
-// goes in the detail column, which is never padded because nothing follows it.
+// Runes rather than bytes because `config get-profiles` pads a profile's name and
+// the path of a local archive, both of which are a user's own strings: a name in
+// Cyrillic would be padded to twice its width by a byte count, and the column it
+// misaligned is the one a reader scans down. It is the same approximation
+// render.displayWidth takes, and taken for the same reason — the alternative is a
+// Unicode width table as a dependency, to straighten a column whose content is
+// file paths and environment variable names.
+//
+// Nothing this pads is ever measured a second time, so the width a caller
+// computed and the width produced here are one count.
 func padRight(text string, width int) string {
-	if len(text) >= width {
+	count := utf8.RuneCountInString(text)
+	if count >= width {
 		return text
 	}
-	return text + strings.Repeat(" ", width-len(text))
+	return text + strings.Repeat(" ", width-count)
 }

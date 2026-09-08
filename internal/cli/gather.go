@@ -180,12 +180,19 @@ func gatherChanges(
 	result.Notices = appendNotice(result.Notices,
 		displayFilterNotice(request, from, to, scanned, len(result.Rows)))
 
+	// Measured once, after the rows are final, and read by the three notices
+	// below. They are three questions about the same document — did a predicate
+	// empty it, is the object's own history missing, did --with-events interleave
+	// anything — and answering each from its own walk of the rows is how two of
+	// them come to disagree about what was on the page.
+	shape := shapeOf(result.Rows)
+
 	// The same question about the predicates the *query* carried, which the two
 	// counts above cannot answer: those rows were removed before they arrived, so
 	// scanned and len(Rows) are both zero and an emptiness the filter produced is
 	// indistinguishable from an empty window. See predicateNotice.
 	predicate, attributed := predicateNotice(
-		ctx, backend.Engine, request, selection, from, to, sawChange(result.Rows))
+		ctx, backend.Engine, request, selection, from, to, shape.changes)
 	result.Notices = appendNotice(result.Notices, predicate)
 
 	if !attributed && (len(result.Rows) > 0 || scanned == 0) {
@@ -195,7 +202,7 @@ func gatherChanges(
 		// Consulting coverage about it would answer a question nobody asked and
 		// could report "nothing was watching" about a window that demonstrably
 		// held changes.
-		emptyNotices, emptyErr := explainEmpty(request, from, to, len(result.Rows) > 0, coverage)
+		emptyNotices, emptyErr := explainNoChanges(request, from, to, shape, coverage)
 		result.Notices = append(result.Notices, emptyNotices...)
 		result.Empty = emptyErr
 	}
@@ -205,7 +212,7 @@ func gatherChanges(
 	// outwards. It is still inside the cold-scan guard, which is where any query
 	// that may walk partitions belongs.
 	result.Notices = appendNotice(result.Notices,
-		eventsNotice(ctx, backend, request, from, to, sawEvent(result.Rows)))
+		eventsNotice(ctx, backend, request, from, to, shape.events))
 	return result, nil
 }
 

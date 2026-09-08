@@ -658,7 +658,14 @@ func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, er
 		return target{}, OriginProfile, err
 	}
 	if profile != nil {
+		// The failure is explained here rather than inside targetFromProfile
+		// because the routes past it are facts about the *invocation* — which
+		// other profiles the file defines, how this one came to be chosen, what
+		// --sink-addr carried — and none of them is knowable from a stanza. The
+		// chain itself is untouched: a profile that fails still fails, and still
+		// stops the walk (D35). See profileroutes.go.
 		chosen, profileErr := targetFromProfile(name, *profile, r.sinkAddr())
+		profileErr = r.explainProfile(name, *profile, profileErr)
 		recordResult(&r.backendSteps, OriginProfile.Step(), profileErr, "%s", r.profileDetail(name))
 		return chosen, OriginProfile, profileErr
 	}
@@ -991,7 +998,7 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 				Password: password,
 				TLS:      profile.ClickHouse.TLS,
 			},
-			description: fmt.Sprintf("%s (ClickHouse at %s/%s%s)", name, addr, database,
+			description: fmt.Sprintf("%s (%s%s)", name, describeClickHouse(addr, database),
 				sinkAddrNote(sinkAddr != "")),
 		}, nil
 
@@ -1005,9 +1012,8 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 				ForcePathStyle: profile.S3.ForcePathStyle,
 			},
 			archivePrefix: profile.S3.Prefix,
-			description: fmt.Sprintf("%s (s3://%s, region %s)", name,
-				joinBucketPrefix(profile.S3.Bucket, profile.S3.Prefix),
-				valueOr(profile.S3.Region, DefaultS3Region)),
+			description: fmt.Sprintf("%s (%s)", name, describeS3(profile.S3.Bucket, profile.S3.Prefix,
+				valueOr(profile.S3.Region, DefaultS3Region))),
 		}, nil
 
 	case BackendLocal:
@@ -1015,7 +1021,7 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 			backend:       BackendLocal,
 			localPath:     profile.Local.Path,
 			archivePrefix: profile.Local.Prefix,
-			description:   fmt.Sprintf("%s (local archive at %s)", name, profile.Local.Path),
+			description:   fmt.Sprintf("%s (%s)", name, describeLocal(profile.Local.Path)),
 		}, nil
 	}
 	return target{}, exit.RuntimeErrorf("profile %q names the backend %q, which is not one of %s",

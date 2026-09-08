@@ -1,0 +1,6 @@
+=== stdout ===
+=== stderr ===
+→ wrote profile "local" in /home/engineer/.config/kuberecord/config.yaml
+→ "local" is now the active profile
+=== exit ===
+0 (success)

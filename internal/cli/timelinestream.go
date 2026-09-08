@@ -46,7 +46,7 @@ import (
 // The risk in having two paths is Invariant 9: a second sequence is a second
 // place for the coverage consultation to be dropped. So the pieces that carry the
 // invariant are the *same* functions the gathered path calls — timelineBounds,
-// selectIncarnation, askCoverage, deletionsNotice, explainEmpty, eventsNotice —
+// selectIncarnation, askCoverage, deletionsNotice, explainNoChanges, eventsNotice —
 // and only the middle, where rows are turned into output, differs. What is
 // duplicated here is the order they are called in, and that order is asserted by
 // tests over both paths rather than by a comment.
@@ -149,7 +149,7 @@ func runTimelineStructured(
 	notices = appendNotice(notices, predicate)
 	var emptyErr error
 	if !attributed {
-		emptyNotices, err := explainEmpty(request, from, to, emitted.items > 0, coverage)
+		emptyNotices, err := explainNoChanges(request, from, to, emitted.shape(), coverage)
 		notices = append(notices, emptyNotices...)
 		emptyErr = err
 	}
@@ -244,6 +244,17 @@ func emitChanges(
 		emitted.items++
 	}
 	return emitted, nil
+}
+
+// shape is what the emission turned out to hold, in the form explainNoChanges
+// reads.
+//
+// The gathered path measures the same thing with shapeOf over rows it still has.
+// Both spellings exist so that neither path answers the question with a
+// convenience of its own — items > 0 was one, and it could not tell a document
+// made entirely of Kubernetes Events from one holding the object's own history.
+func (e emission) shape() timelineShape {
+	return timelineShape{changes: e.sawChange, events: e.sawEvent}
 }
 
 // observe records what one change was, before it is written and forgotten.

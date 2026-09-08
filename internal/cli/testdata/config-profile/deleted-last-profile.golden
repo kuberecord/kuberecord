@@ -1,0 +1,6 @@
+=== stdout ===
+=== stderr ===
+→ deleted profile "local" from /home/engineer/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ no profile is active now: the resolution chain falls through to the steps after it
+=== exit ===
+0 (success)

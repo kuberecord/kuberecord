@@ -20,12 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"unicode"
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
@@ -43,11 +45,18 @@ import (
 //
 // What they will not do is store a credential. See resolve.ClickHouseProfile.Password.
 //
-// The fifth, `resolve`, writes nothing at all. It belongs here because a profile
-// is one step of the chain that decides where an answer comes from, and the
-// question it answers — "which step won, and why not the others" — is the one a
-// reader of this file has when the file turns out not to be the step that won.
-// See resolvecmd.go.
+// The fifth, `delete-profile`, is what closes the lifecycle: create, inspect,
+// switch, delete. A tool that writes configuration and cannot remove it leaves
+// its users hand-editing the file it exists to spare them, and a profile left
+// behind is not inert — it shadows discovery from step 3 of the resolution chain.
+//
+// The last two write nothing at all, and they are the two halves of "inspect".
+// `resolve` belongs here because a profile is one step of the chain that decides
+// where an answer comes from, and the question it answers — "which step won, and
+// why not the others" — is the one a reader of this file has when the file turns
+// out not to be the step that won. `get-profiles` answers the question before
+// that one: what is in the file, which of it is active, and which of it could
+// authenticate right now. See resolvecmd.go and getprofilescmd.go.
 
 // newConfigCommand builds the `config` subtree.
 func newConfigCommand(flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) *cobra.Command {
@@ -63,8 +72,17 @@ context to kuberecord cluster identity. It never holds a password: a profile
 names an environment variable or a file to read one from, and a password written
 inline is refused with an explanation.
 
-`+"`config resolve`"+` writes nothing: it reports which step of the resolution
-chains this invocation would use, and why the earlier ones had nothing to say.`,
+`+"`config set-profile`"+` is an upsert: a name already in the file is replaced
+whole, and the line it prints names the profile that is gone.
+`+"`config delete-profile`"+` removes one, and refuses to remove the active one
+without --force.
+
+Three subcommands write nothing. `+"`config view`"+` prints the file.
+`+"`config get-profiles`"+` prints its state: one row per profile, which is
+active, what each points at, and whether its credential reference resolves on
+this machine — which the file itself cannot say. `+"`config resolve`"+` reports
+which step of the resolution chains this invocation would use, and why the
+earlier ones had nothing to say.`,
 			resolve.ConfigDirName, resolve.ConfigFileName),
 		Args: rejectUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -74,8 +92,10 @@ chains this invocation would use, and why the earlier ones had nothing to say.`,
 
 	config.AddCommand(
 		newConfigViewCommand(flags, streams),
+		newConfigGetProfilesCommand(flags, streams, invokedAs),
 		newConfigSetProfileCommand(flags, streams, invokedAs),
-		newConfigUseProfileCommand(streams),
+		newConfigUseProfileCommand(flags, streams),
+		newConfigDeleteProfileCommand(flags, streams, invokedAs),
 		newConfigSetContextClusterIDCommand(flags, streams, invokedAs),
 		newConfigResolveCommand(flags, streams, invokedAs),
 	)
@@ -174,6 +194,11 @@ func newConfigSetProfileCommand(
 
 A profile says where to read recorded history from.
 
+A name already in the file is replaced, and the whole stanza is replaced rather
+than the fields this invocation mentions: a profile that named a password file
+and is rewritten with --password-env keeps no reference to the file. The line on
+stderr names what was there before, since nothing else holds it afterwards.
+
 With no flags at all, on a terminal, it asks. The first question is whether to
 read the settings from a sink this cluster already holds, which is --from-sink
 reached without having to know it exists; the last thing printed is the flag
@@ -226,6 +251,15 @@ every tool on the machine already reads.`,
 				return errSinkAddrWritesNoFile()
 			}
 
+			// Decided before the questions are asked and before the file is
+			// touched, so that an invocation asking for a rendering nobody can
+			// produce is refused rather than answered after the write. It applies
+			// to all three routes for the same reason the refusal above does.
+			format, err := configFormat("set-profile", flags.Output)
+			if err != nil {
+				return err
+			}
+
 			if len(args) > 1 {
 				return exit.UsageErrorf("config set-profile takes one argument, the profile name")
 			}
@@ -241,7 +275,7 @@ every tool on the machine already reads.`,
 			// to request the behaviour you get by typing nothing is a flag nobody
 			// finds.
 			if !setProfileFlagsGiven(cmd) {
-				return runSetProfileWizard(cmd, flags, streams, invokedAs, name)
+				return runSetProfileWizard(cmd, flags, streams, invokedAs, name, format)
 			}
 
 			if !named {
@@ -252,25 +286,24 @@ every tool on the machine already reads.`,
 			}
 
 			if fromSink != "" {
-				derived, err := deriveProfile(cmd, flags, streams, invokedAs, fromSink,
-					resolve.ProfileOverrides{
-						Addr: fields.Addr, Username: fields.Username, PasswordEnv: fields.PasswordEnv,
-						PasswordFile: fields.PasswordFile, TLS: fields.TLS,
-					})
+				derived, err := deriveProfile(cmd, flags, streams, invokedAs, fromSink, fields.overrides())
 				if err != nil {
 					return err
 				}
+				// Colour is decided here rather than in resolve for the reason the
+				// unreachable-backend block's is: --color, NO_COLOR and whether
+				// stderr is a terminal are facts about this invocation, and a
+				// renderer that consulted them itself would have golden files that
+				// changed with the shell they were generated in.
+				colorize := options.ShouldColorize(flags.Color, streams.ErrOut)
 				return writeProfile(profileWrite{
-					name:    name,
-					profile: derived.Profile,
-					// Colour is decided here rather than in resolve for the reason
-					// the unreachable-backend block's is: --color, NO_COLOR and
-					// whether stderr is a terminal are facts about this invocation,
-					// and a renderer that consulted them itself would have golden
-					// files that changed with the shell they were generated in.
-					explanation: derived.Explain(options.ShouldColorize(flags.Color, streams.ErrOut)),
+					name:        name,
+					profile:     derived.Profile,
+					explanation: derived.Explain(colorize),
 					nextStep:    true,
 					invokedAs:   invokedAs,
+					severity:    render.NewSeverity(colorize),
+					format:      format,
 				}, streams)
 			}
 
@@ -278,7 +311,12 @@ every tool on the machine already reads.`,
 			if err != nil {
 				return err
 			}
-			return writeProfile(profileWrite{name: name, profile: profile}, streams)
+			return writeProfile(profileWrite{
+				name:     name,
+				profile:  profile,
+				severity: render.NewSeverity(options.ShouldColorize(flags.Color, streams.ErrOut)),
+				format:   format,
+			}, streams)
 		},
 	}
 
@@ -361,6 +399,27 @@ func requireProfileName(name string) error {
 // flag by flag, and one derived from a sink custom resource — differ only in what
 // they have to say about it afterwards, and a second copy of the load/merge/save
 // sequence would be a second place for the activation rule to be decided.
+//
+// # A name already in the file is replaced, whole
+//
+// `set-profile` is an upsert, and what it writes over an existing name is the
+// *entire* stanza rather than the fields this invocation happened to mention. A
+// profile that named a password file and is rewritten with --password-env keeps no
+// reference to the file.
+//
+// A field merge is the tempting alternative and it is refused: the profile it
+// produced would depend on what was in the file beforehand, which makes it
+// unreconstructible from the command that wrote it. Every message this command
+// prints — the equivalent command the questions end with, the `--from-sink` line
+// in a bug report — is a claim that running it again produces this profile, and a
+// merge would make that claim false on any machine whose file started out
+// different. It would also make the destructive case worse rather than better: a
+// stanza half from a hand-tuned profile and half from a flag is a configuration
+// nobody wrote.
+//
+// Replacement being destructive is why it is announced. See the `was:` line at the
+// bottom of writeProfile, and D31 — the surprising-but-correct outcome is the one
+// that has to be visible.
 type profileWrite struct {
 	// name is the key in the file's profiles map.
 	name string
@@ -380,6 +439,16 @@ type profileWrite struct {
 	// invokedAs is how this process was invoked, so that line names a command the
 	// reader can type.
 	invokedAs string
+
+	// severity paints the lines this write reports itself with. Its zero value is
+	// colour-disabled, which is what a caller with nothing to say about colour
+	// should get.
+	severity render.Severity
+
+	// format is the structured document this invocation asked for, empty for the
+	// human form. It is decided by configFormat before the command reaches
+	// this struct, so a format nobody can render never rewrites a file.
+	format render.StructuredFormat
 }
 
 // writeProfile validates a profile, writes it, and says what it did.
@@ -401,7 +470,10 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]resolve.Profile{}
 	}
-	_, replaced := cfg.Profiles[w.name]
+	// Read out before the assignment overwrites it, because it is the only
+	// surviving account of what this command destroyed: the file holds the new
+	// stanza a line later, and nothing anywhere holds the old one.
+	previous, replaced := cfg.Profiles[w.name]
 	cfg.Profiles[w.name] = w.profile
 
 	// The first profile in an empty file becomes the active one. Requiring a
@@ -419,11 +491,23 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 		return exit.RuntimeErrorf("%w", err)
 	}
 
-	verb := "wrote"
+	// The two outcomes read differently on purpose. Creating a profile is what
+	// the command was asked to do and is reported plainly; replacing one is
+	// correct, asked for, and destructive, so the line names what is gone.
+	//
+	// Provenance is the tier for it rather than Warning (D27). Nothing went
+	// wrong and no conclusion is misread without the line — the reader gets
+	// exactly the profile they described. What they cannot get back is the
+	// stanza that was there, and provenance is the register for a fact that has
+	// to be available in scrollback without demanding to be read: it is where
+	// the profile now in the file came from, in the same sense as which sink a
+	// row was reconstructed from.
+	confirmation := fmt.Sprintf("→ wrote profile %q in %s", w.name, path)
 	if replaced {
-		verb = "replaced"
+		confirmation = w.severity.Provenance(fmt.Sprintf("→ updated profile %q in %s (was: %s)",
+			w.name, path, previous.Describe()))
 	}
-	if err := options.WriteLine(streams.ErrOut, fmt.Sprintf("→ %s profile %q in %s", verb, w.name, path)); err != nil {
+	if err := options.WriteLine(streams.ErrOut, confirmation); err != nil {
 		return err
 	}
 	if activated {
@@ -438,11 +522,25 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 		}
 	}
 	if w.nextStep && !activated {
-		return options.WriteLine(streams.ErrOut,
+		if err := options.WriteLine(streams.ErrOut,
 			fmt.Sprintf("\n→ to make it the active profile: `%s config use-profile %s`",
-				commandNameOr(w.invokedAs), w.name))
+				commandNameOr(w.invokedAs), w.name)); err != nil {
+			return err
+		}
 	}
-	return nil
+
+	action, displaced := profileCreated, (*resolve.Profile)(nil)
+	if replaced {
+		action, displaced = profileUpdated, &previous
+	}
+	return writeProfileChange(streams.Out, w.format, profileChangeDocument{
+		Action:         action,
+		Name:           w.name,
+		Path:           path,
+		Profile:        &w.profile,
+		Previous:       displaced,
+		CurrentProfile: cfg.CurrentProfile,
+	})
 }
 
 // deriveProfile reads a sink custom resource and turns it into a profile stanza.
@@ -512,6 +610,22 @@ type profileFields struct {
 	ForcePathStyle bool
 	Prefix         string
 	Path           string
+}
+
+// overrides is the subset of these fields --from-sink may put over what a sink
+// records.
+//
+// A method rather than a literal at the call site so that the mapping is stated
+// once. It is the boundary resolve.ProfileOverrides documents — the endpoint, the
+// TLS setting, the user and where the credential lives — and everything absent
+// from it is a fact about where the sink writes, refused by
+// refuseFromSinkConflicts before the cluster is contacted rather than dropped
+// here.
+func (f profileFields) overrides() resolve.ProfileOverrides {
+	return resolve.ProfileOverrides{
+		Addr: f.Addr, Username: f.Username, PasswordEnv: f.PasswordEnv,
+		PasswordFile: f.PasswordFile, TLS: f.TLS,
+	}
 }
 
 // profileField is one settable field of a profile: the flag that carries it, the
@@ -819,7 +933,7 @@ func fromSinkConflict(ref resolve.SinkRef, backend resolve.BackendKind, flag str
 }
 
 // newConfigUseProfileCommand selects the active profile.
-func newConfigUseProfileCommand(streams genericiooptions.IOStreams) *cobra.Command {
+func newConfigUseProfileCommand(flags *options.GlobalFlags, streams genericiooptions.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "use-profile NAME",
 		Short: "Make a profile the active one",
@@ -829,11 +943,15 @@ The active profile is used when neither --source nor --sink is given, and it
 takes precedence over discovering a sink from the cluster. Pass --profile to
 override it for a single command.`,
 
-		// The one command whose whole argument is a profile name, completed from
-		// the same file --profile is completed from.
+		// One of the two commands whose whole argument is a profile name,
+		// completed from the same file --profile is completed from.
 		ValidArgsFunction: completeProfileNames,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := configFormat("use-profile", flags.Output)
+			if err != nil {
+				return err
+			}
 			if len(args) != 1 {
 				return exit.UsageErrorf("config use-profile takes one argument, the profile name")
 			}
@@ -847,18 +965,202 @@ override it for a single command.`,
 			if err != nil {
 				return exit.RuntimeErrorf("%w", err)
 			}
-			if _, ok := cfg.Profiles[name]; !ok {
-				return exit.UsageErrorf("no profile named %q in %s (%s)",
-					name, path, resolve.DescribeProfileNames(cfg.Profiles))
+			profile, err := resolve.RequireProfile(cfg, path, name)
+			if err != nil {
+				return err
 			}
 
 			cfg.CurrentProfile = name
 			if err := resolve.SaveConfig(path, cfg); err != nil {
 				return exit.RuntimeErrorf("%w", err)
 			}
-			return options.WriteLine(streams.ErrOut, fmt.Sprintf("→ %q is now the active profile", name))
+			if err := options.WriteLine(streams.ErrOut,
+				fmt.Sprintf("→ %q is now the active profile", name)); err != nil {
+				return err
+			}
+			// No `previous` stanza: this write displaced nothing. It moved a
+			// pointer, and the profile it moved away from is still in the file for
+			// anybody who wants it.
+			return writeProfileChange(streams.Out, format, profileChangeDocument{
+				Action:         profileActivated,
+				Name:           name,
+				Path:           path,
+				Profile:        &profile,
+				CurrentProfile: name,
+			})
 		},
 	}
+}
+
+// newConfigDeleteProfileCommand removes one profile.
+//
+// It exists because a tool that creates configuration and cannot remove it is
+// incomplete, and because "edit the YAML" is not an answer here: the person who
+// needed prompts to write a profile is not the person who should be hand-editing
+// one. A stale profile is also actively harmful rather than merely untidy — it
+// sits at step 3 of the resolution chain and shadows discovery, which is a
+// confusion `config resolve` was partly built to diagnose, and this is the fix a
+// user reaches for the moment they have diagnosed it.
+//
+// The name follows `kubectl config delete-context` rather than inventing
+// `remove-profile`, for the reason every other spelling in this tree follows
+// kubectl's: a verb somebody has already typed at one Kubernetes CLI should not
+// have to be looked up at this one.
+func newConfigDeleteProfileCommand(
+	flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string,
+) *cobra.Command {
+	var force bool
+
+	command := &cobra.Command{
+		Use:   "delete-profile NAME",
+		Short: "Remove a profile",
+		Long: `Remove a profile from the kuberecord configuration file.
+
+Deleting the active profile is refused unless --force is given, because the
+resolution chain would then name a profile that does not exist. With --force the
+stanza is removed and the active pointer is cleared, so the next command resolves
+through the rest of the chain instead of failing on a profile that is gone.
+
+What was removed is printed, so the deletion is auditable in scrollback: nothing
+else holds that stanza once the file is written.`,
+		Example: `  kuberecord config delete-profile stale
+  kuberecord config delete-profile local --force`,
+
+		ValidArgsFunction: completeProfileNames,
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := configFormat("delete-profile", flags.Output)
+			if err != nil {
+				return err
+			}
+			if len(args) != 1 {
+				return exit.UsageErrorf("config delete-profile takes one argument, the profile name")
+			}
+			name := args[0]
+
+			path, err := resolve.DefaultConfigPath()
+			if err != nil {
+				return exit.RuntimeErrorf("%w", err)
+			}
+			cfg, err := resolve.LoadConfig(path)
+			if err != nil {
+				return exit.RuntimeErrorf("%w", err)
+			}
+			removed, err := resolve.RequireProfile(cfg, path, name)
+			if err != nil {
+				return err
+			}
+
+			cleared := cfg.CurrentProfile == name
+			if cleared && !force {
+				return errDeletingTheActiveProfile(cfg, invokedAs, name)
+			}
+			delete(cfg.Profiles, name)
+			if cleared {
+				// Cleared rather than left dangling. SaveConfig validates on the
+				// way out and would refuse a currentProfile naming nothing, so this
+				// is what makes --force a deletion instead of an error — and it is
+				// what stops the next command resolving to a profile that is gone.
+				cfg.CurrentProfile = ""
+			}
+
+			if err := resolve.SaveConfig(path, cfg); err != nil {
+				return exit.RuntimeErrorf("%w", err)
+			}
+
+			// Provenance, and the same judgement writeProfile's replacement line
+			// makes: the deletion succeeded and was asked for, and what the line
+			// carries is the stanza that no longer exists anywhere (D27).
+			severity := render.NewSeverity(options.ShouldColorize(flags.Color, streams.ErrOut))
+			if err := options.WriteLine(streams.ErrOut, severity.Provenance(
+				fmt.Sprintf("→ deleted profile %q from %s (was: %s)",
+					name, path, removed.Describe()))); err != nil {
+				return err
+			}
+			if cleared {
+				for _, line := range activePointerCleared(cfg, invokedAs) {
+					if err := options.WriteLine(streams.ErrOut, line); err != nil {
+						return err
+					}
+				}
+			}
+
+			return writeProfileChange(streams.Out, format, profileChangeDocument{
+				Action: profileDeleted,
+				Name:   name,
+				Path:   path,
+				// No `profile`: this name carries no stanza any more, and a present
+				// but empty one would describe a profile with no backend that the
+				// file would itself refuse.
+				Previous:       &removed,
+				CurrentProfile: cfg.CurrentProfile,
+			})
+		},
+	}
+
+	command.Flags().BoolVar(&force, options.FlagForce, force,
+		"Delete the active profile as well, clearing the active pointer. Without it, deleting the "+
+			"profile the resolution chain is pointing at is refused.")
+
+	return command
+}
+
+// errDeletingTheActiveProfile refuses the one deletion that changes where the
+// next command reads from.
+//
+// It names both routes past itself rather than only --force (D34). They are not
+// the same decision: switching first keeps a profile active and is what somebody
+// with a replacement wants, while --force leaves the chain to fall through to
+// discovery and is what somebody clearing up wants. A message offering only the
+// second would push the first person into a state they would then have to undo.
+//
+// A profile that is the only one in the file is told so instead of being offered a
+// switch to nothing, because a remedy naming no command is worse than no remedy:
+// it reads as though the reader should have known which name to substitute.
+func errDeletingTheActiveProfile(cfg *resolve.Config, invokedAs, name string) error {
+	command := commandNameOr(invokedAs)
+	others := make([]string, 0, len(cfg.Profiles))
+	for _, other := range slices.Sorted(maps.Keys(cfg.Profiles)) {
+		if other != name {
+			others = append(others, other)
+		}
+	}
+	if len(others) == 0 {
+		return exit.UsageErrorf("%q is the active profile and the only one in this file, so there is "+
+			"nothing to switch to first: delete it and clear the active pointer with "+
+			"`%s config delete-profile %s --%s`, after which the resolution chain falls through to "+
+			"discovering a sink from the cluster", name, command, name, options.FlagForce)
+	}
+	// The rest of the list only when there is a rest of it. With one other profile
+	// the suggestion above has already named it, and a trailing "also defined:
+	// archive" would be the same word twice in one sentence.
+	rest := ""
+	if len(others) > 1 {
+		rest = fmt.Sprintf(" (also defined: %s)", strings.Join(others[1:], ", "))
+	}
+	return exit.UsageErrorf("%q is the active profile, and deleting it would leave the resolution "+
+		"chain naming a profile that does not exist: either switch first with "+
+		"`%s config use-profile %s` and delete it after, or delete it and clear the active pointer "+
+		"with `%s config delete-profile %s --%s`%s",
+		name, command, others[0], command, name, options.FlagForce, rest)
+}
+
+// activePointerCleared says what --force did beyond the deletion.
+//
+// Two lines rather than one because they answer two questions, and the second is
+// only askable when there is something to answer it with: no profile is active
+// now, and — if any remain — which command chooses the next one. A deletion that
+// left the file with no profiles at all says the first and stops, since the route
+// out of that state is `set-profile`, which the resolution chain's own failure
+// already names.
+func activePointerCleared(cfg *resolve.Config, invokedAs string) []string {
+	lines := []string{"→ no profile is active now: the resolution chain falls through to the " +
+		"steps after it"}
+	if len(cfg.Profiles) > 0 {
+		lines = append(lines, fmt.Sprintf("→ to choose another: `%s config use-profile %s`",
+			commandNameOr(invokedAs), slices.Sorted(maps.Keys(cfg.Profiles))[0]))
+	}
+	return lines
 }
 
 // newConfigSetContextClusterIDCommand records which kuberecord cluster a
@@ -884,6 +1186,11 @@ writing several mappings in a row wants.`,
   kuberecord config set-context-cluster-id prod-eu prod-eu-1
   kuberecord --context prod-eu config set-context-cluster-id prod-eu-1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := configFormat("set-context-cluster-id", flags.Output)
+			if err != nil {
+				return err
+			}
+
 			var contextName, clusterID string
 			switch len(args) {
 			case 1:
@@ -914,13 +1221,36 @@ writing several mappings in a row wants.`,
 			if cfg.Contexts == nil {
 				cfg.Contexts = map[string]string{}
 			}
+			// Read out before the assignment, for the reason writeProfile reads the
+			// displaced stanza out: this write is an upsert too, and the identity it
+			// replaces is held nowhere else once the file is saved.
+			previous := cfg.Contexts[contextName]
 			cfg.Contexts[contextName] = clusterID
 
 			if err := resolve.SaveConfig(path, cfg); err != nil {
 				return exit.RuntimeErrorf("%w", err)
 			}
-			return options.WriteLine(streams.ErrOut,
-				fmt.Sprintf("→ context %q reads cluster %q", contextName, clusterID))
+
+			// Remapping a context is the same class of surprising-but-correct
+			// outcome as replacing a profile, and it is reported the same way and in
+			// the same tier. A mapping is what makes `--context prod-eu` carry an
+			// identity, so a reader who has just silently pointed a context at a
+			// different cluster's history is a reader who will trust the next answer
+			// for the wrong reason.
+			confirmation := fmt.Sprintf("→ context %q reads cluster %q", contextName, clusterID)
+			if previous != "" && previous != clusterID {
+				severity := render.NewSeverity(options.ShouldColorize(flags.Color, streams.ErrOut))
+				confirmation = severity.Provenance(confirmation + fmt.Sprintf(" (was: %q)", previous))
+			}
+			if err := options.WriteLine(streams.ErrOut, confirmation); err != nil {
+				return err
+			}
+			return writeContextMapping(streams.Out, format, contextMappingDocument{
+				Context:           contextName,
+				ClusterID:         clusterID,
+				PreviousClusterID: previous,
+				Path:              path,
+			})
 		},
 	}
 }

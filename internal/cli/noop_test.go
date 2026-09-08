@@ -118,7 +118,7 @@ const aBoundNotReached = "a bound that was not reached is the flag working, not 
 // flag added is measured against it by `make test` rather than by a user.
 var noopAudit = []auditedFlag{
 	// `timeline`, `diff`, `blame`, `get`, `scopes` — the flags that shape an answer.
-	{"since", explained, "an empty window is explained by explainEmpty against coverage, or by " +
+	{"since", explained, "an empty window is explained by explainNoChanges against coverage, or by " +
 		"scopesFinding; a window a backend forced is named by timelineBounds"},
 	{"until", explained, "as --since"},
 	{"from", explained, "an alias of --since, collapsed onto it before anything reads a bound"},
@@ -143,13 +143,16 @@ var noopAudit = []auditedFlag{
 		"silent by design: the envelope carries every operation already, so --full asks for " +
 		"something that is already true"},
 	{"with-events", explained, "explainNoEvents gives the three states, and prints the rule " +
-		"fragment that would make Events appear (Task 16.1)"},
+		"fragment that would make Events appear (Task 16.1). The mirror case is explained too: a " +
+		"document made entirely of Event rows is a timeline in which the object appears never to " +
+		"have changed, and explainNoChanges says against the same coverage whether it was watched " +
+		"and quiet or never watched at all (Task 17.3)"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},
 	{"exit-code", deliberatelySilent, "the exit code is the effect, and 0-for-no-changes is " +
 		"`git diff`'s own contract rather than the flag being ignored. The emptiness itself is " +
-		"still explained by explainEmpty, and a non-zero code is announced by changesFoundNotice"},
+		"still explained by explainNoChanges, and a non-zero code is announced by changesFoundNotice"},
 	{"verify", alwaysVisible, "a pass prints the digest it checked, a failure exits 1 and writes " +
 		"no document at all"},
 	{"at", deliberatelySilent, "the header prints `at:`, `base row:` and `patches applied:` on " +
@@ -187,17 +190,23 @@ var noopAudit = []auditedFlag{
 
 	// kuberecord's global surface.
 	{"output", deliberatelySilent, "every format a command cannot render is refused by name. " +
-		"`wide` on `version`, `config view` and `config resolve` renders identically to `table`, " +
-		"and that is the flag's guarantee honoured rather than dropped: `wide` means the same " +
-		"table with nothing elided, and those three documents elide nothing at any width. " +
-		"docs/CLI.md's format matrix says so"},
+		"`wide` on `version`, `config view`, `config get-profiles` and `config resolve` renders " +
+		"identically to `table`, and that is the flag's guarantee honoured rather than dropped: " +
+		"`wide` means the same table with nothing elided, and those four documents elide nothing " +
+		"at any width — the profile listing's cells are addresses and paths people paste, so " +
+		"nothing in it is ever shortened. On the four `config` subcommands that write, `table` " +
+		"and `wide` render no document at all — the report of a write is the confirmation on " +
+		"stderr, and its data is the file. docs/CLI.md's format matrix says so"},
 	{"color", deliberatelySilent, "a rendering mode, never a request for content: it changes how " +
 		"a line is painted and never which lines there are. A notice about colour would be the " +
 		"noise it was warning about"},
 	{"cluster-id", deliberatelySilent, chainInput},
 	{"sink", deliberatelySilent, chainInput},
 	{"source", deliberatelySilent, chainInput},
-	{"profile", deliberatelySilent, chainInput},
+	{"profile", deliberatelySilent, chainInput + ". `config get-profiles` reads the same file " +
+		"and deliberately does not consult it: CURRENT is the file's active pointer, as the `*` " +
+		"in `kubectl config get-contexts` is, and what this invocation would resolve to is the " +
+		"other command's question"},
 	{"operator-namespace", deliberatelySilent, chainInput},
 	{"sink-addr", explained, "it is refused by name on `config set-profile`, where it would " +
 		"otherwise parse, change no field, and leave its author believing they had set the " +
@@ -205,6 +214,11 @@ var noopAudit = []auditedFlag{
 	{"yes", deliberatelySilent, "it answers a question. A question that was not asked — an " +
 		"indexed backend, a non-interactive stream, a scan under the confirmation width — needed " +
 		"no answer, which is what `rm -f` does with a file nothing would have prompted about"},
+	{"force", deliberatelySilent, "it overrides a refusal. A refusal that was not raised — " +
+		"deleting a profile that is not the active one — needed no override, which is what " +
+		"`rm -f` does with a file nothing would have prompted about. Where it does act it is " +
+		"announced twice over: the deletion names the stanza it removed, and clearing the active " +
+		"pointer is its own line naming the command that chooses the next profile"},
 	{"max-objects", deliberatelySilent, "a circuit breaker for the work --limit cannot bound " +
 		"without an index. On an indexed backend the work is already bounded, and a breaker that " +
 		"does trip names itself through coldscan.Stopped"},
@@ -331,7 +345,7 @@ func sortedKeys(m map[string][]string) []string {
 //
 // `timeline`'s predicates are pushed into the query, so the rows a filter removed
 // never arrive and an emptiness it produced is indistinguishable from an empty
-// window. explainEmpty was then handed that emptiness and stated, of a hundred
+// window. explainNoChanges was then handed that emptiness and stated, of a hundred
 // recorded changes, that nothing had changed. See explainNoMatches.
 
 // filteredEmptyRequest is a bare `timeline` narrowed to an actor nothing matches.

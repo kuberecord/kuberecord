@@ -1,0 +1,7 @@
+=== stdout ===
+=== stderr ===
+error: "local" is the active profile, and deleting it would leave the resolution chain naming a profile that does not exist: either switch first with `kuberecord config use-profile archive` and delete it after, or delete it and clear the active pointer with `kuberecord config delete-profile local --force`
+
+<the command's usage block>
+=== exit ===
+2 (usage error)

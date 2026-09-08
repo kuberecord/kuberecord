@@ -69,6 +69,21 @@ import (
 // best-effort: what it cannot check, it says it could not check. Nothing about the
 // written profile depends on the answer, because the profile's password comes from
 // the reader's own environment and not from the operator's Secret.
+//
+// Both routes into ProfileFromSink rest on that paragraph, and they rest on it
+// identically: --from-sink through deriveProfile, and the prompting layer through
+// askDiscovery, which reaches this function with the ref a menu chose. A change
+// that made an unreadable Secret fatal here would not fail one command — it would
+// end the wizard four questions in, for exactly the read-only engineer both routes
+// were built for. The wizard additionally reads CredentialUnreadable, so it can
+// ask where the password comes from instead of assuming the default, which is the
+// one behaviour that differs between the two.
+//
+// It is a carve-out for the Secret read and nothing else. A missing custom
+// resource, an object store handed overrides it cannot hold, a decode failure and
+// a malformed reference all still fail hard on both routes: those are failures of
+// the thing the user named, and a profile derived past one of them would describe
+// a sink that was never read.
 
 // ProfileOverrides are the fields the user stated on the command line, which win
 // over what the custom resource says.
@@ -161,6 +176,25 @@ type SinkProfile struct {
 	// profile depends on it.
 	CredentialUnverified string
 
+	// CredentialUnreadable is the bare reason the Secret could not be *read* —
+	// "forbidden", or whatever the API server said — and is empty whenever it was
+	// read, including when it was read and found to hold no password key.
+	//
+	// The narrower half of CredentialUnverified, and separate from it because the
+	// two are acted on differently. CredentialUnverified is prose for a paragraph
+	// a person reads; this is the fact a caller branches on, which is why it holds
+	// the reason alone rather than a sentence around it. Only the prompting layer
+	// uses it today: a Secret nobody could read means nothing is known about where
+	// this reader's password lives, so the wizard asks rather than assuming the
+	// default — while a Secret that *was* read and lacks its key says nothing
+	// about the reader at all. It is a broken sink, which the operator reports on
+	// its own status and Explain names the present keys for.
+	//
+	// A string rather than a bool so that the message naming it can name the
+	// reason too, in the words reasonFor already chose for every other notice in
+	// this package.
+	CredentialUnreadable string
+
 	// EndpointInternal reports that an S3 profile's endpoint resolves only inside
 	// the cluster. It is written unchanged regardless — see Explain.
 	EndpointInternal bool
@@ -246,8 +280,9 @@ func (r *BackendResolver) clickHouseProfile(
 		RecordedAddr:       connection.Addr,
 		UsernameOverridden: over.Username != "",
 	}
-	credential, unverified := r.verifyCredential(ctx, connection.CredentialsSecretRef)
+	credential, unverified, unreadable := r.verifyCredential(ctx, connection.CredentialsSecretRef)
 	derived.Credential, derived.CredentialUnverified = credential, unverified
+	derived.CredentialUnreadable = unreadable
 
 	// The three cases of the address rule, in the order they are decided. The
 	// override wins outright — it is the common case, and the one Task 13.1's
@@ -330,29 +365,38 @@ func clusterInternalEndpoint(endpoint string) bool {
 // not allowed to look" and "here is what the Secret does hold" — and the second is
 // the one that catches a Secret created with --from-literal=PASSWORD=…, which is
 // invisible until something says the key it looked for was `password`.
+//
+// The third return separates those two messages into the categories a caller can
+// act on: it carries the bare reason when the Secret could not be read at all, and
+// nothing when it was read. See SinkProfile.CredentialUnreadable for why the
+// distinction is worth a second value.
 func (r *BackendResolver) verifyCredential(
 	ctx context.Context, ref v1alpha1.SecretReference,
-) (*SinkCredential, string) {
+) (credential *SinkCredential, unverified, unreadable string) {
 	namespace, err := r.secretNamespace(ctx, ref)
 	if err != nil {
 		return &SinkCredential{Name: ref.Name, Key: secretKeyPassword},
-			fmt.Sprintf("its namespace could not be worked out (%s)", reasonFor(err))
+			fmt.Sprintf("its namespace could not be worked out (%s)", reasonFor(err)), reasonFor(err)
 	}
-	credential := &SinkCredential{Namespace: namespace, Name: ref.Name, Key: secretKeyPassword}
+	credential = &SinkCredential{Namespace: namespace, Name: ref.Name, Key: secretKeyPassword}
 
 	clients, err := r.clients()
 	if err != nil {
-		return credential, fmt.Sprintf("it could not be read (%s)", reasonFor(err))
+		return credential, fmt.Sprintf("it could not be read (%s)", reasonFor(err)), reasonFor(err)
 	}
 	secret, err := clients.Typed.CoreV1().Secrets(namespace).Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
-		return credential, fmt.Sprintf("it could not be read (%s)", reasonFor(err))
+		return credential, fmt.Sprintf("it could not be read (%s)", reasonFor(err)), reasonFor(err)
 	}
 	if _, ok := secret.Data[secretKeyPassword]; !ok {
+		// Read, and wanting. The third return stays empty on purpose: this is a
+		// fact about the sink rather than about the reader's permissions, and the
+		// caller that asks where a password comes from must not be triggered by a
+		// Secret it was perfectly able to look at.
 		return credential, fmt.Sprintf("it holds no %q key (keys present: %s)",
-			secretKeyPassword, describeKeys(secret.Data))
+			secretKeyPassword, describeKeys(secret.Data)), ""
 	}
-	return credential, ""
+	return credential, "", ""
 }
 
 // Explain is what the command prints to stderr about what it derived.

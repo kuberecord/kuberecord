@@ -101,6 +101,21 @@ const (
 	// for, not for the script, which must never be able to hang on a prompt.
 	FlagAssumeYes = "yes"
 
+	// FlagForce is `config delete-profile`'s consent to remove the active profile.
+	//
+	// It is spelled --force rather than reusing --yes because the two answer
+	// different kinds of question. --yes says "do the expensive thing without
+	// asking" about work that was always going to be done; this says "do the thing
+	// I was refused", and it changes the outcome as well as the ceremony — the
+	// active pointer is cleared, which no invocation without it can cause.
+	// `kubectl delete --force` and `rm -f` set the same precedent for a flag that
+	// overrides a refusal.
+	//
+	// It is named here rather than typed at its registration because the refusal it
+	// unlocks names it back, and a message spelling the flag independently of its
+	// registration is the spelling that drifts.
+	FlagForce = "force"
+
 	// FlagMaxObjects is the cold scan's circuit breaker.
 	//
 	// It bounds the *work* rather than the answer, which is the half --limit

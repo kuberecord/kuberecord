@@ -1,0 +1,48 @@
+=== stdout ===
+backend
+  --source             silent       not given
+  --sink               silent       not given
+  profile              failed       profile "prod": the environment variable KUBERECORD_CLICKHOUSE_PASSWORD is not set, and this profile names it as where its password comes from
+  discovery            not reached
+
+  unresolved
+
+cluster identity
+  --cluster-id         silent       not given
+  context mapping      answered     prod-eu-1
+  operator Deployment  not reached
+  the sink             not reached
+
+  resolved             prod-eu-1 (from /home/engineer/.config/kuberecord/config.yaml, which maps the context "kuberecord-test")
+
+reachability
+  not checked          nothing was dialled; --check asks the backend whether it answers
+=== stderr ===
+=== error ===
+error: profile "prod": the environment variable KUBERECORD_CLICKHOUSE_PASSWORD is not set, and this profile names it as where its password comes from
+
+! profile "prod" is where this invocation reads from, and the chain stops here.
+
+It is the currentProfile in
+/home/engineer/.config/kuberecord/config.yaml
+
+Falling through to the cluster's own sink would read from somewhere you did not choose
+and report success, so a profile that cannot be resolved is fatal rather than skipped.
+Three routes get past it, and all three work today.
+
+Export the variable this profile names as where its password comes from:
+
+    export KUBERECORD_CLICKHOUSE_PASSWORD=…
+
+Or skip the profile for this one invocation. --sink is step 2 and a profile is step 3,
+so a named sink is reached first and its credential comes from the Secret it references.
+`kubectl get clickhousesinks` names the ones this cluster holds:
+
+    kuberecord config resolve … --sink ClickHouseSink/<name>
+
+Or stop it answering at all. It is the only profile that file defines, so there is
+none to switch to: write another, or remove this one and let the chain fall through
+to discovering a sink from the cluster.
+
+    kuberecord config set-profile <name>
+    kuberecord config delete-profile prod --force

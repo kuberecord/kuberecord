@@ -358,6 +358,15 @@ func TestProfileFromSinkReportsWhatItCouldNotCheck(t *testing.T) {
 		data     map[string][]byte
 		forbid   bool
 		wantSaid []string
+
+		// wantUnreadable is the bare reason CredentialUnreadable must carry, and
+		// empty means it must be empty. It is asserted separately from wantSaid
+		// because the two answer different questions: the prose says what to tell
+		// a reader, and this says whether the Secret was read at all — which is
+		// what the prompting layer branches on. A case where the Secret was read
+		// and found wanting must leave it empty, or the wizard would start asking
+		// about a permission the reader has.
+		wantUnreadable string
 	}{
 		{
 			name: "a Secret holding the key is checked and said to be",
@@ -369,14 +378,16 @@ func TestProfileFromSinkReportsWhatItCouldNotCheck(t *testing.T) {
 			wantSaid: []string{`no "password" key`, "PASSWORD, user"},
 		},
 		{
-			name:     "a Secret that is not there says so",
-			wantSaid: []string{"could not be read", "not found"},
+			name:           "a Secret that is not there says so",
+			wantSaid:       []string{"could not be read", "not found"},
+			wantUnreadable: "not found",
 		},
 		{
-			name:     "a forbidden read is named as itself, not as a broken cluster",
-			data:     goodSecret(),
-			forbid:   true,
-			wantSaid: []string{"could not be read", "forbidden"},
+			name:           "a forbidden read is named as itself, not as a broken cluster",
+			data:           goodSecret(),
+			forbid:         true,
+			wantSaid:       []string{"could not be read", "forbidden"},
+			wantUnreadable: "forbidden",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -403,6 +414,16 @@ func TestProfileFromSinkReportsWhatItCouldNotCheck(t *testing.T) {
 			}
 			if got := derived.Credential.String(); got != fixtureNamespace+"/"+fromSinkSecret {
 				t.Errorf("Credential = %q, want the Secret the sink names", got)
+			}
+
+			switch {
+			case tc.wantUnreadable == "" && derived.CredentialUnreadable != "":
+				t.Errorf("CredentialUnreadable = %q for a Secret that was read, want empty: "+
+					"the wizard would ask about a permission this reader has",
+					derived.CredentialUnreadable)
+			case !strings.Contains(derived.CredentialUnreadable, tc.wantUnreadable):
+				t.Errorf("CredentialUnreadable = %q, want it to name %q",
+					derived.CredentialUnreadable, tc.wantUnreadable)
 			}
 
 			if len(tc.wantSaid) == 0 {

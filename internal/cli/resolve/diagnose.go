@@ -111,26 +111,31 @@ const (
 // one that drifts.
 const DefaultPasswordEnv = "KUBERECORD_CLICKHOUSE_PASSWORD"
 
-// The two sections of docs/CLI.md a rendered message can send a reader to.
+// The sections of docs/CLI.md a rendered message can send a reader to.
 //
 // Each names a section rather than the page. The page is a command reference
 // several hundred lines long, and a reader who has just been told "see
 // docs/CLI.md" by a failure has been handed a search, not an answer.
 //
-// They are two rather than one because the messages ask two different things of
-// the reader. docsOutsideCluster is for somebody stuck: why the address is a
+// They are three rather than one because the messages ask three different things
+// of the reader. docsOutsideCluster is for somebody stuck: why the address is a
 // Service name and why that is right, both routes out of it, and why this tool
 // will not forward the port itself. docsReadOnlyUser is for somebody who is not
 // stuck at all — `--from-sink` prints the credential advice after writing a
 // profile for a perfectly public endpoint too, and pointing that reader at a
-// port-forward section would be a non-sequitur.
+// port-forward section would be a non-sequitur. docsSourceVersusSinkAddr is for
+// somebody holding the wrong model of two flags rather than missing a fact: it is
+// named when --sink-addr was passed at a failure the flag cannot fix, which is
+// exactly the moment "correcting one field" and "choosing a source" have to come
+// apart (Task 16.4, D36).
 //
-// Both are printed on a line of their own and unpunctuated, for the same reason
+// All are printed on a line of their own and unpunctuated, for the same reason
 // the address gets one: they are tokens to be copied rather than prose to be
 // read, and a trailing full stop is a character that travels with them.
 const (
-	docsOutsideCluster = "docs/CLI.md#running-the-cli-outside-the-cluster"
-	docsReadOnlyUser   = "docs/CLI.md#the-read-only-clickhouse-user"
+	docsOutsideCluster       = "docs/CLI.md#running-the-cli-outside-the-cluster"
+	docsReadOnlyUser         = "docs/CLI.md#the-read-only-clickhouse-user"
+	docsSourceVersusSinkAddr = "docs/CLI.md#--source-versus---sink-addr"
 )
 
 // clusterInternalSuffixes are the DNS suffixes that only resolve inside a

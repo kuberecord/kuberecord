@@ -221,9 +221,21 @@ func assertGolden(t *testing.T, name, stdout, stderr string) {
 // rewriting the thing it was meant to pin.
 func assertGoldenIn(t *testing.T, command, name, stdout, stderr string) {
 	t.Helper()
+	assertGoldenDocument(t, command, name, stdoutMarker+stdout+stderrMarker+stderr)
+}
+
+// assertGoldenDocument is the compare-or-rewrite half, over an already-assembled
+// document.
+//
+// It is separate from the section assembly because the three harnesses that use
+// it assemble different sections — two streams for a rendering, a third for the
+// failure a reporting command returned — while the -update path and the compare
+// path must stay one implementation. A golden test whose two halves disagree is a
+// test that passes after rewriting the thing it was meant to pin.
+func assertGoldenDocument(t *testing.T, command, name, got string) {
+	t.Helper()
 
 	path := filepath.Join("testdata", command, name+".golden")
-	got := stdoutMarker + stdout + stderrMarker + stderr
 
 	if *updateGolden {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -575,21 +587,7 @@ func TestTimelineInterleavesKubernetesEvents(t *testing.T) {
 		changes:      checkoutHistory(),
 		incarnations: checkoutIncarnations(),
 		intervals:    watchedSince("2026-07-02T09:14:00Z", "ClusterStreamRule/all-workloads"),
-		events: []query.Change{
-			{
-				TS: at("2026-08-28T14:03:20.310Z"), EventType: query.EventKubernetes,
-				UID: "e1", Actors: []string{"kube-controller-manager"}, APIVersion: "v1",
-				Data: `{"type":"Normal","reason":"ScalingReplicaSet",` +
-					`"message":"Scaled up replica set checkout-7d4f to 5","source":{"component":"deployment-controller"}}`,
-			},
-			{
-				TS: at("2026-08-28T14:06:44.020Z"), EventType: query.EventKubernetes,
-				UID: "e2", APIVersion: "events.k8s.io/v1",
-				Data: `{"type":"Warning","reason":"FailedCreate",` +
-					`"note":"pods \"checkout-7d4f-\" is forbidden: exceeded quota",` +
-					`"reportingController":"replicaset-controller"}`,
-			},
-		},
+		events:       checkoutEvents(),
 	}
 
 	request := defaultRequest()
@@ -635,6 +633,31 @@ const eventsWatchedSince = "2026-07-02T09:14:00Z"
 func eventsWatchedBy(group, rule string) query.ScopeInterval {
 	return query.ScopeInterval{
 		APIGroup: group, Kind: eventKindName, RuleRef: rule, From: at(eventsWatchedSince),
+	}
+}
+
+// checkoutEvents is the pair of Kubernetes Events the fixtures interleave, one
+// under each API spelling.
+//
+// Both spellings, because the renderer treats them alike and a fixture using only
+// one would let a regression that reached for `message` or for `note` alone pass.
+// They are inside every window these tests use, so a suite that sees none of them
+// is seeing a decision rather than a bound.
+func checkoutEvents() []query.Change {
+	return []query.Change{
+		{
+			TS: at("2026-08-28T14:03:20.310Z"), EventType: query.EventKubernetes,
+			UID: "e1", Actors: []string{"kube-controller-manager"}, APIVersion: "v1",
+			Data: `{"type":"Normal","reason":"ScalingReplicaSet",` +
+				`"message":"Scaled up replica set checkout-7d4f to 5","source":{"component":"deployment-controller"}}`,
+		},
+		{
+			TS: at("2026-08-28T14:06:44.020Z"), EventType: query.EventKubernetes,
+			UID: "e2", APIVersion: "events.k8s.io/v1",
+			Data: `{"type":"Warning","reason":"FailedCreate",` +
+				`"note":"pods \"checkout-7d4f-\" is forbidden: exceeded quota",` +
+				`"reportingController":"replicaset-controller"}`,
+		},
 	}
 }
 
@@ -890,6 +913,231 @@ func TestTimelineExplainsAnEmptyWithEventsResultWhenStructured(t *testing.T) {
 		t.Errorf("the structured rendering explained nothing:\n%s", stderr)
 	}
 	if strings.Contains(stdout, "--with-events") {
+		t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
+	}
+}
+
+// Invariant 9 from the other direction, and Task 17.3's finding.
+//
+// Task 16.1 closed the case where --with-events interleaves nothing. This is its
+// mirror, and it is the one that reads as an answer. Read-time correlation takes
+// an Event's involvedObject from the Event row itself and matches it against the
+// address on the command line — the subject's own rows are never consulted — so a
+// rule capturing v1/Event and not the subject's kind yields working Events and no
+// state at all. Nothing is dropped and nothing is broken. The reader sees a page
+// of Events, no Modified rows, and concludes the object never changed. It did;
+// nobody was watching it.
+
+// eventsOnlyEngine holds Kubernetes Events about the object and none of the
+// object's own history.
+//
+// incarnations is empty as well as changes, which is the honest fixture: a kind
+// nothing ever watched has no rows to list incarnations from, and an engine that
+// answered with one would be putting a UID in the header that no row in the
+// archive supports.
+func eventsOnlyEngine(intervals []query.ScopeInterval) *fakeEngine {
+	return &fakeEngine{
+		caps:      clickHouseCapabilities(),
+		events:    checkoutEvents(),
+		intervals: intervals,
+	}
+}
+
+// eventsOnlyRequest bounds the window, which the three states below need for a
+// reason worth stating.
+//
+// An unbounded window makes from.IsZero() true, and explainNoChanges reads that
+// as "the window reaches back past anything the scope log knows about" — so the
+// watched-and-quiet answer is unreachable without a lower bound, and the fixture
+// would be pinning a different sentence from the one it claims to. It is the same
+// bound TestTimelineExplainsAnEmptyResultAgainstCoverage uses, for the same reason.
+func eventsOnlyRequest() cli.TimelineRequest {
+	request := withEventsRequest()
+	request.From = at("2026-08-01T00:00:00Z")
+	request.To = at("2026-08-28T15:00:00Z")
+	return request
+}
+
+// TestTimelineExplainsAnEventsOnlyTimeline covers the three states, in both
+// colour modes.
+//
+// Golden files rather than substring assertions, as the --with-events states are:
+// the notice exists because the page in front of the reader misleads without it,
+// so what is under test is the whole rendering — the rows, the coverage line in
+// the header they contradict, and the tier the sentence is painted in. A notice
+// demoted to the dim register would change nothing a substring assertion records
+// and would break D30.
+func TestTimelineExplainsAnEventsOnlyTimeline(t *testing.T) {
+	tests := map[string]struct {
+		golden    string
+		intervals []query.ScopeInterval
+		coverErr  error
+	}{
+		// The finding's own state: a rule streams Events, no rule streams the
+		// subject's kind, and the Events shown are not evidence that anything was
+		// watching the Deployment.
+		"the object's kind is not watched": {
+			golden:    "events-only-kind-not-watched",
+			intervals: []query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")},
+		},
+		// The ordinary empty case wearing Event rows. The kind was watched across
+		// the window, so the absence of changes is real and the interval is the
+		// evidence for saying so.
+		"the kind is watched and nothing changed": {
+			golden: "events-only-nothing-changed",
+			intervals: append(deploymentScope(),
+				eventsWatchedBy("", "ClusterStreamRule/all-events")),
+		},
+		// No scope log at all. The two states above cannot be told apart, and the
+		// notice says exactly that rather than picking one.
+		"the backend cannot say": {
+			golden:   "events-only-cannot-say",
+			coverErr: query.ErrCapabilityUnsupported,
+		},
+	}
+
+	for name, test := range tests {
+		for mode, color := range map[string]bool{"": false, "-color": true} {
+			t.Run(name+mode, func(t *testing.T) {
+				engine := eventsOnlyEngine(test.intervals)
+				engine.coverageErr = test.coverErr
+
+				stdout, stderr, err := runTimeline(
+					t, engine, eventsOnlyRequest(), render.Options{Color: color})
+				if err != nil {
+					t.Fatalf("an Events-only timeline is a notice, not a finding: %v", err)
+				}
+				assertGolden(t, test.golden+mode, stdout, stderr)
+			})
+		}
+	}
+}
+
+// TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding pins the exit code apart
+// from the wording.
+//
+// The wholly-empty case with no coverage exits 3, because the command produced no
+// evidence of anything. This one produced evidence — real, correlated Events —
+// and query.ErrNoCoverage's own sentence, "this silence is not evidence that it
+// did not change", describes a silence that is not on the page. So it stays a
+// notice at exit 0, which is also what this path returned before it said anything
+// at all: no consumer's exit-code handling moves under a release whose subject is
+// explaining things better.
+func TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding(t *testing.T) {
+	engine := eventsOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
+
+	_, _, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if code := exit.CodeFor(err); code != exit.Success {
+		t.Errorf("an Events-only timeline exited %d; a document holding rows is an answer, not the "+
+			"absence of one", code)
+	}
+}
+
+// TestATimelineWithBothKindsOfRowSaysNothing is the first silence, and it is as
+// load-bearing as the notices above.
+//
+// The object's own changes are on the page. Nothing about them needs explaining,
+// and a notice volunteered here would appear under the ordinary invocation —
+// which is every invocation — and teach a reader to stop reading the stream the
+// other three states are written to.
+func TestATimelineWithBothKindsOfRowSaysNothing(t *testing.T) {
+	engine := &fakeEngine{
+		caps:         clickHouseCapabilities(),
+		changes:      shortHistory(),
+		incarnations: checkoutIncarnations(),
+		events:       checkoutEvents(),
+		intervals:    deploymentScope(),
+	}
+
+	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if stderr != "" {
+		t.Errorf("a timeline holding both kinds of row qualified itself anyway:\n%s", stderr)
+	}
+}
+
+// TestAWhollyEmptyTimelineKeepsItsOwnMessage is the second silence: the case that
+// was already explained must not now be explained twice.
+//
+// explainNoChanges serves both readings through one switch, so the risk the
+// rename introduces is not that the new state is missed but that the old one
+// gains a second sentence beside the one it has had since Invariant 9 was first
+// made into output.
+func TestAWhollyEmptyTimelineKeepsItsOwnMessage(t *testing.T) {
+	engine := &fakeEngine{caps: clickHouseCapabilities(), intervals: deploymentScope()}
+
+	// A bare invocation over the same bounded window. --with-events is deliberately
+	// absent: it would add explainNoEvents's own sentence, which is a second notice
+	// for a second question and would make the count below assert nothing.
+	request := defaultRequest()
+	request.From, request.To = at("2026-08-01T00:00:00Z"), at("2026-08-28T15:00:00Z")
+
+	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	assertGolden(t, "empty-with-coverage", stdout, stderr)
+	if strings.Contains(stderr, "Kubernetes Event") {
+		t.Errorf("a page with no rows on it was told what its rows are:\n%s", stderr)
+	}
+	if got := strings.Count(stderr, render.WarningMarker+" "); got != 1 {
+		t.Errorf("an empty timeline carried %d notices, want 1:\n%s", got, stderr)
+	}
+}
+
+// TestAnEventsOnlyTimelineReachesTheMidWindowAnswer is the non-vacuity half of
+// "one switch, not two".
+//
+// explainNoChanges has a fourth answer the acceptance criteria do not enumerate —
+// the scope opened after the window started — and it reaches an Events-only
+// document for free precisely because the two readings share the reasoning above
+// the wording. A parallel implementation would have had three answers and would
+// have told this reader the window was covered.
+func TestAnEventsOnlyTimelineReachesTheMidWindowAnswer(t *testing.T) {
+	engine := eventsOnlyEngine(watchedSince("2026-08-20T11:30:00Z", "StreamRule/payments/checkout-audit"))
+
+	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	for _, want := range []string{
+		"every row here is a Kubernetes Event",
+		"was not being watched before 2026-08-20T11:30:00Z",
+		"StreamRule/payments/checkout-audit",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the notice does not say %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestTimelineExplainsAnEventsOnlyTimelineWhenStructured keeps the two renderings
+// honest about the same fact.
+//
+// The structured path is a second sequence and therefore a second place for the
+// consultation to be dropped (see timelinestream.go). It reached the old defect
+// through a convenience of its own — `emitted.items > 0`, which cannot tell a
+// document made of Kubernetes Events from one holding the object's history — and
+// emission.shape is what replaced it.
+func TestTimelineExplainsAnEventsOnlyTimelineWhenStructured(t *testing.T) {
+	engine := eventsOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
+
+	request := eventsOnlyRequest()
+	request.Structured = render.StructuredJSON
+
+	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if !strings.Contains(stderr, "not because this object is watched") {
+		t.Errorf("the structured rendering explained nothing:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "Kubernetes Event") {
 		t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
 	}
 }

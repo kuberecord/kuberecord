@@ -1,0 +1,5 @@
+=== stdout ===
+=== stderr ===
+→ deleted profile "stale" from /home/engineer/.config/kuberecord/config.yaml (was: local archive at /archives/kuberecord)
+=== exit ===
+0 (success)

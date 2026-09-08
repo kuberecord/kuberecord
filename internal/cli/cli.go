@@ -199,7 +199,7 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 		// worse message than the one cobra would have printed unprompted.
 		diagnostic += "\n" + failed.UsageString()
 	}
-	diagnostic += unreachableAdvice(err, failed, flags, streams)
+	diagnostic += remediationAdvice(err, failed, flags, streams)
 
 	// The write is checked rather than discarded because every fallible call
 	// here is, and then deliberately not acted on: a failure means stderr itself
@@ -213,11 +213,39 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 	return code
 }
 
-// unreachableAdvice is the block that turns an unreachable cluster-internal
-// backend from a dead end into two commands (Task 13.1).
+// remediation is a failure that carries the routes past itself.
+//
+// Two errors satisfy it: an unreachable cluster-internal backend (Task 13.1) and
+// a profile that could not be resolved (Task 17.4). Both are cases where the way
+// out already existed and was invisible, which is the whole of D34, and both need
+// the same two things this layer knows and their own package does not — which
+// command failed, and whether stderr takes colour.
+//
+// It is an interface rather than two branches below so that the third one costs
+// nothing here. Matching by method is safe because the method is specific: it
+// takes a cobra command path and a colour decision, which is not a shape an error
+// acquires by accident.
+type remediation interface {
+	error
+	Render(commandPath string, colorize bool) string
+}
+
+// The two that satisfy it, asserted at compile time.
+//
+// An interface matched with errors.As is satisfied at run time or not at all, so
+// an error that stopped rendering its block — a signature changed, a method
+// renamed — would go quiet rather than fail to build, and the symptom would be a
+// failure that has lost its remedy. These two lines are what make that a
+// compilation error instead, and they are the list of what this layer renders.
+var (
+	_ remediation = (*resolve.UnreachableSinkError)(nil)
+	_ remediation = (*resolve.UnresolvableProfileError)(nil)
+)
+
+// remediationAdvice is the block that turns a dead end into commands.
 //
 // It is rendered here, at the top, for three reasons that all point the same way.
-// The failure it explains can be raised anywhere — during resolution, or from the
+// The failures it explains can be raised anywhere — during resolution, or from the
 // first query several layers below a command — and this is the one place every
 // path ends up. Colour is decided from --color, NO_COLOR and whether stderr is a
 // terminal, and only here are all three known. And rendering once, into
@@ -226,13 +254,15 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 //
 // cobra's own name for the command that failed is passed through, so the
 // invocation the message tells the reader to re-run is the one they actually
-// typed rather than a placeholder. It is the only thing this layer adds; the
-// words belong to resolve/diagnose.go.
-func unreachableAdvice(
+// typed rather than a placeholder — and so that a message can tell whether the
+// command it is explaining is the one it was about to recommend. It is the only
+// thing this layer adds; the words belong to resolve/diagnose.go and
+// resolve/profileroutes.go.
+func remediationAdvice(
 	err error, failed *cobra.Command, flags *options.GlobalFlags, streams genericiooptions.IOStreams,
 ) string {
-	var unreachable *resolve.UnreachableSinkError
-	if !errors.As(err, &unreachable) {
+	var advisable remediation
+	if !errors.As(err, &advisable) {
 		return ""
 	}
 
@@ -244,7 +274,7 @@ func unreachableAdvice(
 	if flags != nil {
 		colorize = options.ShouldColorize(flags.Color, streams.ErrOut)
 	}
-	return "\n" + unreachable.Render(commandPath, colorize)
+	return "\n" + advisable.Render(commandPath, colorize)
 }
 
 // interrupted phrases the end of an invocation that was told to stop.

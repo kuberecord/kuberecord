@@ -18,6 +18,45 @@ than a summary of them.
 
 ### Added
 
+- **`kuberecord config get-profiles` lists the profiles and says which of them
+  could authenticate right now.** `config view` prints the configuration file;
+  this prints its *state*, the way `kubectl config get-contexts` does beside
+  `kubectl config view`:
+
+  ```
+  CURRENT   NAME     BACKEND      TARGET                        CREDENTIAL
+  *         local    clickhouse   127.0.0.1:9000/kuberecord     env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+            prod     clickhouse   ch.observability:9000/audit   env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+            archive  s3           s3://audit-archive/prod       ambient
+  ```
+
+  **The `CREDENTIAL` column is the reason it exists.** A profile stores the *name*
+  of an environment variable or the *path* of a file, and whether that reference
+  resolves — exported in the shell you are in, present on this disk — is something
+  a dump of the file structurally cannot tell you. It is also the commonest reason
+  a query stops, so the column reports `env NAME (set|not set)`,
+  `file PATH (present|missing|unreadable)`, `ambient` or `none`, checked as the
+  table is drawn and decided by the same code path a query resolves a password
+  through. `present` and `unreadable` are different words because they are
+  different fixes.
+
+  It **never prints a credential value**, in any format, at any verbosity, and it
+  **contacts nothing** — no cluster, no backend, not even to say whether one
+  answers. Whether the backend can be reached stays `config resolve --check`; two
+  commands that dialled would be two answers to one question. An empty
+  configuration is not an error: the header prints with no rows, a line names
+  `config set-profile`, and the exit code is `0`.
+
+  `-o json` and `-o yaml` render a `Profiles` document under the existing
+  `cli.kuberecord.io/v1alpha1` contract, which makes
+  `jq '.profiles[] | select(.credential.state == "not set")'` the scripted form of
+  the same diagnosis. The profile-resolution failure added below now points at
+  this command where it offers to switch profiles, because *"will the other one
+  work?"* is the question a switch raises and this is the column that answers it.
+
+  That also closes the profile lifecycle: create, inspect, switch, delete, with a
+  command for each and a text editor for none.
+
 - **`kuberecord config set-profile` with no flags asks, on a terminal.**
   Configuring a profile used to require knowing flags a new user does not have.
   Now the bare subcommand prompts, and the **first question is whether to read the
@@ -298,6 +337,99 @@ than a summary of them.
   counting changes.
 
 ### Fixed
+
+- **A profile that cannot be resolved now names every way past it.** A stanza
+  pointing at `KUBERECORD_CLICKHOUSE_PASSWORD` in a shell that never exported it
+  failed with the variable named and nothing else — and a reader who then passed
+  `--sink-addr` to reach a forwarded port failed identically, because that flag
+  replaces the endpoint and never a credential. Three routes past it existed, all
+  three worked, and the error named none of them:
+
+  ```
+  error: profile "prod": the environment variable KUBERECORD_CLICKHOUSE_PASSWORD is not set, and this profile names it as where its password comes from
+
+  ! profile "prod" is where this invocation reads from, and the chain stops here.
+
+  It is the currentProfile in
+  /home/engineer/.config/kuberecord/config.yaml
+
+  Falling through to the cluster's own sink would read from somewhere you did not choose
+  and report success, so a profile that cannot be resolved is fatal rather than skipped.
+  Three routes get past it, and all three work today.
+
+  Export the variable this profile names as where its password comes from:
+
+      export KUBERECORD_CLICKHOUSE_PASSWORD=…
+
+  Or skip the profile for this one invocation. --sink is step 2 and a profile is step 3,
+  so a named sink is reached first and its credential comes from the Secret it references.
+  `kubectl get clickhousesinks` names the ones this cluster holds:
+
+      kuberecord timeline … --sink ClickHouseSink/<name>
+
+  Or stop this one answering. The file also defines archive, staging:
+
+      kuberecord config use-profile archive
+
+  To watch the chain make this decision, with this step's own reason beside it:
+
+      kuberecord config resolve
+  ```
+
+  The middle route is the one people were reaching for. `--sink` is step 2 of the
+  resolution chain and a profile is step 3, so naming a sink skips the profile
+  entirely and takes the credential from the Secret that sink references.
+
+  **Passing `--sink-addr` adds a paragraph rather than changing the answer.** It
+  says the flag corrects the endpoint and never a credential, so the password
+  still came from the profile — and it carries your forwarded port through into
+  the `--sink` route, which is that flag one word away from working.
+
+  Every profile failure is covered, not only the unset variable: a password file
+  that is missing or unreadable names the path and offers to rewrite the stanza, a
+  backend the build does not define offers the same, and a profile that is the
+  only one in the file is told so instead of being pointed at a profile you do not
+  have. Under `config resolve` the block drops its own "run `config resolve`"
+  pointer, since that report is already on the screen above it.
+
+  **Nothing about resolution changed, deliberately.** The chain order is the same,
+  a failing profile is still fatal rather than falling through to discovery — a
+  fall-through would read from somewhere you did not choose and report success —
+  and `--sink-addr` still replaces the endpoint and nothing else. Both properties
+  have tests whose job is to fail if a later change makes this failure disappear
+  the easy way.
+
+- **A timeline showing only Kubernetes Events no longer reads as an object that
+  never changed.** Correlation takes an Event's `involvedObject` from the Event
+  row itself and matches it against the object you named; the subject's own rows
+  are never consulted. So a rule capturing `v1/Event` but not the subject's kind
+  gives working Events — nothing is dropped — beside no `Added` or `Modified` rows
+  at all, because the object's own changes were never recorded. Nothing is broken,
+  and a page of Events with no changes among them says the object was quiet.
+
+  It was not quiet; nobody was watching it. That timeline is now explained against
+  the coverage of the object's own kind, with the same three answers an empty one
+  gets:
+
+  ```
+  ! every row here is a Kubernetes Event: nothing was ever watching apps/Deployment
+    payments/checkout in cluster "prod-eu-1", so its own changes were never
+    recorded. The Events are here because a rule captures Events, not because this
+    object is watched; the `scopes` command lists what is being recorded
+  ```
+
+  **Exit stays `0`.** The wholly-empty case with no coverage exits `3` because the
+  command produced no evidence of anything, and its message says *this silence is
+  not evidence that it did not change* — but here there is no silence, there are
+  rows. A non-zero exit beside a populated `-o json` document would tell a script
+  the opposite of what the document holds, and this path already exited `0` when
+  it said nothing at all, so nobody's exit-code handling moves.
+
+  A timeline with changes in it says none of this, and an empty one keeps the
+  message it has always had. Both readings go through one function against one
+  scope log, so they cannot come to disagree about it — the same discipline
+  `--with-events` finding no Events got in this release, arriving from the other
+  direction.
 
 - **A `timeline` filter that matched nothing no longer reports that nothing
   changed.** `--actor`, `--exclude-actor` and `--field` are pushed into the query,

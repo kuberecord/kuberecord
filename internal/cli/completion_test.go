@@ -429,6 +429,7 @@ profiles:
 	for _, args := range [][]string{
 		{"--" + options.FlagProfile, ""},
 		{"config", "use-profile", ""},
+		{"config", "delete-profile", ""},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			result := completeThrough(t, args...)
