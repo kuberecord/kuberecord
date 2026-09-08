@@ -1,0 +1,26 @@
+! [33mprofile "prod" is where this invocation reads from, and the chain stops here.[0m
+
+[33mIt is the currentProfile in[0m
+[33m/home/engineer/.config/kuberecord/config.yaml[0m
+
+[33mFalling through to the cluster's own sink would read from somewhere you did not choose[0m
+[33mand report success, so a profile that cannot be resolved is fatal rather than skipped.[0m
+[33mThree routes get past it, and all three work today.[0m
+
+[33mExport the variable this profile names as where its password comes from:[0m
+
+[1m    export KUBERECORD_CLICKHOUSE_PASSWORD=…[0m
+
+[33mOr skip the profile for this one invocation. --sink is step 2 and a profile is step 3,[0m
+[33mso a named sink is reached first and its credential comes from the Secret it references.[0m
+[33m`kubectl get clickhousesinks` names the ones this cluster holds:[0m
+
+[1m    kuberecord timeline … --sink ClickHouseSink/<name>[0m
+
+[33mOr stop this one answering. The file also defines archive, staging:[0m
+
+[1m    kuberecord config use-profile archive[0m
+
+[33mTo watch the chain make this decision, with this step's own reason beside it:[0m
+
+[1m    kuberecord config resolve[0m

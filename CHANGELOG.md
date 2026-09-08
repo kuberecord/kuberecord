@@ -299,6 +299,67 @@ than a summary of them.
 
 ### Fixed
 
+- **A profile that cannot be resolved now names every way past it.** A stanza
+  pointing at `KUBERECORD_CLICKHOUSE_PASSWORD` in a shell that never exported it
+  failed with the variable named and nothing else — and a reader who then passed
+  `--sink-addr` to reach a forwarded port failed identically, because that flag
+  replaces the endpoint and never a credential. Three routes past it existed, all
+  three worked, and the error named none of them:
+
+  ```
+  error: profile "prod": the environment variable KUBERECORD_CLICKHOUSE_PASSWORD is not set, and this profile names it as where its password comes from
+
+  ! profile "prod" is where this invocation reads from, and the chain stops here.
+
+  It is the currentProfile in
+  /home/engineer/.config/kuberecord/config.yaml
+
+  Falling through to the cluster's own sink would read from somewhere you did not choose
+  and report success, so a profile that cannot be resolved is fatal rather than skipped.
+  Three routes get past it, and all three work today.
+
+  Export the variable this profile names as where its password comes from:
+
+      export KUBERECORD_CLICKHOUSE_PASSWORD=…
+
+  Or skip the profile for this one invocation. --sink is step 2 and a profile is step 3,
+  so a named sink is reached first and its credential comes from the Secret it references.
+  `kubectl get clickhousesinks` names the ones this cluster holds:
+
+      kuberecord timeline … --sink ClickHouseSink/<name>
+
+  Or stop this one answering. The file also defines archive, staging:
+
+      kuberecord config use-profile archive
+
+  To watch the chain make this decision, with this step's own reason beside it:
+
+      kuberecord config resolve
+  ```
+
+  The middle route is the one people were reaching for. `--sink` is step 2 of the
+  resolution chain and a profile is step 3, so naming a sink skips the profile
+  entirely and takes the credential from the Secret that sink references.
+
+  **Passing `--sink-addr` adds a paragraph rather than changing the answer.** It
+  says the flag corrects the endpoint and never a credential, so the password
+  still came from the profile — and it carries your forwarded port through into
+  the `--sink` route, which is that flag one word away from working.
+
+  Every profile failure is covered, not only the unset variable: a password file
+  that is missing or unreadable names the path and offers to rewrite the stanza, a
+  backend the build does not define offers the same, and a profile that is the
+  only one in the file is told so instead of being pointed at a profile you do not
+  have. Under `config resolve` the block drops its own "run `config resolve`"
+  pointer, since that report is already on the screen above it.
+
+  **Nothing about resolution changed, deliberately.** The chain order is the same,
+  a failing profile is still fatal rather than falling through to discovery — a
+  fall-through would read from somewhere you did not choose and report success —
+  and `--sink-addr` still replaces the endpoint and nothing else. Both properties
+  have tests whose job is to fail if a later change makes this failure disappear
+  the easy way.
+
 - **A timeline showing only Kubernetes Events no longer reads as an object that
   never changed.** Correlation takes an Event's `involvedObject` from the Event
   row itself and matches it against the object you named; the subject's own rows

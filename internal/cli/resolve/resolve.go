@@ -658,7 +658,14 @@ func (r *BackendResolver) resolveTarget(ctx context.Context) (target, Origin, er
 		return target{}, OriginProfile, err
 	}
 	if profile != nil {
+		// The failure is explained here rather than inside targetFromProfile
+		// because the routes past it are facts about the *invocation* — which
+		// other profiles the file defines, how this one came to be chosen, what
+		// --sink-addr carried — and none of them is knowable from a stanza. The
+		// chain itself is untouched: a profile that fails still fails, and still
+		// stops the walk (D35). See profileroutes.go.
 		chosen, profileErr := targetFromProfile(name, *profile, r.sinkAddr())
+		profileErr = r.explainProfile(name, *profile, profileErr)
 		recordResult(&r.backendSteps, OriginProfile.Step(), profileErr, "%s", r.profileDetail(name))
 		return chosen, OriginProfile, profileErr
 	}

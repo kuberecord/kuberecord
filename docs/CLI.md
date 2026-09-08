@@ -1596,6 +1596,13 @@ thing many people meet is a `no such host` from a laptop. That is the subject of
 [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster), and
 step 1 does not have it at all.
 
+Step 3 has a rule of its own worth knowing before you configure a profile: once a
+profile answers, the chain is finished with it. A profile whose credential
+reference cannot be read **fails the command** rather than falling through to
+step 4 — see [A profile that cannot resolve is
+fatal](#a-profile-that-cannot-resolve-is-fatal-and-says-what-to-do-instead), which
+is also where the three ways past that failure are written out.
+
 To see which step would win — and why the earlier ones had nothing to say — without
 running a query, ask: [`kuberecord config resolve`](#config-resolve). It reports
 both chains and contacts nothing unless `--check` says to. For the short answer —
@@ -1745,6 +1752,79 @@ be found by label, then `kuberecord-system`.
 The other way discovery can succeed and still leave you with no answer is the
 address it discovers: correct for the operator, unresolvable from a laptop. See
 [Running the CLI outside the cluster](#running-the-cli-outside-the-cluster).
+
+### A profile that cannot resolve is fatal, and says what to do instead
+
+A profile answers step 3, and when what it references cannot be read — an
+environment variable this shell never exported, a password file that is not there,
+a stanza naming a backend this build does not have — the chain **stops**. It does
+not carry on to discovery.
+
+That is deliberate and it is not going to change. You configured a profile;
+answering from the cluster's own sink instead would read from somewhere you did not
+choose and report success, which is the same property that stops this tool
+[substituting an address](#the-cli-will-not-forward-the-port-for-you) when one does
+not resolve. An audit answer that carries an unstated "…from somewhere" is worse
+than no answer.
+
+So the failure names every route past itself, filled in with your own values:
+
+```console
+$ kuberecord timeline deploy/checkout -n payments
+error: profile "prod": the environment variable KUBERECORD_CLICKHOUSE_PASSWORD is not set, and this profile names it as where its password comes from
+
+! profile "prod" is where this invocation reads from, and the chain stops here.
+
+It is the currentProfile in
+/home/engineer/.config/kuberecord/config.yaml
+
+Falling through to the cluster's own sink would read from somewhere you did not choose
+and report success, so a profile that cannot be resolved is fatal rather than skipped.
+Three routes get past it, and all three work today.
+
+Export the variable this profile names as where its password comes from:
+
+    export KUBERECORD_CLICKHOUSE_PASSWORD=…
+
+Or skip the profile for this one invocation. --sink is step 2 and a profile is step 3,
+so a named sink is reached first and its credential comes from the Secret it references.
+`kubectl get clickhousesinks` names the ones this cluster holds:
+
+    kuberecord timeline … --sink ClickHouseSink/<name>
+
+Or stop this one answering. The file also defines archive, staging:
+
+    kuberecord config use-profile archive
+
+To watch the chain make this decision, with this step's own reason beside it:
+
+    kuberecord config resolve
+```
+
+The three are genuinely different decisions rather than three spellings of one:
+
+| Route | What it does | When it is the one |
+|---|---|---|
+| Export the variable, or create the file | Makes the reference the profile holds resolve. | The profile is right and your shell is missing a line. This is nearly always the answer. |
+| `--sink <kind>/<name>` | Skips the profile entirely — step 2 is reached before step 3 — and takes the address, the database, the user **and the credential** from the sink custom resource and the Secret it names. | You can read that Secret, and you want one answer now. |
+| `config use-profile <other>`, or `--profile <other>` | Leaves this profile in the file and stops it being the one that answers. | The stanza is stale. [`config delete-profile`](#creating-replacing-and-deleting-a-profile) removes it for good. |
+
+**`--sink-addr` is not one of them, and the message says so when you pass it.** It
+[corrects one field](#--source-versus---sink-addr) of whatever the chain found —
+the endpoint — and never a credential, so against a profile whose password
+reference is unresolvable it changes nothing: the password is read before the
+override is applied. Passing it is a good sign you want the second route, and
+`--sink ClickHouseSink/<name> --sink-addr 127.0.0.1:9000` is that route with your
+forwarded port still in it.
+
+If the profile is the only one in the file there is nothing to switch to, and the
+message says that instead of naming a profile you do not have — offering
+[`config set-profile`](#creating-replacing-and-deleting-a-profile) to write another,
+and `config delete-profile <name> --force` to remove this one and let the chain fall
+through to discovery again.
+
+A misspelled `--profile` is a different failure with a different message: it names
+the profiles the file does define, and it is never a fall-through either.
 
 ## Running the CLI outside the cluster
 
@@ -2286,6 +2366,13 @@ one, and a stale profile is not inert. It sits at step 3 of
 [the resolution chain](#where-the-data-comes-from) and shadows discovery — which is
 a confusion [`config resolve`](#config-resolve) was partly built to diagnose, and
 removal is the fix you reach for the moment you have diagnosed it.
+
+It is not inert in a second way either: a profile that answers stops the chain even
+when it cannot be resolved, so a stanza pointing at a variable you no longer export
+fails every command rather than quietly letting discovery take over. That failure
+names `use-profile`, `delete-profile` and both flag routes past it — see [A profile
+that cannot resolve is
+fatal](#a-profile-that-cannot-resolve-is-fatal-and-says-what-to-do-instead).
 
 #### Writes are scriptable
 

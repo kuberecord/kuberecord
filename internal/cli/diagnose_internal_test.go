@@ -159,7 +159,7 @@ func TestAnUnreachableClusterInternalSinkExplainsItself(t *testing.T) {
 		t.Fatalf("parsing flags: %v", parseErr)
 	}
 
-	advice := unreachableAdvice(err, root, flags, streams)
+	advice := remediationAdvice(err, root, flags, streams)
 	for _, want := range []string{
 		"kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000",
 		"--" + options.FlagSinkAddr + " 127.0.0.1:9000",
@@ -213,7 +213,7 @@ func TestTheAdviceObeysTheColourMode(t *testing.T) {
 			if parseErr := root.ParseFlags([]string{"--" + options.FlagColor, string(tc.mode)}); parseErr != nil {
 				t.Fatalf("parsing flags: %v", parseErr)
 			}
-			advice := unreachableAdvice(err, root, flags, streams)
+			advice := remediationAdvice(err, root, flags, streams)
 			if painted := strings.Contains(advice, "\x1b["); painted != tc.painted {
 				t.Errorf("--%s=%s produced painted=%v, want %v", options.FlagColor, tc.mode, painted, tc.painted)
 			}
@@ -238,7 +238,7 @@ func TestAnOrdinaryFailureGetsNoAdvice(t *testing.T) {
 		"a missing-coverage finding":  query.ErrNoCoverage,
 		"nothing at all":              nil,
 	} {
-		if advice := unreachableAdvice(err, root, flags, streams); advice != "" {
+		if advice := remediationAdvice(err, root, flags, streams); advice != "" {
 			t.Errorf("%s acquired an unreachable-backend block:\n%s", name, advice)
 		}
 	}

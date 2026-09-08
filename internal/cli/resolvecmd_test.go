@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -208,25 +209,39 @@ func assertReportGolden(t *testing.T, dir, name, commandPath, stdout, stderr str
 		errorMarker+topLevelDiagnostic(commandPath, err))
 }
 
+// remediation is cli.RunContext's own interface for a failure that carries the
+// routes past itself, restated here because it is unexported there.
+//
+// Restated rather than exported: the property these goldens assert is that the
+// composition at the top of the CLI reaches every such error, and a test that
+// borrowed the production interface would assert that one expression equals
+// itself. The two implementations are named by the compile-time assertions in
+// cli.go.
+type remediation interface {
+	error
+	Render(commandPath string, colorize bool) string
+}
+
 // topLevelDiagnostic is what cli.RunContext writes to stderr for a failure one of
 // these commands returned.
 //
 // It is reproduced here rather than driven through RunContext because these cases
 // hold a fixture cluster that only a directly-constructed resolver can be given.
 // What it must stay in step with is the composition in RunContext: the `error:`
-// line, and then the unreachable-backend block for a failure that carries one.
-// The block is the whole reason this section exists — an unreachable sink
-// resolved by `config resolve` has to produce the same explanation it produces
-// under `timeline`, and this is where a golden can see that it does.
+// line, and then the remediation block for a failure that carries one. The block
+// is the whole reason this section exists — an unreachable sink resolved by
+// `config resolve`, or a profile it could not resolve, has to produce the same
+// explanation it produces under `timeline`, and this is where a golden can see
+// that it does.
 func topLevelDiagnostic(commandPath string, err error) string {
 	if err == nil {
 		return ""
 	}
 	out := fmt.Sprintf("error: %v\n", err)
 
-	var unreachable *resolve.UnreachableSinkError
-	if errors.As(err, &unreachable) {
-		out += "\n" + unreachable.Render(commandPath, false)
+	var advisable remediation
+	if errors.As(err, &advisable) {
+		out += "\n" + advisable.Render(commandPath, false)
 	}
 	return out
 }
@@ -375,6 +390,43 @@ func unreachableBackend(inspection *resolve.Inspection) {
 		fakeEngine: &fakeEngine{caps: clickHouseCapabilities()},
 		err:        unresolvableAddress("clickhouse.kuberecord-system.svc"),
 	}
+}
+
+// TestResolveExplainsAProfileItCannotResolve is Task 17.4 seen from the command
+// that exists to diagnose the chain.
+//
+// It is a function of its own rather than a row of the table above, because that
+// table exports the password variable for every case in it and this case is
+// defined by the variable being absent.
+//
+// Two things are worth a golden here and nowhere else. The report and the block
+// are printed together — the step-by-step above, the routes below — and each is
+// only as useful as the other is not repeating it. And the block suppresses its
+// own "run `config resolve`" pointer here, which is the one place that
+// suppression is visible.
+func TestResolveExplainsAProfileItCannotResolve(t *testing.T) {
+	// Set and then removed, so t.Setenv's cleanup restores whatever the machine
+	// running this has. A developer with the variable exported would otherwise
+	// resolve the profile and produce a completely different report.
+	t.Setenv(clickHousePasswordEnv, "")
+	if err := os.Unsetenv(clickHousePasswordEnv); err != nil {
+		t.Fatalf("unsetting %s: %v", clickHousePasswordEnv, err)
+	}
+
+	invocation := resolveCase{
+		config:  clickHouseProfileConfig(),
+		sinks:   discoverableCluster(),
+		objects: []runtime.Object{credentialsSecret(operatorNamespace)},
+	}
+	stdout, stderr, err := invocation.run(t)
+
+	if got := exit.CodeFor(err); got != exit.RuntimeError {
+		t.Errorf("exit code %d, want %d (error: %v)", got, exit.RuntimeError, err)
+	}
+	if strings.Contains(stdout, theSecret) || strings.Contains(stderr, theSecret) {
+		t.Error("the report carries a credential")
+	}
+	assertResolveGolden(t, "profile-unresolvable", stdout, stderr, err)
 }
 
 // TestResolveDialsNothingWithoutCheck is the property the command exists for
