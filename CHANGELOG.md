@@ -16,6 +16,51 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`kuberecord config set-profile` with no flags asks, on a terminal.**
+  Configuring a profile used to require knowing flags a new user does not have.
+  Now the bare subcommand prompts, and the **first question is whether to read the
+  settings out of a sink this cluster already holds** — which is `--from-sink`
+  reached without having had to know it exists. A wizard whose first question is
+  "what is the address?" would not have helped anybody, because not knowing the
+  address is why you are there.
+
+  **It prints the flag command at the end**, with your values in it:
+
+  ```
+  The same thing without the questions:
+    kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000
+  ```
+
+  That line is the point of the feature rather than a courtesy. It teaches the
+  flag interface instead of replacing it, it is the paste-able artifact for a bug
+  report, and it is what somebody lifts into a CI job — so the second profile
+  needs no second conversation.
+
+  Three properties are worth knowing:
+
+  - **No new validation.** Every answer goes through the same validator the
+    configuration file is read with and the flags are checked by, so a value the
+    flags refuse is refused here in the same sentence, and one they take is taken.
+    A shared test table drives both routes and asserts exactly that.
+  - **No password prompt**, and there cannot be one: a profile never stores a
+    password inline, so what is asked for is the *name* of an environment variable
+    or the path of a file. Nothing secret is typed, echoed, held or left in
+    scrollback.
+  - **Off a terminal it exits `2` naming both flag forms**, rather than waiting.
+    A wizard that blocked in CI would hang the pipeline until something killed it,
+    and the message saying what was wanted would never arrive. `Ctrl-D` at any
+    question writes nothing.
+
+  There is no `--interactive` flag: a flag to request the behaviour you get by
+  typing nothing is a flag nobody finds. Any flag of the subcommand's own —
+  `--from-sink` or a field flag — means you have said what you want, and the
+  existing path runs unchanged. Global flags are not among them: `--context`,
+  `--kubeconfig` and `--operator-namespace` say which cluster the first question
+  would list sinks from, so an invocation carrying one is precisely one that wants
+  to be asked.
+
 ### Changed — BREAKING: CLI output
 
 - **`timeline` and `diff` display oldest first, and `--reverse` now means newest
@@ -97,6 +142,72 @@ than a summary of them.
   files pinning that so a library upgrade cannot quietly re-sort either format.
 
 ### Changed
+
+- **`kubectl explain streamrule.spec.resources` now says what `kind: Event` costs,
+  and `docs/SCHEMA.md` has the model behind it.** Events are captured for the
+  **whole watched scope** — every Event in the selected namespaces, not only those
+  about the other kinds the rule names — and correlated to a subject when the
+  archive is *read*. On top of that, the API server bumps an Event's `count` in
+  place rather than creating a second Event, which changes the object's content,
+  so hash dedup cannot suppress it and every recurrence stores another full row.
+  A crash-looping namespace, not a busy one, is what dominates write volume.
+
+  Both facts were true before this release and written down nowhere a rule author
+  looks. The field comments are the important half of the fix: they are what
+  `kubectl explain` prints, and typing the entry is the moment the decision is
+  actually made.
+
+  **A `labelSelector` does not narrow this**, and that is now stated on the field
+  itself. It matches the watched object's *own* labels, so on an `Event` entry it
+  matches the Event's labels rather than the subject's — and Events, written by
+  kubelet, the scheduler and the controllers, carry essentially none. The result
+  is an empty scope rather than a narrower one, on a rule that stays `Ready=True`
+  throughout. Narrow by namespace instead.
+
+  The new [Event volume](docs/SCHEMA.md#event-volume) section also records the
+  design that was **rejected**, so it is not re-proposed from scratch:
+  `collectEvents: true`, capturing only the Events whose `involvedObject` this
+  rule already matches. **The objection is correctness, not cost** — the lookup is
+  one call against an informer indexer the process already holds — but that cache
+  holds the objects that *exist*, and `FailedScheduling`, `FailedCreate` and
+  `Killing` are about objects that failed to exist or are ceasing to. It would
+  also make the archive non-deterministic, and Event coverage is currently
+  reconstructible from `watch_scopes` and `rule_ref` alone.
+
+  The direction it points at instead — filtering on fields the Event itself
+  carries (`type: Warning`, a `reason` list, `involvedObject.kind`), and
+  count-bump coalescing — is recorded as **v0.5.0 candidates and not commitments**.
+  **No CRD field changes in this release**; `spec.resources` takes exactly what it
+  took before.
+
+- **`config set-profile --sink-addr` is refused on every route, not only beside
+  `--from-sink`.** It replaces the endpoint of one invocation's *resolved* backend,
+  and this subcommand resolves nothing and dials nothing — so given here it parsed,
+  changed no field, and left its author believing they had set the address the
+  profile records. It now says so and names `--addr`, which is the flag that sets
+  it. A command that combined the two never wrote what it looked like it wrote.
+
+- **`timeline --full` closes each expanded block with a blank line, and dims the
+  operations inside it.** An eleven-operation patch used to expand into a wall of
+  text with no visible boundary between one timestamp's changeset and the next.
+  The blank line is written for a row that actually expanded and for no other, so
+  a timeline the `CHANGE` column held entirely is byte for byte the document it
+  was — and because it is a character rather than a colour, the separation is
+  still there under `--color=never`, under `NO_COLOR` and in a redirected file.
+
+  On a terminal the expanded operations also recede into the provenance tier: they
+  are the detail you asked to see, and the row above them becomes the spine of the
+  page without being touched. **The `+`, `-` and `~` stay at full intensity inside
+  the dimmed line**, because the operation vocabulary is how you scan a block for
+  the kind of change in it, and dimming it uniformly would flatten the one signal
+  the block has.
+
+  The proposal was to bold the timestamp instead. It was rejected twice over:
+  emphasis is the line that must survive its block being skimmed, so emphasising
+  every row in a screen of rows emphasises none of them; and a timestamp is not
+  more *severe* than the operations beneath it, it is structurally their parent.
+  Figure and ground are separated by receding the ground, which is what `get -o
+  yaml` already does with the envelope around a recorded object.
 
 - **`get -o yaml` dims the kuberecord wrapper on a terminal, so the recorded
   object is the only thing at full intensity.** The envelope's `apiVersion`,
@@ -187,6 +298,111 @@ than a summary of them.
   counting changes.
 
 ### Fixed
+
+- **A `timeline` filter that matched nothing no longer reports that nothing
+  changed.** `--actor`, `--exclude-actor` and `--field` are pushed into the query,
+  so the changes they remove never arrive — which made a filtered timeline that
+  matched nothing indistinguishable, from the renderer's side, from a window in
+  which nothing happened. `timeline deploy/checkout --actor nobody` over a hundred
+  recorded changes printed:
+
+  ```
+  ! no changes recorded for payments/checkout in the last 24 hours. The scope was
+    confirmed watched over 2026-07-02T09:14:00Z → open, so nothing changed in that period
+  ```
+
+  That sentence was false, and the exit code could be worse than the sentence: a
+  scope log holding no interval for the scope turned the same path into the
+  no-coverage finding, so **a filter matching nothing could exit `3`** — the one
+  code the CLI tells you to script against.
+
+  When a predicate is in force and no change survived it, the same window is now
+  read once more with the predicates removed, and the answer decides what is said:
+
+  ```
+  ! changes are recorded for payments/checkout in the last 24 hours and --actor nobody
+    matched none of them; the window itself is not empty, so this is the filter's
+    answer rather than the object's
+  ```
+
+  If the re-read finds nothing, the filter is not what emptied the window and the
+  three coverage answers apply unchanged, exit `3` included. If it fails, that is
+  said and neither reading is asserted. The extra read costs one row, newest
+  first, and is paid only on the path that needs it. `diff` and `blame` were never
+  affected: their `--field` narrows what is rendered rather than what is read.
+
+- **`get --uid` names itself when nothing was found.** A mistyped UID was answered
+  with an explanation that never mentioned the pin — the object had not been
+  observed, or had already been deleted — when in fact the state was there under
+  an incarnation you had not asked for. The third reason is now in the sentence.
+
+- **A standing check on silent no-ops.** Every flag in the command tree is now
+  audited in `internal/cli/noop_test.go` as *always visible*, *explained*, or
+  *deliberately silent with a reason*, and the sweep walks the real command tree —
+  so a flag with no verdict fails `make test` rather than reaching a terminal. The
+  sweep found the two entries above and nothing else; `--limit`, `--depth`,
+  `--reverse`, `--exit-code`, `--at`, `--yes`, `--max-objects` and the inherited
+  kubectl flags are recorded as deliberately silent, each with why. See
+  [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#the-silent-no-op-sweep).
+
+- **`--with-events` says why it found nothing.** Against the quickstart it
+  produced output byte-identical to a bare invocation: that rule streamed
+  `apps/v1 Deployment` and `v1 ConfigMap`, so the archive held no Event rows and
+  there was nothing to interleave (the entry below gives it some). Nothing was broken, and "nothing was broken" is
+  exactly the state the output could not distinguish from the flag being ignored —
+  on the flag the README's opening example and `--help` both put in front of a new
+  user first.
+
+  It now consults the watch scopes about `Event` — both API spellings, `v1` and
+  `events.k8s.io/v1`, since a rule may name either and gets the same stream — and
+  reports the three states `timeline` already distinguishes for an empty result.
+  Events were being recorded, so the silence is real and the confirming interval
+  is printed as the evidence. No rule streams Events, so the gap is named and the
+  three lines of YAML that close it are printed to be copied. Or the backend has no
+  scope log, in which case it says it cannot tell those two apart rather than
+  picking one.
+
+  ```
+  ! --with-events found no Events: no rule streams Events to this sink.
+    Add them to a rule and they will appear here:
+        - group: ""
+          version: v1
+          kind: Event
+  ```
+
+  A bare `timeline` still says nothing about Events, and pays for no extra
+  coverage read: the notice is owed to somebody who asked for them. It goes to
+  stderr with every other notice, in the table and in `-o json`, `-o yaml` and
+  `-o jsonl` alike — a flag that silently does nothing is as invisible to a script
+  as to a person.
+
+- **The quickstart captures Kubernetes Events, so `--with-events` demonstrates
+  itself.** The flag leads the README's opening example and `--help`'s, and the
+  one environment built to demonstrate the product could not demonstrate it. `make
+  quickstart` now streams `v1/Event` from its demo namespace, and the scale-up it
+  already performed supplies the correlated row the hero block promises — a
+  `ScalingReplicaSet` Event eight milliseconds after the `~ spec.replicas: 1 → 3`
+  that caused it. The run asserts that row arrived rather than hoping, prints the
+  Events it recorded beside the diff and the redaction proof, and says how many of
+  its rows are Events.
+
+  **The rule entry carries a warning, because the quickstart is what people
+  copy.** Events are captured for the whole watched scope and correlated at read
+  time, and an Event bump writes a full row rather than a diff: the API server
+  updates `count` in place, so each bump changes the content, hash dedup cannot
+  suppress it, and a crash-looping pod emitting `BackOff` a hundred times writes a
+  hundred whole JSON rows. One namespace with three `pause` pods produces eleven.
+  A cluster-wide Event rule during a bad rollout is the dominant term in write
+  volume, which makes it a sizing decision rather than a checkbox — and the
+  comment says so in the file being copied, not only in the documentation.
+
+  Two other files moved with it, and neither is a quickstart-only shortcut. The
+  sink's `policy.allowedGVKs` admits `v1/Event`, because that refusal is
+  all-or-nothing: a missing entry refuses the whole rule rather than narrowing it
+  to the kinds that are listed. And the install applies the `events` watch preset,
+  which ships disabled in every install because the storage bill belongs to
+  whoever asked for it. Both are what granting a new kind looks like on any
+  cluster.
 
 - **The incarnation banner no longer offers `diff` and `blame` a flag they
   reject.** Over a name that has belonged to more than one object, all three

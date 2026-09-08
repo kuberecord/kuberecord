@@ -237,7 +237,7 @@ func (r *BackendResolver) clickHouseProfile(
 		// docs/CLI.md names throughout. A profile with no password reference at
 		// all would validate and then authenticate as nobody, which is not what
 		// "complete and usable" means.
-		stanza.PasswordEnv = passwordEnvName
+		stanza.PasswordEnv = DefaultPasswordEnv
 	}
 
 	derived := &SinkProfile{

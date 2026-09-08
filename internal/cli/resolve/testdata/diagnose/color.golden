@@ -11,10 +11,12 @@
 
 [33mOr write it down once, and every later invocation reads it:[0m
 
-[1m    kuberecord config set-profile local --backend clickhouse \[0m
-[1m        --addr 127.0.0.1:9000 --database kuberecord --username kuberecord \[0m
-[1m        --password-env KUBERECORD_CLICKHOUSE_PASSWORD[0m
+[1m    kuberecord config set-profile local --from-sink ClickHouseSink/default[0m
 [1m    kuberecord config use-profile local[0m
+
+[33mThat reads this same sink, records 127.0.0.1:9000 in place of the address above,[0m
+[33mand takes the database and the user from it. The forward is still yours to run:[0m
+[33ma profile records an address, it does not open a tunnel.[0m
 
 [33mExport KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the[0m
 [33mrecommended credential for it, and the operator's own is not. Both routes, and[0m

@@ -72,8 +72,6 @@ func fixtureDiagnosis() diagnosis {
 		ref:         SinkRef{Kind: KindClickHouseSink, Name: "default"},
 		namespace:   fixtureNamespace,
 		addr:        fixtureAddr,
-		database:    DefaultClickHouseDatabase,
-		username:    "kuberecord",
 		commandName: "kuberecord",
 	}
 }
@@ -297,8 +295,9 @@ func TestTheExitCodeIsUnchanged(t *testing.T) {
 // the struct without noticing. A test over a fixture the test itself wrote could
 // not catch that.
 //
-// The username may appear — a profile needs it and it is not a secret. The
-// password may not, on any stream, at any verbosity.
+// The sink's name and its Secret's namespace may appear — they are how a reader
+// finds the thing they are about to mint a read-only alternative to. The password
+// may not, on any stream, at any verbosity.
 func TestTheMessageCarriesNoCredential(t *testing.T) {
 	const secretName = "clickhouse-credentials"
 
@@ -346,11 +345,15 @@ func TestTheMessageCarriesNoCredential(t *testing.T) {
 	if strings.Contains(rendered, "--password ") || strings.Contains(rendered, "--password=") {
 		t.Errorf("the message offers to put a password on a command line:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, passwordEnvName) {
+	if !strings.Contains(rendered, DefaultPasswordEnv) {
 		t.Error("the profile route does not say where the password comes from")
 	}
-	if !strings.Contains(rendered, "--username kuberecord") {
-		t.Error("the profile route omits the username discovery found, which a user would have to guess")
+	// The permanent route names the sink and nothing else it read from it. That
+	// is the whole of Task 16.4: a command carrying no values carries no value
+	// that could be a credential, and the one it does carry is a resource name
+	// this message has already printed twice.
+	if !strings.Contains(rendered, "--"+options.FlagFromSink+" "+ref.String()) {
+		t.Errorf("the profile route does not name the sink to read the stanza from:\n%s", rendered)
 	}
 }
 
@@ -371,10 +374,14 @@ func TestTheMessageNamesBothRoutes(t *testing.T) {
 		// address, and the port carried over.
 		"kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000",
 		"kuberecord timeline … --sink-addr 127.0.0.1:9000",
-		// The profile route, complete enough to paste.
-		"kuberecord config set-profile local --backend clickhouse",
-		"--addr 127.0.0.1:9000 --database kuberecord --username kuberecord",
+		// The profile route: the sink to read the stanza from, and the command
+		// that makes the written profile the active one.
+		"kuberecord config set-profile local --from-sink ClickHouseSink/default",
 		"kuberecord config use-profile local",
+		// And what that one line will do to the address, which is the reason the
+		// profile is worth writing and the one thing the command no longer spells
+		// out for itself.
+		"records 127.0.0.1:9000 in place of the address above",
 		// And the sentence that says the tool will not do it for the user (D23).
 		"will not forward a port",
 	} {
@@ -422,7 +429,8 @@ func TestABareHostFallsBackToTheOperatorNamespace(t *testing.T) {
 	rendered := (&UnreachableSinkError{diagnosis: bare, cause: connectionRefused()}).Render("", false)
 	for _, want := range []string{
 		"kubectl port-forward -n " + fixtureNamespace + " svc/clickhouse 9440:9440",
-		"--addr 127.0.0.1:9440",
+		"--sink-addr 127.0.0.1:9440",
+		"records 127.0.0.1:9440 in place of the address above",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the message does not carry %q:\n%s", want, rendered)
@@ -488,6 +496,48 @@ func reconstructedObjectDocument(t *testing.T, colorize bool) string {
 	return out.String() + errOut.String()
 }
 
+// expandedTimelineDocument renders a --full timeline in one colour mode.
+//
+// The rows are chosen for what they do to the property above rather than for
+// their content: one summarized as a count, so the block below it is expanded,
+// and one the CHANGE column showed whole, so the document contains a row that is
+// not followed by a block at all. A separation that had been implemented by
+// spacing every row equally would be indistinguishable from this one on the
+// second row alone.
+func expandedTimelineDocument(t *testing.T, colorize bool) string {
+	t.Helper()
+
+	ts := time.Date(2026, 8, 28, 14, 5, 2, 117000000, time.UTC)
+	document := render.TimelineDocument{
+		Kind: "apps/Deployment", Object: "payments/checkout", Cluster: "prod-eu-1",
+		UID:      "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+		Coverage: "2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)",
+		Rows: []render.TimelineRow{
+			{
+				Change: query.Change{TS: ts, EventType: query.EventModified, Actors: []string{"kube-controller-manager"}},
+				Ops: []render.Op{
+					{Type: render.OpReplace, Path: "/spec/replicas", Value: []byte("5"), Old: 3, OldKnown: true},
+					{Type: render.OpAdd, Path: "/spec/paused", Value: []byte("true")},
+					{Type: render.OpRemove, Path: "/spec/minReadySeconds"},
+				},
+			},
+			{
+				Change: query.Change{
+					TS: ts.Add(time.Minute), EventType: query.EventModified, Actors: []string{"deployment-controller"},
+				},
+				Ops: []render.Op{{Type: render.OpReplace, Path: "/spec/replicas", Value: []byte("7"), Old: 5, OldKnown: true}},
+			},
+		},
+	}
+
+	var out, errOut strings.Builder
+	if err := render.WriteTimeline(&out, &errOut, document,
+		render.Options{Width: 120, Full: true, Color: colorize}); err != nil {
+		t.Fatalf("rendering the expanded timeline: %v", err)
+	}
+	return out.String() + errOut.String()
+}
+
 // sgrSequence matches an ANSI colour sequence — a CSI ending in `m` — and nothing
 // else.
 //
@@ -547,6 +597,15 @@ func TestColourIsNothingButColour(t *testing.T) {
 		"the reconstructed object document": {
 			painted: reconstructedObjectDocument(t, true),
 			plain:   reconstructedObjectDocument(t, false),
+		},
+		// The other document that recedes half of itself, and the one where the
+		// property does the most work. --full paints the detail of an operation
+		// and deliberately leaves its glyph alone, so a line here is two spans and
+		// a bare marker between them — the shape a split that drifted by one
+		// character would still render, and would render wrongly.
+		"the expanded --full timeline": {
+			painted: expandedTimelineDocument(t, true),
+			plain:   expandedTimelineDocument(t, false),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -206,6 +206,16 @@ sideload "${PAUSE_IMAGE}" >/dev/null 2>&1 ||
 # controller that serves it.
 log "Installing the CRDs and the operator"
 "${KUSTOMIZE}" build "${SCRIPT_DIR}/operator" | "${KUBECTL}" apply --server-side -f -
+
+# The one grant the overlay cannot carry. examples/quickstart/rule.yaml streams
+# v1/Event, the `core-workloads` preset the install ships grants no `events`, and
+# a rule naming a kind nobody granted reports RBACGranted=False and streams
+# nothing. It is applied here rather than folded into the overlay because
+# kustomize refuses a resource file above the kustomization's own directory — the
+# overlay's comment has the long version. Aggregation is by label, so this is the
+# same grant either way, and it lands three steps before the rule that needs it.
+"${KUBECTL}" apply --server-side -f "${REPO_ROOT}/config/rbac/presets/events.yaml"
+
 "${KUBECTL}" -n "${OPERATOR_NAMESPACE}" rollout status deploy/kuberecord-controller-manager --timeout=5m
 note "The operator is running and completely idle: no sink, no rules, nothing streamed."
 
@@ -281,17 +291,32 @@ log "Waiting for the changes to be recorded as diffs"
 modified="$(wait_for "event_type = 'Modified' AND kind = 'ConfigMap'" 1 120)"
 [ "${modified}" -ge 1 ] || fail "the ConfigMap change was not recorded as a Modified row within 120s."
 
+# And the Event the scale-up caused, which is the half of `--with-events` the
+# quickstart exists to make demonstrable: the rule streams v1/Event for this
+# namespace, so the deployment-controller's ScalingReplicaSet lands as a row of
+# its own. Nothing correlated it to checkout-api when it was captured — the
+# subject is read out of the row's involvedObject here, exactly as the CLI reads
+# it (see examples/quickstart/rule.yaml).
+log "Waiting for an Event about checkout-api to be recorded"
+events="$(wait_for "kind = 'Event' AND JSONExtractString(data, 'involvedObject', 'name') = 'checkout-api'" 1 120)"
+[ "${events}" -ge 1 ] || fail "no Event naming checkout-api reached ClickHouse within 120s."
+
 ELAPSED="${SECONDS}"
 rows="$(count "")"
+event_rows="$(count "kind = 'Event'")"
 trap - ERR
 
 ##
 ## 9. Show what landed
 ##
-log "Rows recorded (cluster_id = '${CLUSTER_ID}')"
+# Events are excluded here and printed on their own below. They are the numerous
+# kind — a few dozen rows from three pause pods — and left in they would fill a
+# twenty-row window whose job is to show the demo objects' own history. The row
+# count in the closing banner counts them.
+log "Rows recorded (cluster_id = '${CLUSTER_ID}'), Kubernetes Events aside"
 ch "SELECT event_type, kind, namespace, name, ts
     FROM resource_states
-    WHERE cluster_id = '${CLUSTER_ID}'
+    WHERE cluster_id = '${CLUSTER_ID}' AND kind != 'Event'
     ORDER BY ts ASC
     LIMIT 20
     FORMAT PrettyCompact"
@@ -314,6 +339,23 @@ ch "SELECT ts, name, event_type, substring(diff, 1, 120) AS diff_head
     WHERE cluster_id = '${CLUSTER_ID}' AND kind = 'Deployment' AND event_type = 'Modified'
     ORDER BY ts DESC
     LIMIT 3
+    FORMAT PrettyCompact"
+
+# The commentary beside the history: the same object and the same window, but
+# rows the cluster wrote *about* checkout-api rather than changes to it. These
+# are what `kuberecord timeline --with-events` interleaves into the Deployment's
+# own rows, matched on involvedObject at read time. Every one carries full state
+# and no diff — an Event is updated in place to bump `count`, so there is nothing
+# to diff against and each bump is a whole row (docs/SCHEMA.md#kubernetes-events).
+log "Kubernetes Events recorded about checkout-api"
+ch "SELECT ts,
+           JSONExtractString(data, 'reason')                    AS reason,
+           substring(JSONExtractString(data, 'message'), 1, 68) AS message
+    FROM resource_states
+    WHERE cluster_id = '${CLUSTER_ID}' AND kind = 'Event'
+      AND JSONExtractString(data, 'involvedObject', 'name') = 'checkout-api'
+    ORDER BY ts ASC
+    LIMIT 5
     FORMAT PrettyCompact"
 
 # The demo ConfigMap was created with data.password = "hunter2", and the sink's
@@ -344,7 +386,7 @@ ch "SELECT ts, action, api_group, kind, namespace, rule_ref
 ##
 cat <<EOF
 
-$(printf '\033[1;32m%s\033[0m' "kuberecord is streaming. ${rows} rows in ${ELAPSED}s.")
+$(printf '\033[1;32m%s\033[0m' "kuberecord is streaming. ${rows} rows in ${ELAPSED}s, ${event_rows} of them Kubernetes Events.")
 
 Query it yourself — forward the port once, and both readers below use it:
 
@@ -355,7 +397,13 @@ Read it back with the CLI, which asks about an object rather than a table:
   go build -o bin/kuberecord ./cmd/kubectl-kuberecord
 
   bin/kuberecord timeline deploy/checkout-api -n quickstart-demo \\
-    --sink-addr 127.0.0.1:9000
+    --with-events --sink-addr 127.0.0.1:9000
+
+--with-events interleaves the Events above into the Deployment's own history, so
+the change and the thing the cluster said about it read as one story. Those
+${event_rows} Event rows came from one namespace running three pause pods: worth
+remembering before copying that entry of examples/quickstart/rule.yaml into a
+cluster-wide rule, because an Event bump is a full row rather than a diff.
 
 The sink records clickhouse.${QS_CH_NAMESPACE}.svc:9000, which resolves inside the
 cluster and nowhere else — correct for the operator, unreachable from here. So

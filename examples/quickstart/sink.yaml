@@ -38,11 +38,19 @@ spec:
     # docs/SCHEMA.md#checkpoint-rows.
     checkpointEvery: 50
   policy:
-    # Exactly the two kinds the quickstart rule streams. Omitting `allowedGVKs`
+    # Exactly the three kinds the quickstart rule streams. Omitting `allowedGVKs`
     # entirely would admit everything except the hard deny-list (v1/Secret is
     # never watchable, and no policy can re-enable it), but naming them means a
     # rule that asks for anything else fails loudly as PolicyAllowed=False
     # instead of quietly writing rows you did not expect.
+    #
+    # The refusal is all-or-nothing: a rule naming one kind that is missing here
+    # is refused whole, not narrowed to the kinds that are present. Policy is the
+    # sink owner's admission decision, and honouring its letter while quietly
+    # streaming the rest would defeat its point. So this list and
+    # examples/quickstart/rule.yaml's `resources` move together — Event is here
+    # because that rule streams Events, and its comment is the one to read before
+    # copying either file.
     allowedGVKs:
     - group: apps
       version: v1
@@ -52,6 +60,7 @@ spec:
       version: v1
       kinds:
       - ConfigMap
+      - Event
     # The redaction floor for everything written to this sink. Values on these
     # paths are replaced with "[REDACTED]" after normalization and *before*
     # hashing, so a redacted value reaches neither the payload, nor a diff, nor

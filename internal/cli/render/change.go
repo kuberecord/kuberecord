@@ -168,7 +168,7 @@ func glyph(opType string) string {
 // row says. Colour that survives is applied to whole cells after their widths are
 // settled — see paintCell — and the arrow does without.
 func opText(op Op, width int) string {
-	prefix := glyph(op.Type) + " "
+	prefix := opMarker(op)
 	path := DisplayPath(op.Path)
 	values := opValues(op)
 
@@ -186,6 +186,34 @@ func opText(op Op, width int) string {
 		values = fitValues(op, remaining)
 	}
 	return truncate(prefix+path+valueSuffix(values), width)
+}
+
+// opMarker is the glyph and the space every rendered operation opens with.
+//
+// It is a function rather than a literal inside opText because a second caller
+// now has to know where an operation's marker ends, and the two spellings of
+// that would go on compiling after one of them changed.
+func opMarker(op Op) string { return glyph(op.Type) + " " }
+
+// opTextParts splits an unlimited rendering into the marker a reader scans for
+// and the detail behind it.
+//
+// It exists so that --full can recede an expanded operation into the provenance
+// tier without taking the operation's glyph down with it: +, - and ~ are how a
+// reader finds the *kind* of change in a block of them, and a uniformly dimmed
+// block has no such signal left in it. Recomposing the two halves gives back
+// opText(op, 0) exactly, which is what keeps the uncoloured rendering byte for
+// byte the one it has always been.
+//
+// It renders unlimited, deliberately, and there is no width-taking variant. The
+// marker is the one thing opText never gives up, but at a finite width the
+// detail behind it has been fitted — and painting half of a fitted cell puts
+// escape sequences inside the arithmetic that fitted it, which is the wobble the
+// comment above opText exists to prevent. --full is the only caller, and --full
+// elides nothing.
+func opTextParts(op Op) (marker, detail string) {
+	marker = opMarker(op)
+	return marker, strings.TrimPrefix(opText(op, 0), marker)
 }
 
 // valueSuffix attaches the separator only when there is something to separate.

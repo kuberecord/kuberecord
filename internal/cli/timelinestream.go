@@ -46,10 +46,10 @@ import (
 // The risk in having two paths is Invariant 9: a second sequence is a second
 // place for the coverage consultation to be dropped. So the pieces that carry the
 // invariant are the *same* functions the gathered path calls — timelineBounds,
-// selectIncarnation, askCoverage, deletionsNotice, explainEmpty — and only the
-// middle, where rows are turned into output, differs. What is duplicated here is
-// the order they are called in, and that order is asserted by tests over both
-// paths rather than by a comment.
+// selectIncarnation, askCoverage, deletionsNotice, explainEmpty, eventsNotice —
+// and only the middle, where rows are turned into output, differs. What is
+// duplicated here is the order they are called in, and that order is asserted by
+// tests over both paths rather than by a comment.
 //
 // # Where the memory actually goes
 //
@@ -67,9 +67,10 @@ import (
 // It writes the document to stdout as it goes and every qualification of it to
 // stderr at the end, which is the same split the tabular rendering keeps. The
 // notices arrive after the document rather than before it because some of them —
-// whether the result was empty, whether a deletion was seen — are facts about
-// rows that had not been read yet when the first byte was written. That is the
-// cost of streaming, and it is paid on the stream nothing is piping.
+// whether the result was empty, whether a deletion was seen, whether --with-events
+// interleaved anything — are facts about rows that had not been read yet when the
+// first byte was written. That is the cost of streaming, and it is paid on the
+// stream nothing is piping.
 func runTimelineStructured(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
@@ -104,8 +105,23 @@ func runTimelineStructured(
 		return exit.RuntimeErrorf("%w", err)
 	}
 
-	emitted, sawDeleted, emitErr := emitChanges(
+	emitted, emitErr := emitChanges(
 		ctx, backend.Engine, request, request.timelineQuery(selection, from, to), stream)
+
+	// Asked before the scan is stopped, because Stop cancels the context every
+	// query of a cold read must be issued with — and these may walk partitions
+	// like any other. They are skipped when the emission failed, since the notices
+	// would be explaining the shape of an answer that was never produced.
+	var (
+		predicate   render.Notice
+		attributed  bool
+		eventNotice render.Notice
+	)
+	if emitErr == nil {
+		predicate, attributed = predicateNotice(
+			ctx, backend.Engine, request, selection, from, to, emitted.sawChange)
+		eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent)
+	}
 
 	// Stopped here rather than left to the defer: the reading is over, and the
 	// progress line has to be off the terminal before the notices below are written
@@ -123,9 +139,21 @@ func runTimelineStructured(
 		return errors.Join(emitErr, render.WriteNotices(streams.ErrOut, notices, opts))
 	}
 
-	notices = appendNotice(notices, deletionsNotice(capabilities, sawDeleted))
-	emptyNotices, emptyErr := explainEmpty(request, from, to, emitted > 0, coverage)
-	notices = append(notices, emptyNotices...)
+	notices = appendNotice(notices, deletionsNotice(capabilities, emitted.sawDeleted))
+
+	// Same order and same gate as the gathered path's, which is the half of this
+	// file that is duplicated on purpose: an emptiness a query predicate produced
+	// is explained by the predicate rather than by coverage, and consulting
+	// coverage about it could report "nothing was watching" over a window that
+	// demonstrably held changes.
+	notices = appendNotice(notices, predicate)
+	var emptyErr error
+	if !attributed {
+		emptyNotices, err := explainEmpty(request, from, to, emitted.items > 0, coverage)
+		notices = append(notices, emptyNotices...)
+		emptyErr = err
+	}
+	notices = appendNotice(notices, eventNotice)
 
 	if writeErr := render.WriteNotices(streams.ErrOut, notices, opts); writeErr != nil {
 		return exit.RuntimeErrorf("%w", writeErr)
@@ -133,11 +161,34 @@ func runTimelineStructured(
 	return emptyErr
 }
 
+// emission is what a streamed answer turns out to have been, once it is gone.
+//
+// Every field is a fact about rows that have already been written to stdout and
+// are no longer held anywhere, and each one is read by a notice the gathered path
+// works out from the rows themselves — see sawDeletion and sawEvent, which is why
+// both of those are functions over an enum value rather than inlined comparisons.
+//
+// It is a struct rather than three return values because it is one answer to one
+// question, and because a third positional bool beside a second is the shape a
+// caller eventually passes in the wrong order.
+type emission struct {
+	// items is how many envelope items were written.
+	items int
+	// sawDeleted reports whether a deletion was among them.
+	sawDeleted bool
+	// sawEvent reports whether a merged Kubernetes Event was.
+	sawEvent bool
+	// sawChange reports whether a change to the object itself was — which is not
+	// the complement of items, since a --with-events document can be made
+	// entirely of Event rows. See sawChange, whose question this answers.
+	sawChange bool
+}
+
 // emitChanges runs the query and writes each change into the envelope.
 //
-// It reports how many items were written and whether a deletion was among them,
-// which are the two facts the notices need and the two a streaming path cannot
-// recover afterwards from rows it no longer holds.
+// It reports what the answer turned out to be — how many items, and which kinds
+// of row were among them — because those are the facts the notices need and the
+// ones a streaming path cannot recover afterwards from rows it no longer holds.
 //
 // Err is checked after the loop and Close called on every path, for the reason
 // collectChanges does both: skipping either turns a backend that failed halfway
@@ -146,7 +197,7 @@ func runTimelineStructured(
 func emitChanges(
 	ctx context.Context, engine query.QueryEngine, request TimelineRequest,
 	q query.TimelineQuery, stream *render.Stream,
-) (emitted int, sawDeleted bool, err error) {
+) (emitted emission, err error) {
 	hold := holdForDisplayOrder(request)
 	if !hold {
 		// The query is asked in the order the output is written in, so nothing has
@@ -158,7 +209,7 @@ func emitChanges(
 
 	iterator, err := engine.Timeline(ctx, q)
 	if err != nil {
-		return 0, false, timelineQueryError(ctx, request, err)
+		return emission{}, timelineQueryError(ctx, request, err)
 	}
 	defer func() {
 		if closeErr := iterator.Close(); closeErr != nil && err == nil {
@@ -169,18 +220,18 @@ func emitChanges(
 	var held []query.Change
 	for iterator.Next() {
 		change := iterator.Change()
-		sawDeleted = sawDeleted || change.EventType == query.EventDeleted
+		emitted.observe(change)
 		if hold {
 			held = append(held, change)
 			continue
 		}
 		if writeErr := writeChange(stream, change); writeErr != nil {
-			return emitted, sawDeleted, writeErr
+			return emitted, writeErr
 		}
-		emitted++
+		emitted.items++
 	}
 	if iterErr := iterator.Err(); iterErr != nil {
-		return emitted, sawDeleted, timelineQueryError(ctx, request, iterErr)
+		return emitted, timelineQueryError(ctx, request, iterErr)
 	}
 
 	// At most --limit items, and only when a limit is in force and the display
@@ -188,11 +239,33 @@ func emitChanges(
 	slices.Reverse(held)
 	for _, change := range held {
 		if writeErr := writeChange(stream, change); writeErr != nil {
-			return emitted, sawDeleted, writeErr
+			return emitted, writeErr
 		}
-		emitted++
+		emitted.items++
 	}
-	return emitted, sawDeleted, nil
+	return emitted, nil
+}
+
+// observe records what one change was, before it is written and forgotten.
+//
+// It is called on every change the iterator yields, including the ones held back
+// for the display flip, because what the answer contained is a fact about the
+// query rather than about the order it was written in.
+func (e *emission) observe(change query.Change) {
+	switch change.EventType {
+	case query.EventDeleted:
+		e.sawDeleted, e.sawChange = true, true
+	case query.EventKubernetes:
+		e.sawEvent = true
+	default:
+		// Every other event type is a change to the object: an addition, a
+		// modification, a checkpoint. Spelled as the default rather than
+		// enumerated so that a type added to the schema is counted as a change
+		// until somebody decides otherwise, which is the conservative direction —
+		// the alternative is a new row type silently reading as "the filter
+		// matched nothing".
+		e.sawChange = true
+	}
 }
 
 // writeChange prepares one change and writes it, so that the two emission orders

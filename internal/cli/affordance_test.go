@@ -61,11 +61,17 @@ func TestNoNoticeNamesAFlagItsCommandRejects(t *testing.T) {
 	tests := []struct {
 		name    string
 		command string
-		stderr  func(t *testing.T) string
+
+		// guard is a fragment of the notice the case is about. It is asserted
+		// before the sweep so that a fixture which stopped producing that notice
+		// fails as a drifted fixture rather than passing over an empty stream.
+		guard  string
+		stderr func(t *testing.T) string
 	}{
 		{
 			name:    "timeline over a reused name",
 			command: "timeline",
+			guard:   "incarnations in this window",
 			stderr: func(t *testing.T) string {
 				t.Helper()
 				_, stderr, err := runTimeline(t, twoIncarnations(), defaultRequest(), render.Options{})
@@ -78,6 +84,7 @@ func TestNoNoticeNamesAFlagItsCommandRejects(t *testing.T) {
 		{
 			name:    "diff over a reused name",
 			command: "diff",
+			guard:   "incarnations in this window",
 			stderr: func(t *testing.T) string {
 				t.Helper()
 				_, stderr, err := runDiff(t, twoIncarnations(), defaultDiffRequest(), render.Options{})
@@ -90,6 +97,7 @@ func TestNoNoticeNamesAFlagItsCommandRejects(t *testing.T) {
 		{
 			name:    "blame over a reused name",
 			command: "blame",
+			guard:   "incarnations in this window",
 			stderr: func(t *testing.T) string {
 				t.Helper()
 				_, stderr, err := runBlame(t, twoIncarnations(), defaultBlameRequest(), render.Options{})
@@ -99,14 +107,33 @@ func TestNoNoticeNamesAFlagItsCommandRejects(t *testing.T) {
 				return stderr
 			},
 		},
+		{
+			// The notice explainNoMatches prints names --actor, --exclude-actor
+			// and --field bare, and only `timeline` pushes those into the query —
+			// TimelineRequest.filtered is false for `diff` and `blame`, which
+			// narrow their rendering instead. That is the property this case pins:
+			// the notice is reachable from one command, and it is the command that
+			// has all three flags.
+			name:    "timeline whose filter matched nothing",
+			command: "timeline",
+			guard:   "the window itself is not empty",
+			stderr: func(t *testing.T) string {
+				t.Helper()
+				_, stderr, err := runTimeline(t, watchedCheckoutEngine(), filteredEmptyRequest(), render.Options{})
+				if err != nil {
+					t.Fatalf("RunTimeline: %v", err)
+				}
+				return stderr
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			stderr := tc.stderr(t)
-			if !strings.Contains(stderr, "incarnations in this window") {
-				t.Fatalf("the fixture stopped producing the incarnation banner, so this case is "+
-					"asserting over notices that do not include the one it is about:\n%s", stderr)
+			if !strings.Contains(stderr, tc.guard) {
+				t.Fatalf("the fixture stopped producing %q, so this case is asserting over notices "+
+					"that do not include the one it is about:\n%s", tc.guard, stderr)
 			}
 
 			command := subcommand(t, tc.command)

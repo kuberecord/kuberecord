@@ -490,6 +490,174 @@ func TestQuickstartShowsTheOutsideTheClusterRoute(t *testing.T) {
 	}
 }
 
+// TestQuickstartCapturesEvents keeps the environment built to demonstrate the
+// product able to demonstrate its opening example (Task 16.2).
+//
+// `--with-events` leads the README's hero block and `--help`'s examples, and the
+// quickstart's rule streamed Deployments and ConfigMaps and nothing else: there
+// were no Event rows to interleave, so the flag produced output byte-identical to
+// a bare invocation. Task 16.1 made that silence explicable. This makes it untrue.
+//
+// The check is here rather than left to the run because *three* files have to
+// agree before one Event row exists, and each fails somewhere different:
+//
+//   - the rule must name the kind;
+//   - the sink's policy must admit it — `allowedGVKs` is all-or-nothing, so a
+//     missing entry does not narrow the rule, it refuses the whole thing with
+//     PolicyAllowed=False;
+//   - the operator must hold `get,list,watch` on `events`, which the
+//     `core-workloads` preset does not grant. Without it the rule reports
+//     RBACGranted=False and streams nothing at all.
+//
+// Every one of those is invisible until somebody stands a cluster up, and then
+// visible only as a condition on a custom resource that nobody reads until the
+// flag they were promised does nothing.
+func TestQuickstartCapturesEvents(t *testing.T) {
+	var rule v1alpha1.ClusterStreamRule
+	decodeOneDocument(t, "examples/quickstart/rule.yaml", &rule)
+
+	if !slices.ContainsFunc(rule.Spec.Resources, func(res v1alpha1.WatchedResource) bool {
+		return res.Group == "" && res.Version == "v1" && res.Kind == "Event"
+	}) {
+		t.Fatal("examples/quickstart/rule.yaml no longer streams v1/Event; " +
+			"`kuberecord timeline --with-events` then has nothing to interleave in the one " +
+			"environment built to demonstrate it")
+	}
+
+	var sink v1alpha1.ClickHouseSink
+	decodeOneDocument(t, "examples/quickstart/sink.yaml", &sink)
+
+	// The same reading checkPolicy applies: an empty allow-list admits everything
+	// but the hard deny-list, and a non-empty one is exhaustive.
+	allowed := sink.Spec.Policy.AllowedGVKs
+	if len(allowed) > 0 && !slices.ContainsFunc(allowed, func(sel v1alpha1.GVKSelector) bool {
+		return sel.Group == "" && sel.Version == "v1" &&
+			(slices.Contains(sel.Kinds, "Event") || slices.Contains(sel.Kinds, "*"))
+	}) {
+		t.Error("examples/quickstart/sink.yaml does not admit v1/Event in spec.policy.allowedGVKs; " +
+			"the refusal is all-or-nothing, so the rule above would be refused whole with " +
+			"PolicyAllowed=False rather than narrowed to the kinds that are listed")
+	}
+
+	overlay := readFile(t, "examples/quickstart/operator/kustomization.yaml")
+	if !strings.Contains(overlay, "config/rbac/presets/events.yaml") {
+		t.Error("the quickstart overlay no longer enables the `events` watch preset; " +
+			"core-workloads grants no `events`, so the rule would report RBACGranted=False " +
+			"and stream nothing")
+	}
+
+	// And the demonstration itself, in the two places a reader meets it: an
+	// assertion in the script, so a regression fails a CI job rather than a
+	// stranger's first ten minutes, and the walkthrough that shows what it prints.
+	if !strings.Contains(readFile(t, "examples/quickstart/quickstart.sh"), "kind = 'Event'") {
+		t.Error("examples/quickstart/quickstart.sh no longer asserts that an Event was recorded; " +
+			"the flag would be back to demonstrating itself in prose only")
+	}
+	if !strings.Contains(readFile(t, "examples/quickstart/README.md"), "--with-events") {
+		t.Error("examples/quickstart/README.md no longer walks through --with-events")
+	}
+}
+
+// decodeOneDocument decodes a single-document manifest into obj with unknown
+// fields rejected.
+//
+// See TestTeeExampleCustomResourcesDecode for why a decode beats a substring
+// match on a hand-written example: a CRD prunes an unknown field silently, so a
+// misspelled one applies cleanly and behaves as the default.
+func decodeOneDocument(t *testing.T, file string, obj any) {
+	t.Helper()
+	documents := splitYAML(t, readFile(t, file))
+	if len(documents) != 1 {
+		t.Fatalf("%s holds %d documents, expected exactly 1", file, len(documents))
+	}
+	if err := yaml.UnmarshalStrict(documents[0], obj); err != nil {
+		t.Fatalf("%s does not decode into %T: %v", file, obj, err)
+	}
+}
+
+//
+// The Event volume model is documented where a rule author meets it (Task 16.6)
+//
+
+// eventVolumeClaims is what docs/SCHEMA.md's Event volume section has to keep
+// saying. Each entry is one thing a rule author cannot work out from the rest of
+// the page, and that they need at the moment they type `kind: Event`.
+//
+// Presence is checked, never wording: the prose should stay free to improve. What
+// must not happen is the section quietly losing a half — the sizing guidance
+// without the model that explains it, or the rejection without the reason, which
+// is the shape a rejected design comes back in.
+var eventVolumeClaims = []struct {
+	want string
+	why  string
+}{
+	{"capture is scope-wide", "the model: a rule naming Event streams every Event in its namespaces"},
+	{"read time", "the other half of the model — correlation to a subject happens in the reader"},
+	{"bump writes a whole row", "the amplifier: count is updated in place, so hash dedup cannot suppress it"},
+	{"crash-looping pod", "the worked example, and the case where the amplifier peaks"},
+	{"does not narrow this", "labelSelector is the knob a reader reaches for, and it yields an empty scope"},
+	{"namespaceSelector", "the knob that does narrow it"},
+	{"maxObjectBytes", "the S3 number a cluster-wide Event rule has to be sized against"},
+	{"Suggested TTL", "the retention number it has to be sized against"},
+	{"collectEvents", "the rejected alternative, named so it is not re-proposed from scratch"},
+	{"correctness, not cost", "the precise objection — the lookup is cheap and already exists"},
+	{"FailedScheduling", "the class of Event capture-time correlation would drop"},
+	{"non-deterministic", "why the rejection is not merely a preference"},
+	{"rule_ref", "what determinism buys: Event coverage reconstructible from the rule"},
+	{"v0.5.0 candidates", "the forward direction, marked as a direction and not a promise"},
+}
+
+// TestSchemaPageCoversEventVolume keeps the two halves of Task 16.6 in step: the
+// section that explains what an Event rule costs, and the CRD field descriptions
+// that send an author to it.
+//
+// The field comments are the load-bearing half. A rule author types `kind: Event`
+// into a `resources` list having read `kubectl explain
+// streamrule.spec.resources` and nothing else; a volume model that lives only in
+// a document they have no reason to open is one they meet for the first time in a
+// storage graph. So this asserts the comment in the Go source *and* in the
+// generated CRD, because those are two artifacts and only one of them is written
+// by hand — a comment edited without `make manifests` publishes to godoc and to
+// nothing a cluster ever shows anyone.
+func TestSchemaPageCoversEventVolume(t *testing.T) {
+	page := readFile(t, "docs/SCHEMA.md")
+	if !strings.Contains(page, "#### Event volume") {
+		t.Fatal("docs/SCHEMA.md has no `#### Event volume` heading; three pages and two CRD " +
+			"descriptions link to #event-volume, and a heading rename silently breaks all five")
+	}
+	for _, tc := range eventVolumeClaims {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(page), strings.ToLower(tc.want)) {
+				t.Errorf("docs/SCHEMA.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
+	}
+
+	// The two field comments an author actually reads. `resources` is where the
+	// entry is typed; `labelSelector` is the knob they reach for next, and the one
+	// that fails silently.
+	types := readFile(t, "api/v1alpha1/shared_types.go")
+	for _, want := range []string{"Capture is scope-wide", "dominates write volume", `"Event volume"`} {
+		if !strings.Contains(types, want) {
+			t.Errorf("api/v1alpha1/shared_types.go no longer says %q; the resources and "+
+				"labelSelector comments are what a rule author reads while typing the entry", want)
+		}
+	}
+
+	// And the same text where a cluster serves it. Both rule CRDs embed
+	// StreamRuleSpec, so both descriptions have to carry it.
+	for _, crd := range []string{
+		"config/crd/bases/kuberecord.io_streamrules.yaml",
+		"config/crd/bases/kuberecord.io_clusterstreamrules.yaml",
+	} {
+		if !strings.Contains(readFile(t, crd), "Event volume") {
+			t.Errorf("%s does not point at the Event volume section; run `make manifests` "+
+				"(and `make build-installer helm-sync`), since this description is what "+
+				"`kubectl explain` prints", crd)
+		}
+	}
+}
+
 //
 // The tee example is complete, self-consistent and CI-tested (Task 7.1)
 //
@@ -1740,6 +1908,109 @@ func TestZeroInfraExampleIsLinked(t *testing.T) {
 	for _, page := range []string{"README.md", "docs/CLI.md"} {
 		if !strings.Contains(readFile(t, page), "examples/zero-infra/") {
 			t.Errorf("%s does not link examples/zero-infra/", page)
+		}
+	}
+}
+
+// TestSourceAndSinkAddrAreComparedAndLinked keeps the one page that can settle
+// the question able to settle it (Task 16.4).
+//
+// `--source` and `--sink-addr` are read as alternatives because they are adjacent
+// on this page and both end a sentence with "instead". They are not: one replaces
+// the resolution chain and the other corrects one field of what it found, which is
+// why giving both is a usage error rather than a preference. A reader who has that
+// wrong reaches for `--source` against a ClickHouse and gets a refusal whose reason
+// they do not have the model to read.
+//
+// The comparison is checked by its rows rather than by its heading alone, because
+// a table that loses the "contacts the cluster" row is still a table and still
+// resolves every link into it. Each of the five is a question somebody actually
+// asks, and the answers differ between the two flags in every one of them.
+//
+// The inbound links are the other half. A section nothing points at is a section
+// found only by the reader who already knew it was there — which is not the reader
+// it was written for — and the existing anchor check catches a link that rots,
+// never a link that was never added.
+func TestSourceAndSinkAddrAreComparedAndLinked(t *testing.T) {
+	reference := readFile(t, "docs/CLI.md")
+
+	const heading = "### `--source` versus `--sink-addr`\n"
+	_, section, found := strings.Cut(reference, heading)
+	if !found {
+		t.Fatalf("docs/CLI.md has no %q section: the two flags are compared nowhere",
+			strings.TrimSpace(heading))
+	}
+	if next := strings.Index(section, "\n### "); next >= 0 {
+		section = section[:next]
+	}
+
+	// The five rows the comparison exists to carry, each named by a phrase from
+	// its own row label rather than by the whole of it, so rewording a heading is
+	// allowed and dropping the subject is not.
+	for _, tc := range []struct{ want, why string }{
+		{"question it answers", "what each flag is for, before what it does"},
+		{"Position in", "that one is a step of the chain and the other is a modifier on one"},
+		{"Contacts the cluster", "the difference that decides which works with no kubeconfig"},
+		{"Backends it applies to", "that an archive is never dialled and ClickHouse is never enumerated"},
+		{"What it supplies", "one field against a whole location, which is the whole distinction"},
+	} {
+		if !strings.Contains(section, tc.want) {
+			t.Errorf("the %q comparison no longer covers %q — %s",
+				strings.TrimSpace(heading), tc.want, tc.why)
+		}
+	}
+
+	// And the guidance under it, which is the half a reader acts on. The fourth
+	// case is the one that has to be said out loud: most people need neither flag,
+	// and a page that only described two overrides would read as though everybody
+	// does.
+	for _, tc := range []struct{ want, why string }{
+		{"**A profile**", "when writing it down once beats passing a flag twice"},
+		{"**Neither**", "the common case, which is not overriding anything at all"},
+	} {
+		if !strings.Contains(section, tc.want) {
+			t.Errorf("the %q guidance no longer covers %q — %s",
+				strings.TrimSpace(heading), tc.want, tc.why)
+		}
+	}
+
+	// The three places a reader is standing when they need it. Each is located by
+	// the line or section that must carry the link, not by a count of links in the
+	// page: three links all in one paragraph would satisfy a count and help nobody.
+	const link = "(#--source-versus---sink-addr)"
+	for _, tc := range []struct{ where, anchoredAt, why string }{
+		{
+			where:      "the `--source` row of the flag table",
+			anchoredAt: "| `--source <dir\\|s3://bucket/prefix>` |",
+			why:        "a reader meets the flag in the table before they meet either section",
+		},
+		{
+			where:      "the `--sink-addr` row of the flag table",
+			anchoredAt: "| `--sink-addr <host:port>` |",
+			why:        "the same reader, one row down, with the same question",
+		},
+		{
+			where:      "the \"Running the CLI outside the cluster\" section",
+			anchoredAt: "## Running the CLI outside the cluster\n",
+			why:        "the page a failed dial sends people to, where both flags are already in play",
+		},
+	} {
+		_, rest, ok := strings.Cut(reference, tc.anchoredAt)
+		if !ok {
+			t.Errorf("docs/CLI.md no longer contains %s, so nothing can link the comparison from it", tc.where)
+			continue
+		}
+		// A table row ends at its newline; a section ends at the next `## `. An
+		// unterminated one runs to the end of the page, which is what Cut returns
+		// when it finds nothing.
+		ends := "\n## "
+		if strings.HasPrefix(tc.anchoredAt, "|") {
+			ends = "\n"
+		}
+		scope, _, _ := strings.Cut(rest, ends)
+		if !strings.Contains(scope, link) {
+			t.Errorf("%s does not link the `--source` versus `--sink-addr` comparison — %s",
+				tc.where, tc.why)
 		}
 	}
 }

@@ -280,6 +280,14 @@ type WatchedResource struct {
 	// without tearing down and re-listing a watch. The trade-off is
 	// deliberate — informer bandwidth in exchange for a pool that never
 	// thrashes on a selector edit.
+	//
+	// It matches the watched object's *own* labels, which makes it useless on an
+	// Event entry and quietly so: it would be matched against the Event's labels
+	// rather than against those of whatever the Event is about, and Events —
+	// written by kubelet, the scheduler and the controllers — carry essentially
+	// none. The result is an empty scope, not a narrower one, on a rule that
+	// stays Ready. Narrow Events by namespace instead; see docs/SCHEMA.md
+	// ("Event volume").
 	// +optional
 	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
@@ -418,7 +426,17 @@ type StreamRuleSpec struct {
 	//   - watch scopes still open and close normally, and a restart still
 	//     deduplicates against already-recorded Events.
 	//
-	// See docs/SCHEMA.md ("Kubernetes Events") and docs/QUERIES.md.
+	// Naming Event is a sizing decision, not a checkbox. Capture is scope-wide —
+	// every Event in the selected namespaces, not only those about the other
+	// kinds listed here — and the API server bumps an Event's `count` in place,
+	// so every recurrence changes the content, escapes hash dedup and writes
+	// another full row: a crash-looping namespace, not a busy one, is what
+	// dominates write volume. Prefer a namespaced StreamRule or a
+	// namespaceSelector; a labelSelector does not narrow this (see the field
+	// below).
+	//
+	// See docs/SCHEMA.md ("Kubernetes Events" for what the rows mean, "Event
+	// volume" for what they cost) and docs/QUERIES.md.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	Resources []WatchedResource `json:"resources"`

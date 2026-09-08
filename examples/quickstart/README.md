@@ -20,13 +20,13 @@ A single-node [kind] cluster running:
 - the operator, built from your clone and side-loaded into the node;
 - a single-node ClickHouse with the schema v1 tables;
 - a `ClickHouseSink` and a `ClusterStreamRule` that stream a demo namespace's
-  Deployments and ConfigMaps into it;
+  Deployments, ConfigMaps and Kubernetes Events into it;
 - a demo Deployment and ConfigMap, changed once each, so there is real history to
   query rather than an empty table.
 
-The run ends by printing the rows it recorded, the diff behind one of them, proof
-that a redacted value never reached the database, and the port-forward you need
-to keep querying.
+The run ends by printing the rows it recorded, the diff behind one of them, the
+Events the cluster raised about the demo Deployment, proof that a redacted value
+never reached the database, and the port-forward you need to keep querying.
 
 ## The files
 
@@ -36,7 +36,7 @@ to keep querying.
 | [`clickhouse.yaml`](clickhouse.yaml) | Namespace, credentials, Deployment and Service for a single-node ClickHouse. **Evaluation only** — `emptyDir` storage, one replica, a committed password. |
 | [`secret.yaml`](secret.yaml) | The credentials Secret the operator reads, in the operator's own namespace — the only namespace it can read Secrets in. |
 | [`sink.yaml`](sink.yaml) | The `ClickHouseSink` named `default`: where state goes, how the write path is sized, what may be written, and the redaction floor. |
-| [`rule.yaml`](rule.yaml) | The `ClusterStreamRule`: what gets streamed, and from which namespaces. |
+| [`rule.yaml`](rule.yaml) | The `ClusterStreamRule`: what gets streamed, and from which namespaces. Read its comment on the `Event` entry before copying the file — that one is a sizing decision. |
 | [`demo.yaml`](demo.yaml) | A namespace, a Deployment and a ConfigMap, so there is something to record. |
 | [`operator/`](operator/) | A kustomize overlay: `config/default` plus four documented deltas. |
 | [`quickstart.sh`](quickstart.sh) | The driver. Everything below, in order, with waits. |
@@ -76,8 +76,21 @@ explains each.
 
 ```sh
 bin/kustomize build examples/quickstart/operator | kubectl apply --server-side -f -
+
+# One extra grant: the rule below streams v1/Event, and the `core-workloads`
+# preset the install ships does not cover `events`.
+kubectl apply --server-side -f config/rbac/presets/events.yaml
+
 kubectl -n kuberecord-system rollout status deploy/kuberecord-controller-manager
 ```
+
+That second apply is the whole of "grant a new kind": the aggregated watch role
+picks the preset up by label, so nothing is patched and nothing restarts — see
+[`docs/RBAC.md`](../../docs/RBAC.md). It is a separate command rather than a
+fifth line in the overlay because kustomize refuses a resource file above the
+kustomization's own directory; the overlay's comment has the long version. Skip
+it and the rule still applies, still validates, and reports
+`RBACGranted=False` with the resource it could not read named in the message.
 
 The operator is now running and **completely idle**: no sink, no rules, nothing
 streamed, and no restart needed when that changes.
@@ -121,6 +134,18 @@ The demo objects go in before the rule only to save time: a rule whose
 `activeWatches: 0` — and picks the namespace up on its next resync. Correct, but
 it would spend a reconcile interval proving it.
 
+The rule streams three kinds: Deployments, ConfigMaps and `v1/Event`. The third
+is there so step 8 can show `--with-events` doing something, and it is the entry
+to think about before copying this file. Events are captured for the **whole**
+watched scope and correlated to a subject at read time, and an Event bump is a
+full row rather than a diff — the API server updates `count` in place, so hash
+dedup cannot suppress it and a crash-looping pod writes a row per `BackOff`. In
+one namespace holding three `pause` pods that is a few dozen rows; in a
+cluster-wide rule during a bad rollout it is the dominant term in write volume.
+The comment beside the entry in [`rule.yaml`](rule.yaml) says so at the point of
+copying, and [`docs/SCHEMA.md`](../../docs/SCHEMA.md#kubernetes-events) has what
+the rows look like.
+
 **7. Make some history** — but let the baseline land first.
 
 `Ready=True` on the rule means the rule is valid, permitted and registered. It
@@ -151,22 +176,48 @@ go build -o bin/kuberecord ./cmd/kubectl-kuberecord
 kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
 
 bin/kuberecord timeline deploy/checkout-api -n quickstart-demo \
-  --sink-addr 127.0.0.1:9000
+  --with-events --sink-addr 127.0.0.1:9000
 ```
+
+```console
+→ discovered ClickHouseSink/default (127.0.0.1:9000/kuberecord, address from --sink-addr)
+→ cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
+Kind:     apps/Deployment
+Object:   quickstart-demo/checkout-api
+Cluster:  kuberecord-quickstart
+UID:      e1a6782e-b181-4c9c-9222-48480b61c21a
+Coverage: 2026-09-06T20:54:37Z → open (clusterstreamrule//quickstart)
+
+TIME (UTC)               EVENT     ACTOR                            CHANGE
+2026-09-06 20:54:37.660  Snapshot  kube-controller-manager,kubectl  full state recorded (snapshot)
+2026-09-06 20:54:37.661  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-a…
+2026-09-06 20:54:39.945  Modified  kube-controller-manager,kubectl  ~ spec.replicas: 1 → 3
+2026-09-06 20:54:39.953  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-a…
+2026-09-06 20:54:39.954  Modified  kube-controller-manager,kubectl  11 ops
+2026-09-06 20:54:39.980  Modified  kube-controller-manager,kubectl  + status.unavailableReplicas: 2
+2026-09-06 20:54:39.998  Modified  kube-controller-manager,kubectl  2 ops
+! 2 rows are shortened to fit the CHANGE column; pass --full to print every operation
+```
+
+That is the README's opening example, reproduced against a cluster you stood up
+five minutes ago: `kubectl scale` at 20:54:39.945, and eight milliseconds later
+the `ScalingReplicaSet` Event the controller raised in response. The `Event` rows
+are not changes to the Deployment — they are what the cluster *said* about it,
+matched to the object when the archive was read rather than when it was captured.
+Drop `--with-events` and they go with it, leaving the object's own history.
+
+A first sighting reads `Snapshot` here rather than `Added` because the scope was
+still warming its dedup cache from an empty database; step 9 has the distinction.
 
 The port-forward is the step that is easy to skip and impossible to skip twice.
 The `ClickHouseSink` records `clickhouse.kuberecord-quickstart.svc:9000`, which
 is the right address — it is what the operator, running inside this cluster,
 dials — and it resolves nowhere else. `--sink-addr` replaces that one field and
 nothing else: the database, the user and the credentials still come from the
-sink the CLI just discovered, and the notice on stderr says so.
+sink the CLI just discovered, and the two `→` lines at the top of the output say
+so.
 
-```
-→ discovered ClickHouseSink/default (127.0.0.1:9000/kuberecord, address from --sink-addr)
-→ cluster-id kuberecord-quickstart (from the operator Deployment kuberecord-system/kuberecord-controller-manager)
-```
-
-Two lines worth reading rather than scrolling past. The second is why nothing
+They are worth reading rather than scrolling past, and the second is why nothing
 here passes a `--cluster-id`: the overlay stamped `kuberecord-quickstart` on the
 operator, and the CLI read it back off the Deployment.
 
@@ -215,7 +266,7 @@ already recorded. A `kube-root-ca.crt` ConfigMap appears too — Kubernetes inje
 one into every namespace, and the rule streams the namespace, not a hand-picked
 list of objects.
 
-Two more worth running:
+Three more worth running:
 
 ```sql
 -- The flag flip as one RFC 6902 operation, not a second copy of the ConfigMap.
@@ -224,6 +275,17 @@ FROM resource_states
 WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'ConfigMap'
   AND name = 'checkout-config' AND event_type = 'Modified'
 ORDER BY ts DESC LIMIT 1;
+
+-- What `--with-events` interleaves, in SQL: the Events naming checkout-api as
+-- their subject. The correlation is this predicate — read time, not capture
+-- time — and `diff` is empty on every row, because an Event is recorded as full
+-- state each time the API server bumps its count.
+SELECT ts, JSONExtractString(data, 'reason') AS reason,
+       JSONExtractString(data, 'message')    AS message
+FROM resource_states
+WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'Event'
+  AND JSONExtractString(data, 'involvedObject', 'name') = 'checkout-api'
+ORDER BY ts ASC LIMIT 10;
 
 -- The demo ConfigMap was created with data.password = 'hunter2', and the sink's
 -- redaction floor names data.password. One key survived; the other never arrived.
@@ -247,11 +309,13 @@ these files to a real cluster:
 | Password committed in two YAML files | Reachable only from inside a throwaway kind cluster | Sealed Secrets, External Secrets, SOPS, or a Kustomize `SecretGenerator` |
 | `--ch-auto-create-schema` | Saves a step, and exercises a real code path | Apply [`deploy/clickhouse/schema/*.sql`](../../deploy/clickhouse/schema/) yourself; the operator then never runs DDL |
 | The operator image built from your clone | It is the code you are evaluating | `helm install`, or `kubectl apply -f dist/install.yaml` — both install the same objects |
+| Streaming `v1/Event` from the demo namespace | One namespace, three `pause` pods: a few dozen full-state rows, and the flag the README leads with has something to interleave | Keep Events namespaced with a `StreamRule` and size retention first. A cluster-wide Event rule is a sizing decision — see [`rule.yaml`](rule.yaml) and [`docs/SCHEMA.md`](../../docs/SCHEMA.md#kubernetes-events) |
 
 **Not** shortcuts, and identical to a production install: the RBAC (the
-aggregated-ClusterRole model with only the `core-workloads` preset enabled), the
-namespaced Secret grant, leader election, the authenticated metrics endpoint, the
-`restricted` Pod Security Standard, and every line of the pipeline.
+aggregated-ClusterRole model, with the `core-workloads` and `events` presets
+enabled and nothing else), the namespaced Secret grant, leader election, the
+authenticated metrics endpoint, the `restricted` Pod Security Standard, and every
+line of the pipeline.
 
 ## Where to go next
 
@@ -280,6 +344,7 @@ your custom resources before it exits. Beyond that:
 | `ClickHouseSink` not `Ready` | `kubectl describe clickhousesink default` — `CredentialsResolved`, `SchemaValid` and `Ready` each name their own reason |
 | Rule not `Ready` | `kubectl describe clusterstreamrule quickstart` — `PolicyAllowed`, `ResourceResolved` and `RBACGranted`, each per-kind |
 | Sink ready, rule ready, no rows | `kubectl logs -n kuberecord-system deploy/kuberecord-controller-manager` |
+| `--with-events` interleaves nothing | The CLI says which of the three states it is in, and prints the YAML if the answer is that no rule streams Events. If the rule does name `v1/Event`, check `RBACGranted` on it — the `events` preset from step 3 is the usual omission |
 | `kuberecord timeline` reports `no such host` | The port-forward from step 8. The sink's address resolves inside the cluster only — the CLI prints both routes out of it, and [running the CLI outside the cluster](../../docs/CLI.md#running-the-cli-outside-the-cluster) is the long version |
 | `kind: command not found` | [kind's install guide][kind] |
 

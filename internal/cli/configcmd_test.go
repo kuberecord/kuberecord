@@ -211,6 +211,15 @@ func TestConfigSetProfileFromSinkRefusesWhatTheSinkAlreadyAnswers(t *testing.T) 
 			want: []string{"--sink-addr", "writes a file", "--addr"},
 		},
 		{
+			// Refused on the typed route too, and not only beside --from-sink. A
+			// flag that parsed and changed no field would leave its author
+			// believing they had set the address the profile records (D31).
+			name: "the per-invocation override, beside the fields it does not set",
+			args: []string{"--backend", "clickhouse", "--addr", "clickhouse:9000",
+				"--sink-addr", "127.0.0.1:9000"},
+			want: []string{"--sink-addr", "writes a file", "--addr"},
+		},
+		{
 			name: "a value that is not kind/name",
 			args: []string{"--from-sink", "default"},
 			want: []string{`malformed --from-sink "default"`, "<kind>/<name>"},
