@@ -1,0 +1,7 @@
+=== stdout ===
+=== stderr ===
+error: no profile named "locl" in /home/engineer/.config/kuberecord/config.yaml (defined: archive, local)
+
+<the command's usage block>
+=== exit ===
+2 (usage error)

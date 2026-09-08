@@ -391,8 +391,8 @@ func fixedEnum[T ~string](values []T, descriptions map[T]string) cobra.Completio
 func completeProfileNames(
 	_ *cobra.Command, args []string, toComplete string,
 ) ([]cobra.Completion, cobra.ShellCompDirective) {
-	// Guards `config use-profile NAME`, which takes exactly one: past the first
-	// argument there is nothing left to name.
+	// Guards `config use-profile NAME` and `config delete-profile NAME`, which
+	// take exactly one: past the first argument there is nothing left to name.
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

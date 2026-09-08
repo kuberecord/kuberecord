@@ -1159,6 +1159,10 @@ it out here.
 | [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config view` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config resolve`](#config-resolve) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| `config set-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| `config use-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| `config delete-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| `config set-context-cluster-id` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 
 Each ❌ has a reason, and the error says it:
 
@@ -1170,9 +1174,16 @@ Each ❌ has a reason, and the error says it:
   than a row, and there is nothing for a tabular format to lay out. Its default is
   `yaml`, which is the shape people want and the one that carries the **NOT A
   DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
-- **`version`, `config view` and `config resolve` refuse `jsonl`.** It is a
-  streaming format for a result larger than memory, and each of these is exactly
-  one document.
+- **`version`, `config view`, `config resolve` and the four `config` subcommands
+  that write refuse `jsonl`.** It is a streaming format for a result larger than
+  memory, and each of these is exactly one document.
+- **The four `config` subcommands that write render nothing at all for `table` and
+  `wide`.** Their whole report is the confirmation on stderr, because the data of
+  a write is the file it wrote — and there is no result set to lay out in columns.
+  `-o json` and `-o yaml` add a document on stdout for a script to read; see
+  [writes are scriptable](#writes-are-scriptable). They refuse `diff` for the
+  reason `config resolve` does: there is no patch anywhere in a configuration
+  write.
 - **`config view` renders YAML for `table` and `wide`** rather than refusing them,
   because a configuration file *is* YAML and `table` is the global default a user
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
@@ -1181,10 +1192,12 @@ Each ❌ has a reason, and the error says it:
 
 And one ✅ is worth a sentence, because it looks like a flag being ignored and is
 not. **`wide` on `version`, `config view` and `config resolve` renders exactly what
-`table` does.** `wide` means *the same table with nothing elided*, and each of
-those three is a document that elides nothing at any width — a build identity, a
-configuration file, two chains of decisions — so the flag's guarantee is met
-rather than dropped. Where a command genuinely cannot produce a format it refuses
+`table` does**, and on the four writing `config` subcommands it renders no
+document at all, as `table` does. `wide` means *the same table with nothing
+elided*, and each of these is a document that elides nothing at any width — a
+build identity, a configuration file, two chains of decisions, a write that has
+already been confirmed on stderr — so the flag's guarantee is met rather than
+dropped. Where a command genuinely cannot produce a format it refuses
 it by name, which is the case the list above enumerates.
 
 For `table`, `wide` and `diff` the header, the notices and every explanation go to
@@ -1274,11 +1287,13 @@ It is a property of the rendering rather than of the contract. Nothing `jq` or
 `yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
 only one that notices.
 
-**Three documents carry the same `apiVersion` without being envelopes**, and the
+**Five documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,
-`config view` renders a `Config` one, and
-[`config resolve`](#config-resolve) renders a `Resolution`; none is the answer to a
-query, so none has a `metadata` block or an `items` list. A `Version` carrying
+`config view` renders a `Config` one,
+[`config resolve`](#config-resolve) renders a `Resolution`, and the `config`
+subcommands that write render a
+[`ProfileChange` or a `ContextMapping`](#writes-are-scriptable); none is the answer
+to a query, so none has a `metadata` block or an `items` list. A `Version` carrying
 `cluster_id: ""` and an empty coverage report would be inviting a consumer to read
 three fields that could never mean anything. ([`version --check`](#version---check)
 adds a `setup` block naming a cluster, and that is not a `metadata` block: it is
@@ -2096,6 +2111,11 @@ $ kuberecord config set-profile laptop --backend local --path ~/archives/kuberec
 # Choose the active one.
 $ kuberecord config use-profile archive
 
+# Remove one. Deleting the active profile needs --force, which also clears the
+# active pointer.
+$ kuberecord config delete-profile stale
+$ kuberecord config delete-profile local --force
+
 # Record which kuberecord cluster a kubeconfig context reads.
 $ kuberecord config set-context-cluster-id prod-eu-1          # the current context
 $ kuberecord config set-context-cluster-id prod-eu prod-eu-1  # a named one
@@ -2109,12 +2129,13 @@ $ kuberecord config resolve
 $ kuberecord config resolve --check
 ```
 
-Five subcommands, and two of them have flags of their own:
+Six subcommands, and three of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
 | `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags) |
 | `config use-profile` | `NAME` | none |
+| `config delete-profile` | `NAME` | `--force` — see [the profile lifecycle](#creating-replacing-and-deleting-a-profile) |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
 | `config resolve` | none | `--check` — see [`config resolve`](#config-resolve) |
@@ -2123,6 +2144,10 @@ Five subcommands, and two of them have flags of their own:
 is one step of [where the data comes from](#where-the-data-comes-from), and the
 question it answers is the one a reader of this file has when the file turns out
 not to be the step that won.
+
+The four that write also render a document for `-o json` and `-o yaml`, so
+creating a profile in a script is not a step whose outcome has to be reconstructed
+by diffing the file. See [writes are scriptable](#writes-are-scriptable).
 
 `config set-profile` carries one flag per field of the stanza its `--backend`
 selects. A flag belonging to a different backend is a validation error naming
@@ -2146,6 +2171,135 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
 
 There is no `--password`. That is not an omission: see the first rule above.
+
+#### Creating, replacing and deleting a profile
+
+**`set-profile` is an upsert.** A name already in the file is replaced, and the
+line on stderr names the profile that is gone:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000
+→ updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+```
+
+Creating one prints `→ wrote profile "local" in …` as before. One line is the whole
+of the difference, and it is deliberately not a prompt or a `--force`: re-running
+`set-profile` after a forwarded port moved is the wizard's single most common real
+case, and a command that refused it would break the route new users are put on.
+What the line has to do is make the destructive half visible, because nothing else
+holds that stanza once the file is written.
+
+**The replacement is the whole stanza, not a field merge.** A profile that named
+`passwordFile` and is rewritten with `--password-env` keeps no reference to the
+file; a field the second command did not mention is absent, not inherited.
+
+A merge is the tempting alternative and it is refused on purpose. The profile it
+produced would depend on what was in the file beforehand, which makes it
+unreconstructible from the command that wrote it — and every message this
+subcommand prints is a claim that running that command again produces this
+profile, which a merge would falsify on any machine whose file started out
+different. It would also make the destructive case worse rather than better: a
+stanza half from a hand-tuned profile and half from a flag is a configuration
+nobody wrote.
+
+There is no `update-profile`. With `set-profile` documented as an upsert it would
+be a synonym, and a second name for one operation is how a CLI surface begins to
+sprawl.
+
+**`delete-profile NAME` removes one**, and says what it removed for the same
+reason:
+
+```console
+$ kuberecord config delete-profile stale
+→ deleted profile "stale" from ~/.config/kuberecord/config.yaml (was: local archive at /archives/kuberecord)
+```
+
+Deleting the **active** profile is refused without `--force`, because the
+resolution chain would then name a profile that does not exist. The refusal names
+both routes past it, since they are different decisions:
+
+```console
+$ kuberecord config delete-profile local
+error: "local" is the active profile, and deleting it would leave the resolution chain naming a profile that does not exist: either switch first with `kuberecord config use-profile archive` and delete it after, or delete it and clear the active pointer with `kuberecord config delete-profile local --force`
+
+$ kuberecord config delete-profile local --force
+→ deleted profile "local" from ~/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ no profile is active now: the resolution chain falls through to the steps after it
+→ to choose another: `kuberecord config use-profile archive`
+```
+
+`--force` **clears the active pointer** as well as removing the stanza. That is
+what makes it a deletion rather than a way to corrupt the file: a `currentProfile`
+naming nothing is refused when the file is read, so the next command would not
+resolve to a missing profile — it would refuse to read the configuration at all.
+
+A name the file does not hold is an error listing the names it does, which is the
+shape every "missing key" message in this tool uses:
+
+```console
+$ kuberecord config delete-profile locl
+error: no profile named "locl" in ~/.config/kuberecord/config.yaml (defined: archive, local)
+```
+
+The reason deletion is a command at all, rather than *"edit the YAML"*: the person
+who needed prompts to write a profile is not the person who should be hand-editing
+one, and a stale profile is not inert. It sits at step 3 of
+[the resolution chain](#where-the-data-comes-from) and shadows discovery — which is
+a confusion [`config resolve`](#config-resolve) was partly built to diagnose, and
+removal is the fix you reach for the moment you have diagnosed it.
+
+#### Writes are scriptable
+
+The four subcommands that write — `set-profile`, `use-profile`, `delete-profile`
+and `set-context-cluster-id` — render a document for `-o json` and `-o yaml`. The
+confirmation stays on stderr either way, so `| jq` receives the document alone.
+
+The three that act on a profile render a `ProfileChange`:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000 -o json
+→ updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "ProfileChange",
+  "action": "updated",
+  "name": "local",
+  "path": "/home/you/.config/kuberecord/config.yaml",
+  "profile": {
+    "backend": "clickhouse",
+    "clickhouse": { "addr": "127.0.0.1:9000" }
+  },
+  "previous": {
+    "backend": "clickhouse",
+    "clickhouse": { "addr": "10.0.1.5:9000", "database": "kuberecord" }
+  },
+  "currentProfile": "local"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `action` | `created`, `updated`, `deleted` or `activated`. The field to branch on: which of the two stanzas is present depends on it. |
+| `name` | The profile acted on. |
+| `path` | The file written, so documents collected from several machines are distinguishable. |
+| `profile` | The stanza this name now carries. Absent for a deletion. |
+| `previous` | The stanza this write displaced — replaced by an update, or removed by a deletion. Absent when nothing was displaced, including for `activated`, which moves a pointer and destroys nothing. |
+| `currentProfile` | The active pointer *after* the write, and `""` when none is active. Always present, so an empty pointer is a value to read rather than a missing key to infer from — which is exactly what `delete-profile --force` produces. |
+
+`set-context-cluster-id` renders a `ContextMapping`, whose subject is different
+and which therefore is not the same kind (`context`, `clusterID`,
+`previousClusterID` when the context was already mapped, and `path`). That
+subcommand is an upsert too, and it reports a remap the same way:
+
+```console
+$ kuberecord config set-context-cluster-id prod-eu prod-eu-2
+→ context "prod-eu" reads cluster "prod-eu-2" (was: "prod-eu-1")
+```
+
+Neither kind is an [envelope](#structured-output): no `metadata`, no `items`,
+because no question about recorded history was asked. Both carry the same
+`apiVersion` and are governed by the same
+[additive-only policy](#the-additive-only-policy).
 
 #### `--from-sink`
 

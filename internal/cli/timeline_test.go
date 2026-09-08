@@ -221,9 +221,21 @@ func assertGolden(t *testing.T, name, stdout, stderr string) {
 // rewriting the thing it was meant to pin.
 func assertGoldenIn(t *testing.T, command, name, stdout, stderr string) {
 	t.Helper()
+	assertGoldenDocument(t, command, name, stdoutMarker+stdout+stderrMarker+stderr)
+}
+
+// assertGoldenDocument is the compare-or-rewrite half, over an already-assembled
+// document.
+//
+// It is separate from the section assembly because the three harnesses that use
+// it assemble different sections — two streams for a rendering, a third for the
+// failure a reporting command returned — while the -update path and the compare
+// path must stay one implementation. A golden test whose two halves disagree is a
+// test that passes after rewriting the thing it was meant to pin.
+func assertGoldenDocument(t *testing.T, command, name, got string) {
+	t.Helper()
 
 	path := filepath.Join("testdata", command, name+".golden")
-	got := stdoutMarker + stdout + stderrMarker + stderr
 
 	if *updateGolden {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

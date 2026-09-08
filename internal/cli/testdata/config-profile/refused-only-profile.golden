@@ -1,0 +1,7 @@
+=== stdout ===
+=== stderr ===
+error: "local" is the active profile and the only one in this file, so there is nothing to switch to first: delete it and clear the active pointer with `kuberecord config delete-profile local --force`, after which the resolution chain falls through to discovering a sink from the cluster
+
+<the command's usage block>
+=== exit ===
+2 (usage error)

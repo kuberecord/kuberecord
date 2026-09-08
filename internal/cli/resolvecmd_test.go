@@ -23,8 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -206,27 +204,8 @@ func assertResolveGolden(t *testing.T, name, stdout, stderr string, err error) {
 func assertReportGolden(t *testing.T, dir, name, commandPath, stdout, stderr string, err error) {
 	t.Helper()
 
-	path := filepath.Join("testdata", dir, name+".golden")
-	got := stdoutMarker + stdout + stderrMarker + stderr +
-		errorMarker + topLevelDiagnostic(commandPath, err)
-
-	if *updateGolden {
-		if mkErr := os.MkdirAll(filepath.Dir(path), 0o755); mkErr != nil {
-			t.Fatalf("creating the golden directory: %v", mkErr)
-		}
-		if writeErr := os.WriteFile(path, []byte(got), 0o600); writeErr != nil {
-			t.Fatalf("writing %s: %v", path, writeErr)
-		}
-		return
-	}
-
-	want, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatalf("reading %s (run `go test ./internal/cli/ -update` to create it): %v", path, readErr)
-	}
-	if got != string(want) {
-		t.Errorf("the rendering of %s changed.\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
-	}
+	assertGoldenDocument(t, dir, name, stdoutMarker+stdout+stderrMarker+stderr+
+		errorMarker+topLevelDiagnostic(commandPath, err))
 }
 
 // topLevelDiagnostic is what cli.RunContext writes to stderr for a failure one of

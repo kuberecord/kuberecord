@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
 	"sigs.k8s.io/yaml"
 )
@@ -524,4 +525,80 @@ func DescribeProfileNames(profiles map[string]Profile) string {
 		return "the file defines no profiles"
 	}
 	return "defined: " + strings.Join(slices.Sorted(maps.Keys(profiles)), ", ")
+}
+
+// Describe renders what this profile points at, in the words the resolution
+// notice uses for it.
+//
+// It is the parenthetical half of that notice — `ClickHouse at
+// 10.0.1.5:9000/kuberecord` — without the profile's name, because the name is
+// what the caller is already talking about. targetFromProfile builds the notice
+// from the same three describers, so a message about a profile in the
+// configuration file and a message about the backend that profile opened cannot
+// disagree about what it is.
+//
+// Defaults are applied rather than left blank, since the subject is where a query
+// would actually go: a stanza with no database named reads `kuberecord`, and a
+// description saying `at 10.0.1.5:9000/` would describe nothing that exists.
+//
+// A stanza that is absent is described by its backend name alone. LoadConfig
+// refuses such a profile (Profile.Validate), so this is reachable only from a
+// struct assembled in memory — and a nil dereference inside a message about a
+// misassembled profile would replace the complaint with a crash.
+func (p Profile) Describe() string {
+	switch p.Backend {
+	case BackendClickHouse:
+		if p.ClickHouse == nil {
+			break
+		}
+		return describeClickHouse(p.ClickHouse.Addr, valueOr(p.ClickHouse.Database, DefaultClickHouseDatabase))
+	case BackendS3:
+		if p.S3 == nil {
+			break
+		}
+		return describeS3(p.S3.Bucket, p.S3.Prefix, valueOr(p.S3.Region, DefaultS3Region))
+	case BackendLocal:
+		if p.Local == nil {
+			break
+		}
+		return describeLocal(p.Local.Path)
+	}
+	return string(p.Backend)
+}
+
+// The three per-backend descriptions, spelled once.
+//
+// They take values rather than stanzas because targetFromProfile describes the
+// backend it is about to open rather than the stanza it read: --sink-addr replaces
+// the endpoint of one invocation (D25), and a describer that took the stanza would
+// either report the address that was overridden or need a copy of the stanza made
+// to hold the address that replaced it.
+func describeClickHouse(addr, database string) string {
+	return fmt.Sprintf("ClickHouse at %s/%s", addr, database)
+}
+
+func describeS3(bucket, prefix, region string) string {
+	return fmt.Sprintf("s3://%s, region %s", joinBucketPrefix(bucket, prefix), region)
+}
+
+func describeLocal(path string) string {
+	return fmt.Sprintf("local archive at %s", path)
+}
+
+// RequireProfile reads one profile by name, reporting the names that do exist
+// when it is not among them.
+//
+// It is a function because three commands ask the same question of the same file
+// — `use-profile`, `delete-profile`, and the resolution chain's third step — and
+// the answer to a mistyped name is only useful if it lists the alternatives. That
+// is the shape requireSecretKey uses for a missing Secret key, and the reason is
+// the same: the mistake is almost always a typo or a profile written on another
+// machine, and both are settled by seeing the list.
+func RequireProfile(cfg *Config, path, name string) (Profile, error) {
+	profile, ok := cfg.Profiles[name]
+	if !ok {
+		return Profile{}, exit.UsageErrorf("no profile named %q in %s (%s)",
+			name, path, DescribeProfileNames(cfg.Profiles))
+	}
+	return profile, nil
 }

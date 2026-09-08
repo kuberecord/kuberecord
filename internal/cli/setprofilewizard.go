@@ -106,6 +106,11 @@ type setProfileWizard struct {
 	// something the reader can actually type.
 	invokedAs string
 
+	// format is the structured document this invocation asked for, empty for the
+	// human form. It is decided by the command before the first question, so a
+	// rendering nobody can produce is refused before anybody is asked anything.
+	format render.StructuredFormat
+
 	// newResolver builds the cluster access the first question needs.
 	//
 	// It is a function rather than a resolver so that a wizard whose first answer
@@ -123,7 +128,7 @@ type setProfileWizard struct {
 // what this is.
 func runSetProfileWizard(
 	cmd *cobra.Command, flags *options.GlobalFlags,
-	streams genericiooptions.IOStreams, invokedAs, name string,
+	streams genericiooptions.IOStreams, invokedAs, name string, format render.StructuredFormat,
 ) error {
 	if !options.IsTerminalIn(streams.In) {
 		return errNoQuestionsToAsk(invokedAs)
@@ -136,6 +141,7 @@ func runSetProfileWizard(
 		severity:  render.NewSeverity(colorize),
 		colorize:  colorize,
 		invokedAs: invokedAs,
+		format:    format,
 		newResolver: func() (*resolve.BackendResolver, error) {
 			return resolve.NewBackendResolver(flags, streams, invokedAs)
 		},
@@ -444,6 +450,8 @@ func (w *setProfileWizard) writeDerived(name string, derived *derivedProfile) er
 		explanation: derived.profile.Explain(w.colorize),
 		nextStep:    true,
 		invokedAs:   w.invokedAs,
+		severity:    w.severity,
+		format:      w.format,
 	}, w.streams); err != nil {
 		return err
 	}
@@ -487,6 +495,7 @@ func (w *setProfileWizard) writeTyped(ctx context.Context, name string) error {
 	}
 	if err := writeProfile(profileWrite{
 		name: name, profile: profile, nextStep: true, invokedAs: w.invokedAs,
+		severity: w.severity, format: w.format,
 	}, w.streams); err != nil {
 		return err
 	}

@@ -189,7 +189,9 @@ var noopAudit = []auditedFlag{
 	{"output", deliberatelySilent, "every format a command cannot render is refused by name. " +
 		"`wide` on `version`, `config view` and `config resolve` renders identically to `table`, " +
 		"and that is the flag's guarantee honoured rather than dropped: `wide` means the same " +
-		"table with nothing elided, and those three documents elide nothing at any width. " +
+		"table with nothing elided, and those three documents elide nothing at any width. On the " +
+		"four `config` subcommands that write, `table` and `wide` render no document at all — " +
+		"the report of a write is the confirmation on stderr, and its data is the file. " +
 		"docs/CLI.md's format matrix says so"},
 	{"color", deliberatelySilent, "a rendering mode, never a request for content: it changes how " +
 		"a line is painted and never which lines there are. A notice about colour would be the " +
@@ -205,6 +207,11 @@ var noopAudit = []auditedFlag{
 	{"yes", deliberatelySilent, "it answers a question. A question that was not asked — an " +
 		"indexed backend, a non-interactive stream, a scan under the confirmation width — needed " +
 		"no answer, which is what `rm -f` does with a file nothing would have prompted about"},
+	{"force", deliberatelySilent, "it overrides a refusal. A refusal that was not raised — " +
+		"deleting a profile that is not the active one — needed no override, which is what " +
+		"`rm -f` does with a file nothing would have prompted about. Where it does act it is " +
+		"announced twice over: the deletion names the stanza it removed, and clearing the active " +
+		"pointer is its own line naming the command that chooses the next profile"},
 	{"max-objects", deliberatelySilent, "a circuit breaker for the work --limit cannot bound " +
 		"without an index. On an indexed backend the work is already bounded, and a breaker that " +
 		"does trip names itself through coldscan.Stopped"},

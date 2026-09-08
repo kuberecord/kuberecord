@@ -991,7 +991,7 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 				Password: password,
 				TLS:      profile.ClickHouse.TLS,
 			},
-			description: fmt.Sprintf("%s (ClickHouse at %s/%s%s)", name, addr, database,
+			description: fmt.Sprintf("%s (%s%s)", name, describeClickHouse(addr, database),
 				sinkAddrNote(sinkAddr != "")),
 		}, nil
 
@@ -1005,9 +1005,8 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 				ForcePathStyle: profile.S3.ForcePathStyle,
 			},
 			archivePrefix: profile.S3.Prefix,
-			description: fmt.Sprintf("%s (s3://%s, region %s)", name,
-				joinBucketPrefix(profile.S3.Bucket, profile.S3.Prefix),
-				valueOr(profile.S3.Region, DefaultS3Region)),
+			description: fmt.Sprintf("%s (%s)", name, describeS3(profile.S3.Bucket, profile.S3.Prefix,
+				valueOr(profile.S3.Region, DefaultS3Region))),
 		}, nil
 
 	case BackendLocal:
@@ -1015,7 +1014,7 @@ func targetFromProfile(name string, profile Profile, sinkAddr string) (target, e
 			backend:       BackendLocal,
 			localPath:     profile.Local.Path,
 			archivePrefix: profile.Local.Prefix,
-			description:   fmt.Sprintf("%s (local archive at %s)", name, profile.Local.Path),
+			description:   fmt.Sprintf("%s (%s)", name, describeLocal(profile.Local.Path)),
 		}, nil
 	}
 	return target{}, exit.RuntimeErrorf("profile %q names the backend %q, which is not one of %s",

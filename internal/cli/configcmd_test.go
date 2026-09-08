@@ -329,7 +329,7 @@ func TestConfigSetContextClusterIDTakesBothForms(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve.LoadConfig: %v", err)
 		}
-		if got := cfg.Contexts[kubeconfigContext]; got != "prod-eu-1" {
+		if got := cfg.Contexts[kubeconfigContext]; got != theCluster {
 			t.Errorf("contexts[%q] = %q, want prod-eu-1 (mappings: %v)",
 				kubeconfigContext, got, cfg.Contexts)
 		}
