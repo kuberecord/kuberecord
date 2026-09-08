@@ -306,6 +306,40 @@ func TestTheSwitchRouteMatchesHowTheProfileWasChosen(t *testing.T) {
 	}
 }
 
+// TestTheSwitchRouteNamesTheListingThatSaysWhichOtherProfileWouldWork.
+//
+// The switch route tells a reader to use a different profile and, until
+// `config get-profiles` existed, said nothing about whether that one would fare
+// any better — which for the commonest cause is a coin toss: one exported
+// variable per shell is normal, and the reader has just been told theirs is not
+// the one. The listing reports the same env-set-or-unset and file-present-or-
+// missing fact for every profile in the file, so it is named at the moment the
+// question arises.
+//
+// Both spellings of the switch carry it, because the question is about the file
+// rather than about how this profile came to be chosen.
+func TestTheSwitchRouteNamesTheListingThatSaysWhichOtherProfileWouldWork(t *testing.T) {
+	unsetPasswordEnv(t)
+	profile := clickHouseStanza(func(p *ClickHouseProfile) { p.PasswordEnv = DefaultPasswordEnv })
+	cfg := routesConfig(profile, "archive", "staging")
+
+	for _, flags := range []*options.GlobalFlags{{}, {Profile: routesName}} {
+		rendered := profileFailure(t, cfg, flags).Render("kuberecord timeline", false)
+		if !strings.Contains(rendered, options.StandaloneName+" config get-profiles") {
+			t.Errorf("the switch route does not name the listing that says which profile "+
+				"would resolve:\n%s", rendered)
+		}
+		// Named beside the switch and not somewhere else in the block: it answers
+		// "will the one I switch to work?", and a pointer floating free of that
+		// question is a command with no reason attached to it.
+		listing := strings.Index(rendered, "config get-profiles")
+		switching := strings.LastIndex(rendered, "The file also defines")
+		if switching < 0 || listing < switching {
+			t.Errorf("the listing is not named within the switch route:\n%s", rendered)
+		}
+	}
+}
+
 // TestTheOnlyProfileIsToldSoRatherThanOfferedNothing.
 //
 // A remedy naming no command reads as though the reader should have known which
@@ -332,6 +366,13 @@ func TestTheOnlyProfileIsToldSoRatherThanOfferedNothing(t *testing.T) {
 	}
 	if strings.Contains(rendered, "config use-profile") {
 		t.Errorf("the block offers a switch to a profile that does not exist:\n%s", rendered)
+	}
+	// Nor the listing. With one profile in the file there is nothing to compare
+	// this one against, and the route above has already stated its credential
+	// state — a table of the row the reader just read about tells them what they
+	// know.
+	if strings.Contains(rendered, "config get-profiles") {
+		t.Errorf("the block offers a listing of the one profile it has just described:\n%s", rendered)
 	}
 }
 

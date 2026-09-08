@@ -17,8 +17,10 @@
 
 [1m    kuberecord timeline … --sink ClickHouseSink/<name>[0m
 
-[33mOr stop this one answering. The file also defines archive, staging:[0m
+[33mOr stop this one answering. The file also defines archive, staging. Which of those has a[0m
+[33mcredential that resolves right now is the first command below; the second switches to it:[0m
 
+[1m    kuberecord config get-profiles[0m
 [1m    kuberecord config use-profile archive[0m
 
 [33mTo watch the chain make this decision, with this step's own reason beside it:[0m

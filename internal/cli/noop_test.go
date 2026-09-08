@@ -190,19 +190,23 @@ var noopAudit = []auditedFlag{
 
 	// kuberecord's global surface.
 	{"output", deliberatelySilent, "every format a command cannot render is refused by name. " +
-		"`wide` on `version`, `config view` and `config resolve` renders identically to `table`, " +
-		"and that is the flag's guarantee honoured rather than dropped: `wide` means the same " +
-		"table with nothing elided, and those three documents elide nothing at any width. On the " +
-		"four `config` subcommands that write, `table` and `wide` render no document at all — " +
-		"the report of a write is the confirmation on stderr, and its data is the file. " +
-		"docs/CLI.md's format matrix says so"},
+		"`wide` on `version`, `config view`, `config get-profiles` and `config resolve` renders " +
+		"identically to `table`, and that is the flag's guarantee honoured rather than dropped: " +
+		"`wide` means the same table with nothing elided, and those four documents elide nothing " +
+		"at any width — the profile listing's cells are addresses and paths people paste, so " +
+		"nothing in it is ever shortened. On the four `config` subcommands that write, `table` " +
+		"and `wide` render no document at all — the report of a write is the confirmation on " +
+		"stderr, and its data is the file. docs/CLI.md's format matrix says so"},
 	{"color", deliberatelySilent, "a rendering mode, never a request for content: it changes how " +
 		"a line is painted and never which lines there are. A notice about colour would be the " +
 		"noise it was warning about"},
 	{"cluster-id", deliberatelySilent, chainInput},
 	{"sink", deliberatelySilent, chainInput},
 	{"source", deliberatelySilent, chainInput},
-	{"profile", deliberatelySilent, chainInput},
+	{"profile", deliberatelySilent, chainInput + ". `config get-profiles` reads the same file " +
+		"and deliberately does not consult it: CURRENT is the file's active pointer, as the `*` " +
+		"in `kubectl config get-contexts` is, and what this invocation would resolve to is the " +
+		"other command's question"},
 	{"operator-namespace", deliberatelySilent, chainInput},
 	{"sink-addr", explained, "it is refused by name on `config set-profile`, where it would " +
 		"otherwise parse, change no field, and leave its author believing they had set the " +

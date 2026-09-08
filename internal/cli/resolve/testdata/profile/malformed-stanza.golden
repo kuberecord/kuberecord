@@ -18,8 +18,10 @@ so a named sink is reached first and its credential comes from the Secret it ref
 
     kuberecord timeline … --sink <kind>/<name>
 
-Or stop this one answering. The file also defines archive:
+Or stop this one answering. The file also defines archive. Which of those has a
+credential that resolves right now is the first command below; the second switches to it:
 
+    kuberecord config get-profiles
     kuberecord config use-profile archive
 
 To watch the chain make this decision, with this step's own reason beside it:

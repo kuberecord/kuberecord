@@ -18,6 +18,45 @@ than a summary of them.
 
 ### Added
 
+- **`kuberecord config get-profiles` lists the profiles and says which of them
+  could authenticate right now.** `config view` prints the configuration file;
+  this prints its *state*, the way `kubectl config get-contexts` does beside
+  `kubectl config view`:
+
+  ```
+  CURRENT   NAME     BACKEND      TARGET                        CREDENTIAL
+  *         local    clickhouse   127.0.0.1:9000/kuberecord     env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+            prod     clickhouse   ch.observability:9000/audit   env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+            archive  s3           s3://audit-archive/prod       ambient
+  ```
+
+  **The `CREDENTIAL` column is the reason it exists.** A profile stores the *name*
+  of an environment variable or the *path* of a file, and whether that reference
+  resolves — exported in the shell you are in, present on this disk — is something
+  a dump of the file structurally cannot tell you. It is also the commonest reason
+  a query stops, so the column reports `env NAME (set|not set)`,
+  `file PATH (present|missing|unreadable)`, `ambient` or `none`, checked as the
+  table is drawn and decided by the same code path a query resolves a password
+  through. `present` and `unreadable` are different words because they are
+  different fixes.
+
+  It **never prints a credential value**, in any format, at any verbosity, and it
+  **contacts nothing** — no cluster, no backend, not even to say whether one
+  answers. Whether the backend can be reached stays `config resolve --check`; two
+  commands that dialled would be two answers to one question. An empty
+  configuration is not an error: the header prints with no rows, a line names
+  `config set-profile`, and the exit code is `0`.
+
+  `-o json` and `-o yaml` render a `Profiles` document under the existing
+  `cli.kuberecord.io/v1alpha1` contract, which makes
+  `jq '.profiles[] | select(.credential.state == "not set")'` the scripted form of
+  the same diagnosis. The profile-resolution failure added below now points at
+  this command where it offers to switch profiles, because *"will the other one
+  work?"* is the question a switch raises and this is the column that answers it.
+
+  That also closes the profile lifecycle: create, inspect, switch, delete, with a
+  command for each and a text editor for none.
+
 - **`kuberecord config set-profile` with no flags asks, on a terminal.**
   Configuring a profile used to require knowing flags a new user does not have.
   Now the bare subcommand prompts, and the **first question is whether to read the

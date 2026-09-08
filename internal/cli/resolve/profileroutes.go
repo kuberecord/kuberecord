@@ -45,6 +45,10 @@ import (
 //	kuberecord timeline … --sink ClickHouseSink/default    bypass the profile
 //	kuberecord config use-profile other                    switch away
 //
+// The third of those names `config get-profiles` beside it, which reports the
+// same credential state for every profile in the file — so a reader deciding
+// which one to switch to can see which of them would resolve. See switchRoute.
+//
 // The middle one is the one people reach for. --sink is step 2 and the profile is
 // step 3, so naming a sink is reached first and the credential comes from the
 // Secret that sink references — the profile is not consulted at all.
@@ -375,6 +379,20 @@ func (r profileRoutes) bypassRoute(prose, command func(string), gap func(), invo
 // no command reads as though the reader should have known which name to
 // substitute. The two commands it offers instead are both real — one writes
 // another profile, the other removes this one and lets discovery answer again.
+//
+// # Why the listing is named here and not elsewhere in the block
+//
+// `config get-profiles` is this diagnosis in a table: its CREDENTIAL column
+// reports, for every profile, the same env-set-or-unset and file-present-or-
+// missing fact that this page of prose reports for one. So it is named at the
+// moment the reader has been told to switch to a different profile, because
+// "will that one work?" is the question they now have and the column is the
+// answer.
+//
+// It is not named in the only-profile case. There is nothing to switch to, this
+// block has already stated that profile's own credential state in the route
+// above, and a table of one row the reader has just read about is a command that
+// tells them what they know.
 func (r profileRoutes) switchRoute(prose, command func(string), gap func(), invocation string) {
 	if len(r.others) == 0 {
 		prose("Or stop it answering at all. It is the only profile that file defines, so there is")
@@ -386,8 +404,11 @@ func (r profileRoutes) switchRoute(prose, command func(string), gap func(), invo
 		return
 	}
 
-	prose(fmt.Sprintf("Or stop this one answering. The file also defines %s:", strings.Join(r.others, ", ")))
+	prose(fmt.Sprintf("Or stop this one answering. The file also defines %s. Which of those has a",
+		strings.Join(r.others, ", ")))
+	prose("credential that resolves right now is the first command below; the second switches to it:")
 	gap()
+	command(r.commandName + " config get-profiles")
 	if r.namedByFlag {
 		command(fmt.Sprintf("%s … --%s %s", invocation, options.FlagProfile, r.others[0]))
 		return

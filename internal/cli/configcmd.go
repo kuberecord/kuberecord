@@ -50,11 +50,13 @@ import (
 // its users hand-editing the file it exists to spare them, and a profile left
 // behind is not inert — it shadows discovery from step 3 of the resolution chain.
 //
-// The sixth, `resolve`, writes nothing at all. It belongs here because a profile
-// is one step of the chain that decides where an answer comes from, and the
-// question it answers — "which step won, and why not the others" — is the one a
-// reader of this file has when the file turns out not to be the step that won.
-// See resolvecmd.go.
+// The last two write nothing at all, and they are the two halves of "inspect".
+// `resolve` belongs here because a profile is one step of the chain that decides
+// where an answer comes from, and the question it answers — "which step won, and
+// why not the others" — is the one a reader of this file has when the file turns
+// out not to be the step that won. `get-profiles` answers the question before
+// that one: what is in the file, which of it is active, and which of it could
+// authenticate right now. See resolvecmd.go and getprofilescmd.go.
 
 // newConfigCommand builds the `config` subtree.
 func newConfigCommand(flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) *cobra.Command {
@@ -75,8 +77,12 @@ whole, and the line it prints names the profile that is gone.
 `+"`config delete-profile`"+` removes one, and refuses to remove the active one
 without --force.
 
-`+"`config resolve`"+` writes nothing: it reports which step of the resolution
-chains this invocation would use, and why the earlier ones had nothing to say.`,
+Three subcommands write nothing. `+"`config view`"+` prints the file.
+`+"`config get-profiles`"+` prints its state: one row per profile, which is
+active, what each points at, and whether its credential reference resolves on
+this machine — which the file itself cannot say. `+"`config resolve`"+` reports
+which step of the resolution chains this invocation would use, and why the
+earlier ones had nothing to say.`,
 			resolve.ConfigDirName, resolve.ConfigFileName),
 		Args: rejectUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -86,6 +92,7 @@ chains this invocation would use, and why the earlier ones had nothing to say.`,
 
 	config.AddCommand(
 		newConfigViewCommand(flags, streams),
+		newConfigGetProfilesCommand(flags, streams, invokedAs),
 		newConfigSetProfileCommand(flags, streams, invokedAs),
 		newConfigUseProfileCommand(flags, streams),
 		newConfigDeleteProfileCommand(flags, streams, invokedAs),
@@ -248,7 +255,7 @@ every tool on the machine already reads.`,
 			// touched, so that an invocation asking for a rendering nobody can
 			// produce is refused rather than answered after the write. It applies
 			// to all three routes for the same reason the refusal above does.
-			format, err := configWriteFormat("set-profile", flags.Output)
+			format, err := configFormat("set-profile", flags.Output)
 			if err != nil {
 				return err
 			}
@@ -439,7 +446,7 @@ type profileWrite struct {
 	severity render.Severity
 
 	// format is the structured document this invocation asked for, empty for the
-	// human form. It is decided by configWriteFormat before the command reaches
+	// human form. It is decided by configFormat before the command reaches
 	// this struct, so a format nobody can render never rewrites a file.
 	format render.StructuredFormat
 }
@@ -941,7 +948,7 @@ override it for a single command.`,
 		ValidArgsFunction: completeProfileNames,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			format, err := configWriteFormat("use-profile", flags.Output)
+			format, err := configFormat("use-profile", flags.Output)
 			if err != nil {
 				return err
 			}
@@ -1022,7 +1029,7 @@ else holds that stanza once the file is written.`,
 		ValidArgsFunction: completeProfileNames,
 
 		RunE: func(cmd *cobra.Command, args []string) error {
-			format, err := configWriteFormat("delete-profile", flags.Output)
+			format, err := configFormat("delete-profile", flags.Output)
 			if err != nil {
 				return err
 			}
@@ -1179,7 +1186,7 @@ writing several mappings in a row wants.`,
   kuberecord config set-context-cluster-id prod-eu prod-eu-1
   kuberecord --context prod-eu config set-context-cluster-id prod-eu-1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			format, err := configWriteFormat("set-context-cluster-id", flags.Output)
+			format, err := configFormat("set-context-cluster-id", flags.Output)
 			if err != nil {
 				return err
 			}

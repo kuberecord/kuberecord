@@ -1,0 +1,11 @@
+=== stdout ===
+CURRENT  NAME     BACKEND     TARGET                       CREDENTIAL
+         archive  s3          s3://audit-archive/prod      ambient
+*        local    clickhouse  127.0.0.1:9000/kuberecord    env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+         nopass   clickhouse  127.0.0.1:9000/kuberecord    none
+         onfile   clickhouse  10.0.1.5:9000/kuberecord     file /etc/kuberecord/password (missing)
+         prod     clickhouse  ch.observability:9000/audit  env KUBERECORD_TEST_EXPORTED_PASSWORD (set)
+=== stderr ===
+# /home/engineer/.config/kuberecord/config.yaml
+=== exit ===
+0 (success)

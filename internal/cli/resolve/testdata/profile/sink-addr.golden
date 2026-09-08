@@ -22,8 +22,10 @@ step answered and never a credential, so this profile's password still came from
 reference above. One field replaced, no other:
 docs/CLI.md#--source-versus---sink-addr
 
-Or stop this one answering. The file also defines archive:
+Or stop this one answering. The file also defines archive. Which of those has a
+credential that resolves right now is the first command below; the second switches to it:
 
+    kuberecord config get-profiles
     kuberecord config use-profile archive
 
 To watch the chain make this decision, with this step's own reason beside it:

@@ -1,0 +1,9 @@
+=== stdout ===
+CURRENT  NAME  BACKEND  TARGET  CREDENTIAL
+=== stderr ===
+# /home/engineer/.config/kuberecord/config.yaml
+! this file defines no profiles, which is the ordinary state of a first invocation: with none, resolution falls through to discovering a sink from the cluster.
+  To write one — with no flags it asks for what it needs, and its first question is whether to read the settings out of a sink this cluster already holds:
+      kuberecord config set-profile
+=== exit ===
+0 (success)

@@ -1,0 +1,66 @@
+=== stdout ===
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "Profiles",
+  "path": "/home/engineer/.config/kuberecord/config.yaml",
+  "currentProfile": "local",
+  "profiles": [
+    {
+      "name": "archive",
+      "current": false,
+      "backend": "s3",
+      "target": "s3://audit-archive/prod",
+      "credential": {
+        "source": "ambient",
+        "state": "not checked"
+      }
+    },
+    {
+      "name": "local",
+      "current": true,
+      "backend": "clickhouse",
+      "target": "127.0.0.1:9000/kuberecord",
+      "credential": {
+        "source": "env",
+        "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
+        "state": "not set"
+      }
+    },
+    {
+      "name": "nopass",
+      "current": false,
+      "backend": "clickhouse",
+      "target": "127.0.0.1:9000/kuberecord",
+      "credential": {
+        "source": "none",
+        "state": "not checked"
+      }
+    },
+    {
+      "name": "onfile",
+      "current": false,
+      "backend": "clickhouse",
+      "target": "10.0.1.5:9000/kuberecord",
+      "credential": {
+        "source": "file",
+        "reference": "/etc/kuberecord/password",
+        "state": "missing"
+      }
+    },
+    {
+      "name": "prod",
+      "current": false,
+      "backend": "clickhouse",
+      "target": "ch.observability:9000/audit",
+      "credential": {
+        "source": "env",
+        "reference": "KUBERECORD_TEST_EXPORTED_PASSWORD",
+        "state": "set"
+      }
+    }
+  ]
+}
+=== stderr ===
+# /home/engineer/.config/kuberecord/config.yaml
+=== exit ===
+0 (success)

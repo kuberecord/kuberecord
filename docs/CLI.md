@@ -1196,7 +1196,8 @@ it out here.
 | [`blame`](#blame) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
 | [`scopes`](#scopes) | ✅ default | ✅ | ❌ | ✅ | ✅ | ✅ |
 | [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
-| `config view` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [`config view`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [`config get-profiles`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config resolve`](#config-resolve) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config set-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config use-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
@@ -1213,9 +1214,10 @@ Each ❌ has a reason, and the error says it:
   than a row, and there is nothing for a tabular format to lay out. Its default is
   `yaml`, which is the shape people want and the one that carries the **NOT A
   DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
-- **`version`, `config view`, `config resolve` and the four `config` subcommands
-  that write refuse `jsonl`.** It is a streaming format for a result larger than
-  memory, and each of these is exactly one document.
+- **`version`, `config view`, `config get-profiles`, `config resolve` and the four
+  `config` subcommands that write refuse `jsonl`.** It is a streaming format for a
+  result larger than memory, and each of these is exactly one document — a profile
+  listing included, since it is as long as the configuration file and no longer.
 - **The four `config` subcommands that write render nothing at all for `table` and
   `wide`.** Their whole report is the confirmation on stderr, because the data of
   a write is the file it wrote — and there is no result set to lay out in columns.
@@ -1227,15 +1229,17 @@ Each ❌ has a reason, and the error says it:
   because a configuration file *is* YAML and `table` is the global default a user
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
 - **`config resolve` refuses `diff` too**, and for the same reason: it reports two
-  chains of decisions, and there is no patch anywhere in it.
+  chains of decisions, and there is no patch anywhere in it. So does
+  `config get-profiles`, which reports the state of a file.
 
 And one ✅ is worth a sentence, because it looks like a flag being ignored and is
-not. **`wide` on `version`, `config view` and `config resolve` renders exactly what
-`table` does**, and on the four writing `config` subcommands it renders no
-document at all, as `table` does. `wide` means *the same table with nothing
-elided*, and each of these is a document that elides nothing at any width — a
-build identity, a configuration file, two chains of decisions, a write that has
-already been confirmed on stderr — so the flag's guarantee is met rather than
+not. **`wide` on `version`, `config view`, `config get-profiles` and
+`config resolve` renders exactly what `table` does**, and on the four writing
+`config` subcommands it renders no document at all, as `table` does. `wide` means
+*the same table with nothing elided*, and each of these is a document that elides
+nothing at any width — a build identity, a configuration file, a profile listing
+whose cells are addresses and paths people paste, two chains of decisions, a write
+that has already been confirmed on stderr — so the flag's guarantee is met rather than
 dropped. Where a command genuinely cannot produce a format it refuses
 it by name, which is the case the list above enumerates.
 
@@ -1326,11 +1330,12 @@ It is a property of the rendering rather than of the contract. Nothing `jq` or
 `yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
 only one that notices.
 
-**Five documents carry the same `apiVersion` without being envelopes**, and the
+**Six documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,
 `config view` renders a `Config` one,
-[`config resolve`](#config-resolve) renders a `Resolution`, and the `config`
-subcommands that write render a
+[`config get-profiles`](#config-view-and-config-get-profiles) renders a
+`Profiles`, [`config resolve`](#config-resolve) renders a `Resolution`, and the
+`config` subcommands that write render a
 [`ProfileChange` or a `ContextMapping`](#writes-are-scriptable); none is the answer
 to a query, so none has a `metadata` block or an `items` list. A `Version` carrying
 `cluster_id: ""` and an empty coverage report would be inviting a consumer to read
@@ -1792,8 +1797,10 @@ so a named sink is reached first and its credential comes from the Secret it ref
 
     kuberecord timeline … --sink ClickHouseSink/<name>
 
-Or stop this one answering. The file also defines archive, staging:
+Or stop this one answering. The file also defines archive, staging. Which of those has a
+credential that resolves right now is the first command below; the second switches to it:
 
+    kuberecord config get-profiles
     kuberecord config use-profile archive
 
 To watch the chain make this decision, with this step's own reason beside it:
@@ -1808,6 +1815,13 @@ The three are genuinely different decisions rather than three spellings of one:
 | Export the variable, or create the file | Makes the reference the profile holds resolve. | The profile is right and your shell is missing a line. This is nearly always the answer. |
 | `--sink <kind>/<name>` | Skips the profile entirely — step 2 is reached before step 3 — and takes the address, the database, the user **and the credential** from the sink custom resource and the Secret it names. | You can read that Secret, and you want one answer now. |
 | `config use-profile <other>`, or `--profile <other>` | Leaves this profile in the file and stops it being the one that answers. | The stanza is stale. [`config delete-profile`](#creating-replacing-and-deleting-a-profile) removes it for good. |
+
+Switching raises a question of its own — *will the other one work?* — and the
+message names the command that answers it, because for the commonest cause it is a
+coin toss: one exported variable per shell is normal, and you have just been told
+yours is not the one this profile wanted.
+[`config get-profiles`](#config-view-and-config-get-profiles) reports the same
+credential state for every profile in the file, in a column.
 
 **`--sink-addr` is not one of them, and the message says so when you pass it.** It
 [corrects one field](#--source-versus---sink-addr) of whatever the chain found —
@@ -2243,12 +2257,16 @@ $ kuberecord config set-context-cluster-id prod-eu prod-eu-1  # a named one
 $ kuberecord config view
 $ kuberecord config view -o json | jq .profiles
 
+# Print its state instead: which profile is active, what each points at, and
+# whether its credential resolves on this machine.
+$ kuberecord config get-profiles
+
 # Ask what the resolution chains would choose, without running a query.
 $ kuberecord config resolve
 $ kuberecord config resolve --check
 ```
 
-Six subcommands, and three of them have flags of their own:
+Seven subcommands, and three of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
@@ -2257,12 +2275,15 @@ Six subcommands, and three of them have flags of their own:
 | `config delete-profile` | `NAME` | `--force` — see [the profile lifecycle](#creating-replacing-and-deleting-a-profile) |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
+| `config get-profiles` | none | none — see [`config view` and `config get-profiles`](#config-view-and-config-get-profiles) |
 | `config resolve` | none | `--check` — see [`config resolve`](#config-resolve) |
 
-`config resolve` is the only one that writes nothing. It is here because a profile
-is one step of [where the data comes from](#where-the-data-comes-from), and the
-question it answers is the one a reader of this file has when the file turns out
-not to be the step that won.
+Three of them write nothing. `config view` prints the file and
+[`config get-profiles`](#config-view-and-config-get-profiles) prints its state;
+`config resolve` is here because a profile is one step of
+[where the data comes from](#where-the-data-comes-from), and the question it
+answers is the one a reader of this file has when the file turns out not to be the
+step that won.
 
 The four that write also render a document for `-o json` and `-o yaml`, so
 creating a profile in a script is not a step whose outcome has to be reconstructed
@@ -2290,6 +2311,115 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
 
 There is no `--password`. That is not an omission: see the first rule above.
+
+#### `config view` and `config get-profiles`
+
+Two subcommands read the file and they answer different questions, which is the
+same split `kubectl` makes between `config view` and `config get-contexts`.
+
+**`config view` prints the file.** That is the right answer to *"what did I write
+down"*, and it is the one to reach for when a stanza needs to be checked field by
+field or pasted into an issue. It renders the document unchanged — nothing is
+redacted, which is safe by construction, because [the file cannot hold a
+credential](#the-configuration-file).
+
+**`config get-profiles` prints its state.** One row per profile: which is active,
+what each one points at, and where its credential comes from — with **whether that
+reference resolves on this machine**, checked as the table is drawn.
+
+```console
+$ kuberecord config get-profiles
+# /home/you/.config/kuberecord/config.yaml
+CURRENT  NAME     BACKEND     TARGET                       CREDENTIAL
+         archive  s3          s3://audit-archive/prod      ambient
+*        local    clickhouse  127.0.0.1:9000/kuberecord    env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+         prod     clickhouse  ch.observability:9000/audit  env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+```
+
+The `*` and the `CURRENT` column are `kubectl config get-contexts`'s own, so the
+output is legible without instruction. Rows are sorted by name. The file's path
+goes to **stderr**, so `-o json | jq` receives the document alone.
+
+**The credential column is the reason to run this rather than `view`.** A profile
+stores the *name* of an environment variable or the *path* of a file; whether that
+name is exported in the shell you are in, or that file is on this disk, is not
+something the file can say. It is also the commonest reason a query stops — see [A
+profile that cannot resolve is
+fatal](#a-profile-that-cannot-resolve-is-fatal-and-says-what-to-do-instead), whose
+message points back here.
+
+| `CREDENTIAL` | Means |
+|---|---|
+| `env NAME (set)` | The profile names an environment variable and this shell exports it. A variable exported *empty* is `set`: that was a decision somebody made. |
+| `env NAME (not set)` | It names one and this shell does not export it. Every command that resolves through this profile will fail, naming the variable. |
+| `file PATH (present)` | It names a password file and that file could be read. |
+| `file PATH (missing)` | The file is not there. Create it, or rewrite the stanza to name a variable instead. |
+| `file PATH (unreadable)` | The file *is* there and could not be read — mode `0000`, or a directory that denies traversal. A different fix from `missing`, which is why it is a different word. |
+| `ambient` | An `s3` profile. Credentials come from the AWS credential chain — environment, shared config, SSO, an instance role — which this tool does not re-implement and therefore does not check. |
+| `none` | Nothing to resolve: a `local` archive, or a ClickHouse profile naming neither reference, which is ordinary for an evaluation server with no password. |
+
+Whether it resolves is decided by the same code path a query resolves a password
+through, so a column saying `set` cannot disagree with what the next query finds.
+
+Three properties are worth knowing:
+
+- **No credential value is printed**, in any format, at any verbosity. What is
+  printed is the reference — a variable name, a file path — which is what the file
+  itself holds.
+- **Nothing is contacted.** This reads the file and the environment. Whether the
+  backend *answers* is [`config resolve --check`](#--check), and a second command
+  that dialled would be two answers to one question that could differ.
+- **`CURRENT` is the file's active pointer**, not this invocation's. `--profile`
+  does not move the `*`: what *this* command line would resolve to has nine steps
+  behind it, and [`config resolve`](#config-resolve) is where that is inspected.
+
+**An empty configuration is not an error.** It is the state of every first
+invocation, and of every user whose cluster has a sink custom resource to
+discover — who needs no profile at all. The header is printed with no rows under
+it, so that a file holding nothing is distinguishable from a file that could not
+be read, and the exit code is `0`:
+
+```console
+$ kuberecord config get-profiles
+# /home/you/.config/kuberecord/config.yaml
+CURRENT  NAME  BACKEND  TARGET  CREDENTIAL
+! this file defines no profiles, which is the ordinary state of a first invocation: with none, resolution falls through to discovering a sink from the cluster.
+  To write one — with no flags it asks for what it needs, and its first question is whether to read the settings out of a sink this cluster already holds:
+      kuberecord config set-profile
+```
+
+`-o json` and `-o yaml` render a `Profiles` document. It is not an
+[envelope](#structured-output) — no question about recorded history was asked — and
+it carries no stanza, because `config view -o json` is the command whose subject is
+the file:
+
+```console
+$ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.state == "not set")'
+{
+  "name": "local",
+  "current": true,
+  "backend": "clickhouse",
+  "target": "127.0.0.1:9000/kuberecord",
+  "credential": {
+    "source": "env",
+    "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
+    "state": "not set"
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | The file the listing was read from, so documents collected from several machines are distinguishable. |
+| `currentProfile` | The active pointer, and `""` when none is active. Always present, so an empty pointer is a value to read rather than a missing key to infer from. |
+| `profiles` | One entry per profile, sorted by name. Always a list, including when it is empty. |
+| `profiles[].name` | The key this profile has in the file. |
+| `profiles[].current` | Whether this is the active profile — the row the `*` marks. A field rather than something to derive by comparing with `currentProfile`. |
+| `profiles[].backend` | `clickhouse`, `s3` or `local`. |
+| `profiles[].target` | The locator, with defaults applied: the address and database a query would open rather than the fields as typed. |
+| `profiles[].credential.source` | `env`, `file`, `ambient` or `none`. |
+| `profiles[].credential.reference` | The variable name or the file path. Absent for a source that names neither. |
+| `profiles[].credential.state` | `set`, `not set`, `present`, `missing`, `unreadable` or `not checked` — the table above, in one field. A word rather than a boolean: `resolves: false` on an ambient credential nobody checked would be a claim this command did not make. |
 
 #### Creating, replacing and deleting a profile
 
@@ -2366,6 +2496,11 @@ one, and a stale profile is not inert. It sits at step 3 of
 [the resolution chain](#where-the-data-comes-from) and shadows discovery — which is
 a confusion [`config resolve`](#config-resolve) was partly built to diagnose, and
 removal is the fix you reach for the moment you have diagnosed it.
+
+That closes the lifecycle: **create** with `set-profile`, **inspect** with
+[`config get-profiles`](#config-view-and-config-get-profiles), **switch** with
+`use-profile`, **delete** with `delete-profile`. Every step is a command, and none
+of them is a text editor.
 
 It is not inert in a second way either: a profile that answers stops the chain even
 when it cannot be resolved, so a stanza pointing at a variable you no longer export

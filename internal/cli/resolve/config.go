@@ -449,6 +449,169 @@ func (p *ClickHouseProfile) ResolvePassword() (string, error) {
 	return "", nil
 }
 
+// Credential is where a profile's credential comes from, and whether that
+// reference resolves right now.
+//
+// It holds no credential and cannot: Reference is the *name* of an environment
+// variable or the *path* of a file, which is what a profile stores and what a
+// message may print, and State is a word from the closed set below. The value
+// behind either one is read by ResolvePassword, and this type is what a caller
+// gets instead of it.
+//
+// # Why it is a fact about the machine and not about the file
+//
+// A configuration file structurally cannot say whether the variable it names is
+// exported in the shell that is running, or whether the file it names is on this
+// disk. That is the whole reason `config get-profiles` is a diagnostic rather
+// than an inventory of the file — and it is why this is a method that touches the
+// environment and the filesystem, rather than a field of the stanza.
+type Credential struct {
+	// Source is where the credential comes from.
+	Source CredentialSource
+
+	// Reference is the variable name or the file path, empty for a Source that
+	// names neither.
+	Reference string
+
+	// State is whether that reference resolves, in the words of its own source.
+	State CredentialState
+}
+
+// CredentialSource is where a profile's credential comes from.
+type CredentialSource string
+
+// The four sources a profile can have. They are exhaustive over the three
+// backends: ClickHouse names a variable, names a file, or names neither, and the
+// archive backends have nothing to name.
+const (
+	// CredentialEnv is an environment variable named by clickhouse.passwordEnv.
+	CredentialEnv CredentialSource = "env"
+
+	// CredentialFile is a file named by clickhouse.passwordFile.
+	CredentialFile CredentialSource = "file"
+
+	// CredentialAmbient is the AWS credential chain — environment, shared config,
+	// SSO, an instance role — which an S3 profile deliberately does not describe
+	// (see S3Profile). Nothing here re-implements that chain in order to report on
+	// it: a second credential resolver would be a worse copy of a solved problem,
+	// and it would be wrong in exactly the cases the real one exists for.
+	CredentialAmbient CredentialSource = "ambient"
+
+	// CredentialNone is no credential at all: a local archive, or a ClickHouse
+	// profile naming neither reference — which is an ordinary state for an
+	// evaluation server with no password.
+	CredentialNone CredentialSource = "none"
+)
+
+// CredentialState is whether a reference resolves, in the vocabulary of the
+// source that holds it.
+//
+// Source-specific words rather than one resolved/unresolved pair, because the two
+// failures send a reader to two different places: an unexported variable is a
+// line in a shell, and an absent file is something to create. `set` and `present`
+// are the same conclusion arrived at by different means, and a reader scanning a
+// column wants the means.
+type CredentialState string
+
+// The states a reference can be in.
+const (
+	// CredentialSet is an environment variable that is exported. One that is
+	// exported and empty is set, because that was a decision somebody made — the
+	// distinction ResolvePassword's own comment turns on.
+	CredentialSet CredentialState = "set"
+
+	// CredentialNotSet is an environment variable the shell never exported, which
+	// is the failure Task 17.4's message exists for.
+	CredentialNotSet CredentialState = "not set"
+
+	// CredentialPresent is a password file that could be read.
+	CredentialPresent CredentialState = "present"
+
+	// CredentialMissing is a password file that is not there.
+	CredentialMissing CredentialState = "missing"
+
+	// CredentialUnreadable is a password file that exists and could not be read —
+	// a mode-0000 file, a path whose directory denies traversal.
+	//
+	// It is a third word rather than a second spelling of `missing` because the
+	// two send a reader to different fixes, and reporting a file that is there as
+	// absent is a claim this check did not verify. It is the case the existing
+	// password-file test plants.
+	CredentialUnreadable CredentialState = "unreadable"
+
+	// CredentialNotChecked is what an ambient or absent credential reports.
+	//
+	// Not a boolean, for the reason `config resolve` reports its probe as a word:
+	// `resolves: false` on something nobody checked would be a claim this command
+	// did not make. An S3 profile's credentials are the AWS chain's business, and
+	// a profile that names no credential has no reference to resolve.
+	CredentialNotChecked CredentialState = "not checked"
+)
+
+// Credential reports where this profile's credential comes from and whether that
+// reference resolves.
+//
+// Resolution is decided by calling ResolvePassword and discarding the value,
+// which is the point: that function is what every query resolves a password
+// through, so a column reporting "set" cannot disagree with what the next query
+// will find. A separate presence check — even one that agreed today — is the
+// second implementation this package refuses everywhere else, and it would drift
+// the day one of them learned about a case the other did not.
+//
+// The value is discarded immediately and never travels: nothing in the returned
+// struct is derived from it, not its length and not whether it is empty.
+func (p Profile) Credential() Credential {
+	if p.Backend == BackendS3 {
+		return Credential{Source: CredentialAmbient, State: CredentialNotChecked}
+	}
+	if p.Backend != BackendClickHouse || p.ClickHouse == nil {
+		return Credential{Source: CredentialNone, State: CredentialNotChecked}
+	}
+
+	stanza := p.ClickHouse
+	switch {
+	case stanza.PasswordEnv != "":
+		state := CredentialSet
+		if !referenceResolves(stanza) {
+			state = CredentialNotSet
+		}
+		return Credential{Source: CredentialEnv, Reference: stanza.PasswordEnv, State: state}
+
+	case stanza.PasswordFile != "":
+		state := CredentialPresent
+		if !referenceResolves(stanza) {
+			state = fileFailure(stanza.PasswordFile)
+		}
+		return Credential{Source: CredentialFile, Reference: stanza.PasswordFile, State: state}
+	}
+	return Credential{Source: CredentialNone, State: CredentialNotChecked}
+}
+
+// referenceResolves reports whether this stanza's password reference can be
+// turned into a password.
+//
+// The value is bound to `_` rather than to a name on purpose: a value with a name
+// is a value some later edit can be written to use, and nothing above this line
+// may hold a password for longer than the call.
+func referenceResolves(stanza *ClickHouseProfile) bool {
+	_, err := stanza.ResolvePassword()
+	return err == nil
+}
+
+// fileFailure says which way a password file failed to be read.
+//
+// Reached only after the read has already failed, so what is left to establish is
+// whether the file is absent or merely unreadable — a question about the path
+// rather than about the content, which is why it stats instead of reading again.
+// An existing file is `unreadable` whatever the reason: every reason has the same
+// shape of fix, and none of them is "create it".
+func fileFailure(path string) CredentialState {
+	if _, err := os.Stat(filepath.Clean(path)); errors.Is(err, os.ErrNotExist) {
+		return CredentialMissing
+	}
+	return CredentialUnreadable
+}
+
 // SaveConfig writes the configuration to path, atomically and with the file mode
 // this package promises.
 //
@@ -566,6 +729,44 @@ func (p Profile) Describe() string {
 	return string(p.Backend)
 }
 
+// Target renders the bare locator this profile points at, with no prose around
+// it.
+//
+// It is Describe without the words: `10.0.1.5:9000/kuberecord` rather than
+// `ClickHouse at 10.0.1.5:9000/kuberecord`. The caller is a column headed TARGET
+// in a table whose previous column is headed BACKEND (see `config get-profiles`),
+// so the prose half would be the backend named twice on every row.
+//
+// The two are one implementation and not two agreeing ones: every describer below
+// is built from the locator, so a target read out of a table and a target read out
+// of a resolution notice cannot come to disagree about where a profile points.
+// Defaults are applied here for the reason Describe applies them — the subject is
+// where a query would actually go.
+func (p Profile) Target() string {
+	switch p.Backend {
+	case BackendClickHouse:
+		if p.ClickHouse == nil {
+			break
+		}
+		return targetClickHouse(p.ClickHouse.Addr, valueOr(p.ClickHouse.Database, DefaultClickHouseDatabase))
+	case BackendS3:
+		if p.S3 == nil {
+			break
+		}
+		return targetS3(p.S3.Bucket, p.S3.Prefix)
+	case BackendLocal:
+		if p.Local == nil {
+			break
+		}
+		return p.Local.Path
+	}
+	// The same fallback Describe makes, and for the same reason: a stanza the
+	// file would refuse can still be assembled in memory, and a nil dereference
+	// inside a message about a misassembled profile would replace the complaint
+	// with a crash.
+	return string(p.Backend)
+}
+
 // The three per-backend descriptions, spelled once.
 //
 // They take values rather than stanzas because targetFromProfile describes the
@@ -573,16 +774,32 @@ func (p Profile) Describe() string {
 // the endpoint of one invocation (D25), and a describer that took the stanza would
 // either report the address that was overridden or need a copy of the stanza made
 // to hold the address that replaced it.
+//
+// Each is the locator with its prose, rather than a second rendering of the
+// locator. See Target.
 func describeClickHouse(addr, database string) string {
-	return fmt.Sprintf("ClickHouse at %s/%s", addr, database)
+	return "ClickHouse at " + targetClickHouse(addr, database)
 }
 
 func describeS3(bucket, prefix, region string) string {
-	return fmt.Sprintf("s3://%s, region %s", joinBucketPrefix(bucket, prefix), region)
+	return fmt.Sprintf("%s, region %s", targetS3(bucket, prefix), region)
 }
 
 func describeLocal(path string) string {
-	return fmt.Sprintf("local archive at %s", path)
+	return "local archive at " + path
+}
+
+// The two locators that are more than one field.
+//
+// A local archive has no such function because its locator *is* its path, and a
+// wrapper returning its argument would be a third name for one string. The
+// asymmetry is deliberate and Target says so at the call site.
+func targetClickHouse(addr, database string) string {
+	return addr + "/" + database
+}
+
+func targetS3(bucket, prefix string) string {
+	return "s3://" + joinBucketPrefix(bucket, prefix)
 }
 
 // RequireProfile reads one profile by name, reporting the names that do exist

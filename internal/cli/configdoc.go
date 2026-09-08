@@ -26,7 +26,12 @@ import (
 	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 )
 
-// What the four writing `config` subcommands report to a program.
+// What the `config` subcommands report to a program.
+//
+// The two kinds below are the four writing subcommands' own. What the file also
+// holds is the format vocabulary and the encoder every `config` document is
+// rendered through — including `get-profiles`, which writes nothing and whose
+// document lives in getprofilescmd.go beside the command that produces it.
 //
 // # Why they report anything
 //
@@ -155,21 +160,29 @@ type contextMappingDocument struct {
 	Path string `json:"path"`
 }
 
-// configWriteFormat decides which rendering an invocation of a writing `config`
-// subcommand asked for. An empty StructuredFormat means the human form: the
-// confirmation on stderr and nothing on stdout.
+// configFormat decides which rendering an invocation of a `config` subcommand
+// asked for. An empty StructuredFormat means that subcommand's own human form —
+// the confirmation on stderr for the four that write, the table for
+// `get-profiles`.
+//
+// It is named for the subtree rather than for a write because the vocabulary is a
+// property of the subtree: every one of these subcommands renders a single
+// document about a configuration file, so the set of formats that can carry one
+// is the same question for the reading members as for the writing ones. A second
+// decider for the reader would be a second answer to it.
 //
 // `jsonl` and `diff` are refused by name, exactly as `config resolve` and
 // `version` refuse them: the first is a streaming format for a result larger than
 // memory and each of these is one document, the second renders change operations
-// and a configuration write has none. Rendering something else regardless would
-// leave a user wondering why their flag did nothing (D31).
+// and neither a configuration write nor a profile listing has any. Rendering
+// something else regardless would leave a user wondering why their flag did
+// nothing (D31).
 //
-// It is called before anything is read from disk, so that a format nobody can
-// render is refused rather than reported after the file has already been
-// rewritten. That ordering is the same one writeProfile applies to validation and
-// for the same reason.
-func configWriteFormat(subcommand string, format options.OutputFormat) (render.StructuredFormat, error) {
+// On the writing subcommands it is called before anything is read from disk, so
+// that a format nobody can render is refused rather than reported after the file
+// has already been rewritten. That ordering is the same one writeProfile applies
+// to validation and for the same reason.
+func configFormat(subcommand string, format options.OutputFormat) (render.StructuredFormat, error) {
 	switch format {
 	case options.OutputTable, options.OutputWide:
 		// `wide` means the same table with nothing elided, and there is no table
@@ -187,16 +200,19 @@ func configWriteFormat(subcommand string, format options.OutputFormat) (render.S
 		subcommand, options.OutputTable, options.OutputJSON, options.OutputYAML, format)
 }
 
-// writeConfigWrite renders one of the two documents, or nothing for the human
-// form.
+// writeConfigDocument renders one `config` document in a structured format, or
+// nothing for the human form.
 //
 // subject names the document in a failure, because a bare "encoding" error leaves
 // the reader without the one fact that makes it actionable.
 //
-// The human form writes nothing here at all, and that is not a silent no-op: the
-// command has already said what it did on stderr, in the sentence a person reads.
-// stdout carries a command's data, and the data of a write is the file it wrote.
-func writeConfigWrite(out io.Writer, document any, format render.StructuredFormat, subject string) error {
+// The human form writes nothing here at all, and for a write that is not a silent
+// no-op: the command has already said what it did on stderr, in the sentence a
+// person reads, and stdout carries a command's data — the data of a write being
+// the file it wrote. A subcommand whose human form *is* a document on stdout
+// renders it before reaching this function and never asks it for the empty
+// format; see writeProfiles.
+func writeConfigDocument(out io.Writer, document any, format render.StructuredFormat, subject string) error {
 	switch format {
 	case "":
 		return nil
@@ -218,7 +234,7 @@ func writeConfigWrite(out io.Writer, document any, format render.StructuredForma
 		}
 		return options.WriteAll(out, encoded)
 	}
-	// Unreachable through configWriteFormat, which accepts three formats and
+	// Unreachable through configFormat, which accepts three formats and
 	// refuses the rest by name. Stated rather than ignored, because the
 	// alternative to a stated error here is a command that writes a file, prints
 	// nothing, and exits zero.
@@ -235,7 +251,7 @@ func writeProfileChange(
 ) error {
 	change.APIVersion = render.EnvelopeAPIVersion
 	change.Kind = ProfileChangeKind
-	return writeConfigWrite(out, change, format, "profile change")
+	return writeConfigDocument(out, change, format, "profile change")
 }
 
 // writeContextMapping renders a ContextMapping for one write.
@@ -244,5 +260,5 @@ func writeContextMapping(
 ) error {
 	mapping.APIVersion = render.EnvelopeAPIVersion
 	mapping.Kind = ContextMappingKind
-	return writeConfigWrite(out, mapping, format, "context mapping")
+	return writeConfigDocument(out, mapping, format, "context mapping")
 }
