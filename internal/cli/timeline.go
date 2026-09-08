@@ -892,6 +892,34 @@ func sawChange(rows []render.TimelineRow) bool {
 	})
 }
 
+// timelineShape is which kinds of row a rendered answer turned out to hold.
+//
+// The two questions are carried together because the notice that reads them —
+// explainNoChanges — turns on the *combination* rather than on either half. A
+// document with a change in it is explained by nothing; one with no row at all is
+// explained against coverage; one made entirely of Kubernetes Events is explained
+// against the same coverage in different words, because the reader is looking at
+// rows and would otherwise conclude the object was watched and quiet. Two
+// booleans threaded separately through two call sites is the shape that
+// eventually arrives in the wrong order at one of them.
+type timelineShape struct {
+	// changes reports a row about the object itself: an addition, a
+	// modification, a checkpoint, a deletion.
+	changes bool
+	// events reports a merged Kubernetes Event.
+	events bool
+}
+
+// shapeOf measures a gathered run.
+//
+// It asks through sawChange and sawEvent rather than walking the rows itself, so
+// that the gathered path and the streaming path — which cannot walk anything,
+// and maintains the same two facts as its rows go past — are answering with the
+// same reading of the same enum value. See emission.shape.
+func shapeOf(rows []render.TimelineRow) timelineShape {
+	return timelineShape{changes: sawChange(rows), events: sawEvent(rows)}
+}
+
 // appendNotice adds a notice only when there is one, so that callers can build a
 // list without a conditional at every site.
 func appendNotice(notices []render.Notice, notice render.Notice) []render.Notice {

@@ -439,6 +439,45 @@ time, and an occurrence-count bump writes a full row rather than a diff. Read
 [Event volume](SCHEMA.md#event-volume) before widening the rule beyond a
 namespace.
 
+### Events and no changes at all
+
+The mirror of the section above, and it is the one that looks like an answer.
+
+Correlation takes an Event's `involvedObject` from the **Event row itself** and
+matches it against the object you named; your object's own rows are never
+consulted. So a rule that captures `v1/Event` but not the subject's kind gives
+you working Events — nothing is dropped — beside no `Added` or `Modified` rows at
+all, because the object's own changes were never recorded. Read as a page, that
+says the object never changed. It may have changed all day.
+
+So a timeline holding **Event rows and none of the object's own** is explained
+against the coverage of *the object's kind*, and the three answers are the three
+answers:
+
+| What was found | What you get |
+|----------------|--------------|
+| The kind was watched across the window | `every row here is a Kubernetes Event: no change to … is recorded in …. The scope was confirmed watched over <interval>` — the object really was quiet. |
+| Nothing ever watched the kind | The Events are named as Events, and the reason they are here is spelled out. Exit stays **0**. |
+| No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
+
+```
+! every row here is a Kubernetes Event: nothing was ever watching apps/Deployment
+  payments/checkout in cluster "prod-eu-1", so its own changes were never
+  recorded. The Events are here because a rule captures Events, not because this
+  object is watched; the `scopes` command lists what is being recorded
+```
+
+The second answer stays at exit `0` rather than joining the exit **3** finding
+above it. That message says *this silence is not evidence that it did not change*,
+and there is no silence: the command produced rows, correlated and worth reading.
+A non-zero exit beside a populated `-o json` document would be telling a script
+the opposite of what the document holds.
+
+A timeline with changes in it says none of this, and neither does an empty one —
+the [three answers](#an-empty-result-is-never-presented-on-its-own) already cover
+that, and both readings go through the same function against the same scope log,
+so they cannot come to disagree about it.
+
 ### What a backend cannot record
 
 An object archive holds no deletions at all (see [`docs/TEE.md`](TEE.md) and the

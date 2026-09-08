@@ -118,7 +118,7 @@ const aBoundNotReached = "a bound that was not reached is the flag working, not 
 // flag added is measured against it by `make test` rather than by a user.
 var noopAudit = []auditedFlag{
 	// `timeline`, `diff`, `blame`, `get`, `scopes` — the flags that shape an answer.
-	{"since", explained, "an empty window is explained by explainEmpty against coverage, or by " +
+	{"since", explained, "an empty window is explained by explainNoChanges against coverage, or by " +
 		"scopesFinding; a window a backend forced is named by timelineBounds"},
 	{"until", explained, "as --since"},
 	{"from", explained, "an alias of --since, collapsed onto it before anything reads a bound"},
@@ -143,13 +143,16 @@ var noopAudit = []auditedFlag{
 		"silent by design: the envelope carries every operation already, so --full asks for " +
 		"something that is already true"},
 	{"with-events", explained, "explainNoEvents gives the three states, and prints the rule " +
-		"fragment that would make Events appear (Task 16.1)"},
+		"fragment that would make Events appear (Task 16.1). The mirror case is explained too: a " +
+		"document made entirely of Event rows is a timeline in which the object appears never to " +
+		"have changed, and explainNoChanges says against the same coverage whether it was watched " +
+		"and quiet or never watched at all (Task 17.3)"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},
 	{"exit-code", deliberatelySilent, "the exit code is the effect, and 0-for-no-changes is " +
 		"`git diff`'s own contract rather than the flag being ignored. The emptiness itself is " +
-		"still explained by explainEmpty, and a non-zero code is announced by changesFoundNotice"},
+		"still explained by explainNoChanges, and a non-zero code is announced by changesFoundNotice"},
 	{"verify", alwaysVisible, "a pass prints the digest it checked, a failure exits 1 and writes " +
 		"no document at all"},
 	{"at", deliberatelySilent, "the header prints `at:`, `base row:` and `patches applied:` on " +
@@ -338,7 +341,7 @@ func sortedKeys(m map[string][]string) []string {
 //
 // `timeline`'s predicates are pushed into the query, so the rows a filter removed
 // never arrive and an emptiness it produced is indistinguishable from an empty
-// window. explainEmpty was then handed that emptiness and stated, of a hundred
+// window. explainNoChanges was then handed that emptiness and stated, of a hundred
 // recorded changes, that nothing had changed. See explainNoMatches.
 
 // filteredEmptyRequest is a bare `timeline` narrowed to an actor nothing matches.

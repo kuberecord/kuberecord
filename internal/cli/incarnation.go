@@ -184,7 +184,7 @@ func otherIncarnationNotices(
 //
 // So the other two name the flag they do have and the command that has the other
 // one. Pointing at a sibling command rather than at the documentation is the
-// same move explainEmpty makes with `scopes`: the next thing to type, not the
+// same move explainNoChanges makes with `scopes`: the next thing to type, not the
 // next thing to read.
 func incarnationRemedy(request TimelineRequest) string {
 	if request.AllIncarnationsOffered {

@@ -299,6 +299,38 @@ than a summary of them.
 
 ### Fixed
 
+- **A timeline showing only Kubernetes Events no longer reads as an object that
+  never changed.** Correlation takes an Event's `involvedObject` from the Event
+  row itself and matches it against the object you named; the subject's own rows
+  are never consulted. So a rule capturing `v1/Event` but not the subject's kind
+  gives working Events — nothing is dropped — beside no `Added` or `Modified` rows
+  at all, because the object's own changes were never recorded. Nothing is broken,
+  and a page of Events with no changes among them says the object was quiet.
+
+  It was not quiet; nobody was watching it. That timeline is now explained against
+  the coverage of the object's own kind, with the same three answers an empty one
+  gets:
+
+  ```
+  ! every row here is a Kubernetes Event: nothing was ever watching apps/Deployment
+    payments/checkout in cluster "prod-eu-1", so its own changes were never
+    recorded. The Events are here because a rule captures Events, not because this
+    object is watched; the `scopes` command lists what is being recorded
+  ```
+
+  **Exit stays `0`.** The wholly-empty case with no coverage exits `3` because the
+  command produced no evidence of anything, and its message says *this silence is
+  not evidence that it did not change* — but here there is no silence, there are
+  rows. A non-zero exit beside a populated `-o json` document would tell a script
+  the opposite of what the document holds, and this path already exited `0` when
+  it said nothing at all, so nobody's exit-code handling moves.
+
+  A timeline with changes in it says none of this, and an empty one keeps the
+  message it has always had. Both readings go through one function against one
+  scope log, so they cannot come to disagree about it — the same discipline
+  `--with-events` finding no Events got in this release, arriving from the other
+  direction.
+
 - **A `timeline` filter that matched nothing no longer reports that nothing
   changed.** `--actor`, `--exclude-actor` and `--field` are pushed into the query,
   so the changes they remove never arrive — which made a filtered timeline that

@@ -30,8 +30,9 @@ import (
 //
 // "Nothing changed" and "nothing was watching" are different facts, and an
 // engineer who is handed the second dressed as the first closes an investigation
-// that should have started one. Every empty timeline therefore goes through this
-// file, and leaves it as one of three answers:
+// that should have started one. Every timeline holding none of the object's own
+// changes therefore goes through this file, and leaves it as one of three
+// answers:
 //
 //   - Nothing was ever watching this scope. That is not an empty result at all;
 //     it is a finding, and it exits 3 so a script can tell it from one.
@@ -109,49 +110,123 @@ func describeRule(interval query.ScopeInterval) string {
 	return interval.RuleRef
 }
 
-// explainEmpty turns an empty timeline into the reason for it.
+// explainNoChanges turns a timeline holding none of the object's own changes
+// into the reason for it.
+//
+// It was explainEmpty until Task 17.3, and the rename is the finding. Read-time
+// correlation extracts an Event's involvedObject from the Event row itself and
+// matches it against the address on the command line, never consulting the
+// subject's own rows — so a rule capturing v1/Event and not the subject's kind
+// gives working Events and no state at all. That document is not empty and was
+// therefore never explained, though it is a timeline in which the object appears
+// never to have changed. It did; nobody was watching it.
+//
+// So "empty" is read as empty of the object's history rather than empty of rows,
+// and one switch over the scope log serves both readings. Only the wording differs
+// — through describeNoChanges, and through uncoveredNoChanges where the
+// consequence differs too. A reader with Event rows in front of them is not
+// looking at a blank page and must be told what the rows they can see are; a
+// reader with nothing in front of them must be told the window was not silent by
+// accident. The reasoning above the wording is shared on purpose: a second switch
+// is a second place for the two readings to come to disagree about the same scope
+// log (Invariant 9).
 //
 // The error it returns is the no-coverage finding, wrapping query.ErrNoCoverage
 // so that exit.CodeFor gives it exit code 3 without this call site having to know
 // the number. Everything else is a notice: the command succeeded, and what it
 // found was silence with an explanation attached.
-func explainEmpty(
-	request TimelineRequest, from, to time.Time, hasRows bool, coverage coverageAnswer,
+func explainNoChanges(
+	request TimelineRequest, from, to time.Time, shape timelineShape, coverage coverageAnswer,
 ) ([]render.Notice, error) {
-	if hasRows {
+	if shape.changes {
 		return nil, nil
 	}
 	object := describeObject(request.Ref)
 	window := options.DescribeWindow(from, to)
+	lead := describeNoChanges(shape, object, window)
 
 	if coverage.Gap != nil {
 		return []render.Notice{{
-			Text: fmt.Sprintf("no changes recorded for %s in %s, and this backend has no scope log: "+
-				"it cannot say whether that means nothing changed or nothing was watching",
-				object, window),
+			Text: fmt.Sprintf("%s, and this backend has no scope log: "+
+				"it cannot say whether that means nothing changed or nothing was watching", lead),
 		}}, nil
 	}
 
 	if len(coverage.Intervals) == 0 {
-		return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
-			"not evidence that it did not change; the `%s` command lists what is being recorded",
-			query.ErrNoCoverage, describeKind(request.Ref), object, request.Ref.ClusterID, scopesCommand)
+		return uncoveredNoChanges(request, shape, object)
 	}
 
 	earliest := coverage.Intervals[0]
 	if from.IsZero() || earliest.From.After(from) {
 		return []render.Notice{{
-			Text: fmt.Sprintf("no changes recorded for %s in %s, but %s was not being watched before "+
+			Text: fmt.Sprintf("%s, but %s was not being watched before "+
 				"%s, when %s opened the scope: a change before then would not have been recorded",
-				object, window, describeKind(request.Ref),
+				lead, describeKind(request.Ref),
 				render.FormatInstant(earliest.From), describeRule(earliest)),
 		}}, nil
 	}
 
 	return []render.Notice{{
-		Text: fmt.Sprintf("no changes recorded for %s in %s. The scope was confirmed watched over "+
-			"%s, so nothing changed in that period", object, window, describeInterval(earliest)),
+		Text: fmt.Sprintf("%s. The scope was confirmed watched over "+
+			"%s, so nothing changed in that period", lead, describeInterval(earliest)),
 	}}, nil
+}
+
+// describeNoChanges opens the sentence with what the reader is actually looking
+// at.
+//
+// The two leads carry the same fact and answer different first questions. A blank
+// page prompts "did anything happen?", and the plain lead answers it. A page of
+// Kubernetes Events prompts nothing at all — it looks like an answer — so the
+// Events-only lead has to say that every row on it is an Event before the clause
+// about coverage can mean anything, or the reader reads a statement about the
+// object's history as a statement about the rows in front of them.
+//
+// It is one of only two places the readings differ — uncoveredNoChanges is the
+// other, and differs in consequence rather than in words. Every tail in
+// explainNoChanges is a single string both leads are pasted onto, which is what
+// keeps a change to how this CLI reads a scope log from having to be made twice.
+func describeNoChanges(shape timelineShape, object, window string) string {
+	if shape.events {
+		return fmt.Sprintf("every row here is a Kubernetes Event: no change to %s is recorded in %s",
+			object, window)
+	}
+	return fmt.Sprintf("no changes recorded for %s in %s", object, window)
+}
+
+// uncoveredNoChanges is the one state whose consequence differs, not merely its
+// wording.
+//
+// With no rows at all, nothing was ever watching the scope and the command has
+// produced no evidence of anything: that is the finding Invariant 9 reserves exit
+// 3 for, and a script is entitled to tell it from an answer.
+//
+// With Event rows, the command has produced evidence — real, correlated, worth
+// reading — and the sentence about it has to be true of what is on the page.
+// query.ErrNoCoverage's own words are not: "this silence is not evidence that it
+// did not change" describes a silence that is not there. So the Events-only case
+// is a notice at exit 0, which is also what this path already returned before it
+// said anything at all, and no consumer's exit-code handling changes under a
+// release whose subject is explaining things better.
+//
+// Both spellings name `scopes` for the same reason: the route out of "nothing was
+// watching this kind" is to go and look at what is, and it is the next thing to
+// type rather than the next thing to read (D34).
+func uncoveredNoChanges(
+	request TimelineRequest, shape timelineShape, object string,
+) ([]render.Notice, error) {
+	kind := describeKind(request.Ref)
+	if shape.events {
+		return []render.Notice{{
+			Text: fmt.Sprintf("every row here is a Kubernetes Event: nothing was ever watching %s %s "+
+				"in cluster %q, so its own changes were never recorded. The Events are here because a "+
+				"rule captures Events, not because this object is watched; the `%s` command lists what "+
+				"is being recorded", kind, object, request.Ref.ClusterID, scopesCommand),
+		}}, nil
+	}
+	return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
+		"not evidence that it did not change; the `%s` command lists what is being recorded",
+		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, scopesCommand)
 }
 
 // Invariant 9 applied to a sub-query.
@@ -165,11 +240,11 @@ func explainEmpty(
 // — and "nothing was broken" is precisely the state a reader cannot tell from the
 // output.
 //
-// What follows is explainEmpty's shape, deliberately, and the two are meant to be
+// What follows is explainNoChanges's shape, deliberately, and the two are meant to be
 // read together: the same three states, distinguished the same way, in the same
 // order, so that a change to how this CLI reasons about a silence is made once
 // rather than in two places that then drift. The one difference is the
-// consequence. explainEmpty can return a finding, because a timeline with no
+// consequence. explainNoChanges can return a finding, because a timeline with no
 // coverage behind it is not an answer; this returns only notices, because the
 // object's own history may be complete and interesting and it is the commentary
 // beside it that is missing.
@@ -239,7 +314,7 @@ func eventIntervals(intervals []query.ScopeInterval) []query.ScopeInterval {
 //
 // coverage is the answer to eventScopeQuery, already narrowed by eventIntervals,
 // and readErr is a scope log that exists and could not be read. The three states
-// are explainEmpty's:
+// are explainNoChanges's:
 //
 //   - The backend cannot say, because it has no scope log — or, here, because
 //     reading it failed. Both are reported as the inability they are rather than
@@ -288,7 +363,7 @@ func explainNoEvents(
 				"      kind: %s", eventGroupCore, eventKind)}
 	}
 
-	// The earliest interval, as explainEmpty names the earliest one: it is the
+	// The earliest interval, as explainNoChanges names the earliest one: it is the
 	// oldest evidence there is that something was recording, and describeInterval
 	// prints both ends of it so a reader can see for themselves how much of their
 	// window it covers.
@@ -304,7 +379,7 @@ func explainNoEvents(
 // That is the right place for them — a backend that can filter should — and it is
 // why the emptiness they produce is invisible from here: the rows never arrive,
 // so a filtered timeline that matched nothing is byte-identical to a window in
-// which nothing happened. explainEmpty was then handed that emptiness and did
+// which nothing happened. explainNoChanges was then handed that emptiness and did
 // what it exists to do, which in this one case is to state something false:
 //
 //	no changes recorded for payments/checkout in the last 24 hours. The scope was
@@ -323,7 +398,7 @@ func explainNoEvents(
 // anything can be counted, and the answer is to go and ask: one query, the same
 // window and the same incarnation, with the predicates taken out.
 //
-// The shape below is explainNoEvents's and explainEmpty's, deliberately, because
+// The shape below is explainNoEvents's and explainNoChanges's, deliberately, because
 // all three are one piece of reasoning about a silence and a change to how this
 // CLI thinks about silences should be made once. The three states are theirs too.
 
@@ -332,7 +407,7 @@ func explainNoEvents(
 //
 // hadChanges is what the unfiltered probe found and probeErr is its failure. The
 // second return value says the emptiness now has an explanation better than
-// coverage can give, and is what suppresses explainEmpty at the call site — the
+// coverage can give, and is what suppresses explainNoChanges at the call site — the
 // same gate displayFilterNotice's counts already open for `diff --field`.
 //
 // It is true for a failed probe as well as for a successful one, and that is the
@@ -343,7 +418,7 @@ func explainNoEvents(
 // inability and coverage is not invited to answer a question it was not asked.
 //
 // A probe that found nothing is the case that returns false: the window really
-// is empty of changes, the predicate is not what emptied it, and explainEmpty's
+// is empty of changes, the predicate is not what emptied it, and explainNoChanges's
 // three answers are the right ones. That is also what keeps the no-coverage
 // finding — and its exit 3 — reachable under a filter, since a window nobody was
 // watching holds no changes to find.
