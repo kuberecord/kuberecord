@@ -574,6 +574,23 @@ func TestExplainReadsAsProse(t *testing.T) {
 			over:   ProfileOverrides{Addr: "127.0.0.1:19000", Username: "kuberecord_ro", PasswordFile: "/run/ch"},
 			secret: goodSecret(),
 		},
+		{
+			// A read-only user named and nothing said about its password, which is
+			// the shape the prompting layer produces when the user question is
+			// answered and the password question is not overridden. The variable is
+			// derived from the user, and the recommendation is gone because it has
+			// been taken.
+			name: "named-user", sink: fromSinkClickHouse(fixtureAddr), ref: clickHouseSinkRef,
+			over: ProfileOverrides{Username: "kuberecord_ro"}, secret: goodSecret(),
+		},
+		{
+			// The sink's own user, named explicitly. It changes nothing, so the
+			// rendering must be the one written for a profile that took the
+			// default — the "as --username asked" clause here would be describing
+			// the operator's writer as a read-only alternative to itself.
+			name: "named-sink-user", sink: fromSinkClickHouse(fixtureAddr), ref: clickHouseSinkRef,
+			over: ProfileOverrides{Username: fromSinkUsername}, secret: goodSecret(),
+		},
 		{name: "unverified", sink: fromSinkClickHouse(fixtureAddr), ref: clickHouseSinkRef, forbid: true},
 		{name: "archive", sink: fromSinkS3("https://minio.example.com:9000"), ref: s3SinkRef},
 		{name: "archive-internal", sink: fromSinkS3("http://minio.kuberecord-system.svc:9000"), ref: s3SinkRef},
@@ -645,5 +662,146 @@ func assertFromSinkGolden(t *testing.T, name, got string) {
 	}
 	if got != string(want) {
 		t.Errorf("the rendering of %s changed.\n--- want ---\n%s\n--- got ---\n%s", name, want, got)
+	}
+}
+
+// The credential pair, which is one decision and used to be written as two
+// (D37, Task 18.1).
+//
+// The defect was not a wrong value. Every field the derivation wrote was correct;
+// what was wrong was the sentence printed beside them, which told the reader to
+// export a read-only user's password into a variable a profile authenticating as
+// the sink's own writer would read. A username and a password are halves of one
+// credential, so following that advice fails at the server with a message naming
+// neither half. The two tests below hold the two directions of it.
+
+// TestTheCredentialAdviceNeverNamesAPrincipalItDidNotWrite is the property, swept
+// over every rendering rather than asserted in one case.
+//
+// The golden files pin what each shape says; this pins what none of them may say.
+// The recommendation is only honest above a stanza that has not taken it, so the
+// sweep is: a rendering that names a user other than the one written has to be
+// naming it as a recommendation, and a rendering whose user is not the sink's has
+// no recommendation left to make.
+func TestTheCredentialAdviceNeverNamesAPrincipalItDidNotWrite(t *testing.T) {
+	// The advice as it used to be spelled, in both polarities. Neither may appear
+	// above a stanza that already reads as somebody other than the sink's writer.
+	takenAdvice := []string{
+		"Export a read-only ClickHouse user's password there",
+		"Put a read-only ClickHouse user's password there",
+		"a read-only user instead",
+	}
+
+	for _, tc := range []struct {
+		name string
+		over ProfileOverrides
+		// recommends says whether this profile still has the recommendation to
+		// make: it reads as the sink's own writer, so a read-only user is a change
+		// it has not made yet.
+		recommends bool
+	}{
+		{name: "the sink's user by default", recommends: true},
+		{name: "the sink's user named explicitly", over: ProfileOverrides{Username: fromSinkUsername}, recommends: true},
+		{name: "a read-only user", over: ProfileOverrides{Username: "kuberecord_ro"}},
+		{
+			name: "a read-only user with a password file",
+			over: ProfileOverrides{Username: "kuberecord_ro", PasswordFile: "/run/ch"},
+		},
+		{
+			name: "a read-only user with a variable of its own",
+			over: ProfileOverrides{Username: "kuberecord_ro", PasswordEnv: "CH_RO_PASSWORD"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := fromSinkResolver(t, goodSecret(), fromSinkClickHouse(fixtureAddr))
+
+			derived, err := resolver.ProfileFromSink(t.Context(), clickHouseSinkRef, tc.over)
+			if err != nil {
+				t.Fatalf("ProfileFromSink: %v", err)
+			}
+			rendered := derived.Explain(false)
+			stanza := derived.Profile.ClickHouse
+
+			// The pair, stated together, in every shape. This is the whole of what
+			// the reader has to check before exporting anything.
+			reference := "$" + stanza.PasswordEnv
+			if stanza.PasswordFile != "" {
+				reference = "the file " + stanza.PasswordFile
+			}
+			if want := stanza.Username + "'s password comes from " + reference; !strings.Contains(rendered, want) {
+				t.Errorf("the rendering never states the pair %q:\n%s", want, rendered)
+			}
+
+			warned := strings.Contains(rendered, "can write to the audit trail")
+			if warned != tc.recommends {
+				t.Errorf("the write-capable warning is present=%t for a profile reading as %q, want %t:\n%s",
+					warned, stanza.Username, tc.recommends, rendered)
+			}
+			if tc.recommends {
+				return
+			}
+			for _, advice := range takenAdvice {
+				if strings.Contains(rendered, advice) {
+					t.Errorf("the rendering recommends %q above a stanza that already reads as %s:\n%s",
+						advice, stanza.Username, rendered)
+				}
+			}
+		})
+	}
+}
+
+// TestReaderPasswordEnvGivesEachPrincipalAVariable.
+//
+// Field testing produced four profiles naming four users and all reading
+// $KUBERECORD_CLICKHOUSE_PASSWORD, which is four profiles of which at most one
+// authenticates. The sink's own user keeps the documented variable — it is the one
+// every message tells the reader to export — and anybody else gets one derived
+// from their name.
+func TestReaderPasswordEnvGivesEachPrincipalAVariable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		username string
+		sink     string
+		want     string
+	}{
+		{
+			name: "the sink's own user", username: "kuberecord", sink: "kuberecord",
+			want: DefaultPasswordEnv,
+		},
+		{
+			name: "no user at all", username: "", sink: "kuberecord",
+			want: DefaultPasswordEnv,
+		},
+		{
+			name: "a read-only user", username: "kuberecord_ro", sink: "kuberecord",
+			want: DefaultPasswordEnv + "_KUBERECORD_RO",
+		},
+		{
+			name: "a user whose name is not shell-shaped", username: "audit-reader.eu", sink: "kuberecord",
+			want: DefaultPasswordEnv + "_AUDIT_READER_EU",
+		},
+		{
+			// One rune to one rune rather than a fold: collapsing runs is what
+			// would put these two back on one variable.
+			name: "a name with a run of punctuation", username: "ro--1", sink: "kuberecord",
+			want: DefaultPasswordEnv + "_RO__1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ReaderPasswordEnv(tc.username, tc.sink); got != tc.want {
+				t.Errorf("ReaderPasswordEnv(%q, %q) = %q, want %q", tc.username, tc.sink, got, tc.want)
+			}
+		})
+	}
+
+	// Non-vacuity: two principals must not land on one variable, which is the
+	// whole reason this function exists.
+	first := ReaderPasswordEnv("reader_one", fromSinkUsername)
+	second := ReaderPasswordEnv("reader_two", fromSinkUsername)
+	if first == second {
+		t.Errorf("two principals share the variable %q", first)
+	}
+	if first == DefaultPasswordEnv || second == DefaultPasswordEnv {
+		t.Errorf("a user other than the sink's own was given the sink's own variable: %q, %q", first, second)
 	}
 }

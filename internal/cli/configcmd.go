@@ -720,8 +720,15 @@ var profileFieldFlags = []profileField{
 	{
 		name:    options.FlagUsername,
 		backend: resolve.BackendClickHouse,
-		usage:   "ClickHouse user. A read-only user is the recommended posture; see docs/CLI.md.",
-		str:     func(f *profileFields) *string { return &f.Username },
+		// One sentence in three places: `--help`, the typed path's prompt, and the
+		// derived branch's prompt, which asks it under a line naming the sink's own
+		// user (setProfileWizard.askDerivedCredential). It names the section rather
+		// than the page because that section is now runnable — the CREATE USER and
+		// GRANT SELECT a reader needs — and "see docs/CLI.md" for a several-hundred
+		// line reference is a search rather than an answer.
+		usage: "Which ClickHouse user this profile reads as. A read-only user is the " +
+			"recommended posture; see " + resolve.DocsReadOnlyUser + ".",
+		str: func(f *profileFields) *string { return &f.Username },
 	},
 	{
 		name:    options.FlagPasswordEnv,

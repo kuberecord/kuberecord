@@ -5,10 +5,6 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
     kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
 
-Database kuberecord and user kuberecord are the sink's own.
+Database kuberecord is the sink's own; the user is kuberecord_ro, as --username asked.
 Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
-The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD.
-
-That user is the sink's own writer, so this profile can write to the audit trail.
-Give --username a read-only user instead; the grants it needs are at
-docs/CLI.md#the-read-only-clickhouse-user
+The profile does not copy it: kuberecord_ro's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO.

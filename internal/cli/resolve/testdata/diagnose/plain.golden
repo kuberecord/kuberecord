@@ -18,7 +18,10 @@ That reads this same sink, records 127.0.0.1:9000 in place of the address above,
 and takes the database and the user from it. The forward is still yours to run:
 a profile records an address, it does not open a tunnel.
 
-Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
-recommended credential for it, and the operator's own is not. Both routes, and
-why this tool will not forward the port for you:
+Export KUBERECORD_CLICKHOUSE_PASSWORD first: it is the variable that profile
+records, and the password it wants is the sink's own user's — a credential that can
+write to the audit trail. Add --username <read-only user> to the set-profile line
+above to read as one instead, and it records a variable of its own.
+
+Both routes, and why this tool will not forward the port for you:
 docs/CLI.md#running-the-cli-outside-the-cluster

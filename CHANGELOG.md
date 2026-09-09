@@ -338,6 +338,55 @@ than a summary of them.
 
 ### Fixed
 
+- **`config set-profile` no longer prints credential advice that cannot be
+  followed.** A profile derived from a `ClickHouseSink` records that sink's own
+  ClickHouse user, and the message printed beside it said to export *a read-only
+  user's* password into the variable that profile reads. A ClickHouse username and
+  password are one credential pair, so doing both authenticates as the operator's
+  writer with somebody else's password and is refused by the server — unless the
+  read-only user happens to be named after the operator's, which is the user the
+  advice existed to steer away from.
+
+  The wizard's discovery branch now **asks which user the profile reads as**,
+  defaulting to the sink's own, immediately before asking where that user's
+  password comes from. The two read as one decision: the second question names the
+  answer to the first, and pressing return through both writes exactly the stanza
+  the branch wrote before either question existed.
+
+  ```console
+  ClickHouseSink/default authenticates as kuberecord, which can write to the
+  audit trail.
+
+  Which ClickHouse user this profile reads as. A read-only user is the recommended posture; see docs/CLI.md#the-read-only-clickhouse-user.
+  > [kuberecord] kuberecord_ro
+
+  Where does kuberecord_ro's password come from?
+    1) environment — an environment variable, named next
+    2) file — a file, named next
+  > [environment]
+  ```
+
+  **The advice is now conditional and never contradicts the stanza it accompanies.**
+  A profile reading as the sink's own user is told that credential can write to the
+  audit trail and which flag changes it; one already reading as somebody else is
+  told nothing but the pair that was recorded, because the advice has been taken.
+  The same split reaches the unreachable-backend message, which recommended a
+  read-only user's password for a profile it had just described as taking the sink's
+  user.
+
+  **A profile reading as a user other than the sink's gets a password variable of
+  its own** — `KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO` for the user above,
+  uppercased with everything a shell will not accept replaced by `_`. One variable
+  holds one password, so four profiles naming four principals and all reading
+  `KUBERECORD_CLICKHOUSE_PASSWORD` are four profiles of which at most one
+  authenticates. `--password-env` overrides it, and the equivalent command printed
+  after the write names both halves in full.
+
+  `--from-sink --username` already reached the same derivation, and the printed
+  equivalent now carries `--username` whenever the profile reads as somebody other
+  than the sink's user — so the two routes agree about whether that user is
+  negotiable, which is what keeps the prompting layer a layer (D33, D37).
+
 - **A profile that cannot be resolved now names every way past it.** A stanza
   pointing at `KUBERECORD_CLICKHOUSE_PASSWORD` in a shell that never exported it
   failed with the variable named and nothing else — and a reader who then passed

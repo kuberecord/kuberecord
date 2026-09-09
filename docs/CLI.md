@@ -1885,9 +1885,12 @@ That reads this same sink, records 127.0.0.1:9000 in place of the address above,
 and takes the database and the user from it. The forward is still yours to run:
 a profile records an address, it does not open a tunnel.
 
-Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
-recommended credential for it, and the operator's own is not. Both routes, and
-why this tool will not forward the port for you:
+Export KUBERECORD_CLICKHOUSE_PASSWORD first: it is the variable that profile
+records, and the password it wants is the sink's own user's — a credential that can
+write to the audit trail. Add --username <read-only user> to the set-profile line
+above to read as one instead, and it records a variable of its own.
+
+Both routes, and why this tool will not forward the port for you:
 docs/CLI.md#running-the-cli-outside-the-cluster
 ```
 
@@ -1944,9 +1947,11 @@ $ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
 The port-forward is still yours to run — a profile records an address, it does not
 open a tunnel — but nothing else has to be repeated, and the profile survives the
 kubeconfig context changing under it. The password is **not** copied out of the
-sink's Secret: the profile names an environment variable, and what you export
-there should be [a read-only ClickHouse user](#the-read-only-clickhouse-user)
-rather than the operator's own credential, which can write to the audit trail.
+sink's Secret: the profile names an environment variable, and the password that
+variable has to hold is the password of the user the profile records. That user is
+the sink's own by default, and the sink's own can write to the audit trail — so add
+`--username` to read as [a read-only one](#the-read-only-clickhouse-user) instead,
+which also gives the profile a variable of its own to read.
 The whole subcommand, including which flags survive `--from-sink` and what an
 `S3Sink` does instead, is [`--from-sink`](#--from-sink). If you would rather not
 learn a flag to get here, `kubectl kuberecord config set-profile` with nothing after
@@ -2299,7 +2304,7 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--backend <kind>` | — | `backend`. One of `clickhouse`, `s3`, `local`. Required unless `--from-sink` is given. |
 | `--addr <host:port>` | `clickhouse` | `clickhouse.addr` |
 | `--database <name>` | `clickhouse` | `clickhouse.database` |
-| `--username <user>` | `clickhouse` | `clickhouse.username` |
+| `--username <user>` | `clickhouse` | `clickhouse.username`. Survives `--from-sink`; a user other than the sink's own also defaults `passwordEnv` to a variable of its own — see [the read-only user](#the-read-only-clickhouse-user). |
 | `--password-env <VAR>` | `clickhouse` | `clickhouse.passwordEnv` |
 | `--password-file <path>` | `clickhouse` | `clickhouse.passwordFile` |
 | `--tls` | `clickhouse` | `clickhouse.tls` |
@@ -2578,9 +2583,11 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
 Database kuberecord and user kuberecord are the sink's own.
 Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
-The profile does not copy it: it reads $KUBERECORD_CLICKHOUSE_PASSWORD.
-Export a read-only ClickHouse user's password there rather than the operator's,
-which is a credential that can write to the audit trail. See docs/CLI.md.
+The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD.
+
+That user is the sink's own writer, so this profile can write to the audit trail.
+Give --username a read-only user instead; the grants it needs are at
+docs/CLI.md#the-read-only-clickhouse-user
 ```
 
 It reads the named sink through the same discovery path a query uses, and writes
@@ -2611,8 +2618,21 @@ hand-written stanza. A Secret you may not read is a notice, not a failure: nothi
 in the written profile depends on it, and being unable to read it is the ordinary
 state this whole subcommand exists for. Both routes rest on that — the questions
 [behave the same way](#asking-instead-of-knowing-the-flags), and differ only in
-asking where the password comes from rather than assuming the default, because
+asking the two credential questions rather than taking their defaults, because
 there is somebody there to ask.
+
+**`--username` and the variable are one decision.** A profile reading as a
+[read-only user](#the-read-only-clickhouse-user) defaults to a variable derived
+from that user's name rather than to `KUBERECORD_CLICKHOUSE_PASSWORD`, because a
+username and a password are halves of one credential and two profiles naming two
+principals cannot share one variable. The message above says which principal was
+written and where its password comes from, in one sentence, and it recommends a
+read-only user only when the profile does not already read as one:
+
+| `--username` | The profile reads as | Its password comes from | The message |
+|---|---|---|---|
+| omitted, or the sink's own user | the sink's own user | `KUBERECORD_CLICKHOUSE_PASSWORD` | says that user can write to the audit trail, and names `--username` |
+| a different user | that user | `KUBERECORD_CLICKHOUSE_PASSWORD_<THAT_USER>` | states the pair, and recommends nothing — the advice has been taken |
 
 Four flags survive `--from-sink`, and they are the ones a `ClickHouseSink` cannot
 state or must not state for a *reader*: `--addr`, `--username`, `--password-env` /
@@ -2663,15 +2683,29 @@ That name resolves inside the cluster and nowhere else.
 
 ClickHouse native-protocol endpoint, as host:port.
 > [127.0.0.1:9000]
+
+ClickHouseSink/default authenticates as kuberecord, which can write to the
+audit trail.
+
+Which ClickHouse user this profile reads as. A read-only user is the recommended posture; see docs/CLI.md#the-read-only-clickhouse-user.
+> [kuberecord] kuberecord_ro
+
+Where does kuberecord_ro's password come from?
+  1) environment — an environment variable, named next
+  2) file — a file, named next
+> [environment]
+
+Name of an environment variable holding the ClickHouse password.
+> [KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO]
 → wrote profile "local" in ~/.config/kuberecord/config.yaml
 …
 → to make it the active profile: `kuberecord config use-profile local`
 
 The same thing without the questions:
-  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000
+  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000 --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO
 ```
 
-Five things about it are worth stating, because each is a decision rather than an
+Seven things about it are worth stating, because each is a decision rather than an
 accident:
 
 - **The last line is the point.** The questions are for somebody who does not know
@@ -2688,6 +2722,14 @@ accident:
 - **There is no password prompt**, and cannot be: a profile never stores a password
   inline, so what is asked for is the *name* of an environment variable or the path
   of a file. Nothing secret is typed, echoed, held in memory or left in scrollback.
+- **The user and the password source are one decision, so they are one pair of
+  questions.** A ClickHouse username and password are halves of one credential, and
+  the moment the CLI is about to recommend a
+  [read-only user](#the-read-only-clickhouse-user) is the moment it has to ask which
+  user rather than recommend one and record another. So the second question names
+  the answer to the first, and the variable it offers is derived from it. Pressing
+  return through both writes exactly what `--from-sink` writes with no flags: this
+  adds a question, not a requirement.
 - **Off a terminal it is an error, never a wait.** Standard input that is not a
   terminal exits `2` naming both flag forms. A wizard that blocked in CI would hang
   the pipeline until something killed it, and the message saying what was wanted
@@ -2710,14 +2752,13 @@ accident:
   Cannot read its Secret (forbidden) — that is fine: a profile stores where
   your password lives, not the operator's.
 
-  Where does the ClickHouse password come from?
-    1) environment — an environment variable, named next
-    2) file — a file, named next
-  > [environment]
+  ClickHouseSink/default authenticates as kuberecord, which can write to the
+  audit trail.
   ```
 
-  The equivalent command printed at the end gains the `--password-env` or
-  `--password-file` the answer chose, so it still reproduces the profile exactly.
+  The two credential questions follow, exactly as they do when the Secret *was*
+  read: the sentence above them is the only difference, and it is there because a
+  reader who has just been refused a Secret should be told that nothing is broken.
   Every *other* way reading the sink can fail — a custom resource that is gone, one
   you may not read, one whose spec does not decode — still ends the command, because
   each is a failure of the thing you named in the menu.
@@ -2872,6 +2913,27 @@ $ kuberecord config set-profile prod --backend clickhouse \
     --addr clickhouse.example:9000 --database kuberecord \
     --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD
 ```
+
+Or, against a cluster whose sink the CLI can see, without looking any of it up:
+
+```console
+$ kuberecord config set-profile prod --from-sink ClickHouseSink/default \
+    --username kuberecord_ro
+```
+
+**A username and a password are one credential pair.** `--username` is one of the
+four flags [`--from-sink`](#--from-sink) accepts for exactly this reason: a profile
+records which user it reads as, so the password it reads has to be that user's. A
+profile naming `kuberecord_ro` and a variable holding the operator's password
+authenticates as neither.
+
+That is also why a profile reading as somebody other than the sink's own user gets
+a **variable of its own** — `KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO` for the
+user above, uppercased with everything a shell will not accept replaced by `_`.
+One variable holds one password, so four profiles naming four principals and all
+reading `KUBERECORD_CLICKHOUSE_PASSWORD` are four profiles of which at most one
+authenticates. The variable is printed when the profile is written, and
+`--password-env` overrides it.
 
 Why this rather than widening Kubernetes RBAC so everyone can read the operator's
 Secret: that Secret holds the credential the operator **writes** with. Handing it to

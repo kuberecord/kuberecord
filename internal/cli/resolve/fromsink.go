@@ -75,9 +75,9 @@ import (
 // askDiscovery, which reaches this function with the ref a menu chose. A change
 // that made an unreadable Secret fatal here would not fail one command — it would
 // end the wizard four questions in, for exactly the read-only engineer both routes
-// were built for. The wizard additionally reads CredentialUnreadable, so it can
-// ask where the password comes from instead of assuming the default, which is the
-// one behaviour that differs between the two.
+// were built for. The wizard additionally reads CredentialUnreadable, so it can say
+// why it is about to ask about a credential the cluster could otherwise have
+// described — which is a sentence rather than a behaviour: it asks either way.
 //
 // It is a carve-out for the Secret read and nothing else. A missing custom
 // resource, an object store handed overrides it cannot hold, a decode failure and
@@ -156,10 +156,16 @@ type SinkProfile struct {
 	// AddrOverridden reports that the user named the endpoint themselves.
 	AddrOverridden bool
 
-	// UsernameOverridden reports the same about the ClickHouse user. It is
-	// separate from the address because the message says which fields came from
-	// the custom resource, and a profile that claimed a read-only user was the
-	// sink's own would be describing the operator's writer.
+	// UsernameOverridden reports that this profile reads as somebody other than
+	// the user the sink itself authenticates as. It is separate from the address
+	// because the message says which fields came from the custom resource, and a
+	// profile that claimed a read-only user was the sink's own would be describing
+	// the operator's writer.
+	//
+	// It is a comparison of values rather than a record of whether --username was
+	// passed, and the difference is load-bearing: naming the sink's own user
+	// explicitly changes nothing, so it must not turn the credential advice into
+	// the form written for a *different* principal (see explainReaderCredential).
 	UsernameOverridden bool
 
 	// PortForward is the command that makes a rewritten address work, pre-filled
@@ -255,10 +261,15 @@ func (r *BackendResolver) clickHouseProfile(
 ) *SinkProfile {
 	connection := sink.Spec.Connection
 
+	// The sink's own user, named once and read three times: it is the stanza's
+	// default, the thing an override is measured against, and half of the
+	// credential pair the password reference completes.
+	sinkUsername := valueOr(connection.Username, DefaultClickHouseUsername)
+
 	stanza := &ClickHouseProfile{
 		Addr:     connection.Addr,
 		Database: valueOr(connection.Database, DefaultClickHouseDatabase),
-		Username: valueOr(over.Username, valueOr(connection.Username, DefaultClickHouseUsername)),
+		Username: valueOr(over.Username, sinkUsername),
 		TLS:      over.TLS,
 	}
 	switch {
@@ -268,17 +279,26 @@ func (r *BackendResolver) clickHouseProfile(
 		stanza.PasswordFile = over.PasswordFile
 	default:
 		// The variable Task 13.1's message tells this user to export and
-		// docs/CLI.md names throughout. A profile with no password reference at
-		// all would validate and then authenticate as nobody, which is not what
-		// "complete and usable" means.
-		stanza.PasswordEnv = DefaultPasswordEnv
+		// docs/CLI.md names throughout — unless this profile reads as somebody
+		// other than the sink's own user, in which case it gets one of its own. A
+		// profile with no password reference at all would validate and then
+		// authenticate as nobody, which is not what "complete and usable" means,
+		// and one sharing a variable with a different principal would authenticate
+		// as the wrong half of a pair (D37). See ReaderPasswordEnv.
+		stanza.PasswordEnv = ReaderPasswordEnv(stanza.Username, sinkUsername)
 	}
 
 	derived := &SinkProfile{
-		Ref:                ref,
-		Profile:            Profile{Backend: BackendClickHouse, ClickHouse: stanza},
-		RecordedAddr:       connection.Addr,
-		UsernameOverridden: over.Username != "",
+		Ref:          ref,
+		Profile:      Profile{Backend: BackendClickHouse, ClickHouse: stanza},
+		RecordedAddr: connection.Addr,
+		// Measured against the sink's user rather than against whether --username
+		// was passed, because it is read as "this profile reads as somebody other
+		// than the sink's writer" and that is a fact about the value. `--username
+		// kuberecord` against a sink whose user is kuberecord names the operator's
+		// own writer, and a message calling that a read-only alternative would be
+		// the contradiction this whole task is about.
+		UsernameOverridden: stanza.Username != sinkUsername,
 	}
 	credential, unverified, unreadable := r.verifyCredential(ctx, connection.CredentialsSecretRef)
 	derived.Credential, derived.CredentialUnverified = credential, unverified
@@ -462,22 +482,59 @@ func (p *SinkProfile) explainClickHouse(line func(string), severity render.Sever
 			options.FlagTLS))
 	}
 	p.explainCredential(line)
+	p.explainReaderCredential(line)
+}
 
-	// The reference gets a line of its own and the advice two fixed ones, so that
-	// a long variable name or a long path lengthens one line rather than
-	// reflowing the paragraph under it.
+// explainReaderCredential says where this profile's own password comes from, and
+// it names one principal throughout (D37).
+//
+// This block used to end in a fixed recommendation — "export a read-only
+// ClickHouse user's password there rather than the operator's" — printed above a
+// stanza that said `username: kuberecord`. The two cannot both be followed: a
+// ClickHouse username and password are one credential pair, so a reader taking
+// the advice authenticates as the sink's writer with a read-only user's password
+// and is refused by the server. Advice that contradicts the stanza it accompanies
+// is worse than no advice, because it is followed.
+//
+// So there are two forms and the condition is which user was written. When the
+// sink's own user was kept, the recommendation still applies and the block says
+// what that credential can do and which flag changes it. When a different user was
+// named, the advice has already been taken: repeating it would recommend a
+// principal other than the one written, which is the same defect in the other
+// direction. Neither form ever names a user this profile does not read as.
+//
+// The reference gets a line of its own, so that a long variable name or a long
+// path lengthens one line rather than reflowing the paragraph under it. Nothing
+// here is a Warning tier: this is a report of a write that succeeded, the pair is
+// stated plainly enough that no conclusion is misread, and the emphasis in the
+// message belongs to the port-forward line above (D27, D30).
+func (p *SinkProfile) explainReaderCredential(line func(string)) {
+	stanza := p.Profile.ClickHouse
+
 	switch {
 	case stanza.PasswordEnv != "":
-		line(fmt.Sprintf("The profile does not copy it: it reads $%s.", stanza.PasswordEnv))
-		line("Export a read-only ClickHouse user's password there rather than the operator's,")
-		line("which is a credential that can write to the audit trail. See")
-		line(docsReadOnlyUser)
+		line(fmt.Sprintf("The profile does not copy it: %s's password comes from $%s.",
+			stanza.Username, stanza.PasswordEnv))
 	case stanza.PasswordFile != "":
-		line(fmt.Sprintf("The profile does not copy it: it reads the file %s.", stanza.PasswordFile))
-		line("Put a read-only ClickHouse user's password there rather than the operator's,")
-		line("which is a credential that can write to the audit trail. See")
-		line(docsReadOnlyUser)
+		line(fmt.Sprintf("The profile does not copy it: %s's password comes from the file %s.",
+			stanza.Username, stanza.PasswordFile))
+	default:
+		// No reference at all is a hand-written stanza's business and never a
+		// derived one's — clickHouseProfile always writes one — but saying nothing
+		// is the only honest thing to print about a pair whose second half does
+		// not exist.
+		return
 	}
+	if p.UsernameOverridden {
+		// The advice has been taken. What is left is the pair, which is the whole
+		// of what a reader has to check.
+		return
+	}
+	line("")
+	line("That user is the sink's own writer, so this profile can write to the audit trail.")
+	line(fmt.Sprintf("Give --%s a read-only user instead; the grants it needs are at",
+		options.FlagUsername))
+	line(DocsReadOnlyUser)
 }
 
 // explainCredential says where the sink's own credential lives, and whether this

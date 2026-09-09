@@ -111,6 +111,63 @@ const (
 // one that drifts.
 const DefaultPasswordEnv = "KUBERECORD_CLICKHOUSE_PASSWORD"
 
+// ReaderPasswordEnv names the environment variable a profile reading as username
+// defaults to.
+//
+// A ClickHouse username and a password are one credential pair, and this function
+// exists so that the two halves cannot be decided in two places. The derivation
+// applies it when nothing names a password reference, and the prompting layer
+// offers its result as the answer to "where does this user's password come from?"
+// — so pressing return at that question writes the value --from-sink would have
+// written unprompted, and the printed equivalent command is a command rather than
+// a coincidence.
+//
+// sinkUsername is the user the sink itself authenticates as. Reading as that user
+// is what the CLI defaults to and what DefaultPasswordEnv is for: it is the
+// variable every route already tells the reader to export, docs/CLI.md uses
+// throughout, and the unreachable-backend message names. Reading as somebody else
+// is a deliberate act, and it gets a variable of its own.
+//
+// # Why a different user cannot share the variable
+//
+// One variable holds one password. Four profiles naming four principals and all
+// reading $KUBERECORD_CLICKHOUSE_PASSWORD are four profiles of which at most one
+// authenticates, and the three that fail do so with a server-side "authentication
+// failed" that names neither the profile nor the variable. Field testing produced
+// exactly that. Deriving the name from the user is what makes two profiles for two
+// principals work in one shell without either of them mentioning a flag.
+//
+// The mapping is one rune to one rune rather than a fold: runs of punctuation are
+// not collapsed, because collapsing them is what would put `ro-1` and `ro--1` on
+// one variable again. Two users whose names differ only in *which* punctuation
+// they use do still collide, and --password-env is the answer to that — a default
+// is a starting point, and this one is printed in the equivalent command in full.
+func ReaderPasswordEnv(username, sinkUsername string) string {
+	if username == "" || username == sinkUsername {
+		return DefaultPasswordEnv
+	}
+	return DefaultPasswordEnv + "_" + envSegment(username)
+}
+
+// envSegment turns a ClickHouse username into something a shell can name.
+//
+// A ClickHouse identifier may hold anything a quoted string may hold; an
+// environment variable name may hold letters, digits and underscores. Everything
+// outside that set becomes an underscore, and the result is uppercased, because a
+// variable a reader cannot type in a shell is a default that costs more than it
+// saves.
+func envSegment(username string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r - ('a' - 'A')
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			return r
+		}
+		return '_'
+	}, username)
+}
+
 // The sections of docs/CLI.md a rendered message can send a reader to.
 //
 // Each names a section rather than the page. The page is a command reference
@@ -120,7 +177,7 @@ const DefaultPasswordEnv = "KUBERECORD_CLICKHOUSE_PASSWORD"
 // They are three rather than one because the messages ask three different things
 // of the reader. docsOutsideCluster is for somebody stuck: why the address is a
 // Service name and why that is right, both routes out of it, and why this tool
-// will not forward the port itself. docsReadOnlyUser is for somebody who is not
+// will not forward the port itself. DocsReadOnlyUser is for somebody who is not
 // stuck at all — `--from-sink` prints the credential advice after writing a
 // profile for a perfectly public endpoint too, and pointing that reader at a
 // port-forward section would be a non-sequitur. docsSourceVersusSinkAddr is for
@@ -133,8 +190,15 @@ const DefaultPasswordEnv = "KUBERECORD_CLICKHOUSE_PASSWORD"
 // the address gets one: they are tokens to be copied rather than prose to be
 // read, and a trailing full stop is a character that travels with them.
 const (
-	docsOutsideCluster       = "docs/CLI.md#running-the-cli-outside-the-cluster"
-	docsReadOnlyUser         = "docs/CLI.md#the-read-only-clickhouse-user"
+	docsOutsideCluster = "docs/CLI.md#running-the-cli-outside-the-cluster"
+
+	// DocsReadOnlyUser is exported because it is not only a destination for a
+	// rendered message any more: --username's one-sentence description sends the
+	// reader to the same section, and that sentence is `--help`, the typed path's
+	// prompt and the derived branch's prompt at once (see profileFieldFlags). An
+	// anchor spelled in two files is an anchor that survives exactly one rename.
+	DocsReadOnlyUser = "docs/CLI.md#the-read-only-clickhouse-user"
+
 	docsSourceVersusSinkAddr = "docs/CLI.md#--source-versus---sink-addr"
 )
 
@@ -490,9 +554,32 @@ func (e *UnreachableSinkError) Render(commandPath string, colorize bool) string 
 	line(severity.Warning("and takes the database and the user from it. The forward is still yours to run:"))
 	line(severity.Warning("a profile records an address, it does not open a tunnel."))
 	line("")
-	line(severity.Warning(fmt.Sprintf("Export %s first. A read-only ClickHouse user is the", DefaultPasswordEnv)))
-	line(severity.Warning("recommended credential for it, and the operator's own is not. Both routes, and"))
-	line(severity.Warning("why this tool will not forward the port for you:"))
+	// The credential advice has to agree with the profile the two lines above
+	// write, and it used to not. It said "export a read-only ClickHouse user's
+	// password" into the variable a profile derived from *this* sink reads —
+	// beside a stanza recording the sink's own user, because that is what
+	// --from-sink takes from it. A username and a password are one pair (D37), so a
+	// reader following both authenticates as the operator's writer with somebody
+	// else's password and is refused by the server.
+	//
+	// So the variable is still named — it is the one the command above writes, and
+	// the reader needs it — but what it wants is stated as the sink's own user's
+	// password, which is what that profile actually authenticates with. The
+	// read-only posture becomes the flag that makes it true rather than a password
+	// to put in the wrong variable. No variable is named for that case, because it
+	// depends on the user's name and the write prints it (ReaderPasswordEnv).
+	//
+	// --username names the line it belongs on, as every other flag in this block
+	// does: the two above it sit inside commands. A bare flag in a message printed
+	// by `timeline` is a flag a reader adds to `timeline`, which does not have it —
+	// the affordance sweep's whole subject.
+	line(severity.Warning(fmt.Sprintf("Export %s first: it is the variable that profile", DefaultPasswordEnv)))
+	line(severity.Warning("records, and the password it wants is the sink's own user's — a credential that can"))
+	line(severity.Warning(fmt.Sprintf("write to the audit trail. Add --%s <read-only user> to the set-profile line",
+		options.FlagUsername)))
+	line(severity.Warning("above to read as one instead, and it records a variable of its own."))
+	line("")
+	line(severity.Warning("Both routes, and why this tool will not forward the port for you:"))
 	line(severity.Warning(docsOutsideCluster))
 
 	return out.String()
