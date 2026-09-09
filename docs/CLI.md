@@ -1209,6 +1209,7 @@ it out here.
 | [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config view`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config get-profiles`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [`config current-profile`](#config-current-profile) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config resolve`](#config-resolve) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config set-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config use-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
@@ -1225,10 +1226,11 @@ Each ❌ has a reason, and the error says it:
   than a row, and there is nothing for a tabular format to lay out. Its default is
   `yaml`, which is the shape people want and the one that carries the **NOT A
   DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
-- **`version`, `config view`, `config get-profiles`, `config resolve` and the four
-  `config` subcommands that write refuse `jsonl`.** It is a streaming format for a
-  result larger than memory, and each of these is exactly one document — a profile
-  listing included, since it is as long as the configuration file and no longer.
+- **`version`, `config view`, `config get-profiles`, `config current-profile`,
+  `config resolve` and the four `config` subcommands that write refuse `jsonl`.** It
+  is a streaming format for a result larger than memory, and each of these is exactly
+  one document — a profile listing included, since it is as long as the configuration
+  file and no longer, and the active profile's name most of all.
 - **The four `config` subcommands that write render nothing at all for `table` and
   `wide`.** Their whole report is the confirmation on stderr, because the data of
   a write is the file it wrote — and there is no result set to lay out in columns.
@@ -1240,18 +1242,19 @@ Each ❌ has a reason, and the error says it:
   because a configuration file *is* YAML and `table` is the global default a user
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
 - **`config resolve` refuses `diff` too**, and for the same reason: it reports two
-  chains of decisions, and there is no patch anywhere in it. So does
-  `config get-profiles`, which reports the state of a file.
+  chains of decisions, and there is no patch anywhere in it. So do
+  `config get-profiles`, which reports the state of a file, and
+  `config current-profile`, whose whole answer is one word.
 
 And one ✅ is worth a sentence, because it looks like a flag being ignored and is
-not. **`wide` on `version`, `config view`, `config get-profiles` and
-`config resolve` renders exactly what `table` does**, and on the four writing
-`config` subcommands it renders no document at all, as `table` does. `wide` means
-*the same table with nothing elided*, and each of these is a document that elides
-nothing at any width — a build identity, a configuration file, a profile listing
-whose cells are addresses and paths people paste, two chains of decisions, a write
-that has already been confirmed on stderr — so the flag's guarantee is met rather than
-dropped. Where a command genuinely cannot produce a format it refuses
+not. **`wide` on `version`, `config view`, `config get-profiles`,
+`config current-profile` and `config resolve` renders exactly what `table` does**,
+and on the four writing `config` subcommands it renders no document at all, as
+`table` does. `wide` means *the same table with nothing elided*, and each of these
+is a document that elides nothing at any width — a build identity, a configuration
+file, a profile listing whose cells are addresses and paths people paste, one
+profile name, two chains of decisions, a write that has already been confirmed on
+stderr — so the flag's guarantee is met rather than dropped. Where a command genuinely cannot produce a format it refuses
 it by name, which is the case the list above enumerates.
 
 For `table`, `wide` and `diff` the header, the notices and every explanation go to
@@ -1341,12 +1344,13 @@ It is a property of the rendering rather than of the contract. Nothing `jq` or
 `yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
 only one that notices.
 
-**Six documents carry the same `apiVersion` without being envelopes**, and the
+**Seven documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,
 `config view` renders a `Config` one,
 [`config get-profiles`](#config-view-and-config-get-profiles) renders a
-`Profiles`, [`config resolve`](#config-resolve) renders a `Resolution`, and the
-`config` subcommands that write render a
+`Profiles`, [`config current-profile`](#config-current-profile) renders a
+`CurrentProfile`, [`config resolve`](#config-resolve) renders a `Resolution`, and
+the `config` subcommands that write render a
 [`ProfileChange` or a `ContextMapping`](#writes-are-scriptable); none is the answer
 to a query, so none has a `metadata` block or an `items` list. A `Version` carrying
 `cluster_id: ""` and an empty coverage report would be inviting a consumer to read
@@ -2257,8 +2261,10 @@ $ kuberecord config set-profile archive --backend s3 --bucket acme-audit \
 
 $ kuberecord config set-profile laptop --backend local --path ~/archives/kuberecord
 
-# Choose the active one.
+# Choose the active one, and ask which it is.
 $ kuberecord config use-profile archive
+$ kuberecord config current-profile
+$ PROFILE=$(kuberecord config current-profile) || exit 1
 
 # Remove one. Deleting the active profile needs --force, which also clears the
 # active pointer.
@@ -2277,26 +2283,31 @@ $ kuberecord config view -o json | jq .profiles
 # whether its credential resolves on this machine.
 $ kuberecord config get-profiles
 
+# Or just the active profile's name, which is the shape a script wants.
+$ kuberecord config current-profile
+
 # Ask what the resolution chains would choose, without running a query.
 $ kuberecord config resolve
 $ kuberecord config resolve --check
 ```
 
-Seven subcommands, and three of them have flags of their own:
+Eight subcommands, and three of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
 | `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags) |
 | `config use-profile` | `NAME` | none |
+| [`config current-profile`](#config-current-profile) | none | none |
 | `config delete-profile` | `NAME` | `--force` — see [the profile lifecycle](#creating-replacing-and-deleting-a-profile) |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
 | `config get-profiles` | none | none — see [`config view` and `config get-profiles`](#config-view-and-config-get-profiles) |
 | `config resolve` | none | `--check` — see [`config resolve`](#config-resolve) |
 
-Three of them write nothing. `config view` prints the file and
-[`config get-profiles`](#config-view-and-config-get-profiles) prints its state;
-`config resolve` is here because a profile is one step of
+Four of them write nothing. `config view` prints the file,
+[`config get-profiles`](#config-view-and-config-get-profiles) prints its state and
+[`config current-profile`](#config-current-profile) prints the active profile's
+name alone; `config resolve` is here because a profile is one step of
 [where the data comes from](#where-the-data-comes-from), and the question it
 answers is the one a reader of this file has when the file turns out not to be the
 step that won.
@@ -2355,6 +2366,12 @@ CURRENT  NAME     BACKEND     TARGET                       CREDENTIAL
 The `*` and the `CURRENT` column are `kubectl config get-contexts`'s own, so the
 output is legible without instruction. Rows are sorted by name. The file's path
 goes to **stderr**, so `-o json | jq` receives the document alone.
+
+**`config current-profile` prints the active profile's name and nothing else.** It
+is the third question in this family and the only one shaped for a program rather
+than a reader: the table is the answer to *"what is in the file"*, and one token is
+the answer to *"what do I put in `$PROFILE`"*. See
+[`config current-profile`](#config-current-profile).
 
 **The credential column is the reason to run this rather than `view`.** A profile
 stores the *name* of an environment variable or the *path* of a file; whether that
@@ -2437,6 +2454,79 @@ $ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.
 | `profiles[].credential.reference` | The variable name or the file path. Absent for a source that names neither. |
 | `profiles[].credential.state` | `set`, `not set`, `present`, `missing`, `unreadable` or `not checked` — the table above, in one field. A word rather than a boolean: `resolves: false` on an ambient credential nobody checked would be a claim this command did not make. |
 
+#### `config current-profile`
+
+**`config get-profiles` is for a reader; this is for a program.** They report the
+same fact — which profile is active — and the difference is entirely one of shape.
+The table marks the active row with `*`, which is right when the question is what
+the file holds and wrong when the question is what to put in a variable:
+
+```console
+$ kuberecord config current-profile
+local
+
+$ PROFILE=$(kuberecord config current-profile) || exit 1
+```
+
+One token on stdout, no header, no decoration, and **nothing on stderr** — which
+is where this departs from `config view` and `config get-profiles`, both of which
+print the file's path there. `kubectl config current-context` prints nothing beside
+its answer either, and the path is available from this command's own `-o json` for
+a program that needs it. Extracting the starred row from the table is three lines
+of `awk` and breaks the day an unrelated profile's address gets longer, because the
+columns are laid out to the width of their content.
+
+**No active profile is an error, and exits `1`.** That is the point of it: `$( )`
+cannot tell an empty answer from no answer, so a script that captured `""` and
+carried on would query wherever the rest of
+[the resolution chain](#where-the-data-comes-from) reached — a sink discovered from
+the cluster, most likely — while believing it had been told which profile to use.
+The message names the way out, and which way out depends on what the file holds:
+
+```console
+$ kuberecord config current-profile
+error: no profile is active in ~/.config/kuberecord/config.yaml, so there is no name to print: choose one with `kuberecord config use-profile archive`, or see which of them has a credential that resolves right now with `kuberecord config get-profiles` (also defined: prod)
+```
+
+A file that defines no profiles at all gets the other message. It does not offer
+`use-profile`, because there is nothing to switch to and a remedy naming no command
+reads as though you should have known which name to substitute — and it says
+plainly that an empty file is not a broken one, since every command that queries
+data resolves perfectly well without a profile:
+
+```console
+$ kuberecord config current-profile
+error: no profile is active, and ~/.config/kuberecord/config.yaml defines none: write one with `kuberecord config set-profile`, which with no flags asks for what it needs, after which `kuberecord config get-profiles` reports the file's state. An empty file is not a broken one — with no profile, resolution falls through to discovering a sink from the cluster — but there is no name to print, and printing nothing would let a script carry on as though it had been told which profile to use
+```
+
+**Nothing is contacted**, and unlike `config get-profiles` not even the environment
+is read: there is no credential reference in the answer to resolve. **`CURRENT` is
+the file's active pointer, not this invocation's** — `--profile` does not change
+what this prints, for the reason it does not move the `*` in the table. What *this*
+command line would resolve to has nine steps behind it and is
+[`config resolve`](#config-resolve)'s question.
+
+`-o json` and `-o yaml` render a `CurrentProfile` document. Two fields, and the
+restraint is deliberate: what the profile points at and whether its credential
+resolves is `get-profiles`' subject, and
+`config get-profiles -o json | jq '.profiles[] | select(.current)'` is the way to
+ask for it.
+
+```console
+$ kuberecord config current-profile -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "CurrentProfile",
+  "path": "/home/you/.config/kuberecord/config.yaml",
+  "currentProfile": "local"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | The file the pointer was read from, so documents collected from several machines are distinguishable. It is the one fact the bare form omits. |
+| `currentProfile` | The active profile's name. Never empty in a rendered document: no active profile is a failure with no document at all, which is what distinguishes it from the same field on a [`Profiles`](#config-view-and-config-get-profiles) listing, where `""` is an ordinary state. Spelled the way `Profiles` and `ProfileChange` spell it, so one `jq` path reads the active profile out of all three. |
+
 #### Creating, replacing and deleting a profile
 
 **`set-profile` is an upsert.** A name already in the file is replaced, and the
@@ -2514,9 +2604,10 @@ a confusion [`config resolve`](#config-resolve) was partly built to diagnose, an
 removal is the fix you reach for the moment you have diagnosed it.
 
 That closes the lifecycle: **create** with `set-profile`, **inspect** with
-[`config get-profiles`](#config-view-and-config-get-profiles), **switch** with
-`use-profile`, **delete** with `delete-profile`. Every step is a command, and none
-of them is a text editor.
+[`config get-profiles`](#config-view-and-config-get-profiles) or
+[`config current-profile`](#config-current-profile), **switch** with
+`use-profile`, **delete** with `delete-profile`. It is `kubectl config`'s own five
+verbs, one for one, and every step is a command rather than a text editor.
 
 It is not inert in a second way either: a profile that answers stops the chain even
 when it cannot be resolved, so a stanza pointing at a variable you no longer export

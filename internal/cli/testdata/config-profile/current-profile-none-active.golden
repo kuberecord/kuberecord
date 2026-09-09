@@ -1,0 +1,5 @@
+=== stdout ===
+=== stderr ===
+error: no profile is active in /home/engineer/.config/kuberecord/config.yaml, so there is no name to print: choose one with `kuberecord config use-profile archive`, or see which of them has a credential that resolves right now with `kuberecord config get-profiles` (also defined: prod)
+=== exit ===
+1 (runtime error)

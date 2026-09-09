@@ -50,13 +50,16 @@ import (
 // its users hand-editing the file it exists to spare them, and a profile left
 // behind is not inert — it shadows discovery from step 3 of the resolution chain.
 //
-// The last two write nothing at all, and they are the two halves of "inspect".
+// The last three write nothing at all, and between them they are "inspect".
 // `resolve` belongs here because a profile is one step of the chain that decides
 // where an answer comes from, and the question it answers — "which step won, and
 // why not the others" — is the one a reader of this file has when the file turns
 // out not to be the step that won. `get-profiles` answers the question before
 // that one: what is in the file, which of it is active, and which of it could
-// authenticate right now. See resolvecmd.go and getprofilescmd.go.
+// authenticate right now. `current-profile` answers the narrowest of the three,
+// and is the only one of them shaped for a program rather than a reader: one
+// token, the active profile's name, because the `*` in a table is the wrong shape
+// for `$( )`. See resolvecmd.go, getprofilescmd.go and currentprofilecmd.go.
 
 // newConfigCommand builds the `config` subtree.
 func newConfigCommand(flags *options.GlobalFlags, streams genericiooptions.IOStreams, invokedAs string) *cobra.Command {
@@ -77,12 +80,14 @@ whole, and the line it prints names the profile that is gone.
 `+"`config delete-profile`"+` removes one, and refuses to remove the active one
 without --force.
 
-Three subcommands write nothing. `+"`config view`"+` prints the file.
+Four subcommands write nothing. `+"`config view`"+` prints the file.
 `+"`config get-profiles`"+` prints its state: one row per profile, which is
 active, what each points at, and whether its credential reference resolves on
-this machine — which the file itself cannot say. `+"`config resolve`"+` reports
-which step of the resolution chains this invocation would use, and why the
-earlier ones had nothing to say.`,
+this machine — which the file itself cannot say.
+`+"`config current-profile`"+` prints the active profile's name alone, which is
+the shape a script wants. `+"`config resolve`"+` reports which step of the
+resolution chains this invocation would use, and why the earlier ones had nothing
+to say.`,
 			resolve.ConfigDirName, resolve.ConfigFileName),
 		Args: rejectUnknownSubcommand,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -95,6 +100,7 @@ earlier ones had nothing to say.`,
 		newConfigGetProfilesCommand(flags, streams, invokedAs),
 		newConfigSetProfileCommand(flags, streams, invokedAs),
 		newConfigUseProfileCommand(flags, streams),
+		newConfigCurrentProfileCommand(flags, streams, invokedAs),
 		newConfigDeleteProfileCommand(flags, streams, invokedAs),
 		newConfigSetContextClusterIDCommand(flags, streams, invokedAs),
 		newConfigResolveCommand(flags, streams, invokedAs),

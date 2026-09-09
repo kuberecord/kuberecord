@@ -18,6 +18,43 @@ than a summary of them.
 
 ### Added
 
+- **`kuberecord config current-profile` prints the active profile's name, and
+  nothing else.** `config get-profiles` already reports which profile is active —
+  it is the column with the `*` in it — and that is the wrong shape for the thing
+  people do with the answer:
+
+  ```console
+  $ kuberecord config current-profile
+  local
+
+  $ PROFILE=$(kuberecord config current-profile) || exit 1
+  ```
+
+  One token on stdout, no header, no decoration, and nothing on stderr either;
+  extracting the starred row from a table is three lines of `awk` and breaks the
+  day an unrelated profile's address gets longer, because the columns are laid out
+  to the width of their content. `kubectl config current-context` is the analogue,
+  and with this the profile surface matches `kubectl config` one for one:
+  `set-profile`, `get-profiles`, `use-profile`, `current-profile`,
+  `delete-profile`.
+
+  **No active profile is an error and exits `1`**, which is the point of it: `$( )`
+  cannot tell an empty answer from no answer, so a script that captured `""` and
+  carried on would read from wherever the rest of the resolution chain reached
+  while believing it had been told which profile to use. The message names the way
+  out, and which way out depends on what the file holds — a file with profiles is
+  told to choose one with `config use-profile` and to check which of them can
+  authenticate with `config get-profiles`; a file with none is told to write one
+  with `config set-profile`, and told that an empty file is not a broken one, since
+  every command that queries data resolves perfectly well without a profile.
+
+  It **contacts nothing** — not even the environment, unlike `get-profiles`, since
+  there is no credential reference in the answer to resolve — and `-o json` and
+  `-o yaml` render a two-field `CurrentProfile` document under the existing
+  `cli.kuberecord.io/v1alpha1` contract. The name is spelled `currentProfile`
+  there, as it is in a `Profiles` listing and a `ProfileChange`, so one `jq` path
+  reads the active profile out of all three.
+
 - **`kuberecord config get-profiles` lists the profiles and says which of them
   could authenticate right now.** `config view` prints the configuration file;
   this prints its *state*, the way `kubectl config get-contexts` does beside

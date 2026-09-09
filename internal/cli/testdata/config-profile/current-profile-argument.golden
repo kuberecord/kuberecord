@@ -1,0 +1,7 @@
+=== stdout ===
+=== stderr ===
+error: config current-profile takes no arguments, and "prod" is not one: it prints the profile that is already active. To make that one active, `kuberecord config use-profile prod`
+
+<the command's usage block>
+=== exit ===
+2 (usage error)
