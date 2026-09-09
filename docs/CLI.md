@@ -245,6 +245,12 @@ identity, which step of the resolution chain answered. **On a terminal those
 recede, unless the chain chose something you would not assume** — see
 [Where the data comes from](#where-the-data-comes-from).
 
+A line opening `error:` is the third register, and it is **red**: it says no
+result arrived, which is a different thing from a notice qualifying one that did.
+Everything printed after it — a usage block, or the routes past the failure — keeps
+the weight it was written in, so the line that stopped the command stays the one
+that stands out. See [Exit codes](#exit-codes).
+
 **Rows read oldest first, so the newest change is the last line printed** — the
 one immediately above your prompt, because this CLI does not page. Which changes
 are selected is a separate matter and has not moved: `--limit` still takes the
@@ -496,9 +502,14 @@ wider than seven days is [confirmed first](#cold-scans).
 
 ### Colour, width and paging
 
-Colour follows `--color=auto|always|never`. Under `auto` it is on only when stdout
-is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`,
-which is what the flag is for. The table is laid out to the terminal's width, or
+Colour follows `--color=auto|always|never`. Under `auto` it is on only when the
+stream being written to is a terminal and `NO_COLOR` is unset; `--color=always`
+overrides `NO_COLOR`, which is what the flag is for. The two streams are decided
+separately, because they are two destinations: the table is coloured when
+**stdout** is a terminal, and notices, provenance and the `error:` line when
+**stderr** is. `kuberecord timeline … -o json | jq` on a terminal therefore still
+shows a failure in red, and `2> failure.log` still captures one with no escape
+sequences in it. The table is laid out to the terminal's width, or
 to 120 columns when output is not a terminal. **There is no pager**: output goes
 to stdout and stays there, so `| less -R` is yours to choose.
 
@@ -3103,6 +3114,13 @@ per hour. Ctrl-C stops all five.
 `diff --exit-code` is the one place `0` and `1` carry a second meaning, which is
 why it is opt-in: it overloads codes that otherwise only mean success and failure.
 Code `3` outranks it either way.
+
+Every code but `0` prints one `error:` line to stderr, **red** on a terminal, in a
+single write so that nothing else sharing stderr can land inside it. A usage error
+appends the command's own usage block beneath it, uncoloured — a page of flag
+descriptions in red is a page nobody reads. `diff --exit-code`'s exit `1` is the
+exception that prints no line at all: the changes it found are in the document
+above, and calling that a failure would misread it.
 
 Code `3` is the one worth scripting against. Every other tool in this space
 collapses "your query matched nothing" and "nothing was ever recorded here" into a

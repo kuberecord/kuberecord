@@ -1,0 +1,7 @@
+error: unknown flag: --no-such-flag
+
+Usage:
+  timeline <kind>/<name> [flags]
+
+Flags:
+      --since string   how far back to read (default "24h")

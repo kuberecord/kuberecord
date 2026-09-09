@@ -182,6 +182,31 @@ than a summary of them.
 
 ### Changed
 
+- **A failed command is rendered as one.** The `error:` line is now painted red on
+  a terminal, joining the notices, provenance and emphasis the rest of the CLI
+  already spends its severity vocabulary on. It was the one line that never had
+  been, so a failure arrived in default weight beneath a `!` notice in amber and
+  `→` provenance in dim — the least conspicuous thing on the screen, which is the
+  reverse of the ordering those weights exist to express.
+
+  It is **red rather than the warning tier**, and the two stay distinct on
+  purpose: a warning qualifies a result that arrived, and this says none did.
+  Collapsing them would leave no way to render the difference.
+
+  Nothing else changes weight. The usage block cobra prints beneath a usage error
+  is untouched, because a page of flag descriptions in red is a page nobody reads,
+  and the routes past a failure — the port-forward command for an unreachable
+  sink, the ways around a profile that will not resolve — keep the tiers their own
+  renderer gave them, because they are guidance rather than failure. The whole
+  diagnostic still reaches stderr in a single write, so nothing else sharing the
+  stream can land between the message and the block explaining it.
+
+  Colour for it is decided from **stderr**, not stdout, which is the stream it is
+  written to: `timeline … -o json | jq` on a terminal still shows a failure in
+  red, and `2> failure.log` still captures one with no escape sequences in it.
+  `--color=never` and `NO_COLOR` are honoured as everywhere else, and the plain
+  rendering is byte for byte what it was.
+
 - **`kubectl explain streamrule.spec.resources` now says what `kind: Event` costs,
   and `docs/SCHEMA.md` has the model behind it.** Events are captured for the
   **whole watched scope** — every Event in the selected namespaces, not only those

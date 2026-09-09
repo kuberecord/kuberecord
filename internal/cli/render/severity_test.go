@@ -24,14 +24,14 @@ import (
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
-// The severity vocabulary, asserted as a reader meets it: three registers next to
+// The severity vocabulary, asserted as a reader meets it: every register next to
 // each other, in both colour modes.
 //
 // The half of the property that says colour changes nothing but colour is not
 // here. It is one property over the whole CLI's output, and it is asserted in one
 // place — TestColourIsNothingButColour in internal/cli/resolve — over the
-// diagnostic and these three tiers together, so that a second copy of it cannot
-// drift away from the first.
+// diagnostic and every tier together, so that a second copy of it cannot drift
+// away from the first.
 
 // updateGolden rewrites the golden files instead of comparing against them.
 //
@@ -42,23 +42,30 @@ import (
 // is a second place for the write half to drift from the compare half.
 var updateGolden = flag.Bool("update", false, "rewrite the golden files")
 
-// The lines the block is built from, which are the lines Tasks 15.5 and 15.6 will
-// spend the vocabulary on. Nothing renders this block in the CLI: the vocabulary
-// has no call sites yet, by design, and these stand in for the ones it will have.
+// The lines the block is built from, in the shape their call sites spend them:
+// three from the documents Tasks 15.5 and 15.6 render, and one from the exit path
+// (Task 18.2), which is the only tier a reader meets instead of a result rather
+// than beside one.
 const (
 	fixtureEmphasis    = "NOT A DEPLOYABLE MANIFEST"
 	fixtureProvenance  = "Cluster    prod-eu-1"
 	fixtureProvenance2 = "Base       2026-08-14T09:12:44.317Z  Modified"
 	fixtureWarning     = "this backend does not record deletions, so a timeline that stops is not " +
 		"proof the object was deleted"
+	fixtureFailure = "error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000"
 )
 
 // severityBlock renders one line per tier, in the shape each is destined for.
 //
 // One file per colour mode rather than one per tier, because the question a
-// reader of these files is answering is a question about the three of them
-// together: is a warning distinguishable from provenance, is one emphasised line
-// enough, does the block still read when every escape is gone.
+// reader of these files is answering is a question about all of them together: is
+// a warning distinguishable from provenance, is a failure distinguishable from a
+// warning, is one emphasised line enough, does the block still read when every
+// escape is gone.
+//
+// The failure line comes last because that is where a reader meets it — beneath
+// whatever the invocation had already printed, which is the arrangement that made
+// its old default weight a finding.
 func severityBlock(color bool) string {
 	severity := render.NewSeverity(color)
 	return strings.Join([]string{
@@ -66,6 +73,7 @@ func severityBlock(color bool) string {
 		severity.Provenance(fixtureProvenance),
 		severity.Provenance(fixtureProvenance2),
 		render.WarningMarker + " " + severity.Warning(fixtureWarning),
+		severity.Failure(fixtureFailure),
 	}, "\n") + "\n"
 }
 
@@ -97,6 +105,7 @@ func TestSeverityWithoutColourIsTheTextItself(t *testing.T) {
 		"warning":    plain.Warning,
 		"provenance": plain.Provenance,
 		"emphasis":   plain.Emphasis,
+		"failure":    plain.Failure,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := rendered(fixtureWarning); got != fixtureWarning {

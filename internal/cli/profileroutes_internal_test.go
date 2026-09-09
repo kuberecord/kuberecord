@@ -38,6 +38,16 @@ import (
 // rather than by a branch per error type, and an error that satisfied it at
 // compile time and not at run time would go quiet rather than fail.
 
+// fixtureConfigPath is the configuration file the routes name.
+//
+// A fixed path rather than a t.TempDir() one, because the resolver reads the
+// Config value it is handed and never opens this: the path exists only to be
+// printed, and a temporary one would put a different string in
+// errorseverity_internal_test.go's golden file on every run. It is spelled the way
+// resolvecmd_test.go spells it so that a reader of one set of goldens reads all of
+// them.
+const fixtureConfigPath = "/home/engineer/.config/kuberecord/config.yaml"
+
 // failingProfileResolver builds a resolver whose active profile names an
 // environment variable that is not set.
 //
@@ -68,7 +78,7 @@ func failingProfileResolver(t *testing.T) (*resolve.BackendResolver, genericioop
 
 	return &resolve.BackendResolver{
 		Flags: flags, Streams: streams, InvokedAs: options.StandaloneName,
-		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"),
+		ConfigPath: fixtureConfigPath,
 		Config: &resolve.Config{
 			CurrentProfile: "prod",
 			Profiles: map[string]resolve.Profile{
@@ -104,7 +114,7 @@ func TestAFailingProfileArrivesAtTheTopWithItsRoutes(t *testing.T) {
 		t.Fatalf("parsing flags: %v", parseErr)
 	}
 
-	advice := remediationAdvice(err, root, flags, streams)
+	advice := remediationAdvice(err, root, diagnosticColor(flags, streams))
 	for _, want := range []string{
 		"export " + resolve.DefaultPasswordEnv + "=…",
 		"--" + options.FlagSink + " ClickHouseSink/<name>",
@@ -162,7 +172,7 @@ func TestTheProfileAdviceObeysTheColourMode(t *testing.T) {
 			}); parseErr != nil {
 				t.Fatalf("parsing flags: %v", parseErr)
 			}
-			advice := remediationAdvice(err, root, flags, streams)
+			advice := remediationAdvice(err, root, diagnosticColor(flags, streams))
 			if painted := strings.Contains(advice, "\x1b["); painted != tc.painted {
 				t.Errorf("--%s=%s produced painted=%v, want %v",
 					options.FlagColor, tc.mode, painted, tc.painted)
