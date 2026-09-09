@@ -18,6 +18,35 @@ than a summary of them.
 
 ### Added
 
+- **`kuberecord config set-profile --use` writes a profile and makes it the active
+  one, in one command.** Writing a profile still does not activate it by default,
+  and that stays the default on purpose — the active profile answers every later
+  command that names no source, so switching on every write would point `timeline`,
+  `diff` and `get` at a store you may have written in order to *inspect* it, and
+  `kubectl config set-context` does not switch either. What was missing was the one
+  keystroke that says "and this one":
+
+  ```console
+  $ kuberecord config set-profile local --from-sink ClickHouseSink/default --use
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile, as asked
+  ```
+
+  **The questions ask it too**, as their last one, defaulting to no:
+  `Make this the active profile? [y/N]`. Answer yes and the flag command printed at
+  the end gains `--use`, so the line reproduces the activation as well as the
+  stanza. The question is skipped where there is nothing to decide — a first
+  profile in an empty file is activated regardless, and a profile that already
+  answers cannot be made to answer more — because a question whose answer is
+  disregarded either way is worse than no question.
+
+  `--use` on the profile that already answers is a **no-op that says so** rather
+  than an error: the write succeeded and the profile is active, which is what the
+  invocation asked for, but a flag with no visible effect has to account for
+  itself. `--use` also says nothing about *what* to write, so
+  `config set-profile --use` on a terminal still asks the questions, with the last
+  of them already answered.
+
 - **`kuberecord config current-profile` prints the active profile's name, and
   nothing else.** `config get-profiles` already reports which profile is active —
   it is the column with the `*` in it — and that is the wrong shape for the thing
@@ -218,6 +247,39 @@ than a summary of them.
   files pinning that so a library upgrade cannot quietly re-sort either format.
 
 ### Changed
+
+- **Activation says what it did, and the one write that activates by itself says
+  why.** A profile written into an otherwise empty file has always become the
+  active one; the line reporting it now gives the reason, in the same dim
+  provenance register as the rest of the subcommand's output, because it is a
+  change to where every later command reads from that nobody typed:
+
+  ```console
+  $ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile (it is the only one)      # was: → "local" is now the active profile
+  ```
+
+  **A cleared active pointer is no longer treated as an empty file.**
+  `config delete-profile --force` deliberately leaves a file with profiles in it
+  and no active one, so that resolution falls through to discovering a sink from
+  the cluster — and the next profile written there used to be activated silently,
+  by a rule that would have reported it as the only profile in the file. It is not
+  activated now: there is a decision to make, and `--use` or `config use-profile`
+  is where it is made.
+
+  **Rewriting the profile that answers says so**, in place of the
+  `config use-profile` line it used to print — advice for something already done:
+
+  ```console
+  $ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9001
+  → updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 127.0.0.1:9000/kuberecord)
+  → "local" is the active profile: this stanza is what the next command reads
+  ```
+
+  Nothing about which profile is active changes without a line saying so, and the
+  `ProfileChange` document's `currentProfile` reports the same outcome to a script
+  in every case.
 
 - **A failed command is rendered as one.** The `error:` line is now painted red on
   a terminal, joining the notices, provenance and emphasis the rest of the CLI

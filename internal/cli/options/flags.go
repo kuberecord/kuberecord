@@ -116,6 +116,24 @@ const (
 	// registration is the spelling that drifts.
 	FlagForce = "force"
 
+	// FlagUse activates the profile `config set-profile` has just written.
+	//
+	// It is opt-in and stays opt-in (D38). The active profile is a side effect on
+	// every later command in that shell, so a write that redirected `timeline`,
+	// `diff` and `get` to a store somebody created in order to *inspect* it would
+	// be D24's objection at the config layer, and `kubectl config set-context`
+	// does not switch either. What the flag buys is the one keystroke that says
+	// "and this one" instead of a second command.
+	//
+	// Spelled --use rather than --activate because `config use-profile` is the verb
+	// this surface already teaches for the operation, and a flag naming the verb
+	// somebody has already typed is a flag nobody has to look up. It is named here
+	// rather than typed at its registration because the write's own report spells
+	// it back when it changed nothing, and the prompting layer prints it in the
+	// equivalent command — three spellings of one flag, and the two nobody
+	// compiles are the ones that drift.
+	FlagUse = "use"
+
 	// FlagMaxObjects is the cold scan's circuit breaker.
 	//
 	// It bounds the *work* rather than the answer, which is the half --limit

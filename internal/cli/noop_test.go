@@ -180,6 +180,10 @@ var noopAudit = []auditedFlag{
 	{"force-path-style", alwaysVisible, "as --backend"},
 	{"prefix", alwaysVisible, "as --backend"},
 	{"path", alwaysVisible, "as --backend"},
+	{"use", explained, "activation is reported whenever it happens, and the one invocation that " +
+		"can change nothing — --use on the profile that already answers — says so in those words " +
+		"rather than exiting non-zero (activePointerReport). The write itself is announced either " +
+		"way, so the flag is never the only thing that would have been on the screen"},
 
 	// `completion`.
 	{"no-descriptions", alwaysVisible, "all four generators honour it; the two that cobra offers " +

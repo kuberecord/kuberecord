@@ -111,6 +111,15 @@ type setProfileWizard struct {
 	// rendering nobody can produce is refused before anybody is asked anything.
 	format render.StructuredFormat
 
+	// activate is --use, given on an invocation that named no field and therefore
+	// reached the questions anyway.
+	//
+	// It answers the last question before it is asked rather than adding a flag
+	// the prompting layer has to interpret: a reader who typed --use has said what
+	// they want about the active pointer, and asking them again would be the
+	// question whose answer is disregarded that askActivation exists to avoid.
+	activate bool
+
 	// newResolver builds the cluster access the first question needs.
 	//
 	// It is a function rather than a resolver so that a wizard whose first answer
@@ -129,6 +138,7 @@ type setProfileWizard struct {
 func runSetProfileWizard(
 	cmd *cobra.Command, flags *options.GlobalFlags,
 	streams genericiooptions.IOStreams, invokedAs, name string, format render.StructuredFormat,
+	activate bool,
 ) error {
 	if !options.IsTerminalIn(streams.In) {
 		return errNoQuestionsToAsk(invokedAs)
@@ -142,6 +152,7 @@ func runSetProfileWizard(
 		colorize:  colorize,
 		invokedAs: invokedAs,
 		format:    format,
+		activate:  activate,
 		newResolver: func() (*resolve.BackendResolver, error) {
 			return resolve.NewBackendResolver(flags, streams, invokedAs)
 		},
@@ -199,7 +210,7 @@ func (w *setProfileWizard) gather(ctx context.Context, name string) error {
 		return err
 	}
 	if derived != nil {
-		return w.writeDerived(name, derived)
+		return w.writeDerived(ctx, name, derived)
 	}
 	return w.writeTyped(ctx, name)
 }
@@ -484,19 +495,25 @@ func (w *setProfileWizard) declineDiscovery(reason string) error {
 
 // writeDerived writes a profile the cluster described, and prints the flags that
 // would have written it.
-func (w *setProfileWizard) writeDerived(name string, derived *derivedProfile) error {
-	if err := writeProfile(profileWrite{
+func (w *setProfileWizard) writeDerived(ctx context.Context, name string, derived *derivedProfile) error {
+	activate, err := w.askActivation(ctx, name)
+	if err != nil {
+		return err
+	}
+	activated, err := writeProfile(profileWrite{
 		name:        name,
 		profile:     derived.profile.Profile,
 		explanation: derived.profile.Explain(w.colorize),
+		activate:    activate,
 		nextStep:    true,
 		invokedAs:   w.invokedAs,
 		severity:    w.severity,
 		format:      w.format,
-	}, w.streams); err != nil {
+	}, w.streams)
+	if err != nil {
 		return err
 	}
-	return w.sayEquivalent(w.equivalentFromSink(name, derived))
+	return w.sayEquivalent(w.equivalentFromSink(name, derived), activated)
 }
 
 // equivalentFromSink is the flag command for the discovery branch.
@@ -550,13 +567,65 @@ func (w *setProfileWizard) writeTyped(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeProfile(profileWrite{
-		name: name, profile: profile, nextStep: true, invokedAs: w.invokedAs,
-		severity: w.severity, format: w.format,
-	}, w.streams); err != nil {
+	// After the fields and before the write, which is what makes it the last
+	// question on both branches: it is the only one whose subject is the file
+	// rather than the profile, and a question about what to do with a stanza has
+	// to come after the stanza exists.
+	activate, err := w.askActivation(ctx, name)
+	if err != nil {
 		return err
 	}
-	return w.sayEquivalent(fields.equivalent(w.invokedAs, name))
+	activated, err := writeProfile(profileWrite{
+		name: name, profile: profile, activate: activate, nextStep: true,
+		invokedAs: w.invokedAs, severity: w.severity, format: w.format,
+	}, w.streams)
+	if err != nil {
+		return err
+	}
+	return w.sayEquivalent(fields.equivalent(w.invokedAs, name), activated)
+}
+
+// askActivation is the last question: whether this profile should be the one that
+// answers from here on.
+//
+// It defaults to no, and that default is the decision rather than a preference
+// (D38). The active profile is a side effect on every later command in the shell,
+// so a wizard that switched by default would redirect `timeline`, `diff` and `get`
+// to a store somebody wrote in order to inspect it — D24's objection at the config
+// layer, and not something `kubectl config set-context` does either. One keystroke
+// is the whole cost of saying yes.
+//
+// Two states are not asked about at all, and activationIsADecision is where the
+// rule lives so that the answer and the write cannot disagree about it: a first
+// profile in an empty file is activated regardless, and a profile that already
+// answers cannot be made to answer more. Asking either would be offering a choice
+// that is disregarded whichever way it is given (D31).
+//
+// --use answers it before it is asked. It is not re-asked and not confirmed:
+// writeProfile reports the activation, so what the flag did is on the screen
+// without a question having been spent on it.
+func (w *setProfileWizard) askActivation(ctx context.Context, name string) (bool, error) {
+	if w.activate {
+		return true, nil
+	}
+
+	// Read here rather than carried in from the command, because the file may have
+	// been written by something else during the conversation and because this is
+	// the same read the write is about to do. A failure is returned rather than
+	// swallowed: the write would fail on it a moment later, and a question asked
+	// against a file that cannot be read is a question asked for nothing.
+	path, err := resolve.DefaultConfigPath()
+	if err != nil {
+		return false, exit.RuntimeErrorf("%w", err)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		return false, exit.RuntimeErrorf("%w", err)
+	}
+	if !activationIsADecision(cfg, name) {
+		return false, nil
+	}
+	return w.askYesNo(ctx, "Make this the active profile?", false)
 }
 
 // askFields asks for a backend and then for that backend's fields, in table
@@ -937,7 +1006,18 @@ func (w *setProfileWizard) say(lines ...string) error {
 // The command is Emphasis, and it is the only emphasised line in the block, for
 // the reason the tier is defined with: it is the one line a reader skimming past
 // the write confirmation has to come away with.
-func (w *setProfileWizard) sayEquivalent(parts []string) error {
+//
+// --use is appended when the write activated the profile, so the line reproduces
+// the whole outcome and not only the stanza. It is derived from what happened
+// rather than from what was answered, exactly as --addr and --username are: a
+// profile activated because it was the only one in the file is a profile the
+// printed command has to activate on a machine whose file is not empty, or the
+// line would be a claim that stopped being true the moment somebody wrote a second
+// profile.
+func (w *setProfileWizard) sayEquivalent(parts []string, activated bool) error {
+	if activated {
+		parts = append(parts, "--"+options.FlagUse)
+	}
 	return w.say("", "The same thing without the questions:",
 		w.severity.Emphasis("  "+strings.Join(parts, " ")))
 }

@@ -1943,7 +1943,7 @@ substituting the forwarded address for the one only the cluster can resolve:
 ```console
 $ kubectl kuberecord config set-profile local --from-sink ClickHouseSink/default
 → wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ "local" is now the active profile
+→ made "local" the active profile (it is the only one)
 
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
@@ -2256,6 +2256,9 @@ $ kuberecord config set-profile prod --backend clickhouse \
 # Or read the whole stanza out of the sink the operator already writes to.
 $ kuberecord config set-profile local --from-sink ClickHouseSink/default
 
+# The same, and read through it from here on: --use activates what it writes.
+$ kuberecord config set-profile local --from-sink ClickHouseSink/default --use
+
 $ kuberecord config set-profile archive --backend s3 --bucket acme-audit \
     --prefix kuberecord --endpoint https://minio.internal:9000 --force-path-style
 
@@ -2295,7 +2298,7 @@ Eight subcommands, and three of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
-| `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags) |
+| `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags). `--use` names no field, so it asks too |
 | `config use-profile` | `NAME` | none |
 | [`config current-profile`](#config-current-profile) | none | none |
 | `config delete-profile` | `NAME` | `--force` — see [the profile lifecycle](#creating-replacing-and-deleting-a-profile) |
@@ -2336,6 +2339,7 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--force-path-style` | `s3` | `s3.forcePathStyle` |
 | `--path <dir>` | `local` | `local.path` — the directory containing `format=jsonl-v1/`. |
 | `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
+| `--use` | — | `currentProfile` — makes this profile the active one as well as writing it. See [activation is opt-in](#activation-is-opt-in). |
 
 There is no `--password`. That is not an omission: see the first rule above.
 
@@ -2616,6 +2620,67 @@ names `use-profile`, `delete-profile` and both flag routes past it — see [A pr
 that cannot resolve is
 fatal](#a-profile-that-cannot-resolve-is-fatal-and-says-what-to-do-instead).
 
+#### Activation is opt-in
+
+**Writing a profile does not make it the one that answers.** The active profile is
+consulted by every command that names neither [`--source`](#--source) nor
+`--sink`, so activating on every write would point `timeline`, `diff` and `get` at
+a store you may have written in order to *inspect* it — a side effect on
+everything you type next, decided by a command you ran to record an address.
+`kubectl config set-context` does not switch either.
+
+**`--use` writes and activates in one command**, and that is the whole of the
+concession:
+
+```console
+$ kuberecord config set-profile archive --backend s3 --bucket acme-audit --use
+→ wrote profile "archive" in ~/.config/kuberecord/config.yaml
+→ made "archive" the active profile, as asked
+```
+
+Without it, the write says nothing about which profile answers — and where there
+is somewhere to be sent next, the `config use-profile` line is printed instead:
+[`--from-sink`](#--from-sink) and [the
+questions](#asking-instead-of-knowing-the-flags) both end with it.
+
+**A profile written into an otherwise empty file is activated anyway**, and the
+line says why:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
+```
+
+There is nothing to displace and no second reading of it: the only profile in the
+file is the one that answers, and requiring a second command to make it usable
+would be ceremony with no decision in it. It is the single exception, and both
+halves of the rule are load-bearing — **a cleared pointer is not an empty file.**
+`config delete-profile --force` deliberately leaves a file with profiles in it and
+no active one, so that resolution falls through to discovering a sink; the next
+profile written there is *not* activated, because there is a decision to make and
+`--use` is where it is made.
+
+**`--use` on the profile that already answers changes nothing, and says so.** It is
+not an error — the write succeeded and the profile is active, which is the state
+the invocation asked for — but a flag with no visible effect has to account for
+itself:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000 --use
+→ updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ --use changed nothing: "local" is already the active profile
+```
+
+Rewriting the profile that answers says so too, whether or not `--use` was given,
+because that write is the one an upsert notice cannot describe on its own: the
+stanza it just replaced is the one the next command reads.
+
+**Activation is reported whenever it happens**, in the same
+[provenance](#colour-width-and-paging) register as the rest of this subcommand's
+lines. Where the answer comes from must be legible in scrollback, and a change to
+it that nobody typed most of all.
+
 #### Writes are scriptable
 
 The four subcommands that write — `set-profile`, `use-profile`, `delete-profile`
@@ -2674,7 +2739,7 @@ because no question about recorded history was asked. Both carry the same
 ```console
 $ kuberecord config set-profile local --from-sink ClickHouseSink/default
 → wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ "local" is now the active profile
+→ made "local" the active profile (it is the only one)
 
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
@@ -2749,10 +2814,11 @@ cluster, and its credentials are not in this file at all. A cluster-internal
 a scheme and a certificate name as well as a host, so substituting a forwarded port
 for it is not a guess this command makes.
 
-**The profile is written, not activated.** An existing choice is never overridden;
-the `config use-profile` line to run next is printed instead. The one exception is
-the rule the whole subcommand already follows: the first profile in an empty file
-becomes the active one, and says so.
+**The profile is written, not activated**, unless `--use` is given. An existing
+choice is never overridden; the `config use-profile` line to run next is printed
+instead. The one exception is the rule the whole subcommand already follows: a
+profile written into an otherwise empty file becomes the active one, and says so.
+See [activation is opt-in](#activation-is-opt-in).
 
 #### Asking instead of knowing the flags
 
@@ -2799,7 +2865,9 @@ Where does kuberecord_ro's password come from?
 
 Name of an environment variable holding the ClickHouse password.
 > [KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO]
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+
+Make this the active profile? [y/N]
+> → wrote profile "local" in ~/.config/kuberecord/config.yaml
 …
 → to make it the active profile: `kuberecord config use-profile local`
 
@@ -2807,7 +2875,7 @@ The same thing without the questions:
   kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000 --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO
 ```
 
-Seven things about it are worth stating, because each is a decision rather than an
+Eight things about it are worth stating, because each is a decision rather than an
 accident:
 
 - **The last line is the point.** The questions are for somebody who does not know
@@ -2832,6 +2900,14 @@ accident:
   the answer to the first, and the variable it offers is derived from it. Pressing
   return through both writes exactly what `--from-sink` writes with no flags: this
   adds a question, not a requirement.
+- **The last question is the only one that is not about the profile**, and it
+  defaults to no: making this the active profile changes where every later command
+  reads from, so it is asked rather than assumed — and `--use` answers it before it
+  is asked. It is skipped where there is nothing to decide: a first profile in an
+  empty file is activated regardless, and a profile that already answers cannot be
+  made to answer more. Answer yes and the printed command gains `--use`, so the
+  line reproduces the activation as well as the stanza. See [activation is
+  opt-in](#activation-is-opt-in).
 - **Off a terminal it is an error, never a wait.** Standard input that is not a
   terminal exits `2` naming both flag forms. A wizard that blocked in CI would hang
   the pipeline until something killed it, and the message saying what was wanted

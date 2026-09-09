@@ -137,7 +137,7 @@ func derive(t *testing.T, ref resolve.SinkRef, name string) (stdout, stderr stri
 	if err != nil {
 		t.Fatalf("ProfileFromSink: %v", err)
 	}
-	if err := writeProfile(profileWrite{
+	if _, err := writeProfile(profileWrite{
 		name:        name,
 		profile:     derived.Profile,
 		explanation: derived.Explain(false),
@@ -259,7 +259,7 @@ func TestFromSinkLeavesTheActiveProfileAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProfileFromSink: %v", err)
 	}
-	if err := writeProfile(profileWrite{
+	if _, err := writeProfile(profileWrite{
 		name: "local", profile: derived.Profile, explanation: derived.Explain(false),
 		nextStep: true, invokedAs: options.StandaloneName,
 	}, streams); err != nil {
@@ -278,8 +278,8 @@ func TestFromSinkLeavesTheActiveProfileAlone(t *testing.T) {
 	}
 
 	stderr := streams.ErrOut.(*strings.Builder).String()
-	if strings.Contains(stderr, "is now the active profile") {
-		t.Errorf("the active profile was switched silently:\n%s", stderr)
+	if strings.Contains(stderr, `made "local" the active profile`) {
+		t.Errorf("the active profile was switched:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "config use-profile local") {
 		t.Errorf("stderr does not print the next step to run:\n%s", stderr)
@@ -296,8 +296,8 @@ func TestFromSinkLeavesTheActiveProfileAlone(t *testing.T) {
 func TestFromSinkIntoAnEmptyFileActivatesAndSaysSo(t *testing.T) {
 	_, stderr := derive(t, resolve.SinkRef{Kind: resolve.KindClickHouseSink, Name: "default"}, "local")
 
-	if !strings.Contains(stderr, `"local" is now the active profile`) {
-		t.Errorf("the only profile in an empty file was not activated:\n%s", stderr)
+	if !strings.Contains(stderr, `made "local" the active profile (it is the only one)`) {
+		t.Errorf("the only profile in an empty file was not activated, or did not say why:\n%s", stderr)
 	}
 	if strings.Contains(stderr, "config use-profile local") {
 		t.Errorf("the next-step line was printed for a profile that is already active:\n%s", stderr)
@@ -328,7 +328,7 @@ func TestFromSinkWritesWithoutReadingTheSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a Secret this kubeconfig may not read failed --%s: %v", options.FlagFromSink, err)
 	}
-	if err := writeProfile(profileWrite{
+	if _, err := writeProfile(profileWrite{
 		name: "local", profile: derived.Profile, explanation: derived.Explain(false),
 		nextStep: true, invokedAs: options.StandaloneName,
 	}, streams); err != nil {

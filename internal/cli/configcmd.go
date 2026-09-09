@@ -190,6 +190,7 @@ func newConfigSetProfileCommand(
 ) *cobra.Command {
 	var (
 		fromSink string
+		use      bool
 		fields   profileFields
 	)
 
@@ -204,6 +205,15 @@ A name already in the file is replaced, and the whole stanza is replaced rather
 than the fields this invocation mentions: a profile that named a password file
 and is rewritten with --password-env keeps no reference to the file. The line on
 stderr names what was there before, since nothing else holds it afterwards.
+
+Writing a profile does not make it the active one. The active profile answers
+every later command that names no source, so being switched to a store you wrote
+in order to inspect it is a side effect worth asking for: --use writes and
+activates in one command, and without it the two routes that print a next step —
+--from-sink and the questions — name config use-profile instead. The exception is
+a profile written into an otherwise empty file, which becomes the active one
+because there is nothing to displace and no other reading of it — and the line on
+stderr says so.
 
 With no flags at all, on a terminal, it asks. The first question is whether to
 read the settings from a sink this cluster already holds, which is --from-sink
@@ -230,6 +240,9 @@ every tool on the machine already reads.`,
 
   # From the sink the operator already streams to. No values to look up.
   kuberecord config set-profile local --from-sink ClickHouseSink/default
+
+  # The same, and read through it from here on: one command rather than two.
+  kuberecord config set-profile local --from-sink ClickHouseSink/default --use
 
   # By hand, for a backend no custom resource in this cluster describes:
   # a read-only ClickHouse user, with the password in the environment.
@@ -281,7 +294,7 @@ every tool on the machine already reads.`,
 			// to request the behaviour you get by typing nothing is a flag nobody
 			// finds.
 			if !setProfileFlagsGiven(cmd) {
-				return runSetProfileWizard(cmd, flags, streams, invokedAs, name, format)
+				return runSetProfileWizard(cmd, flags, streams, invokedAs, name, format, use)
 			}
 
 			if !named {
@@ -302,27 +315,31 @@ every tool on the machine already reads.`,
 				// renderer that consulted them itself would have golden files that
 				// changed with the shell they were generated in.
 				colorize := options.ShouldColorize(flags.Color, streams.ErrOut)
-				return writeProfile(profileWrite{
+				_, err = writeProfile(profileWrite{
 					name:        name,
 					profile:     derived.Profile,
 					explanation: derived.Explain(colorize),
+					activate:    use,
 					nextStep:    true,
 					invokedAs:   invokedAs,
 					severity:    render.NewSeverity(colorize),
 					format:      format,
 				}, streams)
+				return err
 			}
 
 			profile, err := fields.stanza()
 			if err != nil {
 				return err
 			}
-			return writeProfile(profileWrite{
+			_, err = writeProfile(profileWrite{
 				name:     name,
 				profile:  profile,
+				activate: use,
 				severity: render.NewSeverity(options.ShouldColorize(flags.Color, streams.ErrOut)),
 				format:   format,
 			}, streams)
+			return err
 		},
 	}
 
@@ -331,6 +348,22 @@ every tool on the machine already reads.`,
 			"ClickHouseSink/default). A cluster-internal address is rewritten to a forwarded "+
 			"loopback port, and the notice on stderr says so.")
 	mustCompleteFlag(command, options.FlagFromSink, completeSinkRefs)
+
+	// Registered beside --from-sink rather than in the table below, because it is
+	// not a field of a profile: it says what to do with the file's active pointer
+	// once the stanza is written. Two consequences follow from that and both are
+	// wanted. It is not refused beside --from-sink, since the custom resource has
+	// no opinion about which profile answers; and it does not count as having said
+	// what to write, so `set-profile --use` on a terminal still asks the questions
+	// — with the last of them already answered.
+	//
+	// No backquotes in the sentence: pflag reads backquoted text in a usage string
+	// as the flag's value placeholder, so naming config use-profile that way would
+	// print a boolean flag as taking one.
+	command.Flags().BoolVar(&use, options.FlagUse, use,
+		"Make this profile the active one as well as writing it, rather than running "+
+			"config use-profile after. Without it the write decides nothing about which profile "+
+			"answers, except for the first profile in an otherwise empty file.")
 
 	// Registered from the table rather than one line each, because the table is
 	// what the prompting layer walks and a flag registered beside it would be a
@@ -371,6 +404,14 @@ func errSinkAddrWritesNoFile() error {
 // wants to be asked; suppressing the questions for it would answer "which
 // cluster?" by refusing to ask anything at all. --color, --output and -v say how
 // this process renders and logs and have no opinion about a profile either.
+//
+// --use is this command's own and is still not one of them, which is the entry in
+// this list that needs a sentence of its own. It says what to do with the active
+// pointer after the write and nothing about what to write, so an invocation
+// carrying it alone has named no field and has to be asked — and the questions
+// then have their last one already answered. Counting it as "the user has said
+// what they want" would send `set-profile --use` to the flag path, to be refused
+// for a missing --backend it never claimed to carry.
 //
 // The set walked is the same table the flags were registered from, so a field
 // added later cannot be one this question forgets about.
@@ -438,8 +479,18 @@ type profileWrite struct {
 	// just typed it.
 	explanation string
 
+	// activate asks for the active pointer to be moved to this profile: --use on
+	// the flag path, and the last of the questions on the other.
+	//
+	// It is a request rather than the outcome. A profile that is already the active
+	// one is not activated again, and one written into an otherwise empty file is
+	// activated whether or not anybody asked — see writeProfile, where both are
+	// decided in one place because the two routes must not disagree about what
+	// this field means.
+	activate bool
+
 	// nextStep asks for the `config use-profile` line, which is printed only when
-	// the write did not itself make this profile the active one.
+	// the write left the active pointer somewhere else.
 	nextStep bool
 
 	// invokedAs is how this process was invoked, so that line names a command the
@@ -457,21 +508,68 @@ type profileWrite struct {
 	format render.StructuredFormat
 }
 
+// activatesOnItsOwn reports whether writing name into cfg makes it the active
+// profile with nobody having asked.
+//
+// It is the one carve-out from D38, and the comment is the reason it is allowed
+// to exist. Activation is opt-in because the active profile is a side effect on
+// every later command in the shell, and redirecting `timeline`, `diff` and `get`
+// to a store somebody wrote in order to inspect it is D24's objection at the
+// config layer. Neither half of that objection applies here: there is nothing to
+// displace, and "the only profile in the file is the one that answers" is the only
+// reading a first profile has. Requiring a second command to make it usable would
+// be ceremony with no decision in it.
+//
+// Both clauses are load-bearing. No active pointer is not enough on its own —
+// `delete-profile --force` leaves a file with several profiles and no pointer, and
+// the next profile written into it would be activated by a rule reporting that it
+// is the only one, which would be false. So the carve-out asks for what it claims:
+// no pointer, and nothing in the file but this name.
+func activatesOnItsOwn(cfg *resolve.Config, name string) bool {
+	if cfg.CurrentProfile != "" {
+		return false
+	}
+	for other := range cfg.Profiles {
+		if other != name {
+			return false
+		}
+	}
+	return true
+}
+
+// activationIsADecision reports whether anybody has a choice to make about the
+// active pointer when name is written into cfg.
+//
+// It is what the prompting layer asks before asking, and two states have no
+// decision in them. The carve-out above decides for itself; and a name that is
+// *already* the active profile cannot be made more so, since answering "no" would
+// not deactivate it either. A question whose answer is disregarded whichever way
+// it is given is worse than no question (D31) — the same judgement askPassword's
+// offerNone is written with.
+func activationIsADecision(cfg *resolve.Config, name string) bool {
+	return !activatesOnItsOwn(cfg, name) && cfg.CurrentProfile != name
+}
+
 // writeProfile validates a profile, writes it, and says what it did.
-func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
+//
+// It reports whether the write made this profile the active one, which the
+// prompting layer needs in order to print --use in the command it teaches: a line
+// reproducing the stanza and not the activation would reproduce half of what its
+// reader just watched happen.
+func writeProfile(w profileWrite, streams genericiooptions.IOStreams) (bool, error) {
 	// Validated before anything is read from disk, so a mistyped command cannot
 	// rewrite a file only to be rejected on the way back in.
 	if err := w.profile.Validate(); err != nil {
-		return exit.UsageErrorf("profile %q: %w", w.name, err)
+		return false, exit.UsageErrorf("profile %q: %w", w.name, err)
 	}
 
 	path, err := resolve.DefaultConfigPath()
 	if err != nil {
-		return exit.RuntimeErrorf("%w", err)
+		return false, exit.RuntimeErrorf("%w", err)
 	}
 	cfg, err := resolve.LoadConfig(path)
 	if err != nil {
-		return exit.RuntimeErrorf("%w", err)
+		return false, exit.RuntimeErrorf("%w", err)
 	}
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]resolve.Profile{}
@@ -480,21 +578,25 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 	// surviving account of what this command destroyed: the file holds the new
 	// stanza a line later, and nothing anywhere holds the old one.
 	previous, replaced := cfg.Profiles[w.name]
+	// Read out ahead of the write for the same reason, and asked before the
+	// insertion because both are questions about what the file *held*: whether
+	// this name was already the one that answers, and whether there was anything
+	// else in the file to displace.
+	wasActive := cfg.CurrentProfile == w.name
+	onlyOne := activatesOnItsOwn(cfg, w.name)
 	cfg.Profiles[w.name] = w.profile
 
-	// The first profile in an empty file becomes the active one. Requiring a
-	// second command to make the only profile usable is ceremony with no
-	// decision in it — and it is announced, so nothing about which profile is
-	// active is decided silently. An existing choice is never overridden: that
-	// one is a decision, and `use-profile` is where it is made.
-	activated := false
-	if cfg.CurrentProfile == "" {
+	// The whole of the activation rule, in one place, so that the flag path and
+	// the questions cannot disagree about it. Asked for, or the only profile in
+	// the file; an existing choice is never overridden, because that one is a
+	// decision and `use-profile` is where it is made.
+	activated := w.activate || onlyOne
+	if activated {
 		cfg.CurrentProfile = w.name
-		activated = true
 	}
 
 	if err := resolve.SaveConfig(path, cfg); err != nil {
-		return exit.RuntimeErrorf("%w", err)
+		return false, exit.RuntimeErrorf("%w", err)
 	}
 
 	// The two outcomes read differently on purpose. Creating a profile is what
@@ -514,24 +616,26 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 			w.name, path, previous.Describe()))
 	}
 	if err := options.WriteLine(streams.ErrOut, confirmation); err != nil {
-		return err
+		return activated, err
 	}
-	if activated {
-		if err := options.WriteLine(streams.ErrOut,
-			fmt.Sprintf("→ %q is now the active profile", w.name)); err != nil {
-			return err
+	if line := activePointerReport(w, activated, wasActive); line != "" {
+		if err := options.WriteLine(streams.ErrOut, w.severity.Provenance(line)); err != nil {
+			return activated, err
 		}
 	}
 	if w.explanation != "" {
 		if err := options.WriteAll(streams.ErrOut, "\n"+w.explanation); err != nil {
-			return err
+			return activated, err
 		}
 	}
-	if w.nextStep && !activated {
+	// Withheld when this profile is the one that answers, however it came to be:
+	// naming the command that makes it active is advice for something already
+	// done, and the line above has just said so.
+	if w.nextStep && !activated && !wasActive {
 		if err := options.WriteLine(streams.ErrOut,
 			fmt.Sprintf("\n→ to make it the active profile: `%s config use-profile %s`",
 				commandNameOr(w.invokedAs), w.name)); err != nil {
-			return err
+			return activated, err
 		}
 	}
 
@@ -539,7 +643,12 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 	if replaced {
 		action, displaced = profileUpdated, &previous
 	}
-	return writeProfileChange(streams.Out, w.format, profileChangeDocument{
+	// No `activated` field beside these: the document reports currentProfile after
+	// the write, which is the fact a consumer needs and the one this write can be
+	// held to. Whether the pointer *moved* is derivable from the action and the
+	// name for every case a script can act on, and a second field saying the same
+	// thing in a narrower way is a field to keep in step for nothing (D19).
+	return activated, writeProfileChange(streams.Out, w.format, profileChangeDocument{
 		Action:         action,
 		Name:           w.name,
 		Path:           path,
@@ -547,6 +656,58 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) error {
 		Previous:       displaced,
 		CurrentProfile: cfg.CurrentProfile,
 	})
+}
+
+// activePointerReport is what a write says about the active pointer, and "" for a
+// write with nothing to say about it.
+//
+// Every line it returns is rendered in the Provenance tier by its caller, and that
+// is the tier for the reason D27 defines it with: which profile answers is a fact
+// the reader needs available in scrollback — a config change nobody typed most of
+// all — while being one they have already read on every previous write. Nothing
+// here is a Warning, because nothing here means a conclusion would be misread; and
+// a creation's own confirmation stays out of the tier, so that the provenance lines
+// in this block are the ones carrying something the command was not asked for.
+//
+// Four states, and the ordering between the first two is deliberate. A write that
+// both asked for activation and would have got it anyway reports the asking: the
+// carve-out's clause exists to explain a change nobody requested, and printing it
+// to somebody who requested one would answer a question they did not ask.
+//
+// The asked-for line does not name --use, and the no-op line below does. That is
+// not an inconsistency: a "yes" at the wizard's last question reaches the first
+// line too, and a line naming a flag its reader never typed is the sort of
+// statement contradicting its own transcript that this phase exists to remove. The
+// no-op is reachable only from the flag, because the questions are not asked about
+// a profile that already answers (activationIsADecision).
+func activePointerReport(w profileWrite, activated, wasActive bool) string {
+	switch {
+	case activated && !wasActive && w.activate:
+		return fmt.Sprintf("→ made %q the active profile, as asked", w.name)
+
+	// Moved, and nobody asked: activatesOnItsOwn is the only other thing that sets
+	// the pointer, so reaching here *is* the carve-out and the clause is a fact
+	// rather than a guess. It is taken from the case above rather than passed in a
+	// second time, which is what keeps the two from being able to disagree.
+	case activated && !wasActive:
+		return fmt.Sprintf("→ made %q the active profile (it is the only one)", w.name)
+
+	// The no-op said out loud (D31). --use on the profile that already answers
+	// changes nothing about the file, and a flag that produced no visible effect
+	// has to say why rather than leave its author to wonder whether it was read.
+	case w.activate:
+		return fmt.Sprintf("→ --%s changed nothing: %q is already the active profile",
+			options.FlagUse, w.name)
+
+	// Nobody asked, and this name is the one that answers. The write is therefore
+	// not inert in the way an upsert of any other profile is — the stanza just
+	// replaced is the one the next command reads — and the reader is the one person
+	// who cannot see that from the confirmation above.
+	case wasActive:
+		return fmt.Sprintf("→ %q is the active profile: this stanza is what the next command reads",
+			w.name)
+	}
+	return ""
 }
 
 // deriveProfile reads a sink custom resource and turns it into a profile stanza.

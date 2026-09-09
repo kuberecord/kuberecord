@@ -50,6 +50,11 @@ const profileGoldens = "config-profile"
 // spells the profile it walks a new user into writing.
 const profileLocal = "local"
 
+// profileArchive is the other profile these cases write, and it is an
+// object-store one on purpose: a case about which profile is *active* should not
+// also be a case about two ClickHouse stanzas that differ by a field.
+const profileArchive = "archive"
+
 // contextName and remappedCluster are the kubeconfig context the mapping case
 // writes and the identity it is then re-pointed at. theCluster, from
 // resolve_test.go, is the identity it maps to first.
@@ -252,6 +257,155 @@ func TestUpsertLeavesTheActivePointerAlone(t *testing.T) {
 	if cfg.CurrentProfile != profileLocal {
 		t.Errorf("currentProfile = %q, want it still local: an upsert writes a stanza and does not "+
 			"decide which profile is active", cfg.CurrentProfile)
+	}
+}
+
+// Activation, and the four states a write can leave the active pointer in.
+//
+// The default is the property under test rather than a behaviour that happens to
+// be there (D38). The active profile answers every later command that names no
+// source, so a write that switched it would redirect `timeline`, `diff` and `get`
+// to a store somebody wrote in order to inspect — and `kubectl config set-context`
+// does not switch either. What the cases below hold is that one keystroke buys the
+// switch, that the one write with nothing to displace takes it anyway and says so,
+// and that neither of those is ever silent.
+
+// TestSetProfileDoesNotActivateWhatItWrites is the default, and the reason the
+// flag exists rather than the behaviour.
+func TestSetProfileDoesNotActivateWhatItWrites(t *testing.T) {
+	path := configHome(t)
+	writeClickHouseProfile(t)
+
+	stdout, stderr, code := run(t, "config", "set-profile", "archive",
+		"--backend", "s3", "--bucket", "acme-audit")
+	if code != exit.Success {
+		t.Fatalf("config set-profile exited %d: %s", code, stderr)
+	}
+	assertProfileGolden(t, "created-not-activated", path, stdout, stderr, code)
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != profileLocal {
+		t.Errorf("currentProfile = %q, want it still local: writing a profile is not choosing one",
+			cfg.CurrentProfile)
+	}
+	// Silence about the pointer is the whole point, and the golden pins it. This
+	// says which half of that line carries the contract.
+	if strings.Contains(stderr, "active profile") {
+		t.Errorf("a write that decided nothing about the active profile mentioned it: %s", stderr)
+	}
+}
+
+// TestSetProfileWithUseWritesAndActivatesInOneCommand is the concession.
+//
+// One flag, one command, and the activation is reported rather than assumed: a
+// change to where every later command reads from has to be visible in scrollback
+// even when it was asked for, because the reader of the scrollback is not always
+// the person who typed it.
+func TestSetProfileWithUseWritesAndActivatesInOneCommand(t *testing.T) {
+	path := configHome(t)
+	writeClickHouseProfile(t)
+
+	stdout, stderr, code := run(t, "config", "set-profile", "archive",
+		"--backend", "s3", "--bucket", "acme-audit", "--"+options.FlagUse)
+	if code != exit.Success {
+		t.Fatalf("config set-profile --%s exited %d: %s", options.FlagUse, code, stderr)
+	}
+	assertProfileGolden(t, "created-use", path, stdout, stderr, code)
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != profileArchive {
+		t.Errorf("currentProfile = %q, want archive: --%s activates what it writes",
+			cfg.CurrentProfile, options.FlagUse)
+	}
+	// The next step is not printed for something already done.
+	if strings.Contains(stderr, "config use-profile") {
+		t.Errorf("--%s printed the command it replaces: %s", options.FlagUse, stderr)
+	}
+
+	// And the document says where the pointer ended up, which is the field a
+	// script reads rather than the sentence above.
+	stdout, stderr, code = run(t, "-o", "json", "config", "set-profile", profileProd,
+		"--backend", "clickhouse", "--addr", "clickhouse.example:9000", "--"+options.FlagUse)
+	if code != exit.Success {
+		t.Fatalf("config set-profile -o json exited %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"currentProfile": "`+profileProd+`"`) {
+		t.Errorf("the document does not report the pointer this write moved:\n%s", stdout)
+	}
+}
+
+// TestUseOnTheProfileThatAlreadyAnswersSaysItChangedNothing is D31 at the one
+// place this flag can do nothing.
+//
+// An error would be wrong: the write succeeded and the profile is active, which is
+// the state the invocation asked for. What would also be wrong is silence, because
+// a flag that produced no visible effect leaves its author unable to tell it was
+// read at all.
+func TestUseOnTheProfileThatAlreadyAnswersSaysItChangedNothing(t *testing.T) {
+	path := configHome(t)
+	writeClickHouseProfile(t)
+
+	stdout, stderr, code := run(t, "config", "set-profile", profileLocal,
+		"--backend", "clickhouse", "--addr", "127.0.0.1:9000", "--"+options.FlagUse)
+	if code != exit.Success {
+		t.Fatalf("--%s on the active profile exited %d, and it is a no-op rather than a refusal: %s",
+			options.FlagUse, code, stderr)
+	}
+	assertProfileGolden(t, "updated-use-no-op", path, stdout, stderr, code)
+
+	if !strings.Contains(stderr, "--"+options.FlagUse+" changed nothing") {
+		t.Errorf("the flag did nothing and did not say so: %s", stderr)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != profileLocal {
+		t.Errorf("currentProfile = %q, want it still local", cfg.CurrentProfile)
+	}
+}
+
+// TestAClearedPointerIsNotAnEmptyFile holds the carve-out's edge.
+//
+// The rule is "no pointer *and* nothing else in the file", and both halves are
+// load-bearing. `delete-profile --force` leaves a file with profiles in it and no
+// pointer on purpose — the chain then falls through to discovering a sink — so a
+// write that activated itself there would undo that decision while reporting that
+// it was the only profile, which would be false.
+func TestAClearedPointerIsNotAnEmptyFile(t *testing.T) {
+	path := configHome(t)
+	writeClickHouseProfile(t)
+
+	if _, stderr, code := run(t, "config", "set-profile", "archive",
+		"--backend", "s3", "--bucket", "acme-audit"); code != exit.Success {
+		t.Fatalf("writing the second profile exited %d: %s", code, stderr)
+	}
+	if _, stderr, code := run(t, "config", "delete-profile", profileLocal,
+		"--"+options.FlagForce); code != exit.Success {
+		t.Fatalf("clearing the active pointer exited %d: %s", code, stderr)
+	}
+
+	stdout, stderr, code := run(t, "config", "set-profile", profileProd,
+		"--backend", "clickhouse", "--addr", "clickhouse.example:9000")
+	if code != exit.Success {
+		t.Fatalf("config set-profile exited %d: %s", code, stderr)
+	}
+	assertProfileGolden(t, "created-pointer-cleared", path, stdout, stderr, code)
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != "" {
+		t.Errorf("currentProfile = %q, want it still cleared: a file with profiles in it has "+
+			"something to displace, so activation is a decision and --%s is where it is made",
+			cfg.CurrentProfile, options.FlagUse)
 	}
 }
 
@@ -539,7 +693,7 @@ func TestProfileWritesRenderAStructuredDocument(t *testing.T) {
 			t.Fatalf("exited %d: %s", code, stderr)
 		}
 		document := decode(t, stdout)
-		if document.Action != "activated" || document.CurrentProfile != "archive" {
+		if document.Action != "activated" || document.CurrentProfile != profileArchive {
 			t.Errorf("action = %q with currentProfile %q, want activated and archive",
 				document.Action, document.CurrentProfile)
 		}
