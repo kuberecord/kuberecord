@@ -560,21 +560,48 @@ than a summary of them.
   record nothing about an object no rule covers, so the fix in the longer of them
   was the fix for a problem the reader does not have yet.
 
-  The finding now accounts for the flag itself, in one clause, and the notice is not
-  printed:
+  The finding now accounts for the flag itself, in one clause — and the clause asks
+  the notice's own question rather than assuming its answer. **"The same absence" is
+  a claim about a second thing, so it is made only where a second measurement
+  supports it**, with the evidence beside it:
 
   ```
   error: no watch coverage recorded for the requested scope: nothing was ever
   watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
   not evidence that it did not change — and no Kubernetes Event about it was
-  recorded either, which is the same absence rather than a second one to fix; the
-  `scopes` command lists what is being recorded
+  recorded either, which is the same absence rather than a second one to fix:
+  Events were confirmed recorded over 2026-09-08T21:09:09Z → open
+  (clusterstreamrule//quickstart); the `scopes` command lists what is being
+  recorded
   ```
+
+  Where Events are **not** being captured, that sentence was simply wrong: the two
+  gaps have two causes and two fixes, and a reader told they have one goes looking
+  at correlation instead of at their rule. So they are now named as two, with the
+  YAML that closes the second:
+
+  ```
+  error: … so this silence is not evidence that it did not change — and no rule
+  streams Events to this sink either, so these are two gaps rather than one:
+  capturing this object's kind would record its changes, and Events would still be
+  missing until a rule names them as well; the `scopes` command lists what is being
+  recorded.
+  Add Events to a rule as well:
+      - group: ""
+        version: v1
+        kind: Event
+  ```
+
+  And a backend with no scope log, or one that could not be read, gets the third
+  answer this CLI gives everywhere it reasons about a silence: it says it cannot
+  tell, names why, and guesses at neither.
 
   Nothing else changes. A watched object with no Events still gets the notice and
   the YAML, which is the state a fresh quickstart used to produce; the clause appears
-  only under `--with-events`, so a bare `timeline` reads exactly as before; and the
-  suppressed case no longer pays for the second coverage query at all.
+  only under `--with-events`, so a bare `timeline` reads exactly as before and pays
+  for no Event coverage read at all; and where the clause does appear, the clause and
+  the notice ask one question through one function, so the invocation still pays for
+  a single read rather than the two it used to.
 
 - **`config set-profile` no longer prints credential advice that cannot be
   followed.** A profile derived from a `ClickHouseSink` records that sink's own

@@ -430,7 +430,7 @@ three:
 | Events were being recorded | `Events were confirmed recorded over <interval>` — nothing was said about this object while that scope was open. |
 | No rule streams Events | The gap, and the YAML that closes it. |
 | No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
-| Nothing was watching the object either | Nothing here: the no-coverage finding says it instead. See below. |
+| Nothing was watching the object either | Nothing here: the no-coverage finding says it instead, having asked this same question. See below. |
 
 The second is the common one, because the `events` watch preset ships disabled
 and a rule has to name `Event` before anything is captured. It is no longer what
@@ -452,22 +452,52 @@ nobody put to it, and the coverage read that builds it is not paid for either.
 
 **Nor does an object nothing was ever watching.** There the timeline is already the
 exit **3** [no-coverage finding](#an-empty-result-is-never-presented-on-its-own),
-and that finding absorbs the point in a clause of its own:
+and that finding absorbs the point in a clause of its own — asking the table
+above's question itself, and reporting whichever of its answers came back:
 
 ```
 error: no watch coverage recorded for the requested scope: nothing was ever
 watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
 not evidence that it did not change — and no Kubernetes Event about it was
-recorded either, which is the same absence rather than a second one to fix; the
-`scopes` command lists what is being recorded
+recorded either, which is the same absence rather than a second one to fix:
+Events were confirmed recorded over 2026-09-08T21:09:09Z → open
+(clusterstreamrule//quickstart); the `scopes` command lists what is being
+recorded
 ```
 
-Both halves used to be printed, the second at length and with the YAML above it.
-They were two findings for one cause, and the fix in the longer of them was a fix
-for a problem that does not exist yet: a rule capturing `Event` would still record
-nothing about an object no rule covers. The flag is still accounted for — it is
-named in the clause rather than left looking like a flag that was ignored — and the
-second coverage read is not paid for at all.
+That is the answer when Events **are** being captured, and it is the only one of
+the three that can call the two absences one absence. When they are not, they are
+two gaps with two fixes, and fixing either leaves the other:
+
+```
+error: no watch coverage recorded for the requested scope: nothing was ever
+watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+not evidence that it did not change — and no rule streams Events to this sink
+either, so these are two gaps rather than one: capturing this object's kind would
+record its changes, and Events would still be missing until a rule names them as
+well; the `scopes` command lists what is being recorded.
+Add Events to a rule as well:
+    - group: ""
+      version: v1
+      kind: Event
+```
+
+And when the backend has no scope log, or has one it could not read, it says so
+and guesses at neither:
+
+```
+… — and whether any Kubernetes Event about it was recorded cannot be said: this
+backend has no scope log; the `scopes` command lists what is being recorded
+```
+
+Both halves used to be printed as separate paragraphs, the second at length and
+with the YAML above it. They were two findings for one cause, and the fix in the
+longer of them was a fix for a problem that does not exist yet: a rule capturing
+`Event` would still record nothing about an object no rule covers. The flag is
+still accounted for — it is named in the clause rather than left looking like a
+flag that was ignored — and the invocation still pays for one Event coverage read,
+never two: the clause and the notice ask the identical question and only one of
+them is ever reached.
 
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read

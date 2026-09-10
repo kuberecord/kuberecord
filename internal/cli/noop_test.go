@@ -146,7 +146,10 @@ var noopAudit = []auditedFlag{
 		"fragment that would make Events appear (Task 16.1). The mirror case is explained too: a " +
 		"document made entirely of Event rows is a timeline in which the object appears never to " +
 		"have changed, and explainNoChanges says against the same coverage whether it was watched " +
-		"and quiet or never watched at all (Task 17.3)"},
+		"and quiet or never watched at all (Task 17.3). Where the object was never watched the " +
+		"finding absorbs the flag rather than printing a second paragraph beneath itself, and " +
+		"eventsClause gives the same three states inside it — measured through the same " +
+		"eventScopeQuery, never assumed (Tasks 18.5 and 18.7)"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},

@@ -118,10 +118,13 @@ func runTimelineStructured(
 	// the Event question is asked at all — the no-coverage finding absorbs the
 	// --with-events explanation, and two findings for one cause is noise — so it has
 	// to run before eventsNotice, which in turn has to run before the context is
-	// cancelled. It reads the coverage answer already in hand and queries nothing,
-	// so the move costs nothing and the notices are still appended below in the
-	// order a reader works outwards through them. The gathered path's gate is the
-	// same condition in the same place relative to the same two calls (gatherChanges).
+	// cancelled. It may ask that question itself, which is the other reason it
+	// belongs above the line rather than below it: since Task 18.7 the absorbed
+	// clause measures the Event scope instead of assuming it, and its read is a
+	// query like any other and must be issued while the cold-scan context is alive.
+	// The two are still exclusive, so the invocation pays for one of them at most.
+	// The gathered path's gate is the same condition in the same place relative to
+	// the same two calls (gatherChanges).
 	var (
 		predicate    render.Notice
 		attributed   bool
@@ -133,7 +136,10 @@ func runTimelineStructured(
 		predicate, attributed = predicateNotice(
 			ctx, backend.Engine, request, selection, from, to, emitted.sawChange)
 		if !attributed {
-			emptyNotices, emptyErr = explainNoChanges(request, from, to, emitted.shape(), coverage)
+			emptyNotices, emptyErr = explainNoChanges(request, from, to, emitted.shape(), coverage,
+				func() (coverageAnswer, error) {
+					return eventCoverage(ctx, backend, request, from, to)
+				})
 		}
 		if emptyErr == nil {
 			eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent)

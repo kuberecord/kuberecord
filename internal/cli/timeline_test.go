@@ -743,89 +743,195 @@ func TestTimelineExplainsAnEmptyWithEventsResult(t *testing.T) {
 }
 
 // TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAll is Task 18.5's
-// fourth item, and the case field testing found.
+// fourth item and Task 18.7's correction of it, in the three states the second
+// gave the first.
 //
 // A Pod no rule ever covered, queried with --with-events, produced two findings:
 // the no-coverage error, and beneath it a longer notice explaining that no rule
 // streams Events and printing the three lines of YAML that would add one. Both
 // were true. Together they read as two problems, and the second one's fix is a
 // fix for a problem the reader does not have yet — a rule capturing Events would
-// still record nothing about an object no rule covers.
+// still record nothing about an object no rule covers. So one explanation, which
+// absorbs the point, and the notice is not printed.
 //
-// So one explanation, which absorbs the point, and the notice is not printed. The
-// two assertions below are the halves of that: the golden holds one paragraph
-// rather than two, and no second coverage question is asked at all — the
-// suppression is a round trip saved rather than an answer discarded.
+// What 18.5 left behind is what these three cases pin. The absorbed clause said
+// the two absences were the same absence, on the strength of the flag having been
+// passed and nothing else — and for a cluster whose rules do not capture Events
+// that is two gaps reported as one, which sends the reader to correlation instead
+// of to their rule. The clause now asks, and the three answers are the three
+// answers this file gives everywhere else.
+//
+// Golden files rather than substring assertions, as every other state of this
+// notice is: two of the three are prose a reader has to act on, the third carries
+// the YAML they are meant to copy, and the tier a line is painted in is invisible
+// to a plain-text assertion (D30).
 func TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAll(t *testing.T) {
-	for mode, color := range map[string]bool{"": false, "-color": true} {
-		t.Run("rendering"+mode, func(t *testing.T) {
-			engine := &fakeEngine{caps: clickHouseCapabilities()}
+	for name, test := range uncoveredWithEventsStates() {
+		for mode, color := range map[string]bool{"": false, "-color": true} {
+			t.Run(name+mode, func(t *testing.T) {
+				engine := &fakeEngine{caps: clickHouseCapabilities(), intervals: test.intervals}
+				engine.eventCoverageErr = test.coverErr
 
-			stdout, stderr, err := runTimeline(t, engine, withEventsRequest(),
-				render.Options{Color: color})
+				stdout, stderr, err := runTimeline(t, engine, withEventsRequest(),
+					render.Options{Color: color})
+				if err == nil {
+					t.Fatal("an object no scope ever covered was reported as an empty result")
+				}
+				if !errors.Is(err, query.ErrNoCoverage) {
+					t.Errorf("the failure does not carry query.ErrNoCoverage: %v", err)
+				}
+				// The flag is accounted for inside the finding rather than left to
+				// look like a flag that was ignored (D31), and it is accounted for
+				// once.
+				if strings.Contains(stderr, "--with-events found no Events") {
+					t.Errorf("the Events notice was printed beneath the finding:\n%s", stderr)
+				}
+				assertGolden(t, test.golden+mode, stdout, stderr+"error: "+err.Error()+"\n")
+
+				assertOneEventScopeQuestion(t, engine)
+			})
+		}
+	}
+}
+
+// uncoveredWithEventsState is one answer the Event scope can give a reader whose
+// object was never watched.
+type uncoveredWithEventsState struct {
+	golden    string
+	intervals []query.ScopeInterval
+	coverErr  error
+}
+
+// uncoveredWithEventsStates are the three, and the object's own scope is empty in
+// every one of them: that is what makes the finding the finding rather than a
+// notice, and it is the fixture 18.5 shipped with.
+//
+// They are a function rather than a map literal at one call site because the
+// structured path asserts the same three, and two lists is how the two paths come
+// to be tested against different states of the same question.
+func uncoveredWithEventsStates() map[string]uncoveredWithEventsState {
+	return map[string]uncoveredWithEventsState{
+		// The claim 18.5 made unconditionally, now the one case that earns it. A
+		// rule streams Events, this object drew none, and the two absences really
+		// do have one cause — with the interval that confirms it printed beside
+		// the sentence rather than assumed by it.
+		"Events were recorded and this object drew none": {
+			golden:    "with-events-without-coverage-events-watched",
+			intervals: []query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")},
+		},
+		// The case that disproves the old wording, and the quickstart's own state
+		// before Task 16.2: nothing watches the object and nothing watches Events.
+		// Two gaps, two fixes, and fixing either leaves the other.
+		"no rule streams Events either": {
+			golden: "with-events-without-coverage",
+		},
+		// No scope log to read. The two above cannot be told apart, and the clause
+		// says exactly that rather than picking whichever is likelier.
+		"the backend cannot say": {
+			golden:   "with-events-without-coverage-cannot-say",
+			coverErr: query.ErrCapabilityUnsupported,
+		},
+		// The same inability with a cause, which is the other half of the third
+		// state and the one Invariant 4 is about. It must not become the
+		// invocation's failure: what failed is that nothing was ever watching this
+		// object, and that is the finding a script's exit 3 is reading.
+		"the Event scope log could not be read": {
+			golden:   "with-events-without-coverage-unreadable",
+			coverErr: errors.New("dial tcp 10.0.0.5:9000: connection refused"),
+		},
+	}
+}
+
+// assertOneEventScopeQuestion pins the cost of the absorbed clause: one Event
+// coverage read, and only one.
+//
+// Both halves matter and they are opposite failures. None at all is Task 18.5's
+// defect — a claim about Events asserted without measuring them — and it is the
+// state this suite passed in while the CLI shipped a sentence that was false for
+// half its readers. Two is the notice having been built and then discarded
+// beneath the finding, which is the round trip 18.5 saved and 18.7 must not spend
+// twice: the finding's clause and eventsNotice ask the identical question through
+// eventCoverage, and exactly one of them is ever reached.
+func assertOneEventScopeQuestion(t *testing.T, engine *fakeEngine) {
+	t.Helper()
+
+	asked := 0
+	for _, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			asked++
+		}
+	}
+	if asked != 1 {
+		t.Errorf("the Event scope was consulted %d times, want 1; the absorbed clause states what "+
+			"was recorded about Events and must measure it exactly once: %+v", asked, engine.scopeQueries)
+	}
+}
+
+// TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured is the
+// same three states on the second sequence.
+//
+// The structured path builds these notices in a different order from the tabular
+// one, because every query it makes has to be issued before the cold-scan context
+// is cancelled — so the Event question is asked earlier there, and a gate written
+// only into the tabular sequence would have left `-o json` printing both findings.
+// Task 18.7 gives that ordering a second reason to be right: the absorbed clause
+// now issues a query of its own, and a clause built after the scan was stopped
+// would report that the scope log could not be read on every invocation. See
+// timelinestream.go, and the two tests above it that exist for the same reason.
+func TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured(t *testing.T) {
+	for name, test := range uncoveredWithEventsStates() {
+		t.Run(name, func(t *testing.T) {
+			engine := &fakeEngine{caps: clickHouseCapabilities(), intervals: test.intervals}
+			engine.eventCoverageErr = test.coverErr
+
+			request := withEventsRequest()
+			request.Structured = render.StructuredJSON
+
+			stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
 			if err == nil {
 				t.Fatal("an object no scope ever covered was reported as an empty result")
 			}
 			if !errors.Is(err, query.ErrNoCoverage) {
 				t.Errorf("the failure does not carry query.ErrNoCoverage: %v", err)
 			}
-			// The flag is accounted for inside the finding rather than left to look
-			// like a flag that was ignored (D31), and it is accounted for once.
-			if !strings.Contains(err.Error(), "no Kubernetes Event about it was recorded either") {
-				t.Errorf("the finding does not absorb --with-events: %v", err)
-			}
 			if strings.Contains(stderr, "--with-events found no Events") {
 				t.Errorf("the Events notice was printed beneath the finding:\n%s", stderr)
 			}
-			assertGolden(t, "with-events-without-coverage"+mode, stdout,
-				stderr+"error: "+err.Error()+"\n")
-
-			// One coverage question, the object's own. A second would mean the
-			// notice was built and then thrown away.
-			for _, q := range engine.scopeQueries {
-				if q.Kind == eventKindName {
-					t.Errorf("the Event scope was consulted for a notice that is not printed: %+v", q)
-				}
+			if strings.Contains(stdout, "--with-events") {
+				t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
 			}
+			// The clause the two renderings must agree on, taken from the tabular
+			// golden of the same state: the words are pinned there, and what is
+			// under test here is that this path reaches the same one.
+			if want := uncoveredClause(t, test.golden); !strings.Contains(err.Error(), want) {
+				t.Errorf("the structured finding does not carry the tabular one's clause.\n"+
+					"want: %s\ngot:  %v", want, err)
+			}
+			assertOneEventScopeQuestion(t, engine)
 		})
 	}
 }
 
-// TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured is the
-// same suppression on the second sequence.
+// uncoveredClause lifts the --with-events clause out of a tabular golden, so that
+// the structured assertion cannot pin wording the rendered document no longer
+// uses.
 //
-// The structured path builds these notices in a different order from the tabular
-// one, because every query it makes has to be issued before the cold-scan context
-// is cancelled — so the Event question is asked earlier there, and a gate written
-// only into the tabular sequence would have left `-o json` printing both findings.
-// See timelinestream.go, and the two tests above it that exist for the same reason.
-func TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured(t *testing.T) {
-	engine := &fakeEngine{caps: clickHouseCapabilities()}
+// The alternative was a literal in each case, and a literal is what lets the two
+// paths drift silently: the tabular golden would be regenerated, the structured
+// substring would still be found somewhere in an older sentence, and the two
+// renderings would answer the same question differently with nothing failing.
+func uncoveredClause(t *testing.T, golden string) string {
+	t.Helper()
 
-	request := withEventsRequest()
-	request.Structured = render.StructuredJSON
-
-	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
-	if err == nil {
-		t.Fatal("an object no scope ever covered was reported as an empty result")
+	document, err := os.ReadFile(filepath.Join("testdata", "timeline", golden+".golden"))
+	if err != nil {
+		t.Fatalf("reading the golden this assertion is taken from: %v", err)
 	}
-	if !errors.Is(err, query.ErrNoCoverage) {
-		t.Errorf("the failure does not carry query.ErrNoCoverage: %v", err)
+	_, clause, found := strings.Cut(string(document), "did not change")
+	if !found {
+		t.Fatalf("%s.golden holds no no-coverage finding to take a clause from", golden)
 	}
-	if !strings.Contains(err.Error(), "no Kubernetes Event about it was recorded either") {
-		t.Errorf("the finding does not absorb --with-events: %v", err)
-	}
-	if strings.Contains(stderr, "--with-events found no Events") {
-		t.Errorf("the Events notice was printed beneath the finding:\n%s", stderr)
-	}
-	if strings.Contains(stdout, "--with-events") {
-		t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
-	}
-	for _, q := range engine.scopeQueries {
-		if q.Kind == eventKindName {
-			t.Errorf("the Event scope was consulted for a notice that is not printed: %+v", q)
-		}
-	}
+	return strings.TrimSuffix(clause, "\n")
 }
 
 // TestTimelineWithEventsStillExplainsItselfWhenTheObjectWasWatched is the other
@@ -1120,7 +1226,8 @@ func TestTimelineExplainsAnEventsOnlyTimeline(t *testing.T) {
 }
 
 // TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding pins the exit code apart
-// from the wording.
+// from the wording, and is Task 18.7's regression guard for the case the field
+// report was actually about.
 //
 // The wholly-empty case with no coverage exits 3, because the command produced no
 // evidence of anything. This one produced evidence — real, correlated Events —
@@ -1129,16 +1236,40 @@ func TestTimelineExplainsAnEventsOnlyTimeline(t *testing.T) {
 // notice at exit 0, which is also what this path returned before it said anything
 // at all: no consumer's exit-code handling moves under a release whose subject is
 // explaining things better.
+//
+// Which route it takes is the guard. An object with no coverage and Events in
+// front of the reader must reach Task 17.3's Events-only notice and not the
+// finding — the state Task 18.6 made reachable against a real backend and the
+// state the old clause described as "the same absence" while four Events sat in
+// ClickHouse. Neither branch may answer for the other: the finding's clause is
+// for a reader looking at a blank page, and this reader is not.
 func TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding(t *testing.T) {
 	engine := eventsOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
 
-	_, _, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
 	if err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
 	if code := exit.CodeFor(err); code != exit.Success {
 		t.Errorf("an Events-only timeline exited %d; a document holding rows is an answer, not the "+
 			"absence of one", code)
+	}
+	if !strings.Contains(stderr, "every row here is a Kubernetes Event") {
+		t.Errorf("the Events-only explanation was not the one taken:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "same absence") {
+		t.Errorf("the finding's absorbed clause was produced for a reader holding Event rows, "+
+			"which is the page it says is blank:\n%s", stderr)
+	}
+
+	// And no Event coverage question at all. The rows are the answer to it — Events
+	// about this object are demonstrably recorded, because they are on the page —
+	// so consulting the scope log would buy a round trip to confirm what the reader
+	// is already looking at.
+	for _, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			t.Errorf("the Event scope was consulted about a document made of Events: %+v", q)
+		}
 	}
 }
 
@@ -1323,6 +1454,21 @@ func TestTimelineExitsThreeWhenNothingWasWatching(t *testing.T) {
 				t.Errorf("exit.CodeFor = %d, want %d", code, exit.NoCoverage)
 			}
 			assertGolden(t, "empty-without-coverage"+mode, stdout, stderr+"error: "+err.Error()+"\n")
+
+			// The other half of Task 18.7, and the reason its clause is gated on
+			// the flag rather than on the coverage answer: nobody here asked about
+			// Events, so the finding says nothing about them and does not pay for
+			// a question whose answer it would not print.
+			for _, q := range engine.scopeQueries {
+				if q.Kind == eventKindName {
+					t.Errorf("a bare invocation paid for a coverage question about %s: %+v",
+						eventKindName, q)
+				}
+			}
+			if strings.Contains(err.Error(), "Event") {
+				t.Errorf("the finding volunteered a sentence about Events to a reader who did "+
+					"not ask for them: %v", err)
+			}
 		})
 	}
 }

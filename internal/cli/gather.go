@@ -202,7 +202,12 @@ func gatherChanges(
 		// Consulting coverage about it would answer a question nobody asked and
 		// could report "nothing was watching" about a window that demonstrably
 		// held changes.
-		emptyNotices, emptyErr := explainNoChanges(request, from, to, shape, coverage)
+		// The Event scope is passed unasked. Only the no-coverage finding under
+		// --with-events spends it, and that is the one branch on which eventsNotice
+		// below is withheld — so the two never both run and the round trip is bought
+		// exactly once, by whichever of them is reached (Task 18.7).
+		emptyNotices, emptyErr := explainNoChanges(request, from, to, shape, coverage,
+			func() (coverageAnswer, error) { return eventCoverage(ctx, backend, request, from, to) })
 		result.Notices = append(result.Notices, emptyNotices...)
 		result.Empty = emptyErr
 	}
@@ -214,12 +219,11 @@ func gatherChanges(
 	//
 	// Withheld when the explanation above turned out to be the no-coverage finding,
 	// which is Task 18.5's fourth item. Nothing was ever watching this object, so a
-	// second notice saying that no Events about it were recorded either is the same
-	// absence reported twice — and the more detailed of the two, since it arrives
-	// with three lines of YAML for a rule that would still record nothing about an
-	// object no rule covers. uncoveredNoChanges absorbs the point instead, in one
-	// sentence, so the reader is left with one finding and one fix rather than two
-	// findings for one cause.
+	// second notice about the Events is a second paragraph for a reader who has not
+	// finished acting on the first. uncoveredNoChanges absorbs the point instead, in
+	// one sentence — and since Task 18.7 it absorbs the standalone notice's coverage
+	// read along with it, so what the reader is left with is one finding that has
+	// measured both halves of what it claims.
 	//
 	// The gate is result.Empty rather than the coverage answer itself, and the
 	// difference is D31. An emptiness a predicate produced is explained by
@@ -256,12 +260,33 @@ func eventsNotice(
 	if !request.WithEvents || interleaved {
 		return render.Notice{}
 	}
+	coverage, err := eventCoverage(ctx, backend, request, from, to)
+	return explainNoEvents(request, from, to, coverage, err)
+}
+
+// eventCoverage asks the scope log whether Events were being recorded where the
+// object was.
+//
+// It is one function because two callers ask the identical question and must
+// receive the identical answer: this notice, for a watched object whose Events
+// are missing, and the no-coverage finding's absorbed clause, for an object that
+// was never watched at all (Task 18.7). They are mutually exclusive — gatherChanges
+// asks the second only when the first is withheld — so an invocation pays for at
+// most one Event coverage read whichever of them it reaches.
+//
+// Two formulations of one question is how the two answers come to disagree, and
+// the disagreement would be invisible: both produce a confident, well-formed
+// sentence about Events, and only one of them would be about the scope that was
+// actually consulted.
+func eventCoverage(
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest, from, to time.Time,
+) (coverageAnswer, error) {
 	coverage, err := askCoverage(
 		ctx, backend, eventScopeQuery(request, from, to), describeEventScope(request))
 	// Narrowed after the query rather than in it, because the query had to ask
 	// about every group in order to reach the core one. See eventIntervals.
 	coverage.Intervals = eventIntervals(coverage.Intervals)
-	return explainNoEvents(request, from, to, coverage, err)
+	return coverage, err
 }
 
 // describeEventScope names the scope the Event coverage question was asked about,
