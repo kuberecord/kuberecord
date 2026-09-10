@@ -1,0 +1,97 @@
+# The kuberecord krew plugin at {{ .TagName }}, rendered from .krew.yaml in
+# github.com/kuberecord/kuberecord — which is where to change it. The digests
+# below are computed from that release's archives, so an edited copy is a copy
+# that has stopped describing them.
+#
+# The rendered document is published as a release asset too, covered by
+# checksums.txt and by the keyless cosign signature over it.
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: kuberecord
+spec:
+  version: {{ .TagName }}
+  homepage: https://github.com/kuberecord/kuberecord
+  shortDescription: Query recorded state changes
+  description: |
+    kuberecord answers questions about recorded Kubernetes state changes — who
+    changed what, when, and what the object looked like before — without needing
+    the cluster the change happened in to still exist.
+
+    A kuberecord operator streams cluster state to a sink; this plugin is the
+    read side of it.
+
+    An empty answer is never presented on its own. Every command consults the
+    watch-scope log first, so "nothing changed" and "nothing was watching" are
+    reported as the different facts they are.
+
+    Reference: https://github.com/kuberecord/kuberecord/blob/{{ .TagName }}/docs/CLI.md
+  caveats: |
+    This installs the kubectl plugin only.
+
+    The same build also ships under the name 'kuberecord', which runs on its own
+    against an object-store archive with no cluster at all — an auditor's copy.
+    krew does not install that one; the project's own installation instructions
+    say where to get it.
+
+    The plugin reads what a kuberecord operator has already recorded. With no
+    operator running and no --source pointing at an archive one wrote, there is
+    nothing to query yet:
+
+      https://github.com/kuberecord/kuberecord/blob/{{ .TagName }}/README.md
+  platforms:
+  - selector:
+      matchLabels:
+        os: linux
+        arch: amd64
+    {{addURIAndSha "https://github.com/kuberecord/kuberecord/releases/download/{{ .TagName }}/kuberecord_{{ .TagName }}_linux_amd64.tar.gz" .TagName }}
+    bin: kubectl-kuberecord
+    files:
+    - from: kubectl-kuberecord
+      to: .
+    - from: LICENSE
+      to: .
+  - selector:
+      matchLabels:
+        os: linux
+        arch: arm64
+    {{addURIAndSha "https://github.com/kuberecord/kuberecord/releases/download/{{ .TagName }}/kuberecord_{{ .TagName }}_linux_arm64.tar.gz" .TagName }}
+    bin: kubectl-kuberecord
+    files:
+    - from: kubectl-kuberecord
+      to: .
+    - from: LICENSE
+      to: .
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: amd64
+    {{addURIAndSha "https://github.com/kuberecord/kuberecord/releases/download/{{ .TagName }}/kuberecord_{{ .TagName }}_darwin_amd64.tar.gz" .TagName }}
+    bin: kubectl-kuberecord
+    files:
+    - from: kubectl-kuberecord
+      to: .
+    - from: LICENSE
+      to: .
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: arm64
+    {{addURIAndSha "https://github.com/kuberecord/kuberecord/releases/download/{{ .TagName }}/kuberecord_{{ .TagName }}_darwin_arm64.tar.gz" .TagName }}
+    bin: kubectl-kuberecord
+    files:
+    - from: kubectl-kuberecord
+      to: .
+    - from: LICENSE
+      to: .
+  - selector:
+      matchLabels:
+        os: windows
+        arch: amd64
+    {{addURIAndSha "https://github.com/kuberecord/kuberecord/releases/download/{{ .TagName }}/kuberecord_{{ .TagName }}_windows_amd64.zip" .TagName }}
+    bin: kubectl-kuberecord.exe
+    files:
+    - from: kubectl-kuberecord.exe
+      to: .
+    - from: LICENSE
+      to: .

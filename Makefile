@@ -1041,6 +1041,18 @@ KREW_MANIFEST_SCRIPT := hack/krew-manifest.sh
 BREW_FORMULA_SCRIPT := hack/homebrew-formula.sh
 MANIFEST_DIGESTS_SCRIPT := hack/manifest-digests.sh
 
+# The krew manifest's one definition (Task 18.8). It is a Go template rather than
+# a document because two things render it: the script above, into the asset this
+# release attaches, and rajatjindal/krew-release-bot, into the krew-index pull
+# request it opens on tag push. A template beside a generator would be two
+# descriptions of one artefact (D43), and the drift would surface as a krew-index
+# entry nothing in this repository had ever printed.
+#
+# The path is fixed by the bot, which looks for `.krew.yaml` at the repository
+# root unless its action is told otherwise. It is named here anyway so that the
+# release targets and the tests have one spelling of it to read.
+KREW_TEMPLATE ?= .krew.yaml
+
 # krew requires three names to be one string: the manifest's file name, the
 # `metadata.name` inside it, and whatever follows `kubectl-` in the binary. So
 # this is derived from CLI_PLUGIN_NAME rather than written down again — kubectl
@@ -1077,9 +1089,16 @@ BREW_TAP_COMMIT_NAME ?= github-actions[bot]
 BREW_TAP_COMMIT_EMAIL ?= 41898282+github-actions[bot]@users.noreply.github.com
 
 # The krew plugin index. Submitting to it is a pull request against somebody
-# else's repository, so it is never run by the release workflow — a release must
-# not open a PR on a third-party repo on its own. `make krew-index-pr` is what a
-# maintainer runs once the tag is published; docs/RELEASING.md says when.
+# else's repository, and since Task 18.8 a tag push does open one — but not from
+# here. rajatjindal/krew-release-bot renders $(KREW_TEMPLATE) in the release
+# workflow and raises the PR through its own GitHub App, so this repository still
+# holds no credential for krew-index and this target is still never called by a
+# workflow.
+#
+# What it remains is the manual route, and it is needed for three things the bot
+# cannot do: the first-ever submission, which krew's maintainers review by hand; a
+# release where the bot is down; and one where the manifest changed shape enough
+# to want a human on the PR. docs/RELEASING.md says which is which.
 KREW_INDEX_REPO ?= kubernetes-sigs/krew-index
 KREW_INDEX_DIR ?= dist/krew-index
 
@@ -1221,16 +1240,17 @@ release-cli: build-cli ## Package the CLI binaries into per-platform archives in
 		}; \
 	done
 
-# The krew plugin manifest, generated from the archives release-cli just packaged.
+# The krew plugin manifest, rendered from KREW_TEMPLATE against the archives
+# release-cli just packaged.
 #
 # It is written through a temporary file for the same reason the release notes
 # are: a shell redirect leaves a truncated document behind on failure, and the
 # next step would happily checksum and publish it.
 .PHONY: release-krew-manifest
-release-krew-manifest: ## Generate the krew plugin manifest from the archives in RELEASE_DIR.
+release-krew-manifest: ## Render the krew plugin manifest from $(KREW_TEMPLATE) and the archives in RELEASE_DIR.
 	@mkdir -p "$(RELEASE_DIR)"
 	@set -e; \
-	if ./$(KREW_MANIFEST_SCRIPT) "$(RELEASE_VERSION)" "$(GITHUB_REPO)" "$(RELEASE_DIR)" \
+	if KREW_TEMPLATE="$(KREW_TEMPLATE)" ./$(KREW_MANIFEST_SCRIPT) "$(RELEASE_VERSION)" "$(GITHUB_REPO)" "$(RELEASE_DIR)" \
 		$(CLI_ARCHIVE_PAIRS) > "$(RELEASE_KREW_MANIFEST).tmp"; then \
 		mv "$(RELEASE_KREW_MANIFEST).tmp" "$(RELEASE_KREW_MANIFEST)"; \
 		echo "release: $(RELEASE_KREW_MANIFEST)"; \
@@ -1521,19 +1541,25 @@ release-brew-push: ## Push this release's formula to BREW_TAP_REPO (needs HOMEBR
 	echo "release: pushed $(BREW_FORMULA_PATH) for $(RELEASE_VERSION) to $(BREW_TAP_REPO)."; \
 	echo "  brew install $(BREW_TAP_NAME)/$(CLI_STANDALONE_NAME)"
 
-# The krew-index submission (Task 12.2).
+# The krew-index submission by hand (Task 12.2), which since Task 18.8 is the
+# fallback rather than the route.
 #
-# Never called by the release workflow, and that is the point: this opens a pull
-# request against somebody else's repository, and a tag push must not do that on
-# its own. A maintainer runs it once the release is published and its assets are
-# actually downloadable — krew-index's own CI fetches every URI in the manifest
-# and checks its digest, so a PR opened before the tag exists fails on arrival and
-# spends weeks of review latency getting nowhere.
+# The release workflow's `krew` job asks rajatjindal/krew-release-bot to open the
+# pull request, and the bot does it with its own credentials rather than this
+# repository's — which is why this target is still never called by a workflow.
+# Three cases keep it: the first submission of a plugin, which the bot cannot do
+# and krew's maintainers review by hand; a bot outage; and a release whose
+# manifest changed shape enough to want a human on the PR.
+#
+# A maintainer runs it once the release is published and its assets are actually
+# downloadable — krew-index's own CI fetches every URI in the manifest and checks
+# its digest, so a PR opened before the tag exists fails on arrival and spends
+# weeks of review latency getting nowhere.
 #
 # What it submits is the manifest the release published, downloaded back, not the
 # one in this working tree.
 .PHONY: krew-index-pr
-krew-index-pr: ## Open the kubernetes-sigs/krew-index pull request for RELEASE_VERSION.
+krew-index-pr: ## Fallback: open the kubernetes-sigs/krew-index PR by hand when the release bot did not.
 	$(call require-tool,gh,Install the GitHub CLI: https://cli.github.com (`brew install gh`).)
 	@set -e; \
 	case "$(RELEASE_VERSION)" in \

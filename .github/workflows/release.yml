@@ -441,6 +441,18 @@ jobs:
             dist/release/RELEASE_NOTES.md
           if-no-files-found: error
 
+      # The krew manifest again, on its own, for the `krew` job below to print on
+      # a rehearsal. The same hand-off the SBOM already makes in the other
+      # direction, and for the same reason: the file is produced here and read
+      # there, and the alternative is that job downloading the bundle above —
+      # a few hundred megabytes of CLI archives — to show three kilobytes of YAML.
+      - name: Upload the krew manifest on its own
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: kuberecord-${{ env.RELEASE_VERSION }}-krew-manifest
+          path: dist/release/kuberecord.yaml
+          if-no-files-found: error
+
       # The chart as an OCI artifact (Task 8.1), pushed before the Release page
       # that advertises it exists. The ordering is the same argument as the
       # image's: the page tells a reader to `helm install oci://…`, and a page
@@ -563,9 +575,9 @@ jobs:
               echo
               echo "CLI: $(ls dist/release/kuberecord_*.tar.gz dist/release/kuberecord_*.zip | wc -l) archives, signed through checksums.txt"
               echo
-              echo "krew: \`dist/release/kuberecord.yaml\`, attached and checksummed. Submitting it to"
-              echo "kubernetes-sigs/krew-index is \`make krew-index-pr\`, run by a maintainer —"
-              echo "a tag push does not open a pull request on somebody else's repository."
+              echo "krew: \`dist/release/kuberecord.yaml\`, attached and checksummed. The krew job"
+              echo "submits it to kubernetes-sigs/krew-index — see its summary for the pull"
+              echo "request, and for the manual command if the bot did not open one."
               echo
               echo "Signed, attested and described. How to check any of that:"
               echo "https://github.com/${{ github.repository }}/blob/$RELEASE_VERSION/docs/VERIFYING.md"
@@ -653,5 +665,156 @@ jobs:
             echo
             echo '```sh'
             echo "brew install kuberecord/tap/kuberecord"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The krew-index submission (Task 18.8). A job of its own, after the Release
+  # exists, for the same two reasons the tap is one: it publishes into a
+  # *different* repository, and by the time it runs the release is already public,
+  # so its failure must be visible without implying the release did not happen.
+  #
+  # The contrast with the tap is the part worth reading. That job holds
+  # HOMEBREW_TAP_TOKEN because it pushes a commit itself. This one holds nothing:
+  # rajatjindal/krew-release-bot renders `.krew.yaml` here, posts the result to its
+  # own service, and that service opens the pull request through its own GitHub
+  # App. No token of ours could write to kubernetes-sigs/krew-index anyway, and
+  # after this job there is still none that could.
+  #
+  # It is a third party, maintained by an individual, opening pull requests on this
+  # project's behalf — so it is worth being explicit about why it is here and what
+  # bounds it. krew's own developer guide strongly recommends it, and it is what
+  # the maintainers reviewing this plugin's submission asked for; it needs no
+  # secrets, which is most of what bounds the exposure; and the `uses:` below is
+  # pinned to a commit, like every other third-party action in this file. One
+  # residual: the action is a Docker action whose own `image:` is a mutable tag
+  # (`ghcr.io/rajatjindal/krew-release-bot:v0.0.50`), so the pin fixes the action's
+  # definition and not the container it runs. docs/RELEASING.md records that.
+  #
+  # The bot automates *version bumps* for a plugin krew-index already carries. The
+  # first submission is a manual pull request the krew maintainers review, so
+  # v0.4.0 is hand-submitted with `make krew-index-pr` and this takes over from
+  # v0.4.1.
+  #
+  # There is no job-level `if:` here either, for the reason recorded above the tap
+  # job: GitHub does not expose the `env` context to one.
+  krew:
+    name: krew index
+    needs: [gate, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      # Only to check this repository out for `.krew.yaml`, which is the file the
+      # action renders. Nothing is written anywhere a GITHUB_TOKEN reaches.
+      contents: read
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # `addURIAndSha` downloads every archive the template names in order to hash
+      # it, and `IsPreRelease` reads the Release itself — so this cannot run before
+      # `gh release create` and the asset upload, which is why it is a job that
+      # `needs: publish` rather than a step somewhere earlier.
+      #
+      # continue-on-error, deliberately: the release is public by now. A
+      # krew-index PR that did not open is recoverable by hand in five minutes,
+      # and failing the workflow at this point would render a finished release as
+      # a failed one. The step below says so and names the command.
+      #
+      # A prerelease is excluded here rather than left to the bot. The bot does
+      # refuse one — it reads the Release and errors out — but that is a third
+      # party's promise about a property this repository already enforces itself:
+      # `make krew-index-pr` refuses a candidate by name, and `release-brew-push`
+      # refuses one for the same reason. krew-index carries the version
+      # `kubectl krew install` serves, which is never a candidate.
+      - name: Ask the release bot to open the krew-index pull request
+        id: bot
+        if: env.DRY_RUN == 'false' && !contains(env.RELEASE_VERSION, '-')
+        continue-on-error: true
+        uses: rajatjindal/krew-release-bot@c970b8a8f6dbc2f2285a26e3ae160903b87002c3 # v0.0.51
+
+      - name: Summarise
+        if: steps.bot.outcome == 'success'
+        run: |
+          {
+            echo "## krew"
+            echo
+            echo "The version bump was submitted to"
+            echo "[kubernetes-sigs/krew-index](https://github.com/kubernetes-sigs/krew-index/pulls?q=is%3Apr+kuberecord)"
+            echo "by \`krew-release-bot\`, rendered from \`.krew.yaml\` at $RELEASE_VERSION."
+            echo
+            echo "Trivial version bumps are usually auto-approved and merged within minutes."
+            echo "Until that merges, \`kubectl krew install kuberecord\` still serves the"
+            echo "previous version — the archives, the Homebrew tap and \`go install\` do not"
+            echo "wait for it."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The release happened; this did not. Loud, non-fatal, and holding the way
+      # out — a route that exists and is not named is a route nobody takes (D34).
+      - name: Say how to submit it by hand
+        if: steps.bot.outcome == 'failure'
+        run: |
+          {
+            echo "## krew: the pull request was not opened"
+            echo
+            echo "$RELEASE_VERSION is published and installable. What did not happen is the"
+            echo "krew-index version bump, so \`kubectl krew install kuberecord\` will keep"
+            echo "serving the previous version until it does."
+            echo
+            echo "The step above says why. The manual route submits the same manifest — the"
+            echo "one this release published, downloaded back and re-verified against the"
+            echo "bytes GitHub is serving:"
+            echo
+            echo '```sh'
+            echo "gh auth login   # the fork and the pull request are opened as you"
+            echo "make krew-index-pr RELEASE_VERSION=$RELEASE_VERSION"
+            echo '```'
+            echo
+            echo "It is also the route for a manifest that changed shape enough to want a"
+            echo "human on the pull request, and the only route for a first submission."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A skipped step is silent, and this one is skipped on every candidate tag.
+      # D31: a no-op that produces no visible effect has to say why.
+      - name: Say why a candidate was not submitted
+        if: env.DRY_RUN == 'false' && contains(env.RELEASE_VERSION, '-')
+        run: |
+          {
+            echo "## krew: nothing was submitted, and that is correct"
+            echo
+            echo "$RELEASE_VERSION is a prerelease. krew-index carries the one version"
+            echo "\`kubectl krew install kuberecord\` serves, and that is never a candidate —"
+            echo "krew has no way for a user to ask for a stable one."
+            echo
+            echo "The manifest was still rendered, checked and attached to the release."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The rehearsal's half. It shows the document rather than describing it,
+      # because what a rehearsal is for is seeing the thing before it is sent.
+      - name: Collect the manifest a release would submit (rehearsal)
+        if: env.DRY_RUN == 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: kuberecord-${{ env.RELEASE_VERSION }}-krew-manifest
+          path: dist/release
+
+      - name: Say what a real run would submit (rehearsal)
+        if: env.DRY_RUN == 'true'
+        run: |
+          {
+            echo "## Rehearsal: kubernetes-sigs/krew-index was not touched"
+            echo
+            echo "A release asks \`krew-release-bot\` to render \`.krew.yaml\` and open the"
+            echo "version-bump pull request. Nothing was sent, and no pull request exists"
+            echo "anywhere as a result of this run."
+            echo
+            echo "Below is what would have been submitted: the same template, rendered in the"
+            echo "publish job by \`hack/krew-manifest.sh\`. The one difference from the bot's"
+            echo "own rendering is where the digests come from — these are of the archives"
+            echo "this rehearsal built, and a real run's are of the published ones, which"
+            echo "\`make release-krew-verify-published\` proves are the same bytes."
+            echo
+            echo '```yaml'
+            cat dist/release/kuberecord.yaml
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

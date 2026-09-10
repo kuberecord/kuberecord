@@ -248,6 +248,54 @@ than a summary of them.
 
 ### Changed
 
+- **The krew-index pull request is opened by a bot on tag push, and the krew
+  manifest now has one definition.** Every release used to end with a manual step
+  on an external review clock — the workflow's own summary said *"Submitting it to
+  kubernetes-sigs/krew-index is `make krew-index-pr`, run by a maintainer"* — so
+  the version bump waited on somebody remembering. The release workflow's new
+  `krew` job asks
+  [`rajatjindal/krew-release-bot`](https://github.com/rajatjindal/krew-release-bot)
+  to raise it instead; krew's developer guide strongly recommends the bot, and
+  trivial bumps are usually auto-approved and merged in minutes.
+
+  The manifest is now described **once**, by [`.krew.yaml`](.krew.yaml) at the
+  repository root, because the bot renders that file and a template beside the
+  existing generator would be two descriptions of one artefact drifting silently
+  (D43). `hack/krew-manifest.sh` renders the same template into the
+  `kuberecord.yaml` a release attaches, hashing the archives it just packaged
+  rather than downloading them — so the asset describes what was built, and
+  `make release-krew-verify-published` is what then proves the published bytes
+  agree. The rendered manifest is byte-for-byte what it was, apart from a header
+  that now names the template.
+
+  The renderer accepts only what both readers implement — `{{ .TagName }}` and
+  `{{addURIAndSha "<url>" .TagName }}`, the latter at exactly four spaces, because
+  the bot hardcodes four on the `sha256` line it emits — and refuses a platform
+  mismatch in either direction. A template naming an archive `make build-cli` does
+  not produce fails on the pull request that introduced it rather than on
+  somebody's `krew install`, since `make release-krew-verify` already runs on
+  every pull request.
+
+  Three things the job deliberately does **not** do. It does not run on a
+  rehearsal: a `workflow_dispatch` that opened a pull request against
+  `kubernetes-sigs/krew-index` would need a stranger to clean it up, so the gate
+  is step-level (D44) and the dry-run branch prints the manifest instead of
+  sending it. It does not submit a **prerelease** — krew-index carries the one
+  version `kubectl krew install` serves, and a candidate is never it. And it does
+  not fail the workflow: by the time it runs the release is published, so a
+  submission that did not happen reports itself and names the fallback rather than
+  rendering a finished release as a failed one.
+
+  **`make krew-index-pr` is kept**, now documented as the fallback — for a bot
+  outage, for a manifest that changed shape enough to want human eyes, and for the
+  first submission of the plugin, which krew's maintainers review by hand. So
+  v0.4.0's initial entry is hand-submitted regardless and the bot takes over from
+  v0.4.1. Nothing about signing, provenance, the SBOMs or `checksums.txt` changes:
+  the bot submits a manifest pointing at assets that were already signed and
+  already attested. [`docs/RELEASING.md`](docs/RELEASING.md) records the trust
+  decision, including that the action is SHA-pinned, holds no secret of ours, and
+  is a Docker action whose own image reference is a mutable tag.
+
 - **`config set-profile` explains what it wrote before confirming that it wrote
   it.** The `→` line is the one thing in that block that looks like an ending, and
   everything a reader still had to do was underneath it — the `kubectl port-forward`
