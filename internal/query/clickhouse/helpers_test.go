@@ -191,3 +191,85 @@ func eventRow(offset time.Duration, apiGroup, name, reason string) conformance.R
 		},
 	}
 }
+
+// eventsOnlySubject is an object that has Events and no history of its own.
+//
+// A Pod, deliberately, because that is the shape the field report arrived in and
+// the shape the quickstart produces: its rule captures Events, Deployments and
+// ConfigMaps, so every Pod in the namespace is named by Events that were recorded
+// and has not one row of its own. The kind is in the core group, so the fixture
+// also spans the group boundary against the Deployment the rest of this file is
+// about.
+func eventsOnlySubject() query.ObjectRef {
+	ref := testRef()
+	return query.ObjectRef{
+		ClusterID: ref.ClusterID, APIGroup: "", Kind: "Pod",
+		Namespace: ref.Namespace, Name: "checkout-7d4f-abcde",
+	}
+}
+
+// eventsOnlySubjectUID is the incarnation the Events name.
+//
+// The Events carry it, exactly as a real Event's involvedObject does, and nothing
+// else in the fixture does — which is the point. It is an incarnation whose
+// existence is recorded only in the commentary about it.
+const eventsOnlySubjectUID = "dddddddd-0000-0000-0000-000000000004"
+
+// unrecordedUID is an incarnation nothing in any fixture names.
+const unrecordedUID = "eeeeeeee-0000-0000-0000-000000000005"
+
+// eventsOnlyFixture is four Events about an object with no rows of its own.
+//
+// Four because that is how many the field report found sitting in ClickHouse while
+// the CLI said there were none, and both spellings because a fixture that captured
+// one of them would leave the other half of the coalesce untested on the very path
+// this fixture exists for.
+func eventsOnlyFixture() conformance.History {
+	return conformance.History{Rows: []conformance.Row{
+		eventRowAbout(30*time.Second, "", "pod.scheduled", "Scheduled", eventsOnlySubject()),
+		eventRowAbout(70*time.Second, "events.k8s.io", "pod.pulling", "Pulling", eventsOnlySubject()),
+		eventRowAbout(110*time.Second, "", "pod.failed", "FailedScheduling", eventsOnlySubject()),
+		eventRowAbout(150*time.Second, "events.k8s.io", "pod.killing", "Killing", eventsOnlySubject()),
+	}}
+}
+
+// eventRowAbout builds one recorded Kubernetes Event naming an arbitrary subject.
+//
+// It is eventRow with the subject as a parameter rather than fixed to the fixture
+// Deployment, which is what an Event about an object with no rows of its own needs.
+// The two are kept apart rather than merged because eventRow's callers assert about
+// commentary *interleaved* with an object's changes, and a helper whose subject is
+// a parameter everywhere would let one of those fixtures name the wrong object
+// without the reading of the test changing at all.
+func eventRowAbout(
+	offset time.Duration, apiGroup, name, reason string, subject query.ObjectRef,
+) conformance.Row {
+	key := "involvedObject"
+	apiVersion := "v1"
+	if apiGroup != "" {
+		key = "regarding"
+		apiVersion = "events.k8s.io/v1"
+	}
+	data := `{"reason":"` + reason + `","` + key + `":{"kind":"` + subject.Kind +
+		`","namespace":"` + subject.Namespace + `","name":"` + subject.Name +
+		`","uid":"` + eventsOnlySubjectUID + `"}}`
+
+	return conformance.Row{
+		Ref: query.ObjectRef{
+			ClusterID: subject.ClusterID,
+			APIGroup:  apiGroup,
+			Kind:      "Event",
+			Namespace: subject.Namespace,
+			Name:      name,
+		},
+		Change: query.Change{
+			TS:              after(offset),
+			EventType:       query.EventAdded,
+			UID:             "event-" + name,
+			APIVersion:      apiVersion,
+			ResourceVersion: "1",
+			Actors:          []string{"kubelet"},
+			Data:            data,
+		},
+	}
+}

@@ -46,13 +46,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/kuberecord/kuberecord/internal/query"
 	"github.com/kuberecord/kuberecord/internal/query/conformance"
 	"github.com/kuberecord/kuberecord/internal/query/objectsource"
 	"github.com/kuberecord/kuberecord/internal/query/objectsource/archivetest"
@@ -102,6 +105,195 @@ func TestIntegrationQueryConformanceAgainstMinIO(t *testing.T) {
 			),
 		}
 	})
+}
+
+// TestIntegrationEventsSurviveAMissingIncarnationAgainstMinIO is Task 18.6 against
+// a real object store.
+//
+// The ClickHouse half of this fix has its own integration test for the same reason,
+// and the reason is that no fake exhibited the defect. Both backends resolved an
+// incarnation before anything else and returned an empty answer when the object had
+// no records of its own, and both the CLI fakes and the conformance harness answer
+// an Event query without needing an incarnation — which is the contract they were
+// written against and precisely what a fake does not model about an early return
+// taken before the query runs (D42).
+//
+// Against this backend the claim also has a second half worth proving on a bucket:
+// the Events are found by *listing partitions and decoding lines*, so an archive
+// whose only occupants are Events about an object it holds no record of has to be
+// walked, decoded and correlated with nothing to anchor the walk to.
+//
+// The archive is written through the fixture's own writer and read through the
+// shipped source, exactly as the suite above is.
+func TestIntegrationEventsSurviveAMissingIncarnationAgainstMinIO(t *testing.T) {
+	ctx := t.Context()
+	bucket := newITBucket(ctx, t)
+	client := itClient(ctx, t, itSecretKey())
+	const prefix = "audit-events-only"
+
+	put := func(key string, body []byte) error {
+		_, err := client.PutObject(ctx, &awss3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String(key), Body: bytes.NewReader(body),
+		})
+		return err
+	}
+	if _, err := archivetest.Write(put, prefix, eventsOnlyHistory()); err != nil {
+		t.Fatalf("writing the events-only archive into %q: %v", bucket, err)
+	}
+
+	source, err := New(ctx, itConfig(bucket, itSecretKey()))
+	if err != nil {
+		t.Fatalf("building a source for bucket %q: %v", bucket, err)
+	}
+	t.Cleanup(func() {
+		if err := source.Close(); err != nil {
+			t.Errorf("closing the source: %v", err)
+		}
+	})
+	engine, err := objectsource.NewEngine(source, objectsource.Options{Prefix: prefix})
+	if err != nil {
+		t.Fatalf("building an engine over bucket %q: %v", bucket, err)
+	}
+	t.Cleanup(func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing the engine: %v", err)
+		}
+	})
+
+	subject := eventsOnlySubject()
+	base := query.TimelineQuery{
+		Ref:  subject,
+		From: eventsOnlyEpoch().Add(-time.Hour),
+		To:   eventsOnlyEpoch().Add(time.Hour),
+	}
+
+	merged := base
+	merged.IncludeEvents = true
+	got := drainEvents(ctx, t, engine, merged)
+	if len(got) != 4 {
+		t.Fatalf("the timeline of an object with Events and no records of its own returned %d "+
+			"change(s), want 4; resolving an incarnation first and stopping when there is none "+
+			"reports an emptiness the archive was never scanned for", len(got))
+	}
+
+	wantReasons := []string{"Scheduled", "Pulling", "FailedScheduling", "Killing"}
+	for i, change := range got {
+		if change.EventType != query.EventKubernetes {
+			t.Errorf("row %d is stamped %q, want %q", i, change.EventType, query.EventKubernetes)
+		}
+		if !strings.Contains(change.Data, wantReasons[i]) {
+			t.Errorf("row %d carries %q, want the Event reason %q", i, change.Data, wantReasons[i])
+		}
+	}
+	// Both spellings were reached. On this identity the whole answer is commentary,
+	// so reading one of them is the difference between two Events and four.
+	if !strings.Contains(got[0].Data, "involvedObject") || !strings.Contains(got[1].Data, "regarding") {
+		t.Errorf("the first two rows are %q and %q, want the core-group Event that names its subject "+
+			"in involvedObject followed by the events.k8s.io one that names it in regarding",
+			got[0].Data, got[1].Data)
+	}
+
+	if bare := drainEvents(ctx, t, engine, base); len(bare) != 0 {
+		t.Errorf("a bare timeline over the same object returned %d change(s), want none: nobody asked "+
+			"about Events, and interleaving them unasked would put rows about the object on a page "+
+			"that promised the object's own changes", len(bare))
+	}
+}
+
+// drainEvents runs one timeline the way the contract documents: drain, close on
+// every path, check Err after the loop.
+func drainEvents(
+	ctx context.Context, t *testing.T, engine *objectsource.Engine, q query.TimelineQuery,
+) []query.Change {
+	t.Helper()
+
+	it, err := engine.Timeline(ctx, q)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	defer func() {
+		if err := it.Close(); err != nil {
+			t.Errorf("closing the iterator: %v", err)
+		}
+	}()
+
+	var changes []query.Change
+	for it.Next() {
+		changes = append(changes, it.Change())
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("the iterator failed mid-stream: %v", err)
+	}
+	return changes
+}
+
+// eventsOnlyEpoch is the instant the events-only fixture is dated from — fixed, so
+// a failure message names the same timestamps today as in a log pasted last week.
+func eventsOnlyEpoch() time.Time { return time.Date(2026, 5, 12, 9, 30, 0, 0, time.UTC) }
+
+// eventsOnlySubject is an object named by Events and holding no records of its own.
+//
+// A Pod, because that is the shape the field report arrived in and the shape the
+// quickstart produces: a rule capturing Events, Deployments and ConfigMaps leaves
+// every Pod in the namespace named by commentary and recorded nowhere else.
+func eventsOnlySubject() query.ObjectRef {
+	return query.ObjectRef{
+		ClusterID: conformance.FixtureClusterID,
+		APIGroup:  "",
+		Kind:      "Pod",
+		Namespace: "payments",
+		Name:      "checkout-7d4f-abcde",
+	}
+}
+
+// eventsOnlyHistory is four Events about that object, in both API spellings and no
+// state records at all.
+func eventsOnlyHistory() conformance.History {
+	return conformance.History{Rows: []conformance.Row{
+		eventsOnlyRow(30*time.Second, "", "pod.scheduled", "Scheduled"),
+		eventsOnlyRow(90*time.Second, "events.k8s.io", "pod.pulling", "Pulling"),
+		eventsOnlyRow(150*time.Second, "", "pod.failed", "FailedScheduling"),
+		eventsOnlyRow(210*time.Second, "events.k8s.io", "pod.killing", "Killing"),
+	}}
+}
+
+// eventsOnlyRow builds one recorded Kubernetes Event naming that subject.
+//
+// The subject key is the one its group spells it with — involvedObject in the core
+// group, regarding in events.k8s.io — because writing both would let a backend that
+// reads only one of them pass. The subject's uid is carried exactly as a real
+// involvedObject carries it, and no record here names it anywhere else: it is an
+// incarnation recorded only in the commentary about it.
+func eventsOnlyRow(offset time.Duration, apiGroup, name, reason string) conformance.Row {
+	key, apiVersion := "involvedObject", "v1"
+	if apiGroup != "" {
+		key, apiVersion = "regarding", "events.k8s.io/v1"
+	}
+	subject := eventsOnlySubject()
+	data := fmt.Sprintf(`{"reason":%q,%q:{"kind":%q,"namespace":%q,"name":%q,"uid":%q}}`,
+		reason, key, subject.Kind, subject.Namespace, subject.Name,
+		conformance.EventsOnlySubjectUID)
+
+	return conformance.Row{
+		Ref: query.ObjectRef{
+			ClusterID: subject.ClusterID,
+			APIGroup:  apiGroup,
+			Kind:      "Event",
+			Namespace: subject.Namespace,
+			Name:      name,
+		},
+		Change: query.Change{
+			TS:              eventsOnlyEpoch().Add(offset),
+			EventType:       query.EventAdded,
+			UID:             "event-" + name,
+			ResourceVersion: "1",
+			APIVersion:      apiVersion,
+			// An Event's actors are the field managers of the Event object: whoever
+			// wrote the Event, never whoever changed the object it is about.
+			Actors: []string{"kubelet"},
+			Data:   data,
+		},
+	}
 }
 
 // bucketHarness seeds a history into a bucket and installs the suite's stream fault.

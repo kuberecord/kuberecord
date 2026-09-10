@@ -55,11 +55,21 @@ limitations under the License.
 //
 // # Size
 //
-// Ten records and four scope transitions, sized for coverage of the named cases
-// below and not for volume. Seeding it costs one batch insert against a table, or
-// eleven small objects against a store; the whole agreement run is well under ten
-// seconds against dockerized backends, which is what keeps it a test somebody runs
-// rather than one somebody skips.
+// Fourteen records and four scope transitions, sized for coverage of the named
+// cases below and not for volume. Seeding it costs one batch insert against a
+// table, or fifteen small objects against a store; the whole agreement run is well
+// under ten seconds against dockerized backends, which is what keeps it a test
+// somebody runs rather than one somebody skips.
+//
+// # Two identities, and why
+//
+// Ten of the records are one Deployment's history, and four are Kubernetes Events
+// about a Pod that has no history at all. The second identity exists because a
+// corpus with one well-recorded object cannot pose the question both backends got
+// wrong: they resolved an incarnation before anything else and returned an empty
+// answer when the object had no rows of its own, which made the Events about such an
+// object unreachable while leaving every question about a recorded object correct
+// (D40, Task 18.6).
 
 package conformance
 
@@ -162,8 +172,37 @@ func (c Corpus) Flushes() [][]Row {
 	return groups
 }
 
-// Ref is the object every record of the corpus describes.
+// Ref is the object the corpus's *state* records describe.
 func (c Corpus) Ref() query.ObjectRef { return corpusRef() }
+
+// EventsOnlyRef is the corpus's second identity: an object named by Kubernetes
+// Events and holding no state records at all.
+//
+// It is here because the property it poses cannot be posed with one identity. An
+// object's own history and the Events about it are independent queries and neither
+// gates the other (D40), and the way both backends got that wrong was by resolving
+// an incarnation first and returning early when the object had no rows of its own —
+// which made the Events unreachable while leaving every question about an object
+// that *does* have rows correct. A corpus with a single, well-recorded identity
+// cannot tell those apart.
+//
+// A Pod, deliberately: it is the shape the field report arrived in, and the shape
+// the quickstart produces, where a rule captures Events, Deployments and ConfigMaps
+// and every Pod in the namespace is named by Events and recorded nowhere else.
+func (c Corpus) EventsOnlyRef() query.ObjectRef { return corpusEventsOnlyRef() }
+
+// EventsOnlySubjectUID is the incarnation the corpus's Events name.
+//
+// The Events carry it in their subject, exactly as a real Event's involvedObject
+// does, and no state record anywhere in the corpus does — an incarnation whose
+// existence is recorded only in the commentary about it. A question pinning it and
+// a question pinning CorpusUnrecordedUID are therefore two different questions, and
+// both are asked.
+const EventsOnlySubjectUID = "dddddddd-4444-4444-8444-dddddddddddd"
+
+// CorpusUnrecordedUID is an incarnation no record of the corpus names, in either
+// half. It is what "a pinned incarnation that was never recorded" means.
+const CorpusUnrecordedUID = "ffffffff-6666-4666-8666-ffffffffffff"
 
 // Window is the time bound the corpus fits inside, with room at each end.
 //
@@ -204,6 +243,15 @@ const (
 	corpusUIDA = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 	corpusUIDB = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 
+	// The events-only subject: a Pod in the same namespace, in the core group, with
+	// no state record of its own anywhere in the corpus. Its name is a real replica
+	// set suffix rather than a tidy one, because a subject predicate is matched on
+	// the name and a name with punctuation in it is the one a JSON path extraction
+	// can mangle.
+	corpusEventsOnlyKind   = "Pod"
+	corpusEventsOnlyName   = "checkout-7d4f-abcde"
+	corpusEventsOnlyAPIVer = "v1"
+
 	// The actors the corpus attributes changes to. corpusActorUnknown is the
 	// literal the recorder writes when a field manager is missing, empty or not a
 	// string; it is a real actor name that a filter must match exactly, and not a
@@ -213,6 +261,22 @@ const (
 	corpusActorHelm       = "helm"
 	corpusActorArgo       = "argocd-controller"
 	corpusActorUnknown    = "unknown"
+
+	// corpusActorKubelet writes the corpus's Events. An Event's actors are the field
+	// managers of the Event object — whoever wrote the Event, never whoever changed
+	// the object it is about — so this is a name no state record of the corpus
+	// carries, which makes an actor predicate leaking into the commentary visible.
+	corpusActorKubelet = "kubelet"
+)
+
+// The kind and the second group a Kubernetes Event is recorded under.
+//
+// The core group is the empty string and is spelled as a value rather than named,
+// for the reason the scope log's namespace is: a wildcard spelling of it would read
+// as "any group" at exactly the call sites that mean "the core one".
+const (
+	corpusEventKind        = "Event"
+	corpusEventGroupModern = "events.k8s.io"
 )
 
 // corpusFlushRotation is the one flush holding more than a single record.
@@ -228,20 +292,35 @@ const corpusFlushRotation = "rotation"
 // The offsets the corpus records at, named because the agreement assertions and
 // any failure they produce refer to them.
 const (
-	corpusAddedA      = 0
-	corpusModifiedA   = 5 * time.Minute
-	corpusAddedB      = 10 * time.Minute
-	corpusNanoFirst   = 12*time.Minute + 1
-	corpusNanoSecond  = 12*time.Minute + 2
-	corpusCheckpoint  = 15 * time.Minute
-	corpusFullState   = 18 * time.Minute
-	corpusBeforeHour  = 19*time.Minute + 59900*time.Millisecond
-	corpusAfterHour   = 20*time.Minute + 100*time.Millisecond
-	corpusDeletedB    = 25 * time.Minute
-	corpusScopeOpen   = -40 * time.Minute
-	corpusScopeClose  = -20 * time.Minute
-	corpusScopeReopen = -10 * time.Minute
-	corpusScopeWide   = -5 * time.Minute
+	corpusAddedA     = 0
+	corpusModifiedA  = 5 * time.Minute
+	corpusAddedB     = 10 * time.Minute
+	corpusNanoFirst  = 12*time.Minute + 1
+	corpusNanoSecond = 12*time.Minute + 2
+	corpusCheckpoint = 15 * time.Minute
+	corpusFullState  = 18 * time.Minute
+	corpusBeforeHour = 19*time.Minute + 59900*time.Millisecond
+	corpusAfterHour  = 20*time.Minute + 100*time.Millisecond
+	corpusDeletedB   = 25 * time.Minute
+
+	// The Events about the events-only subject, interleaved with the Deployment's
+	// own history rather than parked beside it: two backends that ordered a
+	// correlated Event by the wrong instant would still agree if every Event sat
+	// outside the range the rest of the corpus occupies.
+	// All four sit inside the hour the corpus opens in, and deliberately: the
+	// straddling flush is the *only* thing this corpus files under one partition and
+	// stamps into the next, and TestTheAgreementCorpusReallyStraddlesAnHour asserts
+	// that by requiring the later partition to hold nothing else at all. An Event
+	// past the boundary would be a second, unrelated occupant of it and would make
+	// that guard fail without anything being wrong.
+	corpusEventScheduled = 3 * time.Minute
+	corpusEventPulling   = 8 * time.Minute
+	corpusEventFailed    = 14 * time.Minute
+	corpusEventKilling   = 18*time.Minute + 30*time.Second
+	corpusScopeOpen      = -40 * time.Minute
+	corpusScopeClose     = -20 * time.Minute
+	corpusScopeReopen    = -10 * time.Minute
+	corpusScopeWide      = -5 * time.Minute
 )
 
 // The rules that opened and closed the corpus's scopes, and the kind the
@@ -304,7 +383,7 @@ const (
 	corpusPatchB6 = `[{"op":"replace","path":"/spec/paused","value":false}]`
 )
 
-// corpusRef is the object the corpus records history for.
+// corpusRef is the object the corpus records state history for.
 func corpusRef() query.ObjectRef {
 	return query.ObjectRef{
 		ClusterID: FixtureClusterID,
@@ -312,6 +391,17 @@ func corpusRef() query.ObjectRef {
 		Kind:      corpusKind,
 		Namespace: corpusNS,
 		Name:      corpusName,
+	}
+}
+
+// corpusEventsOnlyRef is the object the corpus records only commentary about.
+func corpusEventsOnlyRef() query.ObjectRef {
+	return query.ObjectRef{
+		ClusterID: FixtureClusterID,
+		APIGroup:  "",
+		Kind:      corpusEventsOnlyKind,
+		Namespace: corpusNS,
+		Name:      corpusEventsOnlyName,
 	}
 }
 
@@ -368,6 +458,14 @@ type corpusSpec struct {
 //     name a filter must match, not a marker meaning "no actor".
 //   - A deletion, which one backend can store and the other never receives (D12).
 //     The disagreement it causes is correct, declared, and asserted by name.
+//   - Four Kubernetes Events about a *second* object that has no state records at
+//     all, in both API spellings. An Event names its subject in its own row, so the
+//     two halves of a merged timeline are independent queries and neither gates the
+//     other (D40) — and a backend that resolves an incarnation first and stops when
+//     there is none answers this question with an emptiness it never measured, which
+//     is what both of them did until Task 18.6. It is the one case in this corpus
+//     that no fake can exhibit (D42), which is exactly why it belongs to the pair of
+//     live engines rather than to either one's own tests.
 func AgreementCorpus() Corpus {
 	specs := []corpusSpec{
 		{after: corpusAddedA, event: query.EventAdded, uid: corpusUIDA,
@@ -406,10 +504,105 @@ func AgreementCorpus() Corpus {
 		{after: corpusDeletedB, event: query.EventDeleted, uid: corpusUIDB},
 	}
 
-	return Corpus{
-		Records: buildCorpusRecords(corpusRef(), 700, specs),
-		Scopes:  corpusScopes(),
+	// The two identities' records are concatenated and then ordered by instant, so
+	// that Records keeps the "oldest first" the type promises across both. The order
+	// is not what either backend keys on — a table sorts on insert and an archive
+	// files by partition — but a corpus whose own declaration was out of order would
+	// be read by somebody as evidence about ordering.
+	records := append(buildCorpusRecords(corpusRef(), 700, specs), corpusEventRecords()...)
+	slices.SortStableFunc(records, func(a, b CorpusRecord) int {
+		return a.Change.TS.Compare(b.Change.TS)
+	})
+
+	return Corpus{Records: records, Scopes: corpusScopes()}
+}
+
+// corpusEventSpec is one Kubernetes Event of the corpus, written the way a person
+// reads a cluster's commentary.
+type corpusEventSpec struct {
+	after    time.Duration
+	apiGroup string
+	name     string
+	reason   string
+}
+
+// corpusEventRecords are the Events naming the events-only subject.
+//
+// # Why four, and why both spellings
+//
+// Four is what the field report found sitting in the sink while the command-line
+// client reported none, and the reasons are the four that matter most to an
+// engineer: a Pod that was scheduled, pulled an image, failed to schedule and was
+// killed. Two of them are
+// about something that failed to exist or is ceasing to, which is the class D32 says
+// capture-time correlation cannot serve.
+//
+// Both spellings, because v1/Event and events.k8s.io/v1/Event are one storage behind
+// two APIs and a cluster's rules may name either. A backend correlating one of them
+// would return half the commentary with nothing in the answer marking it short — and
+// on this identity the *whole* answer is commentary, so half of it is the difference
+// between two Events and four.
+//
+// # What the records carry, and what they deliberately do not
+//
+// Each Event is an ordinary Added record of the Event object itself: its own kind,
+// its own name, its own uid, its own actors — a kubelet, which no state record of the
+// corpus attributes anything to, so commentary leaking through an actor predicate is
+// visible. The subject travels in the data, which is the only place an Event names it
+// and the only place a read-time correlation may look.
+//
+// The subject carries EventsOnlySubjectUID, exactly as a real involvedObject does. No
+// state record names that uid, which is what makes a timeline pinned to it a question
+// worth asking: the incarnation is recorded only in the commentary about it.
+//
+// Each is alone in its own flush. They arrived from the Event stream rather than from
+// the Deployment's, so batching them together with the object's own history would be
+// describing a recording that did not happen.
+func corpusEventRecords() []CorpusRecord {
+	specs := []corpusEventSpec{
+		{after: corpusEventScheduled, apiGroup: "", name: "checkout-7d4f.17a9e1", reason: "Scheduled"},
+		{after: corpusEventPulling, apiGroup: corpusEventGroupModern,
+			name: "checkout-7d4f.17a9e2", reason: "Pulling"},
+		{after: corpusEventFailed, apiGroup: "", name: "checkout-7d4f.17a9e3", reason: "FailedScheduling"},
+		{after: corpusEventKilling, apiGroup: corpusEventGroupModern,
+			name: "checkout-7d4f.17a9e4", reason: "Killing"},
 	}
+
+	subject := corpusEventsOnlyRef()
+	records := make([]CorpusRecord, 0, len(specs))
+	for i, spec := range specs {
+		// The subject key is the one that group spells it with: involvedObject in the
+		// core group, regarding in events.k8s.io. Writing both would let a backend that
+		// reads only one of them pass.
+		key, apiVersion := "involvedObject", corpusEventsOnlyAPIVer
+		if spec.apiGroup != "" {
+			key, apiVersion = "regarding", corpusEventGroupModern+"/v1"
+		}
+		data := mustCanonicalJSON(fmt.Sprintf(
+			`{"reason":%q,%q:{"kind":%q,"namespace":%q,"name":%q,"uid":%q}}`,
+			spec.reason, key, subject.Kind, subject.Namespace, subject.Name, EventsOnlySubjectUID))
+
+		records = append(records, CorpusRecord{Row: Row{
+			Ref: query.ObjectRef{
+				ClusterID: FixtureClusterID,
+				APIGroup:  spec.apiGroup,
+				Kind:      corpusEventKind,
+				Namespace: corpusNS,
+				Name:      spec.name,
+			},
+			Change: query.Change{
+				TS:              corpusAt(spec.after),
+				EventType:       query.EventAdded,
+				UID:             fmt.Sprintf("event-%d", i+1),
+				ResourceVersion: fmt.Sprintf("%d", 800+i),
+				APIVersion:      apiVersion,
+				Actors:          []string{corpusActorKubelet},
+				Data:            string(data),
+				SHA256:          sha256Hex(data),
+			},
+		}})
+	}
+	return records
 }
 
 // corpusScopes is the watch-scope log the corpus declares: one scope watched,

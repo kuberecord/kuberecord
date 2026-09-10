@@ -179,11 +179,17 @@ func (it *limitIterator) Close() error         { return it.inner.Close() }
 
 // emptyIterator is an exhausted stream.
 //
-// It is returned when the newest-incarnation probe finds no rows at all, and the
-// distinction it preserves is the one Invariant 9 is about: no rows is an empty
-// result, not a failure and not a statement that nothing happened. Which of those
-// it is remains a question for Coverage, and this iterator is how the timeline
-// declines to answer it.
+// It is returned when the newest-incarnation probe finds no rows at all *and* no
+// Events were asked for, and the distinction it preserves is the one Invariant 9 is
+// about: no rows is an empty result, not a failure and not a statement that nothing
+// happened. Which of those it is remains a question for Coverage, and this iterator
+// is how the timeline declines to answer it.
+//
+// The second half of that condition is load-bearing and was once missing. An object
+// with no state rows still has the Events naming it, found by a query the probe is
+// not an input to (D40), so this iterator is the answer to "nothing was recorded and
+// nothing was asked beyond it" — never to "the object's own rows are missing". It
+// also serves as the exhausted side of that merge; see eventsWithoutState.
 type emptyIterator struct{}
 
 func (emptyIterator) Next() bool           { return false }

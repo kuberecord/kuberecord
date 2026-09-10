@@ -517,6 +517,41 @@ than a summary of them.
 
 ### Fixed
 
+- **A timeline now reports the Kubernetes Events about an object no rule was
+  watching.** Both query backends resolved the object's incarnation before anything
+  else and returned an empty result when the object had no records of its own — so
+  the Events query was never issued at all. For every object outside a rule's scope,
+  and that is every Pod in the quickstart, `--with-events` reported nothing, and the
+  nothing had never been measured:
+
+  ```console
+  $ kuberecord timeline pod/checkout-7d4f-abcde -n payments --with-events
+  # before: an empty page
+  # after:  the four Events that were in the sink the whole time
+  ```
+
+  An Event names its subject in its own row, so correlation never needed the subject
+  to have been captured (D40). The two halves of a merged timeline are independent
+  queries and neither gates the other now.
+
+  This also makes two shipped features reachable for the first time. Task 17.3's
+  Events-only notice — *"every row here is a Kubernetes Event: nothing was ever
+  watching …, so its own changes were never recorded"* — could not fire against
+  either real backend, and the clause `--with-events` adds to the no-coverage
+  finding rested on the same false premise: that "no coverage" and "no Events"
+  always arrive together. They arrived together because the second was never asked.
+
+  Nothing else moves. A bare `timeline` over such an object still returns nothing,
+  because nobody asked a second question; a timeline pinned to an incarnation still
+  narrows the commentary to the Events naming it; and an object with records of its
+  own reads exactly as before.
+
+  The shared agreement corpus gained an object with Events and no state, and the
+  count of Event rows each question expects is now declared against the corpus
+  rather than merely compared between the two backends — because both backends had
+  this defect, and two backends agreeing about an answer neither measured is the
+  greenest possible way to be wrong.
+
 - **`--with-events` no longer adds a second finding beneath the first.** A
   `timeline` for an object nothing was ever watching printed the exit-`3`
   no-coverage finding and then, at greater length, a notice explaining that no rule

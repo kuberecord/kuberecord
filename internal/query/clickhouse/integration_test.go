@@ -194,6 +194,83 @@ func TestEventCorrelationAcrossBothGroupSpellingsIntegration(t *testing.T) {
 	}
 }
 
+// TestEventsSurviveAMissingIncarnationIntegration is Task 18.6 against the server
+// that shipped the defect.
+//
+// It is integration-tagged rather than left to the stand-in for a reason worth
+// stating even though the stand-in does catch it. The failure was found in the
+// field, against a real table, after passing every suite — because the fakes and
+// the conformance harness answer an Event query without needing an incarnation,
+// which is the contract they were written against and the one thing a fake cannot
+// model about an early return taken before the query is issued (D42). So the claim
+// "the Events of an object nobody watched come back" is made here, where
+// JSONExtractString over involvedObject and the api_group IN (”, 'events.k8s.io')
+// predicate are evaluated by ClickHouse rather than by this package's model of it.
+//
+// The history is four Events and *no state rows at all*: the Pod the quickstart
+// leaves uncovered, named by commentary a rule did capture.
+func TestEventsSurviveAMissingIncarnationIntegration(t *testing.T) {
+	conn := openIntegrationConn(t)
+	if err := seedServer(t, conn, eventsOnlyFixture()); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	engine, err := New(conn)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing the engine: %v", err)
+		}
+	}()
+
+	subject := eventsOnlySubject()
+	from, to := fixtureWindow()
+
+	got := drainTimeline(t, engine, query.TimelineQuery{
+		Ref: subject, From: from, To: to, IncludeEvents: true,
+	})
+	if len(got) != 4 {
+		t.Fatalf("the timeline of an object with Events and no state returned %d change(s), want 4; "+
+			"the newest-incarnation probe finds nothing for such an object, and reading that as "+
+			"\"there is no timeline\" reports an emptiness the server was never asked about", len(got))
+	}
+
+	wantReasons := []string{"Scheduled", "Pulling", "FailedScheduling", "Killing"}
+	for i, change := range got {
+		if change.EventType != query.EventKubernetes {
+			t.Errorf("row %d is stamped %q, want %q: every row of this answer is a Kubernetes Event, "+
+				"and the stamp is the only thing a reader has to tell one from a change to the object "+
+				"itself", i, change.EventType, query.EventKubernetes)
+		}
+		if !strings.Contains(change.Data, wantReasons[i]) {
+			t.Errorf("row %d carries %q, want the Event reason %q — the rows are the Events' own, in "+
+				"ts order", i, change.Data, wantReasons[i])
+		}
+	}
+
+	// Both spellings really were reached, which on this identity is the difference
+	// between two Events and four: the whole answer is commentary.
+	if !strings.Contains(got[0].Data, "involvedObject") {
+		t.Errorf("the first row is %q, want the core-group Event that names its subject in "+
+			"involvedObject", got[0].Data)
+	}
+	if !strings.Contains(got[1].Data, "regarding") {
+		t.Errorf("the second row is %q, want the events.k8s.io Event that names its subject in "+
+			"regarding", got[1].Data)
+	}
+
+	// The half that must not have changed: without the flag there is no second
+	// question, and no rows for the object is the whole of the answer.
+	bare := drainTimeline(t, engine, query.TimelineQuery{Ref: subject, From: from, To: to})
+	if len(bare) != 0 {
+		t.Errorf("a bare timeline over the same object returned %d change(s), want none: nobody asked "+
+			"about Events, and interleaving them unasked would put rows about the object on a page "+
+			"that promised the object's own changes", len(bare))
+	}
+}
+
 // countStates counts the rows of resource_states, with or without FINAL.
 func countStates(t *testing.T, ctx context.Context, conn driver.Conn, final bool) uint64 {
 	t.Helper()

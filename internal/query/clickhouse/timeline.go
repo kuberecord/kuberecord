@@ -41,6 +41,11 @@ import (
 // cannot prove it to yield nothing and leave the distinction to Coverage, which
 // is the call a caller makes precisely when a timeline came back empty
 // (Invariant 9).
+//
+// What the resolution decides is which incarnation the *state* half is about, and
+// nothing more. An object with no state rows still has a timeline when Events were
+// asked for, because the two halves are independent queries (D40) — see
+// eventsWithoutState, which is the path this used to return an empty iterator on.
 func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.ChangeIterator, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
@@ -51,7 +56,7 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 		return nil, err
 	}
 	if uid == noIncarnation {
-		return emptyIterator{}, nil
+		return e.eventsWithoutState(ctx, q)
 	}
 
 	// A limit may only be pushed into SQL when nothing is left to apply
@@ -88,6 +93,68 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 	return it, nil
 }
 
+// eventsWithoutState answers a timeline for an object whose own changes were never
+// recorded.
+//
+// # No state rows is not no timeline
+//
+// An Event names its subject in its own row: the correlation reads involvedObject
+// out of the Event's data and never consults the subject's rows at all. So the two
+// halves of a merged timeline are independent queries, and the object half coming
+// back empty says nothing whatever about the other one (D40). Returning an empty
+// iterator here reported an answer that had never been measured.
+//
+// The case is not exotic — it is the quickstart's. A rule capturing Events,
+// Deployments and ConfigMaps leaves every Pod in the namespace with Events and no
+// history of its own, and a Pod is the first thing an engineer types after the
+// Deployment they came for.
+//
+// # Why no suite objected
+//
+// Both this backend's stand-in connection and the command-line client's fake engine
+// answer an Event query without requiring an incarnation, because that is the
+// contract they were written against — and an early return taken *before* the query
+// is issued is precisely what a fake does not model (D42). The shared agreement
+// corpus now holds an object with Events and no state, which is where the two live
+// engines are made to agree about it.
+//
+// # The uid, and the limit
+//
+// The uid handed to mergeEvents is the empty string, which eventsStatement reads as
+// "no uid predicate" and leaves matching on the forgiving (kind, namespace, name)
+// key. That is the right key and the only available one: an object with no
+// incarnation has no incarnation to pin. A caller who pinned one never arrives here
+// — resolveIncarnation hands a pinned UID straight back — so the narrowing a pinned
+// timeline gets is unchanged.
+//
+// The limit is applied over the stream rather than pushed down, for the same reason
+// the merged path applies it there: eventsStatement renders no LIMIT, and it should
+// not learn one to serve this. The statement was already right for this question;
+// what was missing was the call.
+func (e *Engine) eventsWithoutState(
+	ctx context.Context, q query.TimelineQuery,
+) (query.ChangeIterator, error) {
+	if !q.IncludeEvents {
+		// Nobody asked about Events, so there is genuinely nothing to read: no rows
+		// for the object, and no second question to answer. That is an empty result
+		// and not a statement that nothing happened (Invariant 9).
+		return emptyIterator{}, nil
+	}
+
+	// An exhausted changes side rather than a bespoke events-only iterator: the merge
+	// carries the EventKubernetes stamp, the emission order, the failure wrapping and
+	// the Close discipline, and a second path holding copies of those four is a second
+	// path for one of them to be got wrong in.
+	it, err := e.mergeEvents(ctx, q, "", emptyIterator{})
+	if err != nil {
+		return nil, err
+	}
+	if q.Limit > 0 {
+		it = &limitIterator{inner: it, limit: q.Limit}
+	}
+	return it, nil
+}
+
 // noIncarnation is what resolveIncarnation returns when the window holds no rows
 // for the object at all. It is spelled as a constant because the empty string
 // also means "every incarnation" one line away, and two opposite meanings for one
@@ -100,6 +167,12 @@ const noIncarnation = "\x00none"
 // the contract says so, and a backend honouring both would answer a question
 // nobody asked. AllIncarnations yields the empty string, which the statement
 // builder reads as "no uid predicate".
+//
+// Its result no longer decides whether the timeline is empty. noIncarnation says
+// the window holds no rows for the object *itself*, which settles which incarnation
+// the state half is about — there is none — and settles nothing at all about the
+// Events naming it, since those are found by a query this one is not an input to
+// (D40). See eventsWithoutState.
 func (e *Engine) resolveIncarnation(ctx context.Context, q query.TimelineQuery) (string, error) {
 	if q.UID != "" {
 		return q.UID, nil
