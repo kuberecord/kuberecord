@@ -742,6 +742,112 @@ func TestTimelineExplainsAnEmptyWithEventsResult(t *testing.T) {
 	}
 }
 
+// TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAll is Task 18.5's
+// fourth item, and the case field testing found.
+//
+// A Pod no rule ever covered, queried with --with-events, produced two findings:
+// the no-coverage error, and beneath it a longer notice explaining that no rule
+// streams Events and printing the three lines of YAML that would add one. Both
+// were true. Together they read as two problems, and the second one's fix is a
+// fix for a problem the reader does not have yet — a rule capturing Events would
+// still record nothing about an object no rule covers.
+//
+// So one explanation, which absorbs the point, and the notice is not printed. The
+// two assertions below are the halves of that: the golden holds one paragraph
+// rather than two, and no second coverage question is asked at all — the
+// suppression is a round trip saved rather than an answer discarded.
+func TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAll(t *testing.T) {
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("rendering"+mode, func(t *testing.T) {
+			engine := &fakeEngine{caps: clickHouseCapabilities()}
+
+			stdout, stderr, err := runTimeline(t, engine, withEventsRequest(),
+				render.Options{Color: color})
+			if err == nil {
+				t.Fatal("an object no scope ever covered was reported as an empty result")
+			}
+			if !errors.Is(err, query.ErrNoCoverage) {
+				t.Errorf("the failure does not carry query.ErrNoCoverage: %v", err)
+			}
+			// The flag is accounted for inside the finding rather than left to look
+			// like a flag that was ignored (D31), and it is accounted for once.
+			if !strings.Contains(err.Error(), "no Kubernetes Event about it was recorded either") {
+				t.Errorf("the finding does not absorb --with-events: %v", err)
+			}
+			if strings.Contains(stderr, "--with-events found no Events") {
+				t.Errorf("the Events notice was printed beneath the finding:\n%s", stderr)
+			}
+			assertGolden(t, "with-events-without-coverage"+mode, stdout,
+				stderr+"error: "+err.Error()+"\n")
+
+			// One coverage question, the object's own. A second would mean the
+			// notice was built and then thrown away.
+			for _, q := range engine.scopeQueries {
+				if q.Kind == eventKindName {
+					t.Errorf("the Event scope was consulted for a notice that is not printed: %+v", q)
+				}
+			}
+		})
+	}
+}
+
+// TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured is the
+// same suppression on the second sequence.
+//
+// The structured path builds these notices in a different order from the tabular
+// one, because every query it makes has to be issued before the cold-scan context
+// is cancelled — so the Event question is asked earlier there, and a gate written
+// only into the tabular sequence would have left `-o json` printing both findings.
+// See timelinestream.go, and the two tests above it that exist for the same reason.
+func TestTimelineWithEventsSaysNothingWhenNothingWasWatchingAtAllStructured(t *testing.T) {
+	engine := &fakeEngine{caps: clickHouseCapabilities()}
+
+	request := withEventsRequest()
+	request.Structured = render.StructuredJSON
+
+	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
+	if err == nil {
+		t.Fatal("an object no scope ever covered was reported as an empty result")
+	}
+	if !errors.Is(err, query.ErrNoCoverage) {
+		t.Errorf("the failure does not carry query.ErrNoCoverage: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no Kubernetes Event about it was recorded either") {
+		t.Errorf("the finding does not absorb --with-events: %v", err)
+	}
+	if strings.Contains(stderr, "--with-events found no Events") {
+		t.Errorf("the Events notice was printed beneath the finding:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "--with-events") {
+		t.Errorf("a notice was written to stdout, which corrupts the document:\n%s", stdout)
+	}
+	for _, q := range engine.scopeQueries {
+		if q.Kind == eventKindName {
+			t.Errorf("the Event scope was consulted for a notice that is not printed: %+v", q)
+		}
+	}
+}
+
+// TestTimelineWithEventsStillExplainsItselfWhenTheObjectWasWatched is the other
+// half of the gate.
+//
+// Suppressing on the raw scope log rather than on the finding would have silenced
+// this case too, and it is the one the quickstart walks into: the Deployment is
+// watched, its history is there, and --with-events interleaved nothing because no
+// rule streams Events. The notice is the whole answer to that, and the golden it
+// is pinned by is the one this task must not have changed.
+func TestTimelineWithEventsStillExplainsItselfWhenTheObjectWasWatched(t *testing.T) {
+	engine := withEventsEngine(deploymentScope())
+
+	_, stderr, err := runTimeline(t, engine, withEventsRequest(), render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	if !strings.Contains(stderr, "--with-events found no Events") {
+		t.Errorf("a watched object with no Events got no explanation of the flag:\n%s", stderr)
+	}
+}
+
 // TestTimelineAsksAboutEventsInTheObjectsNamespace pins the question, which no
 // rendering can carry.
 //
@@ -1186,20 +1292,39 @@ func TestTimelineWarnsWhenTheObjectWasNotObservedEarlier(t *testing.T) {
 // Every other tool in this space renders this as a successful empty result. That
 // collapse is what sends an engineer away believing an object sat untouched when
 // in truth nobody was recording it.
+//
+// Both colour modes, because this is the document Task 18.5's third item is
+// about: the header's coverage value and the `error:` beneath it carry the same
+// finding, and they were rendered at different weights — the fact at the weight
+// of a cluster name, the explanation of it in a tier of its own. The coloured
+// golden is where that tier is visible; the plain one is where the characters are
+// pinned, and the pair is what shows that only escapes separate them.
+//
+// The `error:` line is appended by this harness in plain text rather than through
+// the exit path that paints it. What tier a failure carries is
+// errorseverity_internal_test.go's property; what these files are for is the
+// document above it.
 func TestTimelineExitsThreeWhenNothingWasWatching(t *testing.T) {
-	engine := &fakeEngine{caps: clickHouseCapabilities()}
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("rendering"+mode, func(t *testing.T) {
+			engine := &fakeEngine{caps: clickHouseCapabilities()}
 
-	stdout, stderr, err := runTimeline(t, engine, defaultRequest(), render.Options{})
-	if err == nil {
-		t.Fatal("RunTimeline succeeded; an object no scope ever covered is a finding, not an empty result")
+			stdout, stderr, err := runTimeline(t, engine, defaultRequest(),
+				render.Options{Color: color})
+			if err == nil {
+				t.Fatal("RunTimeline succeeded; an object no scope ever covered is a finding, " +
+					"not an empty result")
+			}
+			if !errors.Is(err, query.ErrNoCoverage) {
+				t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to "+
+					"an exit code: %v", err)
+			}
+			if code := exit.CodeFor(err); code != exit.NoCoverage {
+				t.Errorf("exit.CodeFor = %d, want %d", code, exit.NoCoverage)
+			}
+			assertGolden(t, "empty-without-coverage"+mode, stdout, stderr+"error: "+err.Error()+"\n")
+		})
 	}
-	if !errors.Is(err, query.ErrNoCoverage) {
-		t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to an exit code: %v", err)
-	}
-	if code := exit.CodeFor(err); code != exit.NoCoverage {
-		t.Errorf("exit.CodeFor = %d, want %d", code, exit.NoCoverage)
-	}
-	assertGolden(t, "empty-without-coverage", stdout, stderr+"error: "+err.Error()+"\n")
 }
 
 // TestTimelineNoticesABackendThatCannotRecordDeletions is the capability notice.

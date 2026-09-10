@@ -651,14 +651,15 @@ func RunTimeline(
 	}
 
 	document := render.TimelineDocument{
-		Kind:         describeKind(request.Ref),
-		Object:       describeObject(request.Ref),
-		Cluster:      request.Ref.ClusterID,
-		UID:          gathered.UID,
-		Incarnations: gathered.Incarnations,
-		Coverage:     gathered.Coverage.Summary(),
-		Rows:         gathered.Rows,
-		Notices:      gathered.Notices,
+		Kind:           describeKind(request.Ref),
+		Object:         describeObject(request.Ref),
+		Cluster:        request.Ref.ClusterID,
+		UID:            gathered.UID,
+		Incarnations:   gathered.Incarnations,
+		Coverage:       gathered.Coverage.Summary(),
+		CoverageAbsent: gathered.Coverage.Absent(),
+		Rows:           gathered.Rows,
+		Notices:        gathered.Notices,
 	}
 	if writeErr := render.WriteTimeline(streams.Out, streams.ErrOut, document, opts); writeErr != nil {
 		return exit.RuntimeErrorf("%w", writeErr)

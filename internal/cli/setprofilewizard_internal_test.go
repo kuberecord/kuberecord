@@ -72,6 +72,18 @@ func wizardHome(t *testing.T) string {
 // for.
 func scriptedWizard(t *testing.T, answers ...string) (*setProfileWizard, *strings.Builder) {
 	t.Helper()
+	return colouredWizard(t, false, answers...)
+}
+
+// colouredWizard is scriptedWizard with the colour decision made explicitly.
+//
+// The two share one body so that a coloured transcript and a plain one differ in
+// nothing but that decision — the property the golden pair exists to show, and one
+// a second constructor would quietly stop guaranteeing.
+func colouredWizard(
+	t *testing.T, colorize bool, answers ...string,
+) (*setProfileWizard, *strings.Builder) {
+	t.Helper()
 
 	// No trailing newline for an empty script, so that "answer nothing" is an
 	// immediate EOF rather than one blank line — which would be answered with the
@@ -86,7 +98,8 @@ func scriptedWizard(t *testing.T, answers ...string) (*setProfileWizard, *string
 	return &setProfileWizard{
 		streams:   genericiooptions.IOStreams{In: in, Out: &out, ErrOut: &errOut},
 		in:        bufio.NewReader(in),
-		severity:  render.NewSeverity(false),
+		severity:  render.NewSeverity(colorize),
+		colorize:  colorize,
 		invokedAs: options.StandaloneName,
 		newResolver: func() (*resolve.BackendResolver, error) {
 			t.Errorf("the wizard built a resolver for a run that declined discovery")
@@ -1096,6 +1109,97 @@ The archive's key prefix within the bucket or directory, with no leading or trai
 The same thing without the questions:
   kuberecord config set-profile laptop --backend local --path /archives/kuberecord --prefix kuberecord --use
 `
+
+// wizardGoldens is the testdata subdirectory the discovery branch's transcripts
+// live in.
+//
+// The same directory the flag path's confirmations use, because they are two
+// routes to one write and a reviewer changing the order of its lines should see
+// every file that pins the order in one diff.
+const wizardGoldens = "config-profile"
+
+// TestTheWizardSaysWhatItWroteBeforeSayingThatItWrote is Task 18.5's first item,
+// and the whole of it is the sequence.
+//
+// Field use produced this:
+//
+//	> [127.0.0.1:9000]
+//	→ wrote profile "test-2" in …/config.yaml
+//	ClickHouseSink/default records …svc:9000.
+//	…
+//	→ to make it the active profile: …
+//	The same thing without the questions: …
+//
+// The first `→` is the one line in that block that looks like an ending, and
+// everything a reader still has to do was underneath it: the port-forward the
+// profile now expects, and which principal's password the variable it names has to
+// hold. A reader who stopped there had been told the write succeeded and nothing
+// about what would make it work.
+//
+// So the order is explanation, then the confirmation, then where the active
+// pointer stands, then the equivalent command — and this file is the assertion,
+// because the ordering is the deliverable rather than a wording preference. The
+// positional check beside it is what says which property the golden carries: a
+// reordering that a future edit made would otherwise be a golden diff a reviewer
+// could accept without noticing what it meant.
+//
+// Both colour modes, and the plain file is where the sequence is legible. The
+// coloured one is what pins that the port-forward line is still the block's one
+// emphasised line and that nothing in the reordering spent a tier.
+func TestTheWizardSaysWhatItWroteBeforeSayingThatItWrote(t *testing.T) {
+	for mode, colorize := range map[string]bool{"": false, "-color": true} {
+		t.Run("transcript"+mode, func(t *testing.T) {
+			resolver, _, path := fromSinkFixture(t)
+			// A profile already answers, so activation is a decision to be asked
+			// about and "no" is an answer that stands. Written into an empty file
+			// this profile would be activated regardless (D38's carve-out) and the
+			// `use-profile` line — one of the four steps whose order is under test —
+			// would correctly never be printed.
+			seedActiveProfile(t, path)
+
+			// y — read the settings from a sink; 1 — the ClickHouseSink; then the
+			// offered address, the offered user, the environment and the offered
+			// variable name, all by pressing return; and n, do not activate it,
+			// which is the answer that leaves the `use-profile` line to be printed.
+			wizard, errOut := colouredWizard(t, colorize, "y", "1", "", "", "", "", "n")
+			wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+			if err := wizard.run(t.Context(), "local"); err != nil {
+				t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+			}
+
+			got := strings.ReplaceAll(errOut.String(), path, "<config>")
+			assertInternalGolden(t, wizardGoldens, "wizard-from-sink"+mode, got)
+
+			// The property, stated as positions rather than left to the file: the
+			// explanation of what was written precedes the confirmation that it was,
+			// and the confirmation is the last thing said about the write.
+			plain := sgrSequence.ReplaceAllString(got, "")
+			explanation := strings.Index(plain, internalAddr+".")
+			confirmation := strings.Index(plain, `→ wrote profile "local"`)
+			nextStep := strings.Index(plain, "→ to make it the active profile")
+			equivalent := strings.Index(plain, "The same thing without the questions")
+			for _, step := range []struct {
+				name string
+				at   int
+			}{
+				{"the explanation", explanation},
+				{"the write confirmation", confirmation},
+				{"the activation route", nextStep},
+				{"the equivalent command", equivalent},
+			} {
+				if step.at < 0 {
+					t.Fatalf("%s is not in the transcript:\n%s", step.name, plain)
+				}
+			}
+			if explanation >= confirmation || confirmation >= nextStep || nextStep >= equivalent {
+				t.Errorf("the transcript reads out of order (explanation %d, confirmation %d, "+
+					"activation %d, equivalent %d):\n%s",
+					explanation, confirmation, nextStep, equivalent, plain)
+			}
+		})
+	}
+}
 
 // The read-only engineer's path, which is the shape most people who need a
 // profile actually have (D7): a kubeconfig that can list custom resources and not

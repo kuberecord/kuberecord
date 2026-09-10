@@ -71,6 +71,12 @@ const UnknownActor = "unknown"
 // only matches in one.
 const incarnationsLabel = "Incarnations"
 
+// coverageLabel is the header row whose *value* changes weight, which is why it
+// is a constant for the reason incarnationsLabel is one: renderHeader branches on
+// it in order to decide the tier, and a label matched by literal in two places is
+// a label that eventually only matches in one.
+const coverageLabel = "Coverage"
+
 // uidPrefixLength is how much of a UID a narrow table shows.
 //
 // Eight hexadecimal characters distinguish the two or three incarnations a
@@ -161,6 +167,9 @@ type TimelineDocument struct {
 	Incarnations []string
 	// Coverage is the pre-rendered coverage summary for the header.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was watching.
+	// See documentHeader.CoverageAbsent.
+	CoverageAbsent bool
 	// Rows are the changes, in the order they are to be displayed.
 	Rows []TimelineRow
 	// Notices are written to standard error, in order.
@@ -181,12 +190,13 @@ func (d TimelineDocument) showUID(opts Options) bool {
 // eventually disagree about whether coverage was stated.
 func (d TimelineDocument) header() documentHeader {
 	return documentHeader{
-		Kind:         d.Kind,
-		Object:       d.Object,
-		Cluster:      d.Cluster,
-		UID:          d.UID,
-		Incarnations: d.Incarnations,
-		Coverage:     d.Coverage,
+		Kind:           d.Kind,
+		Object:         d.Object,
+		Cluster:        d.Cluster,
+		UID:            d.UID,
+		Incarnations:   d.Incarnations,
+		Coverage:       d.Coverage,
+		CoverageAbsent: d.CoverageAbsent,
 	}
 }
 
@@ -221,6 +231,20 @@ type documentHeader struct {
 	Base string
 	// Coverage is the pre-rendered coverage summary.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was ever
+	// watching this scope, which is what puts the value in the Warning tier.
+	//
+	// A flag rather than a comparison against the sentence, because the sentence
+	// is written by the command that consulted the scope log and this package
+	// cannot read a claim out of prose. It is the same division every other field
+	// here follows: the command decides, the renderer renders.
+	//
+	// It is deliberately not set for a backend that has no scope log. That state
+	// is a permanent property of an archive tier (D12) rather than a finding about
+	// this object, and a tier spent on every invocation against one is a tier
+	// spent on nothing — the header says `not reported by this backend` at full
+	// weight and the notice on stderr carries the consequence.
+	CoverageAbsent bool
 }
 
 // WriteTimeline writes the document to out and its notices to errOut.
@@ -355,10 +379,11 @@ func renderNotices(notices []Notice, opts Options) string {
 // a fact only the layout knows — the column's width is whatever the other columns
 // left over — and which the footer on the other stream is built from.
 func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
-	p := palette{enabled: opts.Color}
+	severity := NewSeverity(opts.Color)
+	p := severity.palette
 
 	var built strings.Builder
-	built.WriteString(renderHeader(doc.header(), p))
+	built.WriteString(renderHeader(doc.header(), severity))
 	if len(doc.Rows) == 0 {
 		// No table, not an empty one. Why the result is empty is on stderr, where
 		// every other qualification of the document is; a header row with nothing
@@ -374,7 +399,16 @@ func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
 // renderHeader renders the five facts a reader needs before the first row means
 // anything: which kind, which object, which cluster, which incarnation, and
 // whether anything was watching.
-func renderHeader(doc documentHeader, p palette) string {
+//
+// It takes a Severity rather than a palette because the last of those five is not
+// always a fact of the same weight as the other four. `Coverage: none recorded for
+// this scope` is the whole of Invariant 9's finding, restated at length by an
+// `error:` two lines below it, and rendering it at the weight of a cluster name
+// left the header and the error disagreeing about how much it mattered — so the
+// value goes into the Warning tier when there was no coverage at all (D30, Task
+// 18.5). The labels stay in the provenance tier they were always in, which is what
+// keeps the amber on the fact rather than on the word in front of it.
+func renderHeader(doc documentHeader, severity Severity) string {
 	type field struct{ label, value string }
 
 	fields := []field{
@@ -397,7 +431,7 @@ func renderHeader(doc documentHeader, p palette) string {
 	if doc.Base != "" {
 		fields = append(fields, field{"Base", doc.Base})
 	}
-	fields = append(fields, field{"Coverage", doc.Coverage})
+	fields = append(fields, field{coverageLabel, doc.Coverage})
 
 	labelWidth := 0
 	for _, f := range fields {
@@ -408,12 +442,21 @@ func renderHeader(doc documentHeader, p palette) string {
 	for _, f := range fields {
 		// The label is painted and *then* padded, so the escape sequences never
 		// enter the width arithmetic that lines the values up.
-		label := p.dim(f.label+":") + strings.Repeat(" ", labelWidth-displayWidth(f.label)) + " "
+		label := severity.dim(f.label+":") + strings.Repeat(" ", labelWidth-displayWidth(f.label)) + " "
 		if f.label == incarnationsLabel {
 			built.WriteString(label + renderIncarnations(doc, labelWidth+2))
 			continue
 		}
-		built.WriteString(label + f.value + "\n")
+		value := f.value
+		// No marker in front of it, unlike a notice: this is a labelled field in a
+		// block of labelled fields, and a `!` here would add a character that the
+		// uncoloured rendering has to carry too — which is the one thing the tiers
+		// may not do to a line (TestColourIsNothingButColour). The label already
+		// says what the value is about; what the tier adds is how much it matters.
+		if f.label == coverageLabel && doc.CoverageAbsent {
+			value = severity.Warning(value)
+		}
+		built.WriteString(label + value + "\n")
 	}
 	return built.String()
 }

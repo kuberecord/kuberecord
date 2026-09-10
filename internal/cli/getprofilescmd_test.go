@@ -55,9 +55,15 @@ const exportedPasswordEnv = "KUBERECORD_TEST_EXPORTED_PASSWORD"
 // t.TempDir() and are asserted without a golden for that reason.
 const missingPasswordFile = "/etc/kuberecord/password"
 
-// profileListingConfig is the fixture: five profiles, one per credential state
+// profileListingConfig is the fixture: six profiles, one per credential state
 // that can be pinned in a golden, with the active one in the middle of the sorted
 // order so that the `*` is visibly not just the first row.
+//
+// `writer` is the sixth and it is there for Task 18.5's property: it differs from
+// `local` in nothing but the ClickHouse user, down to naming the same password
+// variable, so the two rows are identical in every column except TARGET. A
+// listing that could not tell them apart is the finding, and this is the pair a
+// golden shows it on.
 const profileListingConfig = `apiVersion: cli.kuberecord.io/v1alpha1
 kind: Config
 currentProfile: local
@@ -68,6 +74,13 @@ profiles:
       addr: 127.0.0.1:9000
       database: kuberecord
       username: kuberecord_ro
+      passwordEnv: KUBERECORD_CLICKHOUSE_PASSWORD
+  writer:
+    backend: clickhouse
+    clickhouse:
+      addr: 127.0.0.1:9000
+      database: kuberecord
+      username: kuberecord
       passwordEnv: KUBERECORD_CLICKHOUSE_PASSWORD
   prod:
     backend: clickhouse
@@ -138,7 +151,7 @@ func TestGetProfilesListsWhichProfilesThereAreAndWhichCouldAuthenticate(t *testi
 	// else. `*` follows `kubectl config get-contexts` so that the output is
 	// legible without instruction, and a second marker would make it meaningless.
 	rows := tableRows(t, stdout)
-	if len(rows) != 5 {
+	if len(rows) != 6 {
 		t.Fatalf("the table has %d rows, want one per profile:\n%s", len(rows), stdout)
 	}
 	marked := make([]string, 0, 1)
@@ -165,11 +178,43 @@ func TestGetProfilesListsWhichProfilesThereAreAndWhichCouldAuthenticate(t *testi
 		}
 	}
 
+	// And Task 18.5's property, on the pair the fixture holds for it: `local` and
+	// `writer` read the same database at the same address through the same password
+	// variable, so before the principal joined the locator they were two rows a
+	// reader could not tell apart. Asserted as the two cells being different
+	// strings rather than as the spelling, which the golden pins.
+	local, writer := profileRow(t, rows, profileLocal), profileRow(t, rows, "writer")
+	if local == writer {
+		t.Errorf("two profiles differing only by user render identically:\n%s", stdout)
+	}
+
 	// The file this is a listing of, on the other stream, so that
 	// `get-profiles -o json | jq` receives the document alone.
 	if !strings.Contains(stderr, path) {
 		t.Errorf("stderr does not name the file the listing came from: %s", stderr)
 	}
+}
+
+// profileRow returns the row for a profile, with the NAME cell taken out.
+//
+// The name is removed because it is the one column these two rows are *meant* to
+// differ in: comparing whole rows would pass however the rest of them rendered,
+// which is the opposite of the property being asserted.
+func profileRow(t *testing.T, rows []string, name string) string {
+	t.Helper()
+
+	for _, row := range rows {
+		fields := strings.Fields(row)
+		if len(fields) > 0 && fields[0] == name {
+			return strings.Join(fields[1:], " ")
+		}
+		// The active row carries the marker ahead of the name.
+		if len(fields) > 1 && fields[0] == "*" && fields[1] == name {
+			return strings.Join(fields[2:], " ")
+		}
+	}
+	t.Fatalf("the table has no row for profile %q:\n%s", name, strings.Join(rows, "\n"))
+	return ""
 }
 
 // TestGetProfilesReportsAFilePresentAndUnreadableAsDifferentStates.
@@ -288,7 +333,7 @@ func TestGetProfilesRendersTheVersionedDocument(t *testing.T) {
 	for _, entry := range document.Profiles {
 		names = append(names, entry.Name)
 	}
-	if want := []string{"archive", "local", "nopass", "onfile", "prod"}; strings.Join(names, ",") !=
+	if want := []string{"archive", "local", "nopass", "onfile", "prod", "writer"}; strings.Join(names, ",") !=
 		strings.Join(want, ",") {
 		t.Errorf("the document lists %v, want %v sorted", names, want)
 	}
@@ -305,25 +350,37 @@ func TestGetProfilesRendersTheVersionedDocument(t *testing.T) {
 		credential profileListingCredential
 	}{
 		{
-			name: "local", current: true, backend: "clickhouse", target: "127.0.0.1:9000/kuberecord",
+			name: "local", current: true, backend: "clickhouse",
+			target: "kuberecord_ro@127.0.0.1:9000/kuberecord",
 			credential: profileListingCredential{
 				Source: "env", Reference: clickHousePasswordEnv, State: "not set",
 			},
 		},
 		{
-			name: "prod", backend: "clickhouse", target: "ch.observability:9000/audit",
+			// Identical to `local` in every field but this one, which is the whole
+			// of what the principal in the target is here to distinguish.
+			name: "writer", backend: "clickhouse",
+			target: "kuberecord@127.0.0.1:9000/kuberecord",
+			credential: profileListingCredential{
+				Source: "env", Reference: clickHousePasswordEnv, State: "not set",
+			},
+		},
+		{
+			name: "prod", backend: "clickhouse", target: "kuberecord_ro@ch.observability:9000/audit",
 			credential: profileListingCredential{
 				Source: "env", Reference: exportedPasswordEnv, State: "set",
 			},
 		},
 		{
-			name: "onfile", backend: "clickhouse", target: "10.0.1.5:9000/kuberecord",
+			// No user in the stanza, so the target names the one the driver would
+			// authenticate as rather than leaving the cell to start with an `@`.
+			name: "onfile", backend: "clickhouse", target: "default@10.0.1.5:9000/kuberecord",
 			credential: profileListingCredential{
 				Source: "file", Reference: missingPasswordFile, State: "missing",
 			},
 		},
 		{
-			name: "nopass", backend: "clickhouse", target: "127.0.0.1:9000/kuberecord",
+			name: "nopass", backend: "clickhouse", target: "default@127.0.0.1:9000/kuberecord",
 			credential: profileListingCredential{Source: "none", State: "not checked"},
 		},
 		{

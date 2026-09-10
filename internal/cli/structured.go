@@ -80,6 +80,20 @@ type coverageAnswer struct {
 // Summary renders the answer as the sentence every document's header carries.
 func (a coverageAnswer) Summary() string { return coverageSummary(a.Intervals, a.Gap) }
 
+// Absent reports that nothing was ever watching the scope this answer is about.
+//
+// It is the one reading of a coverage answer a renderer needs and cannot get from
+// Summary, which is prose by the time it reaches one: it decides whether the
+// header's coverage line carries the Warning tier (render.documentHeader's
+// CoverageAbsent, Task 18.5). Deriving it here rather than comparing against the
+// sentence is what keeps the tier and the words from being able to disagree.
+//
+// A backend with no scope log is deliberately *not* absent. It has said nothing
+// either way, which is a different claim from "nothing was watching" and is the
+// exact confusion Invariant 9 exists to prevent — the Gap clause is what keeps the
+// two apart, here as in explainNoChanges.
+func (a coverageAnswer) Absent() bool { return a.Gap == nil && len(a.Intervals) == 0 }
+
 // Report renders the answer as the machine-readable half of Invariant 9.
 //
 // The summary is the identical sentence the human-readable header carries, so

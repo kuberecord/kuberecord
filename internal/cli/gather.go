@@ -211,8 +211,26 @@ func gatherChanges(
 	// sub-question --with-events asked inside the main one, and a reader works
 	// outwards. It is still inside the cold-scan guard, which is where any query
 	// that may walk partitions belongs.
-	result.Notices = appendNotice(result.Notices,
-		eventsNotice(ctx, backend, request, from, to, shape.events))
+	//
+	// Withheld when the explanation above turned out to be the no-coverage finding,
+	// which is Task 18.5's fourth item. Nothing was ever watching this object, so a
+	// second notice saying that no Events about it were recorded either is the same
+	// absence reported twice — and the more detailed of the two, since it arrives
+	// with three lines of YAML for a rule that would still record nothing about an
+	// object no rule covers. uncoveredNoChanges absorbs the point instead, in one
+	// sentence, so the reader is left with one finding and one fix rather than two
+	// findings for one cause.
+	//
+	// The gate is result.Empty rather than the coverage answer itself, and the
+	// difference is D31. An emptiness a predicate produced is explained by
+	// predicateNotice and never reaches explainNoChanges, so gating on the raw scope
+	// log would silence --with-events with nothing left to account for it — a flag
+	// that produced no visible effect and did not say why. It also spares the extra
+	// round trip on the one path that has nothing to learn from it.
+	if result.Empty == nil {
+		result.Notices = appendNotice(result.Notices,
+			eventsNotice(ctx, backend, request, from, to, shape.events))
+	}
 	return result, nil
 }
 

@@ -110,6 +110,9 @@ type DiffDocument struct {
 	UID string
 	// Coverage is the pre-rendered coverage summary for the header.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was watching.
+	// See documentHeader.CoverageAbsent.
+	CoverageAbsent bool
 	// Changes are the recorded changes, in the order they are to be displayed.
 	Changes []TimelineRow
 	// Notices are written to standard error, in order.
@@ -120,6 +123,7 @@ type DiffDocument struct {
 func (d DiffDocument) header() documentHeader {
 	return documentHeader{
 		Kind: d.Kind, Object: d.Object, Cluster: d.Cluster, UID: d.UID, Coverage: d.Coverage,
+		CoverageAbsent: d.CoverageAbsent,
 	}
 }
 
@@ -145,10 +149,11 @@ func WriteDiff(out, errOut io.Writer, doc DiffDocument, opts Options) error {
 
 // renderDiff builds the stdout half: the header, then one block per change.
 func renderDiff(doc DiffDocument, opts Options) string {
-	p := palette{enabled: opts.Color}
+	severity := NewSeverity(opts.Color)
+	p := severity.palette
 
 	var built strings.Builder
-	built.WriteString(renderHeader(doc.header(), p))
+	built.WriteString(renderHeader(doc.header(), severity))
 	for _, change := range doc.Changes {
 		// A blank line before each block rather than after, so the document never
 		// ends in trailing whitespace and every block is separated from whatever

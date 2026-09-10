@@ -258,6 +258,7 @@ func RunGet(
 		PatchesApplied: reconstruction.PatchesApplied,
 		SHA256:         reconstruction.SHA256,
 		Coverage:       coverage.Summary(),
+		CoverageAbsent: coverage.Absent(),
 		State:          reconstruction.Object,
 	}
 

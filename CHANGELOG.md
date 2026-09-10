@@ -248,6 +248,61 @@ than a summary of them.
 
 ### Changed
 
+- **`config set-profile` explains what it wrote before confirming that it wrote
+  it.** The `→` line is the one thing in that block that looks like an ending, and
+  everything a reader still had to do was underneath it — the `kubectl port-forward`
+  the profile now expects, and whose password the variable it names has to hold. A
+  reader who stopped at the first `→` had been told the write succeeded and nothing
+  about what would make it work.
+
+  The order is now the explanation, then the confirmation, then where the active
+  pointer stands, then the equivalent command: outwards from the profile to what to
+  do next, with the confirmation the last thing said *about the write* rather than
+  the first.
+
+  ```console
+  $ kuberecord config set-profile local --from-sink ClickHouseSink/default
+  ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+  That name resolves inside the cluster and nowhere else, so the profile records
+  127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+      kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+  …
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile (it is the only one)
+  ```
+
+  The questions end the same way, with the equivalent flag command last. Nothing is
+  added or removed; only the order changed.
+
+- **`config get-profiles` names the ClickHouse user in `TARGET`**, in the spelling
+  a connection string uses: `kuberecord_ro@127.0.0.1:9000/kuberecord`, with the
+  defaults a query would apply — `kuberecord` for an unnamed database, `default` for
+  an unnamed user. Now that the questions ask which user a profile reads as, two
+  profiles can differ in nothing but the principal, and `CREDENTIAL` cannot tell
+  them apart: it reports *where* a password comes from, not whose. Four rows reading
+  `env KUBERECORD_CLICKHOUSE_PASSWORD (not set)` were four rows a reader could not
+  distinguish.
+
+  `-o json`'s `profiles[].target` carries the same string, because it is the same
+  locator reached two ways. No field was added, renamed or removed. `s3` and `local`
+  targets are unchanged — they have no principal.
+
+- **The header's `Coverage` value is rendered as a notice when nothing was
+  watching.** `Coverage: none recorded for this scope` is the whole of the exit-`3`
+  no-coverage finding in one line, and the `error:` two lines below it says the same
+  thing at length — so the two disagreed about how much it mattered, with the fact
+  rendered at the weight of a cluster name. It now carries the same amber the
+  explanation does, on `timeline`, `diff`, `blame` and `get`, so a reader who stops
+  at the header learns what the error would have told them.
+
+  Coverage that is *present* is unchanged, and so is `not reported by this backend`:
+  that is a permanent property of an archive tier rather than a finding about the
+  object asked about, and it has a notice of its own. Every label in the header
+  stays dim. With colour off — `--color=never`, `NO_COLOR`, a redirected stream —
+  every one of these documents is byte for byte what it was.
+
 - **Activation says what it did, and the one write that activates by itself says
   why.** A profile written into an otherwise empty file has always become the
   active one; the line reporting it now gives the reason, in the same dim
@@ -461,6 +516,30 @@ than a summary of them.
   counting changes.
 
 ### Fixed
+
+- **`--with-events` no longer adds a second finding beneath the first.** A
+  `timeline` for an object nothing was ever watching printed the exit-`3`
+  no-coverage finding and then, at greater length, a notice explaining that no rule
+  streams Events — with the three lines of YAML that would add one. Both were true,
+  and together they read as two problems: a rule capturing `Event` would still
+  record nothing about an object no rule covers, so the fix in the longer of them
+  was the fix for a problem the reader does not have yet.
+
+  The finding now accounts for the flag itself, in one clause, and the notice is not
+  printed:
+
+  ```
+  error: no watch coverage recorded for the requested scope: nothing was ever
+  watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+  not evidence that it did not change — and no Kubernetes Event about it was
+  recorded either, which is the same absence rather than a second one to fix; the
+  `scopes` command lists what is being recorded
+  ```
+
+  Nothing else changes. A watched object with no Events still gets the notice and
+  the YAML, which is the state a fresh quickstart used to produce; the clause appears
+  only under `--with-events`, so a bare `timeline` reads exactly as before; and the
+  suppressed case no longer pays for the second coverage query at all.
 
 - **`config set-profile` no longer prints credential advice that cannot be
   followed.** A profile derived from a `ClickHouseSink` records that sink's own

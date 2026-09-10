@@ -1,0 +1,48 @@
+
+Writing a profile: where this command reads recorded history from.
+A profile never holds a password — it names an environment variable or a file.
+Ctrl-D at any question stops, and writes nothing.
+
+Read the settings from a sink custom resource in this cluster? [Y/n]
+> 
+Which sink should this profile read from?
+  1) ClickHouseSink/default — the frozen v1 schema in a ClickHouse instance
+  2) S3Sink/archive — a jsonl-v1 archive in an S3-compatible bucket
+> [ClickHouseSink/default] 
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+That name resolves inside the cluster and nowhere else.
+
+ClickHouse native-protocol endpoint, as host:port.
+> [127.0.0.1:9000] 
+ClickHouseSink/default authenticates as kuberecord, which can write to the
+audit trail.
+
+Which ClickHouse user this profile reads as. A read-only user is the recommended posture; see docs/CLI.md#the-read-only-clickhouse-user.
+> [kuberecord] 
+Where does kuberecord's password come from?
+  1) environment — an environment variable, named next
+  2) file — a file, named next
+> [environment] 
+Name of an environment variable holding the ClickHouse password.
+> [KUBERECORD_CLICKHOUSE_PASSWORD] 
+Make this the active profile? [y/N]
+> ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so the profile records
+127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+
+Database kuberecord and user kuberecord are the sink's own.
+Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
+The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD.
+
+That user is the sink's own writer, so this profile can write to the audit trail.
+Give --username a read-only user instead; the grants it needs are at
+docs/CLI.md#the-read-only-clickhouse-user
+
+→ wrote profile "local" in <config>
+→ to make it the active profile: `kuberecord config use-profile local`
+
+The same thing without the questions:
+  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000 --password-env KUBERECORD_CLICKHOUSE_PASSWORD

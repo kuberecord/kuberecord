@@ -251,6 +251,16 @@ Everything printed after it — a usage block, or the routes past the failure �
 the weight it was written in, so the line that stopped the command stays the one
 that stands out. See [Exit codes](#exit-codes).
 
+**The header's `Coverage` value carries a notice's weight when nothing was
+watching.** `Coverage: none recorded for this scope` is the whole of the
+[no-coverage finding](#an-empty-result-is-never-presented-on-its-own) in one line,
+and the `error:` below it says the same thing at length — so a reader who stops at
+the header is told it at the same severity rather than at the weight of a cluster
+name. Coverage that is *present* is unchanged, and so is
+`not reported by this backend`: that one is a permanent property of an archive tier
+rather than a finding about the object you asked about, and it has a notice of its
+own on stderr. Every label in the header stays provenance.
+
 **Rows read oldest first, so the newest change is the last line printed** — the
 one immediately above your prompt, because this CLI does not page. Which changes
 are selected is a separate matter and has not moved: `--limit` still takes the
@@ -375,7 +385,7 @@ time, and there are exactly three answers:
 |----------------|--------------|
 | The scope was watched across the whole window | `no changes recorded … The scope was confirmed watched over <interval>` — the silence is real. |
 | The scope opened *after* the window started | A warning naming that instant and the rule that opened it: a change before then would not have been recorded. |
-| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result — [`scopes`](#scopes) is where you go next. |
+| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result — [`scopes`](#scopes) is where you go next. Under [`--with-events`](#--with-events-that-finds-no-events) it also accounts for the flag, so there is one explanation and not two. |
 
 A backend with no scope log to read says that instead, and exits `0`: it cannot
 tell the three apart, and pretending otherwise would be the failure this section
@@ -420,6 +430,7 @@ three:
 | Events were being recorded | `Events were confirmed recorded over <interval>` — nothing was said about this object while that scope was open. |
 | No rule streams Events | The gap, and the YAML that closes it. |
 | No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
+| Nothing was watching the object either | Nothing here: the no-coverage finding says it instead. See below. |
 
 The second is the common one, because the `events` watch preset ships disabled
 and a rule has to name `Event` before anything is captured. It is no longer what
@@ -438,6 +449,25 @@ environment that exists to demonstrate it.
 A bare `timeline` says none of this. The notice is owed to somebody who asked for
 Events; a command that volunteered it to everyone would be answering a question
 nobody put to it, and the coverage read that builds it is not paid for either.
+
+**Nor does an object nothing was ever watching.** There the timeline is already the
+exit **3** [no-coverage finding](#an-empty-result-is-never-presented-on-its-own),
+and that finding absorbs the point in a clause of its own:
+
+```
+error: no watch coverage recorded for the requested scope: nothing was ever
+watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+not evidence that it did not change — and no Kubernetes Event about it was
+recorded either, which is the same absence rather than a second one to fix; the
+`scopes` command lists what is being recorded
+```
+
+Both halves used to be printed, the second at length and with the YAML above it.
+They were two findings for one cause, and the fix in the longer of them was a fix
+for a problem that does not exist yet: a rule capturing `Event` would still record
+nothing about an object no rule covers. The flag is still accounted for — it is
+named in the clause rather than left looking like a flag that was ignored — and the
+second coverage read is not paid for at all.
 
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read
@@ -730,6 +760,12 @@ On a terminal the block is **dimmed** — all of it except `NOT A DEPLOYABLE
 MANIFEST`, which is not. Provenance is a fact you need available and do not need
 to re-read; that one phrase is the line that has to survive you skimming past the
 rest of them.
+
+One value in it is not provenance either. `coverage: none recorded for this scope`
+means the reconstruction rests on a period nobody was recording, so it carries a
+notice's weight in the [same vocabulary the header block
+uses](#colour-width-and-paging) — the one line in this block that changes what the
+document is worth. Coverage that is present stays as dim as the label beside it.
 
 The header solves this for a person and not for a script: stderr is the stream
 `2>/dev/null` discards and a pipe never reads, so `get … -o json | jq` would
@@ -1942,9 +1978,6 @@ substituting the forwarded address for the one only the cluster can resolve:
 
 ```console
 $ kubectl kuberecord config set-profile local --from-sink ClickHouseSink/default
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ made "local" the active profile (it is the only one)
-
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so the profile records
@@ -1952,6 +1985,9 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
     kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
 …
+
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
 
 $ export KUBERECORD_CLICKHOUSE_PASSWORD=…
 $ kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
@@ -2361,15 +2397,24 @@ reference resolves on this machine**, checked as the table is drawn.
 ```console
 $ kuberecord config get-profiles
 # /home/you/.config/kuberecord/config.yaml
-CURRENT  NAME     BACKEND     TARGET                       CREDENTIAL
-         archive  s3          s3://audit-archive/prod      ambient
-*        local    clickhouse  127.0.0.1:9000/kuberecord    env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
-         prod     clickhouse  ch.observability:9000/audit  env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+CURRENT  NAME     BACKEND     TARGET                                     CREDENTIAL
+         archive  s3          s3://audit-archive/prod                    ambient
+*        local    clickhouse  kuberecord_ro@127.0.0.1:9000/kuberecord     env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+         prod     clickhouse  kuberecord_ro@ch.observability:9000/audit  env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+         writer   clickhouse  kuberecord@127.0.0.1:9000/kuberecord       env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
 ```
 
 The `*` and the `CURRENT` column are `kubectl config get-contexts`'s own, so the
 output is legible without instruction. Rows are sorted by name. The file's path
 goes to **stderr**, so `-o json | jq` receives the document alone.
+
+**A ClickHouse `TARGET` names the user**, in the spelling a connection string uses:
+`user@host:port/database`, with the defaults a query would apply — `kuberecord` for
+an unnamed database, `default` for an unnamed user. `local` and `writer` above are
+the reason. They read the same database at the same address through the same
+password variable and differ in nothing else, so the `CREDENTIAL` column cannot
+tell them apart: it reports *where* a password comes from and not *whose*. Add
+`--username` to a profile and this is where the choice is visible.
 
 **`config current-profile` prints the active profile's name and nothing else.** It
 is the third question in this family and the only one shaped for a program rather
@@ -2436,7 +2481,7 @@ $ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.
   "name": "local",
   "current": true,
   "backend": "clickhouse",
-  "target": "127.0.0.1:9000/kuberecord",
+  "target": "kuberecord_ro@127.0.0.1:9000/kuberecord",
   "credential": {
     "source": "env",
     "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
@@ -2453,7 +2498,7 @@ $ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.
 | `profiles[].name` | The key this profile has in the file. |
 | `profiles[].current` | Whether this is the active profile — the row the `*` marks. A field rather than something to derive by comparing with `currentProfile`. |
 | `profiles[].backend` | `clickhouse`, `s3` or `local`. |
-| `profiles[].target` | The locator, with defaults applied: the address and database a query would open rather than the fields as typed. |
+| `profiles[].target` | The locator, with defaults applied: the address and database a query would open rather than the fields as typed, and for `clickhouse` the user it opens them as — `user@host:port/database`. The same string the `TARGET` column prints. |
 | `profiles[].credential.source` | `env`, `file`, `ambient` or `none`. |
 | `profiles[].credential.reference` | The variable name or the file path. Absent for a source that names neither. |
 | `profiles[].credential.state` | `set`, `not set`, `present`, `missing`, `unreadable` or `not checked` — the table above, in one field. A word rather than a boolean: `resolves: false` on an ambient credential nobody checked would be a claim this command did not make. |
@@ -2738,9 +2783,6 @@ because no question about recorded history was asked. Both carry the same
 
 ```console
 $ kuberecord config set-profile local --from-sink ClickHouseSink/default
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ made "local" the active profile (it is the only one)
-
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so the profile records
@@ -2755,7 +2797,16 @@ The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICK
 That user is the sink's own writer, so this profile can write to the audit trail.
 Give --username a read-only user instead; the grants it needs are at
 docs/CLI.md#the-read-only-clickhouse-user
+
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
 ```
+
+**The explanation comes before the confirmation**, and that ordering is
+deliberate: the `→` line looks like an ending, and everything still to be done —
+the port-forward, and whose password the variable has to hold — was underneath it.
+The confirmation is the last thing said about the write, and what follows it is
+about the active pointer and your next command.
 
 It reads the named sink through the same discovery path a query uses, and writes
 the stanza its kind calls for. It is the second of the two routes in [Running the
@@ -2866,18 +2917,26 @@ Where does kuberecord_ro's password come from?
 Name of an environment variable holding the ClickHouse password.
 > [KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO]
 
-Make this the active profile? [y/N]
-> → wrote profile "local" in ~/.config/kuberecord/config.yaml
+Make this the active profile? [y/N] n
+
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 …
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
 → to make it the active profile: `kuberecord config use-profile local`
 
 The same thing without the questions:
   kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000 --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO
 ```
 
-Eight things about it are worth stating, because each is a decision rather than an
+Nine things about it are worth stating, because each is a decision rather than an
 accident:
 
+- **What was written is explained before the write is confirmed.** The `→` line
+  looks like an ending, so a reader who stops at the first one has missed the
+  port-forward the profile expects and the credential guidance underneath it. The
+  order is the explanation, then the confirmation, then where the active pointer
+  stands, then the equivalent command — outwards from the profile to what to do
+  next.
 - **The last line is the point.** The questions are for somebody who does not know
   the flags; the equivalent command is what they are holding afterwards. It is the
   line to paste into a bug report, the line to lift into a CI job, and the reason a

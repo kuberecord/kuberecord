@@ -87,8 +87,22 @@ func updatingGoldens(t *testing.T) bool {
 // this one produces has no stdout half to put a section marker around.
 func assertFailureGolden(t *testing.T, name, got string) {
 	t.Helper()
+	assertInternalGolden(t, "error", name, got)
+}
 
-	path := filepath.Join("testdata", "error", name+".golden")
+// assertInternalGolden is that comparison for any of this package's
+// internal-test goldens.
+//
+// The directory is a parameter for the reason assertGoldenIn's is on the external
+// side: two copies of a compare-or-rewrite pair are two places for the write half
+// to drift from the compare half, and a golden test whose halves disagree is one
+// that passes after rewriting the thing it was meant to pin. This is the internal
+// package's single copy, because the external one's -update flag cannot be
+// reached from here — see updatingGoldens.
+func assertInternalGolden(t *testing.T, dir, name, got string) {
+	t.Helper()
+
+	path := filepath.Join("testdata", dir, name+".golden")
 	if updatingGoldens(t) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatalf("creating the golden directory: %v", err)

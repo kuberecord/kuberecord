@@ -449,15 +449,16 @@ func writeBlameAnswer(
 ) error {
 	if request.Timeline.Structured == "" {
 		document := render.BlameDocument{
-			Kind:     describeKind(request.Timeline.Ref),
-			Object:   describeObject(request.Timeline.Ref),
-			Cluster:  request.Timeline.Ref.ClusterID,
-			UID:      gathered.UID,
-			Window:   options.DescribeWindow(gathered.From, gathered.To),
-			Base:     base,
-			Coverage: gathered.Coverage.Summary(),
-			Rows:     rows,
-			Notices:  notices,
+			Kind:           describeKind(request.Timeline.Ref),
+			Object:         describeObject(request.Timeline.Ref),
+			Cluster:        request.Timeline.Ref.ClusterID,
+			UID:            gathered.UID,
+			Window:         options.DescribeWindow(gathered.From, gathered.To),
+			Base:           base,
+			Coverage:       gathered.Coverage.Summary(),
+			CoverageAbsent: gathered.Coverage.Absent(),
+			Rows:           rows,
+			Notices:        notices,
 		}
 		if err := render.WriteBlame(streams.Out, streams.ErrOut, document, opts); err != nil {
 			return exit.RuntimeErrorf("%w", err)

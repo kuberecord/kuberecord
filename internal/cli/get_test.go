@@ -179,6 +179,34 @@ func TestGetReconstructsStateAsYAMLInColour(t *testing.T) {
 	assertGoldenIn(t, "get", "yaml-color", stdout, stderr)
 }
 
+// TestGetHeaderWarnsWhenNothingWasWatchingTheReconstructedPeriod is Task 18.5's
+// third item on the one document whose header is otherwise entirely provenance.
+//
+// The state came back, so this is not the no-coverage *finding* — the command
+// succeeds and the reconstruction is real. What the scope log says is that no
+// interval covers the period it was assembled from, which is exactly the
+// qualification a reader acting on a reconstructed manifest needs and exactly the
+// line they read past on every invocation. So the value carries the Warning tier
+// while every other field in the block stays where it was.
+//
+// Both colour modes, and the plain file is the assertion that the tier added
+// nothing but escapes: this is a document somebody pipes into `yq`.
+func TestGetHeaderWarnsWhenNothingWasWatchingTheReconstructedPeriod(t *testing.T) {
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("rendering"+mode, func(t *testing.T) {
+			engine := checkpointEngine(t)
+			engine.intervals = nil
+
+			stdout, stderr, err := runGetWith(t, engine, getRequest(render.StructuredYAML),
+				render.Options{Width: goldenWidth, Color: color})
+			if err != nil {
+				t.Fatalf("RunGet: %v", err)
+			}
+			assertGoldenIn(t, "get", "uncovered"+mode, stdout, stderr)
+		})
+	}
+}
+
 // TestGetReconstructsStateAsJSON covers the format with no comment syntax.
 func TestGetReconstructsStateAsJSON(t *testing.T) {
 	stdout, stderr, err := runGet(t, checkpointEngine(t), getRequest(render.StructuredJSON))

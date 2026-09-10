@@ -19,7 +19,7 @@
       "name": "local",
       "current": true,
       "backend": "clickhouse",
-      "target": "127.0.0.1:9000/kuberecord",
+      "target": "kuberecord_ro@127.0.0.1:9000/kuberecord",
       "credential": {
         "source": "env",
         "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
@@ -30,7 +30,7 @@
       "name": "nopass",
       "current": false,
       "backend": "clickhouse",
-      "target": "127.0.0.1:9000/kuberecord",
+      "target": "default@127.0.0.1:9000/kuberecord",
       "credential": {
         "source": "none",
         "state": "not checked"
@@ -40,7 +40,7 @@
       "name": "onfile",
       "current": false,
       "backend": "clickhouse",
-      "target": "10.0.1.5:9000/kuberecord",
+      "target": "default@10.0.1.5:9000/kuberecord",
       "credential": {
         "source": "file",
         "reference": "/etc/kuberecord/password",
@@ -51,11 +51,22 @@
       "name": "prod",
       "current": false,
       "backend": "clickhouse",
-      "target": "ch.observability:9000/audit",
+      "target": "kuberecord_ro@ch.observability:9000/audit",
       "credential": {
         "source": "env",
         "reference": "KUBERECORD_TEST_EXPORTED_PASSWORD",
         "state": "set"
+      }
+    },
+    {
+      "name": "writer",
+      "current": false,
+      "backend": "clickhouse",
+      "target": "kuberecord@127.0.0.1:9000/kuberecord",
+      "credential": {
+        "source": "env",
+        "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
+        "state": "not set"
       }
     }
   ]

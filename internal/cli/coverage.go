@@ -212,6 +212,24 @@ func describeNoChanges(shape timelineShape, object, window string) string {
 // Both spellings name `scopes` for the same reason: the route out of "nothing was
 // watching this kind" is to go and look at what is, and it is the next thing to
 // type rather than the next thing to read (D34).
+//
+// # Why the finding absorbs --with-events
+//
+// The no-rows branch is the one path where this file answers a question the reader
+// asked and eventsNotice's question at once, and until Task 18.5 it answered them
+// separately: a Pod nobody had ever watched produced this finding and then a
+// second, longer notice explaining that no rule streams Events, complete with the
+// three lines of YAML that would add one. Both were true. Neither was useful in
+// that order — a rule capturing Events would still record nothing about an object
+// no rule covers, so the fix the second one printed was the fix for a problem the
+// reader does not have yet.
+//
+// So the clause is here, in the finding, and the notice is withheld at the call
+// site (gatherChanges). It states the fact rather than a causal claim: reaching
+// this branch means there were no Event rows about the object *and* no interval
+// covering it, and what the reader needs from that is that the two are one gap.
+// It appears only under --with-events, because nobody else asked about Events and
+// a sentence answering an unasked question is the noise this is removing.
 func uncoveredNoChanges(
 	request TimelineRequest, shape timelineShape, object string,
 ) ([]render.Notice, error) {
@@ -224,9 +242,14 @@ func uncoveredNoChanges(
 				"is being recorded", kind, object, request.Ref.ClusterID, scopesCommand),
 		}}, nil
 	}
+	events := ""
+	if request.WithEvents {
+		events = " — and no Kubernetes Event about it was recorded either, which is the same absence " +
+			"rather than a second one to fix"
+	}
 	return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
-		"not evidence that it did not change; the `%s` command lists what is being recorded",
-		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, scopesCommand)
+		"not evidence that it did not change%s; the `%s` command lists what is being recorded",
+		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, events, scopesCommand)
 }
 
 // Invariant 9 applied to a sub-query.
@@ -311,6 +334,11 @@ func eventIntervals(intervals []query.ScopeInterval) []query.ScopeInterval {
 }
 
 // explainNoEvents says why --with-events interleaved nothing.
+//
+// It is not reached at all when the object's own scope had no coverage: that
+// finding absorbs this one, and gatherChanges is where the gate lives. What is
+// left here is a document whose subject *was* being watched, so every state below
+// is a statement about Events alone.
 //
 // coverage is the answer to eventScopeQuery, already narrowed by eventIntervals,
 // and readErr is a scope log that exists and could not be read. The three states

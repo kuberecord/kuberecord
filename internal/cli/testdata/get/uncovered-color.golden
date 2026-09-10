@@ -1,0 +1,54 @@
+=== stdout ===
+[2m# Reconstructed state — [0m[1mNOT A DEPLOYABLE MANIFEST[0m[2m.[0m
+[2m#[0m
+[2m# object:          apps/Deployment payments/checkout[0m
+[2m# cluster:         prod-eu-1[0m
+[2m# uid:             7c9e6679-7425-40de-944b-e07fc1f90ae7[0m
+[2m# at:              2026-08-28T15:00:00Z[0m
+[2m# base row:        2026-08-28T14:05:02Z (Checkpoint)[0m
+[2m# patches applied: 0[0m
+[2m# coverage:        [0m[33mnone recorded for this scope[0m
+[2m#[0m
+[2m# This is what kuberecord recorded, not what the API server held. Do not[0m
+[2m# `kubectl apply -f` it: metadata.managedFields, metadata.resourceVersion and[0m
+[2m# metadata.generation were stripped at capture, and every field a redaction[0m
+[2m# policy covers carries the sentinel [REDACTED] in place of its value.[0m
+[2mapiVersion: cli.kuberecord.io/v1alpha1[0m
+[2mkind: Object[0m
+[2mmetadata:[0m
+[2m  cluster_id: prod-eu-1[0m
+[2m  backend: clickhouse[0m
+[2m  coverage:[0m
+[2m    available: true[0m
+[2m    summary: none recorded for this scope[0m
+[2m    intervals: [][0m
+[2m  reconstruction:[0m
+[2m    reconstructed: true[0m
+[2m    not_deployable: true[0m
+[2m    at: "2026-08-28T15:00:00Z"[0m
+[2m    base_ts: "2026-08-28T14:05:02.117Z"[0m
+[2m    base_event: Checkpoint[0m
+[2m    patches_applied: 0[0m
+[2mitems:[0m
+[2m- at: "2026-08-28T15:00:00Z"[0m
+[2m  uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7[0m
+[2m  base_ts: "2026-08-28T14:05:02.117Z"[0m
+[2m  base_event: Checkpoint[0m
+[2m  patches_applied: 0[0m
+[2m  sha256: 283f5a59c38331efcea930d5e95a909f132454c4d3c305df9300d0f69d7544cf[0m
+[2m  object:[0m
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: checkout
+      namespace: payments
+      uid: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+    spec:
+      template:
+        spec:
+          containers:
+          - image: registry.example/checkout:1.4.2
+            name: checkout
+          - image: registry.example/envoy:1.29
+            name: envoy
+=== stderr ===

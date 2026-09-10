@@ -392,27 +392,37 @@ func TestBlameSeedsFromAFullStateRowInTheWindow(t *testing.T) {
 //
 // An object with no recorded history and no state is not an object with no
 // fields, and the difference is the whole of what exit 3 says.
+// Both colour modes, for the reason timeline's own no-coverage case has them: the
+// header's coverage value is the finding in one line, and Task 18.5 put it in the
+// Warning tier so that a reader who stops at the header is told what the error
+// below would have told them.
 func TestBlameExitsThreeWhenNothingWasWatching(t *testing.T) {
-	engine := blamedCheckoutEngine()
-	engine.changes = nil
-	engine.incarnations = nil
-	engine.intervals = nil
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("rendering"+mode, func(t *testing.T) {
+			engine := blamedCheckoutEngine()
+			engine.changes = nil
+			engine.incarnations = nil
+			engine.intervals = nil
 
-	stdout, stderr, err := runBlame(t, engine, defaultBlameRequest(), render.Options{})
-	if err == nil {
-		t.Fatal("a scope nobody watched was reported as an object with no fields")
+			stdout, stderr, err := runBlame(t, engine, defaultBlameRequest(),
+				render.Options{Color: color})
+			if err == nil {
+				t.Fatal("a scope nobody watched was reported as an object with no fields")
+			}
+			if code := exit.CodeFor(err); code != exit.NoCoverage {
+				t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
+			}
+			if !errors.Is(err, query.ErrNoCoverage) {
+				t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to "+
+					"an exit code: %v", err)
+			}
+			// The finding is written by the caller that turns an error into an exit
+			// code, so the golden carries it the way `timeline`'s does: what a person
+			// sees is both streams and the line that ends the invocation.
+			assertGoldenIn(t, "blame", "empty-without-coverage"+mode, stdout,
+				stderr+"error: "+err.Error()+"\n")
+		})
 	}
-	if code := exit.CodeFor(err); code != exit.NoCoverage {
-		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
-	}
-	if !errors.Is(err, query.ErrNoCoverage) {
-		t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to an exit code: %v",
-			err)
-	}
-	// The finding is written by the caller that turns an error into an exit code,
-	// so the golden carries it the way `timeline`'s does: what a person sees is
-	// both streams and the line that ends the invocation.
-	assertGoldenIn(t, "blame", "empty-without-coverage", stdout, stderr+"error: "+err.Error()+"\n")
 }
 
 // TestBlameListsFieldsWhenNothingChangedInTheWindow is the third answer Invariant

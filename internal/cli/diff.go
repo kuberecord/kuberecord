@@ -289,13 +289,14 @@ func writeDiffAnswer(
 ) error {
 	if request.Timeline.Structured == "" {
 		document := render.DiffDocument{
-			Kind:     describeKind(request.Timeline.Ref),
-			Object:   describeObject(request.Timeline.Ref),
-			Cluster:  request.Timeline.Ref.ClusterID,
-			UID:      gathered.UID,
-			Coverage: gathered.Coverage.Summary(),
-			Changes:  gathered.Rows,
-			Notices:  notices,
+			Kind:           describeKind(request.Timeline.Ref),
+			Object:         describeObject(request.Timeline.Ref),
+			Cluster:        request.Timeline.Ref.ClusterID,
+			UID:            gathered.UID,
+			Coverage:       gathered.Coverage.Summary(),
+			CoverageAbsent: gathered.Coverage.Absent(),
+			Changes:        gathered.Rows,
+			Notices:        notices,
 		}
 		if err := render.WriteDiff(streams.Out, streams.ErrOut, document, opts); err != nil {
 			return exit.RuntimeErrorf("%w", err)

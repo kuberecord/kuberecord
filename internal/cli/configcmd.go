@@ -464,9 +464,9 @@ func requireProfileName(name string) error {
 // stanza half from a hand-tuned profile and half from a flag is a configuration
 // nobody wrote.
 //
-// Replacement being destructive is why it is announced. See the `was:` line at the
-// bottom of writeProfile, and D31 — the surprising-but-correct outcome is the one
-// that has to be visible.
+// Replacement being destructive is why it is announced. See the `was:` line in
+// writeProfile, and D31 — the surprising-but-correct outcome is the one that has
+// to be visible.
 type profileWrite struct {
 	// name is the key in the file's profiles map.
 	name string
@@ -477,6 +477,9 @@ type profileWrite struct {
 	// explanation is what --from-sink derived and why, already rendered. Empty for
 	// a profile typed out by hand, which needs no explaining to the person who
 	// just typed it.
+	//
+	// It is written *before* the confirmation, because it is the only part of this
+	// report its reader has not already been told. See writeProfile.
 	explanation string
 
 	// activate asks for the active pointer to be moved to this profile: --use on
@@ -599,6 +602,31 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) (bool, err
 		return false, exit.RuntimeErrorf("%w", err)
 	}
 
+	// The explanation of what was written comes before the confirmation that it
+	// was, and the ordering is the finding rather than a preference (Task 18.5).
+	//
+	// What --from-sink derives is the only part of this report a reader has not
+	// already been told: that the recorded address resolves inside the cluster
+	// and nowhere else, the port-forward the profile now expects beside it, and
+	// which principal's password the variable it names has to hold. Printed
+	// *after* the `→` line, all of it sat below the first thing that looked like
+	// an ending — so a reader who stopped there had been shown a successful write
+	// and none of the two commands it obliges them to run.
+	//
+	// So the block reads outwards from the subject: what this profile is, then
+	// that it exists, then what to do next. The confirmation is the last thing
+	// said about the write rather than the first, and the lines after it are about
+	// the file's active pointer and the reader's next command instead.
+	//
+	// The blank line moves with it, from in front of the explanation to behind it.
+	// A leading one would open the flag path's stderr with an empty line, and the
+	// separation is wanted between the paragraph and the `→` lines either way.
+	if w.explanation != "" {
+		if err := options.WriteAll(streams.ErrOut, w.explanation+"\n"); err != nil {
+			return activated, err
+		}
+	}
+
 	// The two outcomes read differently on purpose. Creating a profile is what
 	// the command was asked to do and is reported plainly; replacing one is
 	// correct, asked for, and destructive, so the line names what is gone.
@@ -623,17 +651,17 @@ func writeProfile(w profileWrite, streams genericiooptions.IOStreams) (bool, err
 			return activated, err
 		}
 	}
-	if w.explanation != "" {
-		if err := options.WriteAll(streams.ErrOut, "\n"+w.explanation); err != nil {
-			return activated, err
-		}
-	}
 	// Withheld when this profile is the one that answers, however it came to be:
 	// naming the command that makes it active is advice for something already
 	// done, and the line above has just said so.
+	//
+	// No blank line in front of it now that it follows the confirmation directly:
+	// the three lines above are one block about this write and where it left the
+	// active pointer, and the next blank line the reader meets belongs to the
+	// equivalent command the questions end with.
 	if w.nextStep && !activated && !wasActive {
 		if err := options.WriteLine(streams.ErrOut,
-			fmt.Sprintf("\n→ to make it the active profile: `%s config use-profile %s`",
+			fmt.Sprintf("→ to make it the active profile: `%s config use-profile %s`",
 				commandNameOr(w.invokedAs), w.name)); err != nil {
 			return activated, err
 		}
