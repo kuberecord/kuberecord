@@ -45,7 +45,11 @@ import (
 // golden files assert them, and a heading that drifted from what the tests pin
 // would be a silent change to something people script `awk` against.
 const (
-	columnTime     = "TIME (UTC)"
+	// columnTime is the heading without its frame. The frame is appended by
+	// Zone.TimeColumn, because the column's contents are in whatever zone the
+	// invocation asked for and a heading that named a different one would be the
+	// disagreement Task 18.9 exists to close, one layer along.
+	columnTime     = "TIME"
 	columnUID      = "UID"
 	columnEvent    = "EVENT"
 	columnRevision = "RESOURCE VERSION"
@@ -71,6 +75,12 @@ const UnknownActor = "unknown"
 // only matches in one.
 const incarnationsLabel = "Incarnations"
 
+// coverageLabel is the header row whose *value* changes weight, which is why it
+// is a constant for the reason incarnationsLabel is one: renderHeader branches on
+// it in order to decide the tier, and a label matched by literal in two places is
+// a label that eventually only matches in one.
+const coverageLabel = "Coverage"
+
 // uidPrefixLength is how much of a UID a narrow table shows.
 //
 // Eight hexadecimal characters distinguish the two or three incarnations a
@@ -89,10 +99,27 @@ const uidPrefixLength = 8
 // time.RFC3339Nano, which trims trailing zeros: that would render one row as
 // .9 and its neighbour as .482913004, and a column of timestamps at varying
 // precision reads as data of varying precision.
+//
+// The narrow layout keeps its space in place of RFC 3339's `T` and its
+// milliseconds, and it is not allowed to keep dropping the trailing marker for
+// them: a column heading is not attached to the data. `TIME (UTC)` scrolls off a
+// nine-row table and does not travel when a row is pasted into a post-mortem,
+// where `2026-09-10 22:41:13.263` reads as a local time two hours from the
+// instant it names (D45).
+//
+// The first three are the UTC layouts and their trailing `Z` is a literal — Go
+// reads `Z` as a marker only when `0700` or `07:00` follows it. The zoned three
+// below spell that suffix out, so a non-UTC frame renders an explicit numeric
+// offset and never a bare local time. That prohibition is the whole reason --tz
+// is a flag rather than something a reader does with a shell alias.
 const (
-	narrowTimeLayout = "2006-01-02 15:04:05.000"
+	narrowTimeLayout = "2006-01-02 15:04:05.000Z"
 	wideTimeLayout   = "2006-01-02T15:04:05.000000000Z"
 	headerTimeLayout = "2006-01-02T15:04:05Z"
+
+	narrowZonedTimeLayout = "2006-01-02 15:04:05.000-07:00"
+	wideZonedTimeLayout   = "2006-01-02T15:04:05.000000000-07:00"
+	headerZonedTimeLayout = "2006-01-02T15:04:05-07:00"
 )
 
 // TimelineRow is one change, decoded as far as rendering needs it.
@@ -161,6 +188,9 @@ type TimelineDocument struct {
 	Incarnations []string
 	// Coverage is the pre-rendered coverage summary for the header.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was watching.
+	// See documentHeader.CoverageAbsent.
+	CoverageAbsent bool
 	// Rows are the changes, in the order they are to be displayed.
 	Rows []TimelineRow
 	// Notices are written to standard error, in order.
@@ -181,12 +211,13 @@ func (d TimelineDocument) showUID(opts Options) bool {
 // eventually disagree about whether coverage was stated.
 func (d TimelineDocument) header() documentHeader {
 	return documentHeader{
-		Kind:         d.Kind,
-		Object:       d.Object,
-		Cluster:      d.Cluster,
-		UID:          d.UID,
-		Incarnations: d.Incarnations,
-		Coverage:     d.Coverage,
+		Kind:           d.Kind,
+		Object:         d.Object,
+		Cluster:        d.Cluster,
+		UID:            d.UID,
+		Incarnations:   d.Incarnations,
+		Coverage:       d.Coverage,
+		CoverageAbsent: d.CoverageAbsent,
 	}
 }
 
@@ -221,6 +252,20 @@ type documentHeader struct {
 	Base string
 	// Coverage is the pre-rendered coverage summary.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was ever
+	// watching this scope, which is what puts the value in the Warning tier.
+	//
+	// A flag rather than a comparison against the sentence, because the sentence
+	// is written by the command that consulted the scope log and this package
+	// cannot read a claim out of prose. It is the same division every other field
+	// here follows: the command decides, the renderer renders.
+	//
+	// It is deliberately not set for a backend that has no scope log. That state
+	// is a permanent property of an archive tier (D12) rather than a finding about
+	// this object, and a tier spent on every invocation against one is a tier
+	// spent on nothing — the header says `not reported by this backend` at full
+	// weight and the notice on stderr carries the consequence.
+	CoverageAbsent bool
 }
 
 // WriteTimeline writes the document to out and its notices to errOut.
@@ -355,10 +400,11 @@ func renderNotices(notices []Notice, opts Options) string {
 // a fact only the layout knows — the column's width is whatever the other columns
 // left over — and which the footer on the other stream is built from.
 func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
-	p := palette{enabled: opts.Color}
+	severity := NewSeverity(opts.Color)
+	p := severity.palette
 
 	var built strings.Builder
-	built.WriteString(renderHeader(doc.header(), p))
+	built.WriteString(renderHeader(doc.header(), severity))
 	if len(doc.Rows) == 0 {
 		// No table, not an empty one. Why the result is empty is on stderr, where
 		// every other qualification of the document is; a header row with nothing
@@ -374,7 +420,16 @@ func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
 // renderHeader renders the five facts a reader needs before the first row means
 // anything: which kind, which object, which cluster, which incarnation, and
 // whether anything was watching.
-func renderHeader(doc documentHeader, p palette) string {
+//
+// It takes a Severity rather than a palette because the last of those five is not
+// always a fact of the same weight as the other four. `Coverage: none recorded for
+// this scope` is the whole of Invariant 9's finding, restated at length by an
+// `error:` two lines below it, and rendering it at the weight of a cluster name
+// left the header and the error disagreeing about how much it mattered — so the
+// value goes into the Warning tier when there was no coverage at all (D30, Task
+// 18.5). The labels stay in the provenance tier they were always in, which is what
+// keeps the amber on the fact rather than on the word in front of it.
+func renderHeader(doc documentHeader, severity Severity) string {
 	type field struct{ label, value string }
 
 	fields := []field{
@@ -397,7 +452,7 @@ func renderHeader(doc documentHeader, p palette) string {
 	if doc.Base != "" {
 		fields = append(fields, field{"Base", doc.Base})
 	}
-	fields = append(fields, field{"Coverage", doc.Coverage})
+	fields = append(fields, field{coverageLabel, doc.Coverage})
 
 	labelWidth := 0
 	for _, f := range fields {
@@ -408,12 +463,21 @@ func renderHeader(doc documentHeader, p palette) string {
 	for _, f := range fields {
 		// The label is painted and *then* padded, so the escape sequences never
 		// enter the width arithmetic that lines the values up.
-		label := p.dim(f.label+":") + strings.Repeat(" ", labelWidth-displayWidth(f.label)) + " "
+		label := severity.dim(f.label+":") + strings.Repeat(" ", labelWidth-displayWidth(f.label)) + " "
 		if f.label == incarnationsLabel {
 			built.WriteString(label + renderIncarnations(doc, labelWidth+2))
 			continue
 		}
-		built.WriteString(label + f.value + "\n")
+		value := f.value
+		// No marker in front of it, unlike a notice: this is a labelled field in a
+		// block of labelled fields, and a `!` here would add a character that the
+		// uncoloured rendering has to carry too — which is the one thing the tiers
+		// may not do to a line (TestColourIsNothingButColour). The label already
+		// says what the value is about; what the tier adds is how much it matters.
+		if f.label == coverageLabel && doc.CoverageAbsent {
+			value = severity.Warning(value)
+		}
+		built.WriteString(label + value + "\n")
 	}
 	return built.String()
 }
@@ -448,7 +512,7 @@ func renderIncarnations(doc documentHeader, indent int) string {
 func renderTable(doc TimelineDocument, opts Options, p palette) (string, int) {
 	showUID := doc.showUID(opts)
 
-	headings := []string{columnTime}
+	headings := []string{opts.Zone.TimeColumn()}
 	if showUID {
 		headings = append(headings, columnUID)
 	}
@@ -512,7 +576,7 @@ func headerLine(headings []string, widths []int) string {
 // plainCells renders every column but CHANGE, unpainted, so the layout can be
 // measured.
 func plainCells(row TimelineRow, showUID bool, opts Options) []string {
-	cells := []string{formatTimestamp(row.Change.TS, opts.Wide)}
+	cells := []string{formatTimestamp(row.Change.TS, opts.Wide, opts.Zone)}
 	if showUID {
 		cells = append(cells, formatUID(row.Change.UID, opts.Wide))
 	}
@@ -740,21 +804,18 @@ func elided(row TimelineRow, changeWidth int) bool {
 }
 
 // formatTimestamp renders a change's instant at the precision the format asks
-// for. Everything is UTC: the header column says so, and a timeline whose rows
-// were in local time would be unusable the moment two engineers compared them.
-func formatTimestamp(ts time.Time, wide bool) string {
-	if wide {
-		return ts.UTC().Format(wideTimeLayout)
-	}
-	return ts.UTC().Format(narrowTimeLayout)
-}
-
-// FormatInstant renders a timestamp for the header and for a notice.
+// for, in the frame the invocation asked for.
 //
-// It is exported because the command builds the coverage summary and the
-// empty-result explanation, and those must not spell an instant differently from
-// the way the document does.
-func FormatInstant(ts time.Time) string { return ts.UTC().Format(headerTimeLayout) }
+// The frame is on the value rather than only on the heading above it, and the
+// default is UTC because the schema column is UTC and docs/QUERIES.md is UTC: a
+// CLI showing local time while the SQL shows UTC would be two views of one audit
+// trail disagreeing (D46).
+func formatTimestamp(ts time.Time, wide bool, zone Zone) string {
+	if wide {
+		return zone.Wide(ts)
+	}
+	return zone.Narrow(ts)
+}
 
 // formatUID abbreviates a UID for the table, or does not for -o wide.
 func formatUID(uid string, wide bool) string {

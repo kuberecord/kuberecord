@@ -57,6 +57,13 @@ import (
 // ResolvePassword every query resolves a password through, so a column saying
 // `set` cannot disagree with what the next query finds.
 //
+// What it cannot report is *whose* password, and that is why TARGET names the
+// ClickHouse principal (Task 18.5). A file whose profiles read as four different
+// users through one variable name rendered as four rows saying
+// `env KUBERECORD_CLICKHOUSE_PASSWORD (not set)` and nothing to tell them apart —
+// so the user joined the locator, in the spelling a connection string uses, rather
+// than becoming a sixth column that only one backend could fill.
+//
 // # What it will not do
 //
 // Contact anything. It reads the configuration file and the environment, and
@@ -178,8 +185,13 @@ type profileEntry struct {
 	Backend resolve.BackendKind `json:"backend"`
 
 	// Target is the locator it points at, with defaults applied — the address and
-	// database a query would open, not the fields as typed. See
-	// resolve.Profile.Target.
+	// database a query would open, not the fields as typed, and for ClickHouse the
+	// user it reads as in front of them: `kuberecord_ro@127.0.0.1:9000/kuberecord`.
+	//
+	// The principal is part of the locator rather than a field of its own, so that
+	// this document and the TARGET column of the table say the same thing in the
+	// same spelling. See resolve.Profile.Target for why it is here and not in
+	// Describe.
 	Target string `json:"target"`
 
 	// Credential is where its credential comes from and whether that reference

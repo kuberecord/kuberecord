@@ -5,9 +5,9 @@
 [2mUID:[0m      7c9e6679-7425-40de-944b-e07fc1f90ae7
 [2mCoverage:[0m 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-[2mTIME (UTC)               EVENT     ACTOR                      CHANGE[0m
-2026-08-28 14:02:58.001  [32mAdded[0m     kubectl-client-side-apply  full state recorded
-2026-08-28 14:05:02.117  [33mModified[0m  kube-controller-manager    ~ spec.replicas: 3 → 5
+[2mTIME (UTC)                EVENT     ACTOR                      CHANGE[0m
+2026-08-28 14:02:58.001Z  [32mAdded[0m     kubectl-client-side-apply  full state recorded
+2026-08-28 14:05:02.117Z  [33mModified[0m  kube-controller-manager    ~ spec.replicas: 3 → 5
 === stderr ===
 ! [33mthe objectsource backend cannot answer an unbounded question, so the window defaults to 2026-08-27T15:00:00Z to 2026-08-28T15:00:00Z; pass --since to widen it[0m
 ! [33mthe objectsource backend does not record deletions, so this timeline ending is not evidence that the object still exists; it may have been deleted while unobserved. The `scopes` command shows what was being watched[0m

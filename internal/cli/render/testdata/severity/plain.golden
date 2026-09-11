@@ -2,3 +2,4 @@ NOT A DEPLOYABLE MANIFEST
 Cluster    prod-eu-1
 Base       2026-08-14T09:12:44.317Z  Modified
 ! this backend does not record deletions, so a timeline that stops is not proof the object was deleted
+error: cannot reach ClickHouseSink/default at clickhouse.kuberecord-system.svc:9000

@@ -15,13 +15,13 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-TIME (UTC)               EVENT     ACTOR                      CHANGE
-2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
-2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
-2026-08-28 14:03:20.310  Event     kube-controller-manager    ScalingReplicaSet: Scaled up replica set checkout-7d4f to…
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
-2026-08-28 14:06:44.020  Event     replicaset-controller      ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: excee…
-2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+TIME (UTC)                EVENT     ACTOR                      CHANGE
+2026-08-28 14:02:58.001Z  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply  ~ spec.…resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:03:20.310Z  Event     kube-controller-manager    ScalingReplicaSet: Scaled up replica set checkout-7d4f t…
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager    3 ops
+2026-08-28 14:06:44.020Z  Event     replicaset-controller      ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: exce…
+2026-08-28 14:09:40.900Z  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
 ! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
@@ -36,7 +36,7 @@ any of it happened:
 
 ```console
 $ kubectl kuberecord diff deploy/checkout -n payments --since 30m
-2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply
   ~ spec.template.spec.containers[0].resources.limits.memory
       - 2Gi
       + 512Mi
@@ -135,9 +135,9 @@ $ make quickstart
 ...
 ==> [01:36] Rows recorded (cluster_id = 'kuberecord-quickstart')
    ┌─event_type─┬─kind───────┬─namespace───────┬─name────────────┬────────────────────────────ts─┐
-1. │ Snapshot   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:56.199673090 │
-2. │ Snapshot   │ Deployment │ quickstart-demo │ checkout-api    │ 2026-08-03 00:59:56.199748632 │
-3. │ Modified   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:58.458432966 │
+1. │ Snapshot   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:56.199Z673090 │
+2. │ Snapshot   │ Deployment │ quickstart-demo │ checkout-api    │ 2026-08-03 00:59:56.199Z748632 │
+3. │ Modified   │ ConfigMap  │ quickstart-demo │ checkout-config │ 2026-08-03 00:59:58.458Z432966 │
    └────────────┴────────────┴─────────────────┴─────────────────┴───────────────────────────────┘
 
 ==> [01:37] The feature-flag change, as a diff
@@ -197,8 +197,8 @@ parameters, so it is copy-pasteable without editing:
 
 ```console
 $ clickhouse-client --param_cluster=kuberecord-quickstart \
-    --param_namespace=payments --param_from='2026-08-01 13:45:00.000' \
-    --param_to='2026-08-01 14:30:00.000' --queries-file first.sql
+    --param_namespace=payments --param_from='2026-08-01 13:45:00.000Z' \
+    --param_to='2026-08-01 14:30:00.000Z' --queries-file first.sql
 ```
 
 **1. What has been happening?** The whole stream, newest first. Start here.
@@ -211,7 +211,7 @@ SELECT
     namespace,
     name,
     arrayStringConcat(arraySort(actors), ', ') AS field_managers
-FROM resource_states
+FROM  resource_states
 WHERE cluster_id = {cluster:String}
 ORDER BY ts DESC
 LIMIT 20;
@@ -228,7 +228,7 @@ SELECT
     kind,
     name,
     multiIf(diff != '', diff, data != '', '(full state)', '') AS change
-FROM resource_states FINAL
+FROM  resource_states FINAL
 WHERE cluster_id = {cluster:String}
   AND namespace = {namespace:String}
   AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
@@ -241,7 +241,7 @@ baseline you replay them onto.
 
 ```sql
 SELECT ts, event_type, data
-FROM resource_states FINAL
+FROM  resource_states FINAL
 WHERE cluster_id = {cluster:String}
   AND kind      = {kind:String}
   AND namespace = {namespace:String}
@@ -263,7 +263,7 @@ SELECT
     name,
     count() AS modifications,
     max(ts) AS last_change
-FROM resource_states FINAL
+FROM  resource_states FINAL
 WHERE cluster_id = {cluster:String}
   AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
   AND event_type IN ('Modified', 'Checkpoint')
@@ -283,7 +283,7 @@ SELECT
     name,
     count() AS modifications,
     arrayStringConcat(arraySort(groupUniqArrayArray(actors)), ', ') AS field_managers
-FROM resource_states FINAL
+FROM  resource_states FINAL
 WHERE cluster_id = {cluster:String}
   AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
   AND event_type IN ('Modified', 'Checkpoint')

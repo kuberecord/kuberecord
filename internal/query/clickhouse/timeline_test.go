@@ -346,3 +346,136 @@ func TestMidStreamFailureSurfacesThroughErr(t *testing.T) {
 		t.Errorf("the iterator delivered %d changes before failing, want 2", delivered)
 	}
 }
+
+// Task 18.6, and the one bug of Phase 18.
+//
+// The newest-incarnation probe answers "which incarnation is the state half about",
+// and this engine used to read its empty answer as "there is no timeline": it
+// returned an exhausted iterator before the Events query was issued at all. So for
+// an object no rule watches — every Pod in the quickstart — a `--with-events`
+// timeline reported nothing, and the nothing had never been measured.
+//
+// It ran for a release because no fake models it. This package's stand-in does,
+// which is why the cases below are pinned here as well as against a real server:
+// the stand-in evaluates the newest-incarnation probe and the subject predicate
+// from its own spelling of both, so an early return before either is exactly as
+// visible to it as to ClickHouse (D42 cuts the other way for a stand-in that
+// interprets statements).
+func TestEventsSurviveAMissingIncarnation(t *testing.T) {
+	subject := eventsOnlySubject()
+	from, to := fixtureWindow()
+
+	tests := map[string]struct {
+		query query.TimelineQuery
+		want  int
+		why   string
+	}{
+		"the flag is set": {
+			query: query.TimelineQuery{Ref: subject, From: from, To: to, IncludeEvents: true},
+			want:  4,
+			why: "an object with no rows of its own still has the Events naming it: they are found " +
+				"from their own involvedObject and never from the subject's rows (D40)",
+		},
+		"the flag is not set": {
+			query: query.TimelineQuery{Ref: subject, From: from, To: to},
+			want:  0,
+			why: "nobody asked about Events, so there is no second question to answer and the empty " +
+				"result is the whole of it",
+		},
+		"a limit bounds the events": {
+			query: query.TimelineQuery{Ref: subject, From: from, To: to, IncludeEvents: true, Limit: 2},
+			want:  2,
+			why:   "the limit applies to the emission order of an events-only stream as it does to a merged one",
+		},
+		"an unrecorded incarnation is pinned": {
+			query: query.TimelineQuery{
+				Ref: subject, From: from, To: to, IncludeEvents: true, UID: unrecordedUID,
+			},
+			want: 0,
+			why: "a pinned incarnation narrows the commentary to the Events naming it, and an " +
+				"incarnation nothing ever recorded is named by none",
+		},
+		"the subject's own incarnation is pinned": {
+			query: query.TimelineQuery{
+				Ref: subject, From: from, To: to, IncludeEvents: true, UID: eventsOnlySubjectUID,
+			},
+			want: 4,
+			why: "the uid the Events do name: pinning it is the narrowing working, not the absence " +
+				"of state rows mattering",
+		},
+		"every incarnation is asked for": {
+			query: query.TimelineQuery{
+				Ref: subject, From: from, To: to, IncludeEvents: true, AllIncarnations: true,
+			},
+			want: 4,
+			why: "the one shape that always worked, because AllIncarnations resolves to the empty " +
+				"uid rather than to noIncarnation — which is how narrowly the bug missed being seen",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			engine, _ := seededEngine(t, eventsOnlyFixture())
+
+			got := drainTimeline(t, engine, test.query)
+			if len(got) != test.want {
+				t.Fatalf("the timeline of an object with Events and no state returned %d change(s), "+
+					"want %d: %s", len(got), test.want, test.why)
+			}
+			for i, change := range got {
+				if change.EventType != query.EventKubernetes {
+					t.Errorf("row %d is stamped %q, want %q — every row of this answer is a Kubernetes "+
+						"Event, and the stamp is the only thing a reader has to tell one from a change "+
+						"to the object itself", i, change.EventType, query.EventKubernetes)
+				}
+			}
+			for i := 1; i < len(got); i++ {
+				if got[i].TS.Before(got[i-1].TS) {
+					t.Errorf("rows %d and %d are out of ts order (%s then %s)", i-1, i,
+						got[i-1].TS.Format(time.RFC3339Nano), got[i].TS.Format(time.RFC3339Nano))
+				}
+			}
+		})
+	}
+}
+
+// The other half of "no new SQL": the statement the events-only path issues is the
+// one that already existed, with no uid predicate on it.
+//
+// eventsStatement omits that predicate when the caller pinned no incarnation, which
+// is exactly right for a subject that has none to pin — so this task needed a call
+// site and not a statement builder. A second builder appearing here would mean the
+// first had been misread, and this pins the difference rather than leaving it to
+// review.
+func TestTheEventsOnlyPathAddsNoStatement(t *testing.T) {
+	engine, conn := seededEngine(t, eventsOnlyFixture())
+	from, to := fixtureWindow()
+
+	drainTimeline(t, engine, query.TimelineQuery{
+		Ref: eventsOnlySubject(), From: from, To: to, IncludeEvents: true,
+	})
+
+	var events []string
+	for _, sqlText := range conn.statements() {
+		if strings.Contains(sqlText, "involvedObject") {
+			events = append(events, sqlText)
+		}
+	}
+	if len(events) != 1 {
+		t.Fatalf("the events-only path issued %d subject-matching statement(s), want exactly 1:\n%s",
+			len(events), strings.Join(conn.statements(), "\n---\n"))
+	}
+	if strings.Contains(events[0], "'uid'") {
+		t.Errorf("the events-only statement pins a uid, but the subject has no incarnation to pin — "+
+			"the predicate would match nothing and the answer would be the empty one this task "+
+			"exists to remove:\n%s", events[0])
+	}
+	// The object's own rows are still read: the probe has to run for the engine to
+	// know there is no incarnation, and the state half of the merge is what the
+	// exhausted iterator stands in for.
+	if len(conn.statements()) < 2 {
+		t.Errorf("only %d statement(s) ran; the newest-incarnation probe is what establishes that "+
+			"there is no incarnation, and skipping it would make the events-only path a guess",
+			len(conn.statements()))
+	}
+}

@@ -18,6 +18,72 @@ than a summary of them.
 
 ### Added
 
+- **`kuberecord config set-profile --use` writes a profile and makes it the active
+  one, in one command.** Writing a profile still does not activate it by default,
+  and that stays the default on purpose — the active profile answers every later
+  command that names no source, so switching on every write would point `timeline`,
+  `diff` and `get` at a store you may have written in order to *inspect* it, and
+  `kubectl config set-context` does not switch either. What was missing was the one
+  keystroke that says "and this one":
+
+  ```console
+  $ kuberecord config set-profile local --from-sink ClickHouseSink/default --use
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile, as asked
+  ```
+
+  **The questions ask it too**, as their last one, defaulting to no:
+  `Make this the active profile? [y/N]`. Answer yes and the flag command printed at
+  the end gains `--use`, so the line reproduces the activation as well as the
+  stanza. The question is skipped where there is nothing to decide — a first
+  profile in an empty file is activated regardless, and a profile that already
+  answers cannot be made to answer more — because a question whose answer is
+  disregarded either way is worse than no question.
+
+  `--use` on the profile that already answers is a **no-op that says so** rather
+  than an error: the write succeeded and the profile is active, which is what the
+  invocation asked for, but a flag with no visible effect has to account for
+  itself. `--use` also says nothing about *what* to write, so
+  `config set-profile --use` on a terminal still asks the questions, with the last
+  of them already answered.
+
+- **`kuberecord config current-profile` prints the active profile's name, and
+  nothing else.** `config get-profiles` already reports which profile is active —
+  it is the column with the `*` in it — and that is the wrong shape for the thing
+  people do with the answer:
+
+  ```console
+  $ kuberecord config current-profile
+  local
+
+  $ PROFILE=$(kuberecord config current-profile) || exit 1
+  ```
+
+  One token on stdout, no header, no decoration, and nothing on stderr either;
+  extracting the starred row from a table is three lines of `awk` and breaks the
+  day an unrelated profile's address gets longer, because the columns are laid out
+  to the width of their content. `kubectl config current-context` is the analogue,
+  and with this the profile surface matches `kubectl config` one for one:
+  `set-profile`, `get-profiles`, `use-profile`, `current-profile`,
+  `delete-profile`.
+
+  **No active profile is an error and exits `1`**, which is the point of it: `$( )`
+  cannot tell an empty answer from no answer, so a script that captured `""` and
+  carried on would read from wherever the rest of the resolution chain reached
+  while believing it had been told which profile to use. The message names the way
+  out, and which way out depends on what the file holds — a file with profiles is
+  told to choose one with `config use-profile` and to check which of them can
+  authenticate with `config get-profiles`; a file with none is told to write one
+  with `config set-profile`, and told that an empty file is not a broken one, since
+  every command that queries data resolves perfectly well without a profile.
+
+  It **contacts nothing** — not even the environment, unlike `get-profiles`, since
+  there is no credential reference in the answer to resolve — and `-o json` and
+  `-o yaml` render a two-field `CurrentProfile` document under the existing
+  `cli.kuberecord.io/v1alpha1` contract. The name is spelled `currentProfile`
+  there, as it is in a `Profiles` listing and a `ProfileChange`, so one `jq` path
+  reads the active profile out of all three.
+
 - **`kuberecord config get-profiles` lists the profiles and says which of them
   could authenticate right now.** `config view` prints the configuration file;
   this prints its *state*, the way `kubectl config get-contexts` does beside
@@ -100,7 +166,68 @@ than a summary of them.
   would list sinks from, so an invocation carrying one is precisely one that wants
   to be asked.
 
+- **`--tz` displays timestamps in a zone of your choosing.** It takes `utc` (the
+  default, and legal to state), `local`, or an IANA name such as `Europe/Warsaw`,
+  and a non-UTC zone is always rendered with an explicit offset:
+
+  ```console
+  $ kuberecord timeline deploy/checkout -n payments --tz Europe/Warsaw
+  TIME (Europe/Warsaw)           EVENT     ACTOR                      CHANGE
+  2026-08-28 16:02:58.001+02:00  Added     kubectl-client-side-apply  full state recorded
+  ```
+
+  Never bare, and that prohibition is the whole reason this is a flag rather than
+  something you do with a shell alias — a local timestamp with no offset is
+  exactly the value this release is fixing. The heading names the *zone* rather
+  than an offset, because `Europe/Warsaw` is `+02:00` in summer and `+01:00` in
+  winter and a table spanning the change would otherwise carry a heading wrong for
+  half its rows.
+
+  It applies to **every** human-facing instant in the invocation — table rows, the
+  header block, notices, errors — so one command never mixes frames. It reaches
+  **no** structured output: `-o json`, `-o jsonl` and `-o yaml` emit UTC always, in
+  every envelope kind and including `metadata`, because `ts` is part of the
+  versioned contract and a consumer must not find its meaning depends on the shell
+  that produced it. A test asserts that `-o json` is byte-identical with and
+  without `--tz`.
+
+  **The default stays UTC**, deliberately. The recorded column is
+  `DateTime64(9, 'UTC')` and `docs/QUERIES.md` is UTC; a CLI showing local time
+  while the SQL shows UTC would be two views of one audit trail disagreeing, and
+  evidence exported for an auditor cannot be in the timezone of whoever ran the
+  command.
+
 ### Changed — BREAKING: CLI output
+
+- **Every timestamp carries its frame on the value.** The default table renders
+  `2026-08-28 14:02:58.001Z`, where it used to render `2026-08-28 14:02:58.001`
+  with the `Z` only in the `TIME (UTC)` column heading:
+
+  ```diff
+  - TIME (UTC)               EVENT     ACTOR                      CHANGE
+  - 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
+  + TIME (UTC)                EVENT     ACTOR                      CHANGE
+  + 2026-08-28 14:02:58.001Z  Added     kubectl-client-side-apply  full state recorded
+  ```
+
+  A heading scrolls off a long table and it does not travel when a row is pasted
+  into a ticket or a post-mortem — where `2026-08-28 14:02:58.001` reads as a local
+  time in whatever zone the next person is in. It was reported that way: a tester
+  two hours ahead of UTC read `22:41` as an evening time and it was the following
+  morning where they were sitting. `-o wide` and the header block always carried
+  the marker; this brings the third rendering into line with them rather than
+  changing what any of them means.
+
+  `diff`'s block headings lose the trailing word `UTC` — `2026-08-28 14:03:11.482
+  UTC` becomes `2026-08-28 14:03:11.482Z` — because with the frame on the value the
+  word names it twice, and under `--tz` it would name two different frames for one
+  instant. `blame`'s `LAST CHANGED` and `scopes`' `FROM`/`TO` gain the marker they
+  never had at all.
+
+  **No instant moved**, in any rendering. The columns to the left of `CHANGE` are
+  one character wider, so a long field path in the flagship row now elides one
+  segment earlier; a script reading the `TIME` column with `awk` is unaffected, and
+  one comparing the whole string is not.
 
 - **`timeline` and `diff` display oldest first, and `--reverse` now means newest
   first.** Both commands read top to bottom in the order the changes happened, so
@@ -181,6 +308,167 @@ than a summary of them.
   files pinning that so a library upgrade cannot quietly re-sort either format.
 
 ### Changed
+
+- **The krew-index pull request is opened by a bot on tag push, and the krew
+  manifest now has one definition.** Every release used to end with a manual step
+  on an external review clock — the workflow's own summary said *"Submitting it to
+  kubernetes-sigs/krew-index is `make krew-index-pr`, run by a maintainer"* — so
+  the version bump waited on somebody remembering. The release workflow's new
+  `krew` job asks
+  [`rajatjindal/krew-release-bot`](https://github.com/rajatjindal/krew-release-bot)
+  to raise it instead; krew's developer guide strongly recommends the bot, and
+  trivial bumps are usually auto-approved and merged in minutes.
+
+  The manifest is now described **once**, by [`.krew.yaml`](.krew.yaml) at the
+  repository root, because the bot renders that file and a template beside the
+  existing generator would be two descriptions of one artefact drifting silently
+  (D43). `hack/krew-manifest.sh` renders the same template into the
+  `kuberecord.yaml` a release attaches, hashing the archives it just packaged
+  rather than downloading them — so the asset describes what was built, and
+  `make release-krew-verify-published` is what then proves the published bytes
+  agree. The rendered manifest is byte-for-byte what it was, apart from a header
+  that now names the template.
+
+  The renderer accepts only what both readers implement — `{{ .TagName }}` and
+  `{{addURIAndSha "<url>" .TagName }}`, the latter at exactly four spaces, because
+  the bot hardcodes four on the `sha256` line it emits — and refuses a platform
+  mismatch in either direction. A template naming an archive `make build-cli` does
+  not produce fails on the pull request that introduced it rather than on
+  somebody's `krew install`, since `make release-krew-verify` already runs on
+  every pull request.
+
+  Three things the job deliberately does **not** do. It does not run on a
+  rehearsal: a `workflow_dispatch` that opened a pull request against
+  `kubernetes-sigs/krew-index` would need a stranger to clean it up, so the gate
+  is step-level (D44) and the dry-run branch prints the manifest instead of
+  sending it. It does not submit a **prerelease** — krew-index carries the one
+  version `kubectl krew install` serves, and a candidate is never it. And it does
+  not fail the workflow: by the time it runs the release is published, so a
+  submission that did not happen reports itself and names the fallback rather than
+  rendering a finished release as a failed one.
+
+  **`make krew-index-pr` is kept**, now documented as the fallback — for a bot
+  outage, for a manifest that changed shape enough to want human eyes, and for the
+  first submission of the plugin, which krew's maintainers review by hand. So
+  v0.4.0's initial entry is hand-submitted regardless and the bot takes over from
+  v0.4.1. Nothing about signing, provenance, the SBOMs or `checksums.txt` changes:
+  the bot submits a manifest pointing at assets that were already signed and
+  already attested. [`docs/RELEASING.md`](docs/RELEASING.md) records the trust
+  decision, including that the action is SHA-pinned, holds no secret of ours, and
+  is a Docker action whose own image reference is a mutable tag.
+
+- **`config set-profile` explains what it wrote before confirming that it wrote
+  it.** The `→` line is the one thing in that block that looks like an ending, and
+  everything a reader still had to do was underneath it — the `kubectl port-forward`
+  the profile now expects, and whose password the variable it names has to hold. A
+  reader who stopped at the first `→` had been told the write succeeded and nothing
+  about what would make it work.
+
+  The order is now the explanation, then the confirmation, then where the active
+  pointer stands, then the equivalent command: outwards from the profile to what to
+  do next, with the confirmation the last thing said *about the write* rather than
+  the first.
+
+  ```console
+  $ kuberecord config set-profile local --from-sink ClickHouseSink/default
+  ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+  That name resolves inside the cluster and nowhere else, so the profile records
+  127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+      kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+  …
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile (it is the only one)
+  ```
+
+  The questions end the same way, with the equivalent flag command last. Nothing is
+  added or removed; only the order changed.
+
+- **`config get-profiles` names the ClickHouse user in `TARGET`**, in the spelling
+  a connection string uses: `kuberecord_ro@127.0.0.1:9000/kuberecord`, with the
+  defaults a query would apply — `kuberecord` for an unnamed database, `default` for
+  an unnamed user. Now that the questions ask which user a profile reads as, two
+  profiles can differ in nothing but the principal, and `CREDENTIAL` cannot tell
+  them apart: it reports *where* a password comes from, not whose. Four rows reading
+  `env KUBERECORD_CLICKHOUSE_PASSWORD (not set)` were four rows a reader could not
+  distinguish.
+
+  `-o json`'s `profiles[].target` carries the same string, because it is the same
+  locator reached two ways. No field was added, renamed or removed. `s3` and `local`
+  targets are unchanged — they have no principal.
+
+- **The header's `Coverage` value is rendered as a notice when nothing was
+  watching.** `Coverage: none recorded for this scope` is the whole of the exit-`3`
+  no-coverage finding in one line, and the `error:` two lines below it says the same
+  thing at length — so the two disagreed about how much it mattered, with the fact
+  rendered at the weight of a cluster name. It now carries the same amber the
+  explanation does, on `timeline`, `diff`, `blame` and `get`, so a reader who stops
+  at the header learns what the error would have told them.
+
+  Coverage that is *present* is unchanged, and so is `not reported by this backend`:
+  that is a permanent property of an archive tier rather than a finding about the
+  object asked about, and it has a notice of its own. Every label in the header
+  stays dim. With colour off — `--color=never`, `NO_COLOR`, a redirected stream —
+  every one of these documents is byte for byte what it was.
+
+- **Activation says what it did, and the one write that activates by itself says
+  why.** A profile written into an otherwise empty file has always become the
+  active one; the line reporting it now gives the reason, in the same dim
+  provenance register as the rest of the subcommand's output, because it is a
+  change to where every later command reads from that nobody typed:
+
+  ```console
+  $ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000
+  → wrote profile "local" in ~/.config/kuberecord/config.yaml
+  → made "local" the active profile (it is the only one)      # was: → "local" is now the active profile
+  ```
+
+  **A cleared active pointer is no longer treated as an empty file.**
+  `config delete-profile --force` deliberately leaves a file with profiles in it
+  and no active one, so that resolution falls through to discovering a sink from
+  the cluster — and the next profile written there used to be activated silently,
+  by a rule that would have reported it as the only profile in the file. It is not
+  activated now: there is a decision to make, and `--use` or `config use-profile`
+  is where it is made.
+
+  **Rewriting the profile that answers says so**, in place of the
+  `config use-profile` line it used to print — advice for something already done:
+
+  ```console
+  $ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9001
+  → updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 127.0.0.1:9000/kuberecord)
+  → "local" is the active profile: this stanza is what the next command reads
+  ```
+
+  Nothing about which profile is active changes without a line saying so, and the
+  `ProfileChange` document's `currentProfile` reports the same outcome to a script
+  in every case.
+
+- **A failed command is rendered as one.** The `error:` line is now painted red on
+  a terminal, joining the notices, provenance and emphasis the rest of the CLI
+  already spends its severity vocabulary on. It was the one line that never had
+  been, so a failure arrived in default weight beneath a `!` notice in amber and
+  `→` provenance in dim — the least conspicuous thing on the screen, which is the
+  reverse of the ordering those weights exist to express.
+
+  It is **red rather than the warning tier**, and the two stay distinct on
+  purpose: a warning qualifies a result that arrived, and this says none did.
+  Collapsing them would leave no way to render the difference.
+
+  Nothing else changes weight. The usage block cobra prints beneath a usage error
+  is untouched, because a page of flag descriptions in red is a page nobody reads,
+  and the routes past a failure — the port-forward command for an unreachable
+  sink, the ways around a profile that will not resolve — keep the tiers their own
+  renderer gave them, because they are guidance rather than failure. The whole
+  diagnostic still reaches stderr in a single write, so nothing else sharing the
+  stream can land between the message and the block explaining it.
+
+  Colour for it is decided from **stderr**, not stdout, which is the stream it is
+  written to: `timeline … -o json | jq` on a terminal still shows a failure in
+  red, and `2> failure.log` still captures one with no escape sequences in it.
+  `--color=never` and `NO_COLOR` are honoured as everywhere else, and the plain
+  rendering is byte for byte what it was.
 
 - **`kubectl explain streamrule.spec.resources` now says what `kind: Event` costs,
   and `docs/SCHEMA.md` has the model behind it.** Events are captured for the
@@ -337,6 +625,141 @@ than a summary of them.
   counting changes.
 
 ### Fixed
+
+- **A timeline now reports the Kubernetes Events about an object no rule was
+  watching.** Both query backends resolved the object's incarnation before anything
+  else and returned an empty result when the object had no records of its own — so
+  the Events query was never issued at all. For every object outside a rule's scope,
+  and that is every Pod in the quickstart, `--with-events` reported nothing, and the
+  nothing had never been measured:
+
+  ```console
+  $ kuberecord timeline pod/checkout-7d4f-abcde -n payments --with-events
+  # before: an empty page
+  # after:  the four Events that were in the sink the whole time
+  ```
+
+  An Event names its subject in its own row, so correlation never needed the subject
+  to have been captured (D40). The two halves of a merged timeline are independent
+  queries and neither gates the other now.
+
+  This also makes two shipped features reachable for the first time. Task 17.3's
+  Events-only notice — *"every row here is a Kubernetes Event: nothing was ever
+  watching …, so its own changes were never recorded"* — could not fire against
+  either real backend, and the clause `--with-events` adds to the no-coverage
+  finding rested on the same false premise: that "no coverage" and "no Events"
+  always arrive together. They arrived together because the second was never asked.
+
+  Nothing else moves. A bare `timeline` over such an object still returns nothing,
+  because nobody asked a second question; a timeline pinned to an incarnation still
+  narrows the commentary to the Events naming it; and an object with records of its
+  own reads exactly as before.
+
+  The shared agreement corpus gained an object with Events and no state, and the
+  count of Event rows each question expects is now declared against the corpus
+  rather than merely compared between the two backends — because both backends had
+  this defect, and two backends agreeing about an answer neither measured is the
+  greenest possible way to be wrong.
+
+- **`--with-events` no longer adds a second finding beneath the first.** A
+  `timeline` for an object nothing was ever watching printed the exit-`3`
+  no-coverage finding and then, at greater length, a notice explaining that no rule
+  streams Events — with the three lines of YAML that would add one. Both were true,
+  and together they read as two problems: a rule capturing `Event` would still
+  record nothing about an object no rule covers, so the fix in the longer of them
+  was the fix for a problem the reader does not have yet.
+
+  The finding now accounts for the flag itself, in one clause — and the clause asks
+  the notice's own question rather than assuming its answer. **"The same absence" is
+  a claim about a second thing, so it is made only where a second measurement
+  supports it**, with the evidence beside it:
+
+  ```
+  error: no watch coverage recorded for the requested scope: nothing was ever
+  watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+  not evidence that it did not change — and no Kubernetes Event about it was
+  recorded either, which is the same absence rather than a second one to fix:
+  Events were confirmed recorded over 2026-09-08T21:09:09Z → open
+  (clusterstreamrule//quickstart); the `scopes` command lists what is being
+  recorded
+  ```
+
+  Where Events are **not** being captured, that sentence was simply wrong: the two
+  gaps have two causes and two fixes, and a reader told they have one goes looking
+  at correlation instead of at their rule. So they are now named as two, with the
+  YAML that closes the second:
+
+  ```
+  error: … so this silence is not evidence that it did not change — and no rule
+  streams Events to this sink either, so these are two gaps rather than one:
+  capturing this object's kind would record its changes, and Events would still be
+  missing until a rule names them as well; the `scopes` command lists what is being
+  recorded.
+  Add Events to a rule as well:
+      - group: ""
+        version: v1
+        kind: Event
+  ```
+
+  And a backend with no scope log, or one that could not be read, gets the third
+  answer this CLI gives everywhere it reasons about a silence: it says it cannot
+  tell, names why, and guesses at neither.
+
+  Nothing else changes. A watched object with no Events still gets the notice and
+  the YAML, which is the state a fresh quickstart used to produce; the clause appears
+  only under `--with-events`, so a bare `timeline` reads exactly as before and pays
+  for no Event coverage read at all; and where the clause does appear, the clause and
+  the notice ask one question through one function, so the invocation still pays for
+  a single read rather than the two it used to.
+
+- **`config set-profile` no longer prints credential advice that cannot be
+  followed.** A profile derived from a `ClickHouseSink` records that sink's own
+  ClickHouse user, and the message printed beside it said to export *a read-only
+  user's* password into the variable that profile reads. A ClickHouse username and
+  password are one credential pair, so doing both authenticates as the operator's
+  writer with somebody else's password and is refused by the server — unless the
+  read-only user happens to be named after the operator's, which is the user the
+  advice existed to steer away from.
+
+  The wizard's discovery branch now **asks which user the profile reads as**,
+  defaulting to the sink's own, immediately before asking where that user's
+  password comes from. The two read as one decision: the second question names the
+  answer to the first, and pressing return through both writes exactly the stanza
+  the branch wrote before either question existed.
+
+  ```console
+  ClickHouseSink/default authenticates as kuberecord, which can write to the
+  audit trail.
+
+  Which ClickHouse user this profile reads as. A read-only user is the recommended posture; see docs/CLI.md#the-read-only-clickhouse-user.
+  > [kuberecord] kuberecord_ro
+
+  Where does kuberecord_ro's password come from?
+    1) environment — an environment variable, named next
+    2) file — a file, named next
+  > [environment]
+  ```
+
+  **The advice is now conditional and never contradicts the stanza it accompanies.**
+  A profile reading as the sink's own user is told that credential can write to the
+  audit trail and which flag changes it; one already reading as somebody else is
+  told nothing but the pair that was recorded, because the advice has been taken.
+  The same split reaches the unreachable-backend message, which recommended a
+  read-only user's password for a profile it had just described as taking the sink's
+  user.
+
+  **A profile reading as a user other than the sink's gets a password variable of
+  its own** — `KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO` for the user above,
+  uppercased with everything a shell will not accept replaced by `_`. One variable
+  holds one password, so four profiles naming four principals and all reading
+  `KUBERECORD_CLICKHOUSE_PASSWORD` are four profiles of which at most one
+  authenticates. `--password-env` overrides it, and the equivalent command printed
+  after the write names both halves in full.
+
+  `--from-sink --username` already reached the same derivation, and the printed
+  equivalent now carries `--username` whenever the profile reads as somebody other
+  than the sink's user — so the two routes agree about whether that user is
+  negotiable, which is what keeps the prompting layer a layer (D33, D37).
 
 - **A profile that cannot be resolved now names every way past it.** A stanza
   pointing at `KUBERECORD_CLICKHOUSE_PASSWORD` in a shell that never exported it

@@ -159,7 +159,7 @@ func TestAnUnreachableClusterInternalSinkExplainsItself(t *testing.T) {
 		t.Fatalf("parsing flags: %v", parseErr)
 	}
 
-	advice := remediationAdvice(err, root, flags, streams)
+	advice := remediationAdvice(err, root, diagnosticColor(flags, streams))
 	for _, want := range []string{
 		"kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000",
 		"--" + options.FlagSinkAddr + " 127.0.0.1:9000",
@@ -194,7 +194,8 @@ func TestAnUnreachableClusterInternalSinkExplainsItself(t *testing.T) {
 // The block is written to stderr through the same single write as the `error:`
 // line above it, so the only decision left at this layer is whether to paint it —
 // and that decision belongs to --color and to whether stderr is a terminal, never
-// to this function.
+// to this function. It is taken here the way RunContext takes it, through
+// diagnosticColor, so that a change to which stream decides fails here too.
 func TestTheAdviceObeysTheColourMode(t *testing.T) {
 	streams, err := unreachableFixture(t)
 
@@ -213,7 +214,7 @@ func TestTheAdviceObeysTheColourMode(t *testing.T) {
 			if parseErr := root.ParseFlags([]string{"--" + options.FlagColor, string(tc.mode)}); parseErr != nil {
 				t.Fatalf("parsing flags: %v", parseErr)
 			}
-			advice := remediationAdvice(err, root, flags, streams)
+			advice := remediationAdvice(err, root, diagnosticColor(flags, streams))
 			if painted := strings.Contains(advice, "\x1b["); painted != tc.painted {
 				t.Errorf("--%s=%s produced painted=%v, want %v", options.FlagColor, tc.mode, painted, tc.painted)
 			}
@@ -238,7 +239,7 @@ func TestAnOrdinaryFailureGetsNoAdvice(t *testing.T) {
 		"a missing-coverage finding":  query.ErrNoCoverage,
 		"nothing at all":              nil,
 	} {
-		if advice := remediationAdvice(err, root, flags, streams); advice != "" {
+		if advice := remediationAdvice(err, root, diagnosticColor(flags, streams)); advice != "" {
 			t.Errorf("%s acquired an unreachable-backend block:\n%s", name, advice)
 		}
 	}

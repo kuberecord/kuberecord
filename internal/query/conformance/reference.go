@@ -84,6 +84,13 @@ func (e *referenceEngine) Close() error { return nil }
 // filter cannot change *which* incarnation is the newest one; a backend that
 // filtered first would answer a question about the wrong object whenever the newest
 // incarnation's changes were all made by an excluded actor.
+// The Events half is a second, independent selection over the same history, and it
+// is deliberately not gated on the first (D40). An Event names its subject in its
+// own row, so an object with no rows at all still has the Events naming it — the
+// case both live backends answered with an unmeasured emptiness until Task 18.6.
+// The reference implementation models the contract rather than either
+// implementation of it (D42), which for this property means issuing the second
+// selection whether or not the first found anything.
 func (e *referenceEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.ChangeIterator, error) {
 	if e.caps.TimeBoundRequired && q.From.IsZero() && q.To.IsZero() {
 		return nil, fmt.Errorf("timeline for %s/%s: %w", q.Ref.Kind, q.Ref.Name, query.ErrTimeBoundRequired)
@@ -97,6 +104,9 @@ func (e *referenceEngine) Timeline(_ context.Context, q query.TimelineQuery) (qu
 		if keepsFilters(r.Change, q) {
 			changes = append(changes, r.Change)
 		}
+	}
+	if q.IncludeEvents {
+		changes = append(changes, e.correlatedEvents(q, incarnationOf(rows, q))...)
 	}
 
 	slices.SortStableFunc(changes, func(a, b query.Change) int { return a.TS.Compare(b.TS) })
@@ -385,6 +395,141 @@ func selectIncarnation(rows []Row, uid string, all bool) []Row {
 		}
 	}
 	return slices.DeleteFunc(slices.Clone(rows), func(r Row) bool { return r.Change.UID != newest.Change.UID })
+}
+
+// incarnationOf names the incarnation a timeline's commentary is narrowed to, which
+// is not always the one its state rows were narrowed to.
+//
+// A pinned UID is the caller's own word and wins outright. AllIncarnations spans
+// every one, so the commentary is not narrowed at all. Otherwise it is the
+// incarnation the surviving rows belong to — and when there are none, there is no
+// incarnation to pin and the commentary keeps the forgiving (kind, namespace, name)
+// key. That last clause is the whole of the events-only case: a subject with no rows
+// has no uid to narrow by, and narrowing by the empty string would exclude every
+// Event ever recorded about it.
+func incarnationOf(rows []Row, q query.TimelineQuery) string {
+	switch {
+	case q.UID != "":
+		return q.UID
+	case q.AllIncarnations || len(rows) == 0:
+		return ""
+	default:
+		return rows[0].Change.UID
+	}
+}
+
+// correlatedEvents selects the Kubernetes Events naming the timeline's subject.
+//
+// # What is matched, and from where
+//
+// The subject is read out of the *Event's own* data and never from the subject's
+// rows, which is what makes an Event about an object nobody watched correlatable at
+// all. It is matched on (kind, namespace, name), plus uid when the caller pinned an
+// incarnation: name is the forgiving key that still finds the Events of an object
+// since recreated, and uid is the exact one, right to add precisely when the caller
+// has already said which incarnation they mean.
+//
+// The Event row's own namespace is not consulted. An Event lives in a namespace of
+// its own choosing, and for a cluster-scoped subject it is not the subject's — which
+// has none — so pinning it would correlate nothing for exactly the objects whose
+// Events are hardest to find another way.
+//
+// # What the predicates do not do
+//
+// The actor predicates are not applied. An Event's actors are the field managers of
+// the Event object — the controller that wrote it, never whoever changed the object
+// it is about — so filtering commentary by them would empty the Event half of almost
+// every filtered timeline and show a reader "Kubernetes said nothing" about an
+// incident Kubernetes had plenty to say about (Invariant 4). Field-path predicates
+// need no exception: an Event row carries no diff, and a row with no patch survives
+// such a filter by the same rule that keeps a first sighting.
+func (e *referenceEngine) correlatedEvents(q query.TimelineQuery, uid string) []query.Change {
+	var out []query.Change
+	for _, r := range e.window(e.rows, q.From, q.To) {
+		if r.Ref.ClusterID != q.Ref.ClusterID || !isEventKind(r.Ref) {
+			continue
+		}
+		subject := eventSubjectOf(r.Change.Data)
+		if subject.Kind != q.Ref.Kind || subject.Namespace != q.Ref.Namespace ||
+			subject.Name != q.Ref.Name {
+			continue
+		}
+		if uid != "" && subject.UID != uid {
+			continue
+		}
+		// EventKubernetes is stamped because Change carries no other way to say it: an
+		// ingested Event is an ordinary object with its own history, so its rows record
+		// Added or Modified, and without the stamp a reader could not tell a row *about*
+		// the object from a row about something that happened to it.
+		change := r.Change
+		change.EventType = query.EventKubernetes
+		out = append(out, change)
+	}
+	return out
+}
+
+// isEventKind reports whether an identity is a Kubernetes Event, in either of the
+// two API groups one may have been captured through.
+//
+// Both spellings, because v1/Event and events.k8s.io/v1/Event are one storage behind
+// two APIs and a cluster's rules may name either. Recognising one would drop
+// whichever half of a cluster's commentary happens to be captured the other way,
+// which is a silent hole rather than a visible gap.
+func isEventKind(ref query.ObjectRef) bool {
+	return ref.Kind == referenceEventKind &&
+		(ref.APIGroup == "" || ref.APIGroup == referenceEventGroupModern)
+}
+
+// The kind and the second group a Kubernetes Event is recorded under. The core group
+// is the empty string and is spelled as a value rather than named, because a
+// wildcard spelling of it reads as "any group" at the call sites that mean "the core
+// one".
+const (
+	referenceEventKind        = "Event"
+	referenceEventGroupModern = "events.k8s.io"
+)
+
+// eventSubject is the object a Kubernetes Event is about.
+type eventSubject struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+}
+
+// eventEnvelope is the part of an Event's recorded data that names its subject: the
+// core group names it in involvedObject, events.k8s.io in regarding.
+type eventEnvelope struct {
+	InvolvedObject eventSubject `json:"involvedObject"`
+	Regarding      eventSubject `json:"regarding"`
+}
+
+// eventSubjectOf reads the subject out of an Event's recorded data.
+//
+// The two spellings are coalesced *per field*, which is the reading the published
+// recipes use: an Event carrying one key with some fields empty is still matched on
+// the fields it does fill. An undecodable payload yields the zero subject, which
+// matches nothing — an Event nobody can attribute is not correlated, and it is not a
+// reason to fail the timeline it was going to be commentary on.
+func eventSubjectOf(data string) eventSubject {
+	var env eventEnvelope
+	if err := json.Unmarshal([]byte(data), &env); err != nil {
+		return eventSubject{}
+	}
+	return eventSubject{
+		Kind:      firstNonEmpty(env.InvolvedObject.Kind, env.Regarding.Kind),
+		Namespace: firstNonEmpty(env.InvolvedObject.Namespace, env.Regarding.Namespace),
+		Name:      firstNonEmpty(env.InvolvedObject.Name, env.Regarding.Name),
+		UID:       firstNonEmpty(env.InvolvedObject.UID, env.Regarding.UID),
+	}
+}
+
+// firstNonEmpty returns the first of two values that is set.
+func firstNonEmpty(first, second string) string {
+	if first != "" {
+		return first
+	}
+	return second
 }
 
 // keepsFilters applies the actor and field-path predicates, client-side and in the

@@ -172,7 +172,7 @@ func runBlameCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.window.since, local.window.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now, flags.Zone())
 	if err != nil {
 		return err
 	}
@@ -239,6 +239,7 @@ func blameRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IOS
 		Width: options.TerminalWidth(streams.Out),
 		Color: options.ShouldColorize(flags.Color, streams.Out),
 		Wide:  flags.Output == options.OutputWide,
+		Zone:  flags.Zone(),
 	}
 }
 
@@ -278,7 +279,7 @@ func RunBlame(
 	// plausible, and silent.
 	request.Timeline.Reverse = false
 
-	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
+	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams, opts.Zone)
 	if err != nil {
 		return err
 	}
@@ -290,8 +291,8 @@ func RunBlame(
 	// change *before* the one that wrote it, silently and plausibly.
 	ascending := gathered.Rows
 
-	seed, base, seedNotice := seedBlameState(ctx, backend.Engine, request, gathered, ascending)
-	attributed := replay.AttributeRun(seed, ascending)
+	seed, base, seedNotice := seedBlameState(ctx, backend.Engine, request, gathered, ascending, opts.Zone)
+	attributed := replay.AttributeRun(seed, ascending, opts.Zone)
 	rows := attributed.BlameRows(request.Fields, request.Depth)
 
 	notices := append(slices.Clone(gathered.Notices), attributed.Notices...)
@@ -302,7 +303,7 @@ func RunBlame(
 		// would offer a second, weaker reason for the same silence.
 		notices = appendNotice(notices, seedNotice)
 	}
-	notices = appendNotice(notices, blameFilterNotice(request, gathered, len(rows)))
+	notices = appendNotice(notices, blameFilterNotice(request, gathered, len(rows), opts.Zone))
 
 	if writeErr := writeBlameAnswer(backend, request, gathered, base, rows, notices, streams, opts); writeErr != nil {
 		return writeErr
@@ -324,24 +325,24 @@ func RunBlame(
 // before an object existed would spend a round trip to be told so.
 func seedBlameState(
 	ctx context.Context, engine query.QueryEngine, request BlameRequest,
-	gathered gatherResult, ascending []render.TimelineRow,
+	gathered gatherResult, ascending []render.TimelineRow, zone render.Zone,
 ) ([]byte, string, render.Notice) {
 	if len(ascending) > 0 && ascending[0].Change.EventType == query.EventAdded {
 		return nil, fmt.Sprintf("%s (%s), this incarnation's first sighting",
-			render.FormatInstant(ascending[0].Change.TS), query.EventAdded), render.Notice{}
+			zone.Instant(ascending[0].Change.TS), query.EventAdded), render.Notice{}
 	}
 
 	at := blameAnchor(request, gathered, ascending)
 	reconstruction, err := engine.StateAt(ctx, request.Timeline.Ref, at, gathered.UID)
 	if err != nil {
-		return fallbackSeed(ascending, err)
+		return fallbackSeed(ascending, err, zone)
 	}
 
 	encoded, encodeErr := json.Marshal(reconstruction.Object)
 	if encodeErr != nil {
-		return fallbackSeed(ascending, encodeErr)
+		return fallbackSeed(ascending, encodeErr, zone)
 	}
-	return encoded, describeBase(reconstruction), render.Notice{}
+	return encoded, describeBase(reconstruction, zone), render.Notice{}
 }
 
 // blameAnchor is the instant the state is reconstructed for.
@@ -375,14 +376,14 @@ func blameAnchor(request BlameRequest, gathered gatherResult, ascending []render
 // patches name are attributable without any state at all, and the object's other
 // fields are what is lost. Failing here instead would trade the whole answer for
 // the part of it that could not be assembled (Invariant 5).
-func fallbackSeed(ascending []render.TimelineRow, err error) ([]byte, string, render.Notice) {
+func fallbackSeed(ascending []render.TimelineRow, err error, zone render.Zone) ([]byte, string, render.Notice) {
 	for _, row := range ascending {
 		if row.Change.Data == "" {
 			continue
 		}
 		return []byte(row.Change.Data),
 			fmt.Sprintf("%s (%s), the oldest full state in this window",
-				render.FormatInstant(row.Change.TS), row.Change.EventType),
+				zone.Instant(row.Change.TS), row.Change.EventType),
 			render.Notice{
 				Text: fmt.Sprintf("no state survives from before this window (%s), so the fields the "+
 					"changes below did not touch are shown as %s rather than attributed",
@@ -401,9 +402,9 @@ func fallbackSeed(ascending []render.TimelineRow, err error) ([]byte, string, re
 // The patch count travels with it for the reason `get --at` prints one: a state
 // assembled from a base an hour old and two patches invites more confidence than
 // one assembled from a base three months old and four hundred.
-func describeBase(reconstruction *query.Reconstruction) string {
+func describeBase(reconstruction *query.Reconstruction, zone render.Zone) string {
 	base := fmt.Sprintf("%s (%s)",
-		render.FormatInstant(reconstruction.BaseTS), reconstruction.BaseEvent)
+		zone.Instant(reconstruction.BaseTS), reconstruction.BaseEvent)
 	if reconstruction.PatchesApplied == 0 {
 		return base
 	}
@@ -430,14 +431,14 @@ func patchWord(count int) string {
 // tokens and merges the rows that then coincide, so it can make a table shorter
 // and can never make it empty. A flag that cannot produce this emptiness has
 // nothing to explain about one.
-func blameFilterNotice(request BlameRequest, gathered gatherResult, shown int) render.Notice {
+func blameFilterNotice(request BlameRequest, gathered gatherResult, shown int, zone render.Zone) render.Notice {
 	if shown > 0 || len(request.Fields) == 0 || gathered.Empty != nil {
 		return render.Notice{}
 	}
 	return render.Notice{
 		Text: fmt.Sprintf("%s has no field at or beneath %s in %s; the object itself is not empty",
 			describeObject(request.Timeline.Ref), strings.Join(request.Fields, ", "),
-			options.DescribeWindow(gathered.From, gathered.To)),
+			options.DescribeWindow(gathered.From, gathered.To, zone)),
 	}
 }
 
@@ -449,15 +450,16 @@ func writeBlameAnswer(
 ) error {
 	if request.Timeline.Structured == "" {
 		document := render.BlameDocument{
-			Kind:     describeKind(request.Timeline.Ref),
-			Object:   describeObject(request.Timeline.Ref),
-			Cluster:  request.Timeline.Ref.ClusterID,
-			UID:      gathered.UID,
-			Window:   options.DescribeWindow(gathered.From, gathered.To),
-			Base:     base,
-			Coverage: gathered.Coverage.Summary(),
-			Rows:     rows,
-			Notices:  notices,
+			Kind:           describeKind(request.Timeline.Ref),
+			Object:         describeObject(request.Timeline.Ref),
+			Cluster:        request.Timeline.Ref.ClusterID,
+			UID:            gathered.UID,
+			Window:         options.DescribeWindow(gathered.From, gathered.To, opts.Zone),
+			Base:           base,
+			Coverage:       gathered.Coverage.Summary(opts.Zone),
+			CoverageAbsent: gathered.Coverage.Absent(),
+			Rows:           rows,
+			Notices:        notices,
 		}
 		if err := render.WriteBlame(streams.Out, streams.ErrOut, document, opts); err != nil {
 			return exit.RuntimeErrorf("%w", err)

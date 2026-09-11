@@ -1,0 +1,6 @@
+=== stdout ===
+=== stderr ===
+→ updated profile "local" in /home/engineer/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ --use changed nothing: "local" is already the active profile
+=== exit ===
+0 (success)

@@ -1,0 +1,11 @@
+=== stdout ===
+[2mKind:[0m     apps/Deployment
+[2mObject:[0m   payments/checkout
+[2mCluster:[0m  prod-eu-1
+[2mCoverage:[0m [33mnone recorded for this scope[0m
+=== stderr ===
+error: no watch coverage recorded for the requested scope: nothing was ever watching apps/Deployment payments/checkout in cluster "prod-eu-1", so this silence is not evidence that it did not change — and no rule streams Events to this sink either, so these are two gaps rather than one: capturing this object's kind would record its changes, and Events would still be missing until a rule names them as well; the `scopes` command lists what is being recorded.
+Add Events to a rule as well:
+    - group: ""
+      version: v1
+      kind: Event

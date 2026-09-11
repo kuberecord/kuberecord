@@ -267,6 +267,15 @@ func TestEnumeratedFlagsCompleteTheirValues(t *testing.T) {
 			want: stringsOf(options.ColorModes()),
 		},
 		{
+			// The two keywords only. The IANA half of the accepted set is six
+			// hundred names the standard library cannot enumerate, and a menu that
+			// long is one nobody reads — the same trade the resource-kind menu
+			// makes with a cluster's CRDs. Typing a location name in full works.
+			name: "--" + options.FlagTZ,
+			args: []string{"--" + options.FlagTZ, ""},
+			want: options.ZoneKeywords(),
+		},
+		{
 			name: "--" + options.FlagBackend,
 			args: []string{"config", "set-profile", "example", "--" + options.FlagBackend, ""},
 			want: stringsOf(resolve.BackendKinds),
@@ -402,6 +411,35 @@ func TestShortNameTableIsAMenuAndNotAContract(t *testing.T) {
 	for _, want := range []string{"deploy", "sts", "cm", "ing"} {
 		if !slices.Contains(result.values, want) {
 			t.Errorf("the menu no longer offers %q", want)
+		}
+	}
+}
+
+// TestConfigVerbsAreCompleted keeps the `config` subtree's own menu honest.
+//
+// Cobra completes subcommands from the tree, so a verb reaches the menu by being
+// registered and there is nothing per-verb to write — which is exactly why the
+// assertion is worth having. A verb added to the tree and left out of this list
+// is a failure that says so, and the alternative is a menu nobody notices has
+// gone stale.
+//
+// The five profile verbs are named first because they are the surface the
+// release is measured against: `kubectl config` has set-context, get-contexts,
+// current-context, use-context and delete-context, and this is the same five.
+func TestConfigVerbsAreCompleted(t *testing.T) {
+	configHome(t)
+
+	result := completeThrough(t, "config", "")
+	for _, verb := range []string{
+		"set-profile", "get-profiles", "current-profile", "use-profile", "delete-profile",
+		"view", "resolve", "set-context-cluster-id",
+	} {
+		if !slices.Contains(result.values, verb) {
+			t.Errorf("the `config` menu no longer offers %q; it offered %v", verb, result.values)
+		}
+		if strings.TrimSpace(result.descriptions[verb]) == "" {
+			t.Errorf("%q completes with no description, so a menu of eight verbs says nothing "+
+				"about which is which", verb)
 		}
 	}
 }

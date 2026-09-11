@@ -1,0 +1,5 @@
+=== stdout ===
+=== stderr ===
+error: no profile is active, and /home/engineer/.config/kuberecord/config.yaml defines none: write one with `kuberecord config set-profile`, which with no flags asks for what it needs, after which `kuberecord config get-profiles` reports the file's state. An empty file is not a broken one — with no profile, resolution falls through to discovering a sink from the cluster — but there is no name to print, and printing nothing would let a script carry on as though it had been told which profile to use
+=== exit ===
+1 (runtime error)

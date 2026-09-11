@@ -18,7 +18,10 @@
 [33mand takes the database and the user from it. The forward is still yours to run:[0m
 [33ma profile records an address, it does not open a tunnel.[0m
 
-[33mExport KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the[0m
-[33mrecommended credential for it, and the operator's own is not. Both routes, and[0m
-[33mwhy this tool will not forward the port for you:[0m
+[33mExport KUBERECORD_CLICKHOUSE_PASSWORD first: it is the variable that profile[0m
+[33mrecords, and the password it wants is the sink's own user's — a credential that can[0m
+[33mwrite to the audit trail. Add --username <read-only user> to the set-profile line[0m
+[33mabove to read as one instead, and it records a variable of its own.[0m
+
+[33mBoth routes, and why this tool will not forward the port for you:[0m
 [33mdocs/CLI.md#running-the-cli-outside-the-cluster[0m

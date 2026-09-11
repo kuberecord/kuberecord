@@ -156,9 +156,9 @@ func TestBlameAttributesEveryField(t *testing.T) {
 	// Asserted by content as well as by golden file: a golden regenerated after a
 	// regression would keep passing, and these are the rows the command exists for.
 	for _, want := range [][]string{
-		{"spec.template.spec.containers[0].resources.limits.memory", "2026-08-28 14:07:20.044",
+		{"spec.template.spec.containers[0].resources.limits.memory", "2026-08-28 14:07:20.044Z",
 			"argocd-application-controller"},
-		{"spec.replicas", "2026-08-28 14:05:02.117", "kube-controller-manager"},
+		{"spec.replicas", "2026-08-28 14:05:02.117Z", "kube-controller-manager"},
 	} {
 		if !hasRow(stdout, want...) {
 			t.Errorf("the flagship attribution is missing.\nwant the row %v\ngot:\n%s", want, stdout)
@@ -170,7 +170,7 @@ func TestBlameAttributesEveryField(t *testing.T) {
 	// replace that never names it. Crediting kubectl is the wrong answer that looks
 	// right.
 	if hasRow(stdout, "spec.template.spec.containers[0].resources.limits.memory",
-		"2026-08-28 14:03:11.482", "kubectl-client-side-apply") {
+		"2026-08-28 14:03:11.482Z", "kubectl-client-side-apply") {
 		t.Errorf("a field is credited to the last change that named it rather than to the last "+
 			"change that wrote it:\n%s", stdout)
 	}
@@ -189,7 +189,7 @@ func TestBlameMarksARemovedField(t *testing.T) {
 		t.Errorf("a field the window deleted is missing from the table, or is not marked:\n%s", stdout)
 	}
 	if !hasRow(stdout, "spec.minReadySeconds", render.RemovedMarker,
-		"2026-08-28 14:05:02.117", "kube-controller-manager") {
+		"2026-08-28 14:05:02.117Z", "kube-controller-manager") {
 		t.Errorf("the removal is not attributed to the change that made it:\n%s", stdout)
 	}
 }
@@ -248,7 +248,7 @@ func TestBlameCollapsesAtDepth(t *testing.T) {
 
 	// The four fields under spec.template collapse into one row that says so. A
 	// collapsed row without its count would claim a single field last changed then.
-	if !hasRow(stdout, "spec.template", "2026-08-28 14:07:20.044", "4", "argocd-application-controller") {
+	if !hasRow(stdout, "spec.template", "2026-08-28 14:07:20.044Z", "4", "argocd-application-controller") {
 		t.Errorf("a collapsed row does not carry the newest write under it, or its field count:\n%s",
 			stdout)
 	}
@@ -392,27 +392,37 @@ func TestBlameSeedsFromAFullStateRowInTheWindow(t *testing.T) {
 //
 // An object with no recorded history and no state is not an object with no
 // fields, and the difference is the whole of what exit 3 says.
+// Both colour modes, for the reason timeline's own no-coverage case has them: the
+// header's coverage value is the finding in one line, and Task 18.5 put it in the
+// Warning tier so that a reader who stops at the header is told what the error
+// below would have told them.
 func TestBlameExitsThreeWhenNothingWasWatching(t *testing.T) {
-	engine := blamedCheckoutEngine()
-	engine.changes = nil
-	engine.incarnations = nil
-	engine.intervals = nil
+	for mode, color := range map[string]bool{"": false, "-color": true} {
+		t.Run("rendering"+mode, func(t *testing.T) {
+			engine := blamedCheckoutEngine()
+			engine.changes = nil
+			engine.incarnations = nil
+			engine.intervals = nil
 
-	stdout, stderr, err := runBlame(t, engine, defaultBlameRequest(), render.Options{})
-	if err == nil {
-		t.Fatal("a scope nobody watched was reported as an object with no fields")
+			stdout, stderr, err := runBlame(t, engine, defaultBlameRequest(),
+				render.Options{Color: color})
+			if err == nil {
+				t.Fatal("a scope nobody watched was reported as an object with no fields")
+			}
+			if code := exit.CodeFor(err); code != exit.NoCoverage {
+				t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
+			}
+			if !errors.Is(err, query.ErrNoCoverage) {
+				t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to "+
+					"an exit code: %v", err)
+			}
+			// The finding is written by the caller that turns an error into an exit
+			// code, so the golden carries it the way `timeline`'s does: what a person
+			// sees is both streams and the line that ends the invocation.
+			assertGoldenIn(t, "blame", "empty-without-coverage"+mode, stdout,
+				stderr+"error: "+err.Error()+"\n")
+		})
 	}
-	if code := exit.CodeFor(err); code != exit.NoCoverage {
-		t.Errorf("exit code %d, want %d", code, exit.NoCoverage)
-	}
-	if !errors.Is(err, query.ErrNoCoverage) {
-		t.Errorf("the failure does not carry query.ErrNoCoverage, so nothing maps it to an exit code: %v",
-			err)
-	}
-	// The finding is written by the caller that turns an error into an exit code,
-	// so the golden carries it the way `timeline`'s does: what a person sees is
-	// both streams and the line that ends the invocation.
-	assertGoldenIn(t, "blame", "empty-without-coverage", stdout, stderr+"error: "+err.Error()+"\n")
 }
 
 // TestBlameListsFieldsWhenNothingChangedInTheWindow is the third answer Invariant

@@ -28,26 +28,33 @@ package render
 // the rows beneath it, not by decision but because there was nothing else to give
 // it. The same is true of the header a reader passes over on every invocation.
 //
-// This file names the missing axis: three registers for a line that is not data,
-// chosen by what the line does to a reader rather than by what produced it. It
-// replaces nothing underneath. A row's event type is still coloured by what the
-// event is, because that is a fact about the row and not about its importance.
+// This file names the missing axis: registers for a line that is not data, chosen
+// by what the line does to a reader rather than by what produced it. It replaces
+// nothing underneath. A row's event type is still coloured by what the event is,
+// because that is a fact about the row and not about its importance.
 //
 // # The vocabulary is closed
 //
-// Three tiers, and a fourth is a design decision that needs a reason — not a
+// Four tiers, and a fifth is a design decision that needs a reason — not a
 // convenience at one call site. The value of a set this small is that "which tier
 // is this line?" has one obvious answer for every line the CLI prints, and each
-// name added makes that question harder for every line already rendered: a fourth
+// name added makes that question harder for every line already rendered: a new
 // register costs one decision per call site, not one decision. A line that seems
 // to want a new tier is usually a line arguing about emphasis *within* one of
-// these three, and the answer to it is wording rather than a register.
+// these four, and the answer to it is wording rather than a register.
 //
 // The names carry that weight only because they answer different questions.
 // Warning is about a conclusion the reader would otherwise draw; Provenance is
 // about a fact they need available rather than read; Emphasis is about what
-// survives skimming. A candidate fourth tier that cannot be told apart from those
-// three in one sentence is the case this paragraph exists to refuse.
+// survives skimming; Failure is about a result that never arrived at all. A
+// candidate fifth tier that cannot be told apart from those four in one sentence
+// is the case this paragraph exists to refuse.
+//
+// Failure is the fourth, and it is what a reason for one looks like. The file
+// shipped with three and spent none of them on the exit path, so the line saying
+// a command had failed rendered in default weight beneath a notice in amber and
+// provenance in dim — the least conspicuous thing on the screen, which inverts
+// the ordering this vocabulary exists to express (D39).
 //
 // # Colour is never the whole message
 //
@@ -67,7 +74,7 @@ package render
 //
 // A constant rather than a literal at each call site, because the marker is a
 // piece of the vocabulary and not a formatting habit: a second character
-// appearing in one place would be a fourth tier introduced without anyone
+// appearing in one place would be a further tier introduced without anyone
 // deciding to have one. It is deliberately not applied by Warning itself, because
 // the tier is also spent on multi-line prose — the unreachable-sink diagnostic is
 // a paragraph — where prefixing only the first line would mark the paragraph
@@ -84,7 +91,7 @@ const WarningMarker = "!"
 // that changed with the window they were generated in.
 //
 // Its method set is the whole vocabulary, which is what makes the set closed in a
-// way a reader can check: a fourth register would be a fourth method here, in one
+// way a reader can check: a fifth register would be a fifth method here, in one
 // file, rather than an escape sequence appearing at a call site.
 type Severity struct{ palette }
 
@@ -128,3 +135,23 @@ func (s Severity) Provenance(text string) string { return s.dim(text) }
 // two emphasised lines has none, because emphasis is relative to what surrounds
 // it and the second one spends the first.
 func (s Severity) Emphasis(text string) string { return s.paint(ansiBold, text) }
+
+// Failure renders the line that says no result arrived.
+//
+// Reach for it at the exit path and nowhere else: the `error:` line the top of
+// the CLI writes when a command has failed. That is the whole distinction between
+// it and Warning, and it is why the two must not be collapsed — a Warning
+// qualifies an answer that was still produced, this says there is none, and a
+// reader who cannot tell them apart cannot tell whether the document above the
+// line is an answer (D39).
+//
+// It spends the mechanical red rather than a register of its own, because red
+// already carries this meaning at every smaller scale in the CLI: the row that
+// ends an object's existence, the value a patch removed. A failure is the same
+// sense at the scale of an invocation.
+//
+// What it is deliberately not spent on is the usage block cobra prints beneath a
+// usage error. That block is a page of flag descriptions, and a page of red is a
+// page nobody reads — so the prefix and the message are painted and the block is
+// handed on untouched, exactly as the remediation routes beneath it are.
+func (s Severity) Failure(text string) string { return s.red(text) }

@@ -49,6 +49,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"text/template"
 
 	"sigs.k8s.io/yaml"
 )
@@ -700,9 +701,14 @@ type releaseWorkflow struct {
 		Permissions *map[string]string `json:"permissions"`
 		Steps       []struct {
 			Name string `json:"name"`
+			ID   string `json:"id"`
 			Uses string `json:"uses"`
 			If   string `json:"if"`
 			Run  string `json:"run"`
+			// `any` rather than `bool`: the field also accepts an expression,
+			// and a workflow that used one would otherwise fail the parse for
+			// every test in this file rather than for the one that reads it.
+			ContinueOnError any `json:"continue-on-error"`
 		} `json:"steps"`
 	} `json:"jobs"`
 }
@@ -857,46 +863,69 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 	publishing := []struct {
 		match func(name, uses, run string) bool
 		what  string
+		// wantIf overrides the plain gate for a step that carries a second
+		// condition. Empty means the gate alone, which is every step but one.
+		wantIf string
 	}{
 		{
 			func(_, uses, _ string) bool { return strings.Contains(uses, "attest-build-provenance") },
 			"an attestation is a record written against this repository",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-sign") },
 			"a signature is a registry write and a public transparency-log entry",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "gh release create") },
 			"a published Release cannot be unpublished",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "docker login") },
 			"a rehearsal that authenticates to the registry could push",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-login") },
 			"a rehearsal that authenticates to the chart registry could push",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-push") },
 			"a chart in a public registry cannot be unpublished",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-sign") },
 			"a signature is a registry write and a public transparency-log entry",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-chart-metadata-push") },
 			"the metadata claims ownership of a public listing, and it is a registry write",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-artifacts-sign") },
 			"sign-blob writes a public transparency-log entry, whatever it is over",
+			"",
 		},
 		{
 			func(_, _, run string) bool { return strings.Contains(run, "make release-brew-push") },
 			"a commit pushed to the public Homebrew tap is what `brew install` serves",
+			"",
+		},
+		{
+			// The one step here that reaches a repository this project does not
+			// own. A rehearsal that opened a pull request against
+			// kubernetes-sigs/krew-index would need a stranger to close it.
+			func(_, uses, _ string) bool { return strings.Contains(uses, "rajatjindal/krew-release-bot") },
+			"a pull request against kubernetes-sigs/krew-index is somebody else's inbox",
+			// Also excluded on a candidate tag: krew-index carries the one
+			// version `kubectl krew install` serves, which is never a candidate.
+			gate + " && !contains(env.RELEASE_VERSION, '-')",
 		},
 	}
 
@@ -908,9 +937,13 @@ func TestPublishingStepsAreGatedOnTheDryRun(t *testing.T) {
 					continue
 				}
 				found[i]++
-				if step.If != gate {
-					t.Errorf("%s/%q runs on a rehearsal (`if: %s`), but %s",
-						jobName, step.Name, step.If, p.what)
+				want := p.wantIf
+				if want == "" {
+					want = gate
+				}
+				if step.If != want {
+					t.Errorf("%s/%q runs under `if: %s`, want `if: %s` — %s",
+						jobName, step.Name, step.If, want, p.what)
 				}
 			}
 		}
@@ -1631,9 +1664,31 @@ func workflowRuns(t *testing.T, path, want string) bool {
 	t.Helper()
 	for _, job := range parseWorkflow(t, path).Jobs {
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, want) {
+			if stepInvokes(step.Run, want) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// stepInvokes reports whether a step's script *runs* the named make target,
+// rather than merely containing its name.
+//
+// The distinction is the one TestKrewIndexSubmissionIsAMaintainersCommand already
+// draws, and Task 18.8 is where the rest of the file needed it too: the krew job's
+// summary explains to a reader where the published digests are checked, and naming
+// `make release-krew-verify-published` in that sentence made a substring search
+// believe a rehearsal was fetching published assets. A line that starts with `make`
+// runs it; a line that mentions it does not.
+func stepInvokes(run, target string) bool {
+	for line := range strings.SplitSeq(run, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "make ") && !strings.HasPrefix(line, "$(MAKE) ") {
+			continue
+		}
+		if strings.Contains(line, target) {
+			return true
 		}
 	}
 	return false
@@ -1865,6 +1920,9 @@ const (
 	krewPluginBin   = "kubectl-" + krewPluginName
 	krewAPIVersion  = "krew.googlecontainertools.github.com/v1alpha2"
 	brewPlatformSet = 4 // darwin and linux, arm64 and amd64
+	// The one platform that changes every rule below: a `.zip` rather than a
+	// tarball, an `.exe` on both binary names, and no Homebrew formula at all.
+	goosWindows = "windows"
 )
 
 // runHack invokes one of the hack/ scripts and returns stdout, stderr and the
@@ -1939,7 +1997,7 @@ func distFixture(t *testing.T, platforms []string) (dir string, pairs []string,
 			t.Fatalf("CLI_PLATFORMS carries %q, which is not <os>/<arch>", platform)
 		}
 		extension := ".tar.gz"
-		if goos == "windows" {
+		if goos == goosWindows {
 			extension = ".zip"
 		}
 		name := fmt.Sprintf("kuberecord_%s_%s_%s%s", fixtureVersion, goos, arch, extension)
@@ -2061,7 +2119,7 @@ func TestKrewManifestIsGeneratedFromTheArchives(t *testing.T) {
 			// is told to: an extensionless `bin` installs a plugin Windows cannot
 			// execute.
 			wantBin := krewPluginBin
-			if goos == "windows" {
+			if goos == goosWindows {
 				wantBin += ".exe"
 			}
 			if entry.Bin != wantBin {
@@ -2158,6 +2216,457 @@ func TestKrewManifestSuitsTheIndex(t *testing.T) {
 	}
 }
 
+//
+// The manifest has one definition (Task 18.8)
+//
+
+// krewTemplate is the manifest's one description. Both renderers read this file:
+// hack/krew-manifest.sh, into the asset a release attaches, and
+// rajatjindal/krew-release-bot, into the pull request it opens against
+// kubernetes-sigs/krew-index.
+//
+// The path is not a choice. The bot looks for `.krew.yaml` at the repository root
+// unless its action is configured otherwise, and configuring it otherwise would
+// buy nothing.
+const krewTemplate = ".krew.yaml"
+
+// The two template actions both renderers implement, and the whole of the
+// language this file may use. `addURIAndSha` is matched twice on purpose: once
+// strictly, as the only form the renderer accepts, and once loosely, so a line
+// that meant to be one and is not can be reported as that rather than as an
+// unknown action.
+var (
+	krewTagAction    = regexp.MustCompile(`\{\{\s*\.TagName\s*\}\}`)
+	krewURIAction    = regexp.MustCompile(`^( *)\{\{\s*addURIAndSha\s+"([^"]+)"\s+\.TagName\s*\}\}$`)
+	krewURIAttempted = regexp.MustCompile(`addURIAndSha`)
+)
+
+// krewTemplateBlock is one platform's entry in the template, with the lines it
+// occupies so a test can remove it and watch the renderer notice.
+type krewTemplateBlock struct {
+	os, arch, uri, bin string
+	// first and past are the half-open line range [first, past) the block covers,
+	// zero-based.
+	first, past int
+}
+
+// parseKrewTemplate reads the platform blocks out of the template.
+//
+// It is a line scan rather than a YAML parse because the template is not YAML:
+// `version: {{ .TagName }}` is a flow mapping to any parser that tried, which is
+// exactly why the rendered copy and this file cannot be checked the same way.
+func parseKrewTemplate(t *testing.T, body string) []krewTemplateBlock {
+	t.Helper()
+
+	lines := strings.Split(body, "\n")
+	var blocks []krewTemplateBlock
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "- selector:":
+			if n := len(blocks); n > 0 {
+				blocks[n-1].past = i
+			}
+			blocks = append(blocks, krewTemplateBlock{first: i, past: len(lines)})
+			continue
+		case len(blocks) == 0:
+			continue
+		}
+
+		block := &blocks[len(blocks)-1]
+		switch {
+		case strings.HasPrefix(trimmed, "os: "):
+			block.os = strings.TrimPrefix(trimmed, "os: ")
+		case strings.HasPrefix(trimmed, "arch: "):
+			block.arch = strings.TrimPrefix(trimmed, "arch: ")
+		case strings.HasPrefix(trimmed, "bin: "):
+			block.bin = strings.TrimPrefix(trimmed, "bin: ")
+		default:
+			if m := krewURIAction.FindStringSubmatch(line); m != nil {
+				block.uri = m[2]
+			}
+		}
+	}
+	if len(blocks) == 0 {
+		t.Fatalf("%s declares no platforms, so the manifest would install nowhere", krewTemplate)
+	}
+	return blocks
+}
+
+// TestKrewManifestHasOneDefinition is D43 as a check.
+//
+// A template for the bot beside a generator for the release asset would be two
+// descriptions of one artefact that must agree, which is the drift class
+// TestRBACParityWithKustomize exists to catch elsewhere in this repository. The
+// failure would be quiet and remote: krew-index would carry a document nothing
+// here had ever printed, and the first symptom would be somebody's `krew install`
+// fetching an archive whose digest does not match.
+//
+// So the assertion is a negative. The generator may render the manifest; it may
+// not describe it.
+func TestKrewManifestHasOneDefinition(t *testing.T) {
+	body := readFile(t, krewTemplate)
+	if strings.TrimSpace(body) == "" {
+		t.Fatalf("%s is empty, so nothing defines the manifest", krewTemplate)
+	}
+
+	script := readFile(t, krewScript)
+	for _, described := range []struct{ substring, what string }{
+		{"krew.googlecontainertools", "the apiVersion"},
+		{"matchLabels", "the platform selectors"},
+		{"shortDescription", "the index listing"},
+		{"caveats", "the caveats"},
+	} {
+		if strings.Contains(script, described.substring) {
+			t.Errorf("%s still describes %s (%q). Since Task 18.8 it renders %s and the "+
+				"release bot renders the same file; a generator that also described the "+
+				"manifest would be the second description that drifts",
+				krewScript, described.what, described.substring, krewTemplate)
+		}
+	}
+
+	// And the renderer has to actually read it, rather than defaulting to it in a
+	// comment. `.krew.yaml` appearing in the script's prose and nowhere in its
+	// logic is the shape this would fail as.
+	if !strings.Contains(script, "KREW_TEMPLATE") {
+		t.Errorf("%s no longer reads KREW_TEMPLATE, so nothing points it at %s",
+			krewScript, krewTemplate)
+	}
+	makefile := readFile(t, "Makefile")
+	if !strings.Contains(makefile, "KREW_TEMPLATE ?= "+krewTemplate) {
+		t.Errorf("the Makefile no longer defines KREW_TEMPLATE as %s", krewTemplate)
+	}
+	if !strings.Contains(makefile, `KREW_TEMPLATE="$(KREW_TEMPLATE)" ./$(KREW_MANIFEST_SCRIPT)`) {
+		t.Error("release-krew-manifest no longer passes KREW_TEMPLATE to the renderer, so the " +
+			"Makefile's variable describes a path nothing uses")
+	}
+}
+
+// TestKrewTemplateUsesOnlyWhatBothRenderersImplement keeps the template inside the
+// language its two readers share.
+//
+// The bot's renderer is Go's text/template with two helpers; this repository's is
+// a shell script that implements exactly those two. A third construct would render
+// under one and not the other — and the one it renders under is the one that opens
+// the pull request, so the divergence would first be visible in krew-index.
+//
+// The four-space rule is not style. `addURIAndSha` returns its `sha256:` line with
+// four spaces hardcoded (pkg/source/template.go), so the same template at six
+// spaces is valid YAML here and broken YAML there.
+func TestKrewTemplateUsesOnlyWhatBothRenderersImplement(t *testing.T) {
+	uriActions := 0
+	for i, line := range strings.Split(readFile(t, krewTemplate), "\n") {
+		number := i + 1
+
+		if m := krewURIAction.FindStringSubmatch(line); m != nil {
+			uriActions++
+			if indent := m[1]; len(indent) != 4 {
+				t.Errorf("%s:%d indents addURIAndSha by %d spaces; it must be exactly four, "+
+					"because the bot hardcodes four on the sha256 line it emits",
+					krewTemplate, number, len(indent))
+			}
+			continue
+		}
+		if krewURIAttempted.MatchString(line) {
+			t.Errorf("%s:%d looks like an addURIAndSha action and does not parse as one:\n  %s\n"+
+				"The accepted form is `{{addURIAndSha \"<url>\" .TagName }}` alone on the line",
+				krewTemplate, number, line)
+			continue
+		}
+
+		if rest := krewTagAction.ReplaceAllString(line, ""); strings.Contains(rest, "{{") {
+			t.Errorf("%s:%d uses a template action neither renderer here implements:\n  %s\n"+
+				"The manifest has one definition and two readers, so it may only use "+
+				"{{ .TagName }} and {{addURIAndSha \"<url>\" .TagName }}",
+				krewTemplate, number, line)
+		}
+	}
+	if uriActions == 0 {
+		t.Errorf("%s carries no addURIAndSha action, so it names no archive at all", krewTemplate)
+	}
+}
+
+// TestKrewTemplateCoversEveryPlatformTheReleaseBuilds is the acceptance
+// criterion's parity half, read off the template rather than off the rendered
+// asset.
+//
+// The renderer refuses a mismatch in either direction at release time, and
+// `make release-krew-verify` runs on every pull request — so this is the third
+// opinion rather than the only one. What it adds is the *order* and the shape: a
+// manifest naming an archive that does not exist is a `krew install` that 404s,
+// and it 404s only for the users on that platform.
+func TestKrewTemplateCoversEveryPlatformTheReleaseBuilds(t *testing.T) {
+	platforms := cliPlatforms(t)
+	blocks := parseKrewTemplate(t, readFile(t, krewTemplate))
+
+	if len(blocks) != len(platforms) {
+		t.Fatalf("%s declares %d platforms, but the release builds %d (%v). krew installs "+
+			"nothing on a platform the manifest omits, and it says so to the user rather "+
+			"than to us", krewTemplate, len(blocks), len(platforms), platforms)
+	}
+
+	// The standalone name is read out of the Makefile rather than written here:
+	// the archives are named after it, so a rename that missed this file would
+	// publish five URLs that 404 and nothing would have failed.
+	match := regexp.MustCompile(`(?m)^CLI_STANDALONE_NAME \?= (\S+)$`).FindStringSubmatch(readFile(t, "Makefile"))
+	if match == nil {
+		t.Fatal("the Makefile no longer defines CLI_STANDALONE_NAME, which the archives are named after")
+	}
+	standalone := match[1]
+
+	for i, platform := range platforms {
+		t.Run(platform, func(t *testing.T) {
+			goos, arch, _ := strings.Cut(platform, "/")
+			block := blocks[i]
+
+			if block.os != goos || block.arch != arch {
+				t.Fatalf("%s's platform %d selects %s/%s, but CLI_PLATFORMS has %s there",
+					krewTemplate, i+1, block.os, block.arch, platform)
+			}
+
+			extension := ".tar.gz"
+			wantBin := krewPluginBin
+			if goos == goosWindows {
+				extension = ".zip"
+				wantBin += ".exe"
+			}
+
+			// The tag stays a template action in the archive name. Spelled out
+			// literally it would be the version of whichever release last
+			// touched this file, for every release afterwards.
+			wantURI := fmt.Sprintf("https://github.com/%s/releases/download/{{ .TagName }}/%s_{{ .TagName }}_%s_%s%s",
+				githubRepo(t), standalone, goos, arch, extension)
+			if block.uri != wantURI {
+				t.Errorf("the %s entry names\n  %s\nwant\n  %s", platform, block.uri, wantURI)
+			}
+
+			// Windows binaries carry the extension, and krew installs the file
+			// it is told to: an extensionless `bin` installs a plugin Windows
+			// cannot execute.
+			if block.bin != wantBin {
+				t.Errorf("the %s entry installs %q, want %q", platform, block.bin, wantBin)
+			}
+		})
+	}
+}
+
+// TestKrewRendererAgreesWithTheGoTemplateEngine is the residual risk of having
+// one definition, closed.
+//
+// D43 removed the second *description* of the manifest; what it necessarily left
+// behind is a second *renderer*, because the bot runs Go's text/template with two
+// helpers and this repository runs a shell script implementing them. One
+// definition read two ways is only worth having if the two ways agree, and
+// "agree" here is byte-for-byte: the bot submits its own rendering to krew-index,
+// so a construct the shell mishandles would surface as a document nothing in this
+// repository ever printed.
+//
+// So this renders the real template through the real engine — the same
+// `text/template`, the same helper signature, the same hardcoded four-space
+// `sha256` line the bot emits — and compares. The one deliberate difference is
+// where the digest comes from: the bot downloads the published archive and this
+// hashes the local one, which is why the helper below hashes the fixture rather
+// than fetching anything.
+func TestKrewRendererAgreesWithTheGoTemplateEngine(t *testing.T) {
+	const version = fixtureVersion
+	platforms := cliPlatforms(t)
+	dir, pairs, _ := distFixture(t, platforms)
+
+	// The bot's helper, transcribed. It renders the URL as a template of its own
+	// — a `{{ .TagName }}` inside a Go string literal is not expanded by the
+	// outer parse — and returns two lines with the second one's indentation
+	// fixed at four spaces.
+	addURIAndSha := func(rawURL, tag string) string {
+		urlTemplate, err := template.New("url").Parse(rawURL)
+		if err != nil {
+			t.Fatalf("parse the URL template %q: %v", rawURL, err)
+		}
+		var url bytes.Buffer
+		if err := urlTemplate.Execute(&url, struct{ TagName string }{TagName: tag}); err != nil {
+			t.Fatalf("render the URL template %q: %v", rawURL, err)
+		}
+
+		// The same last-segment rule the renderer applies (`${url##*/}`).
+		rendered := url.String()
+		archive := filepath.Join(dir, rendered[strings.LastIndex(rendered, "/")+1:])
+		raw, err := os.ReadFile(archive) // #nosec G304 -- a fixture this test wrote
+		if err != nil {
+			t.Fatalf("read the archive the template names: %v", err)
+		}
+		sum := sha256.Sum256(raw)
+		return fmt.Sprintf("uri: %s\n    sha256: %s", rendered, hex.EncodeToString(sum[:]))
+	}
+
+	parsed, err := template.New(filepath.Base(krewTemplate)).
+		Funcs(template.FuncMap{"addURIAndSha": addURIAndSha}).
+		ParseFiles(repoPath(krewTemplate))
+	if err != nil {
+		t.Fatalf("%s does not parse as a Go template, so the release bot cannot render it "+
+			"at all: %v", krewTemplate, err)
+	}
+	var viaGo bytes.Buffer
+	if err := parsed.Execute(&viaGo, struct{ TagName string }{TagName: version}); err != nil {
+		t.Fatalf("%s does not execute as a Go template: %v", krewTemplate, err)
+	}
+
+	viaShell, stderr, code := runHack(t, krewScript, append([]string{version, githubRepo(t), dir}, pairs...)...)
+	if code != 0 {
+		t.Fatalf("%s exited %d: %s", krewScript, code, stderr)
+	}
+
+	if viaShell != viaGo.String() {
+		t.Errorf("the two renderers of %s disagree. The bot submits its own rendering to "+
+			"krew-index, so this is a document this repository would never have printed.\n"+
+			"--- %s\n%s\n--- text/template\n%s", krewTemplate, krewScript, viaShell, viaGo.String())
+	}
+}
+
+// TestKrewRendererRefusesATemplateItCannotRender is the renderer's non-vacuity
+// proof, and the reason one definition is safe to have.
+//
+// A lenient renderer is worse than a second definition, because its output looks
+// right: a template action it silently passed through would reach krew-index as
+// literal text, and a platform it silently skipped would be a release that stops
+// shipping to those users with nothing having failed. Every case below is a
+// mutation of the real template, so none of them can pass by describing a fixture
+// that has drifted from the file the bot reads.
+func TestKrewRendererRefusesATemplateItCannotRender(t *testing.T) {
+	const version = fixtureVersion
+	repo := githubRepo(t)
+	platforms := cliPlatforms(t)
+	original := readFile(t, krewTemplate)
+	blocks := parseKrewTemplate(t, original)
+	lines := strings.Split(original, "\n")
+
+	// dropPlatform removes one platform's whole block, which is the only way to
+	// reach "the template forgot a platform the release builds" — mutating its
+	// archive name reaches a different refusal.
+	dropPlatform := func(t *testing.T, platform string) string {
+		t.Helper()
+		goos, arch, _ := strings.Cut(platform, "/")
+		for _, block := range blocks {
+			if block.os == goos && block.arch == arch {
+				kept := append(append([]string{}, lines[:block.first]...), lines[block.past:]...)
+				return strings.Join(kept, "\n")
+			}
+		}
+		t.Fatalf("%s has no %s block to remove", krewTemplate, platform)
+		return ""
+	}
+
+	tests := []struct {
+		name string
+		// mutate produces the template to render.
+		mutate func(t *testing.T) string
+		// names is what the refusal must say, so the failure is diagnosable
+		// from the release log alone.
+		names []string
+	}{
+		{
+			name: "an action neither renderer implements",
+			mutate: func(*testing.T) string {
+				return strings.Replace(original, "  name: kuberecord", "  name: {{ .PluginName }}", 1)
+			},
+			names: []string{"does not implement", ".PluginName"},
+		},
+		{
+			name: "addURIAndSha at an indent the bot would render differently",
+			mutate: func(*testing.T) string {
+				return strings.Replace(original, "\n    {{addURIAndSha", "\n      {{addURIAndSha", 1)
+			},
+			names: []string{"exactly four", "6 spaces"},
+		},
+		{
+			name:   "a platform the release builds and the template forgot",
+			mutate: func(t *testing.T) string { return dropPlatform(t, "darwin/arm64") },
+			names:  []string{"no entry for darwin/arm64"},
+		},
+		{
+			name: "an archive this release does not build",
+			mutate: func(*testing.T) string {
+				return strings.Replace(original, "_linux_amd64.tar.gz", "_linux_riscv64.tar.gz", 1)
+			},
+			names: []string{"not one of the archives"},
+		},
+		{
+			name: "a URL pointing at another project's releases",
+			mutate: func(*testing.T) string {
+				return strings.Replace(original, "/releases/download/", "/releases/downloads/", 1)
+			},
+			names: []string{"is not a " + version + " asset"},
+		},
+		{
+			name: "one archive claimed by two platforms",
+			mutate: func(*testing.T) string {
+				return strings.Replace(original, "_linux_arm64.tar.gz", "_linux_amd64.tar.gz", 1)
+			},
+			names: []string{"twice"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, pairs, _ := distFixture(t, platforms)
+			path := filepath.Join(t.TempDir(), "krew.yaml")
+			if err := os.WriteFile(path, []byte(tc.mutate(t)), 0o600); err != nil {
+				t.Fatalf("write the mutated template: %v", err)
+			}
+
+			stdout, stderr, code := runKrewRenderer(t, path,
+				append([]string{version, repo, dir}, pairs...)...)
+			if code == 0 {
+				t.Fatalf("the renderer accepted it and printed a manifest:\n%s", stdout)
+			}
+			if stdout != "" {
+				t.Errorf("the renderer refused but printed %d bytes first; a document "+
+					"truncated halfway is one a caller might still redirect into a file",
+					len(stdout))
+			}
+			for _, want := range tc.names {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("the refusal does not say %q:\n%s", want, stderr)
+				}
+			}
+		})
+	}
+
+	// And the template itself has to be there. A default that silently rendered
+	// nothing would be a release with no krew manifest and no failure.
+	_, stderr, code := runKrewRenderer(t, filepath.Join(t.TempDir(), "absent.yaml"),
+		version, repo, t.TempDir(), "linux/amd64=x.tar.gz")
+	if code == 0 {
+		t.Error("the renderer accepted a template that does not exist")
+	}
+	if !strings.Contains(stderr, "does not exist") {
+		t.Errorf("the refusal does not say the template is missing:\n%s", stderr)
+	}
+}
+
+// runKrewRenderer invokes the renderer against a template of the caller's
+// choosing. KREW_TEMPLATE exists for exactly this: the default is the file the
+// bot reads, and a fixture must not be able to become that by accident.
+func runKrewRenderer(t *testing.T, templatePath string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+
+	cmd := exec.Command(repoPath(krewScript), args...) // #nosec G204 -- test-controlled arguments
+	cmd.Env = append(os.Environ(), "KREW_TEMPLATE="+templatePath)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		exitCode = 0
+	case asExitError(err, &exitErr):
+		exitCode = exitErr.ExitCode()
+	default:
+		t.Fatalf("run %s: %v", krewScript, err)
+	}
+	return out.String(), errOut.String(), exitCode
+}
+
 // TestGeneratorsRefuseAnIncompleteRelease is the non-vacuity proof for both
 // generators.
 //
@@ -2240,7 +2749,7 @@ func TestHomebrewFormulaCoversEveryPlatformBrewRunsOn(t *testing.T) {
 	if !strings.Contains(stderr, "windows/amd64") {
 		t.Errorf("the formula generator dropped the Windows archive silently. Its stderr was:\n%s", stderr)
 	}
-	if strings.Contains(stdout, "windows") {
+	if strings.Contains(stdout, goosWindows) {
 		t.Error("the formula names a Windows archive; brew does not run there, and a URL " +
 			"nothing can select is a URL nothing checks")
 	}
@@ -2599,13 +3108,13 @@ func TestDistributionDigestsAreVerifiedInCI(t *testing.T) {
 	for jobName, job := range wf.Jobs {
 		for _, step := range job.Steps {
 			switch {
-			case strings.Contains(step.Run, "make release-krew-verify-published"):
+			case stepInvokes(step.Run, "release-krew-verify-published"):
 				published++
 				if step.If != "env.DRY_RUN == 'false'" {
 					t.Errorf("%s/%q fetches published assets under `if: %s`; a rehearsal has "+
 						"nothing published to fetch", jobName, step.Name, step.If)
 				}
-			case strings.Contains(step.Run, "make release-krew-verify"):
+			case stepInvokes(step.Run, "release-krew-verify"):
 				local++
 				if step.If != "" {
 					t.Errorf("%s/%q re-derives the digests under `if: %s`. Hashing a local file "+
@@ -2751,12 +3260,21 @@ func TestTapRefusesWhatItMustRefuse(t *testing.T) {
 }
 
 // TestKrewIndexSubmissionIsAMaintainersCommand is the boundary this task drew on
-// purpose.
+// purpose, and Task 18.8 moved without erasing.
 //
-// Submitting to krew-index is a pull request against a repository this project
-// does not own, and a tag push must not open one. It also could not work: krew-index
-// CI fetches every URI in the manifest, so a PR raised before the assets exist
-// fails on arrival and spends weeks of review latency getting nowhere.
+// A tag push *does* open the krew-index pull request now — but not from here.
+// rajatjindal/krew-release-bot raises it through its own GitHub App, so this
+// repository still holds no credential for a repository it does not own, and
+// this target is still what a person runs rather than what a trigger runs. The
+// three cases that keep it are the first-ever submission, which the bot cannot
+// do, a bot outage, and a manifest that changed shape enough to want a human on
+// the pull request.
+//
+// The mechanical assertion is unchanged, and it is the one worth keeping: no
+// workflow may invoke `make krew-index-pr`. Automating *our* fork-and-push
+// machinery would also not work — krew-index CI fetches every URI in the
+// manifest, so a PR raised before the assets exist fails on arrival and spends
+// weeks of review latency getting nowhere.
 // TestKrewIndexPRInvokesGhCorrectly pins the two gh invocations krew-index-pr
 // depends on, neither of which any test or rehearsal exercises.
 //
@@ -2823,6 +3341,149 @@ func TestKrewIndexPRInvokesGhCorrectly(t *testing.T) {
 	}
 }
 
+// TestKrewIndexSubmissionIsAutomated pins the shape of the job that opens the
+// krew-index pull request (Task 18.8).
+//
+// Before it, every release carried a manual step with an external review clock,
+// and the workflow's own summary said so. What replaced it is a third party
+// running in this pipeline, which is worth pinning rather than trusting to
+// review: the gate that keeps a rehearsal from publishing, the pin that keeps the
+// action from changing under us, the permission it holds, and the fact that a
+// failure here reports rather than reddens a release that already happened.
+func TestKrewIndexSubmissionIsAutomated(t *testing.T) {
+	const bot = "rajatjindal/krew-release-bot"
+	wf := parseReleaseWorkflow(t)
+
+	// The action runs in exactly one job, and it is not the one holding
+	// `contents: write`, `packages: write` and an OIDC identity. That is the whole
+	// argument for the job existing separately: a third-party action needs what it
+	// reads, and nothing else in this workflow can be reached from it.
+	jobsRunningBot := map[string]bool{}
+	for name, job := range wf.Jobs {
+		for _, step := range job.Steps {
+			if strings.Contains(step.Uses, bot) {
+				jobsRunningBot[name] = true
+			}
+		}
+	}
+	if len(jobsRunningBot) != 1 {
+		t.Fatalf("%s runs %s in %v; it belongs in exactly one job", releaseWorkflowPath, bot,
+			sortedKeys(jobsRunningBot))
+	}
+	if !jobsRunningBot["krew"] {
+		t.Fatalf("%s runs in %v rather than in the krew job. A job of its own is what keeps "+
+			"a third-party action out of the one granted contents: write, packages: write "+
+			"and an OIDC identity", bot, sortedKeys(jobsRunningBot))
+	}
+
+	krew := wf.Jobs["krew"]
+	if want := map[string]string{"contents": "read"}; !mapsEqual(*krew.Permissions, want) {
+		t.Errorf("the krew job is granted %v, not %v. It checks this repository out for "+
+			"%s and nothing else: the pull request is opened by the bot's own GitHub App, "+
+			"against a repository no token issued here could write to",
+			*krew.Permissions, want, krewTemplate)
+	}
+
+	// `addURIAndSha` downloads every archive the manifest names in order to hash
+	// it, and the bot reads the Release itself to see whether it is a prerelease.
+	// Both need the publish job to have finished.
+	if needs := fmt.Sprint(krew.Needs); !strings.Contains(needs, "publish") {
+		t.Errorf("the krew job needs %v. The bot downloads the published archives to hash "+
+			"them, so a job that did not wait for the release resolves nothing", krew.Needs)
+	}
+
+	var submit, fallback, prerelease, rehearsal int
+	for _, step := range krew.Steps {
+		switch {
+		case strings.Contains(step.Uses, bot):
+			submit++
+
+			// A tag is mutable and this one opens pull requests on the project's
+			// behalf. The repository-wide check covers the pinning; this one
+			// covers *what* is pinned, so a bare tag here fails with the reason.
+			if !regexp.MustCompile(`@[0-9a-f]{40}$`).MatchString(step.Uses) {
+				t.Errorf("%s is used as %q, which is not pinned to a commit SHA. It opens "+
+					"pull requests on this project's behalf; a tag is a third party "+
+					"deciding what does that", bot, step.Uses)
+			}
+
+			// Both halves of the gate, spelled where a reader of the step sees
+			// them. Not a job-level `if:` — GitHub does not expose the `env`
+			// context to one, which is recorded above the tap job and is why a
+			// rehearsal that opened a PR against somebody else's repository was
+			// ever a risk worth writing down.
+			const gate = "env.DRY_RUN == 'false' && !contains(env.RELEASE_VERSION, '-')"
+			if step.If != gate {
+				t.Errorf("the submission step runs under `if: %s`, want `if: %s`. A rehearsal "+
+					"that opened a pull request against kubernetes-sigs/krew-index would "+
+					"need a stranger to clean it up, and krew-index carries the one version "+
+					"`kubectl krew install` serves, which is never a candidate",
+					step.If, gate)
+			}
+
+			if fmt.Sprint(step.ContinueOnError) != "true" {
+				t.Error("the submission step is not continue-on-error. By the time it runs " +
+					"the release is published, so a krew-index PR that did not open is " +
+					"recoverable by hand — while a failed job at that point reads as a " +
+					"failed release")
+			}
+			if step.ID == "" {
+				t.Error("the submission step has no `id:`, so no later step can report " +
+					"whether it worked. A tolerated failure nobody prints is a silent one")
+			}
+
+		case strings.Contains(step.If, "outcome == 'failure'"):
+			fallback++
+			// D34: when a command fails, the error names every existing route
+			// around the failure.
+			if !strings.Contains(step.Run, "krew-index-pr") {
+				t.Error("the failure step does not name `make krew-index-pr`. The manual " +
+					"route exists; a route that exists and is not named is a route nobody " +
+					"takes")
+			}
+
+		case strings.Contains(step.If, "contains(env.RELEASE_VERSION, '-')"):
+			// D31: a no-op is never silent. Every candidate tag skips the
+			// submission, and a skipped step says nothing by itself.
+			prerelease++
+
+		case step.If == "env.DRY_RUN == 'true'":
+			rehearsal++
+		}
+	}
+
+	for _, required := range []struct {
+		found int
+		what  string
+	}{
+		{submit, "no step asks the bot to open the pull request"},
+		{fallback, "no step reports a failed submission, so a tolerated failure is a silent one"},
+		{prerelease, "no step says why a candidate tag submitted nothing"},
+		{rehearsal, "no step shows what a rehearsal would have submitted"},
+	} {
+		if required.found == 0 {
+			t.Error(required.what)
+		}
+	}
+
+	// The rehearsal shows the document rather than describing it, and the
+	// manifest reaches this job as an artifact of its own — downloading the
+	// release bundle would fetch several hundred megabytes of CLI archives to
+	// print three kilobytes of YAML.
+	const artifact = "kuberecord-${{ env.RELEASE_VERSION }}-krew-manifest"
+	workflow := readFile(t, releaseWorkflowPath)
+	if strings.Count(workflow, artifact) != 2 {
+		t.Errorf("%s does not both upload and download %q, so the rehearsal has no manifest "+
+			"to print", releaseWorkflowPath, artifact)
+	}
+
+	// And the summary no longer hands the maintainer a job the workflow now does.
+	if strings.Contains(workflow, "run by a maintainer") {
+		t.Error("release.yml's summary still tells a maintainer to submit the krew manifest " +
+			"on every release. The bot does it; the manual command is the fallback")
+	}
+}
+
 func TestKrewIndexSubmissionIsAMaintainersCommand(t *testing.T) {
 	makefile := readFile(t, "Makefile")
 	if !strings.Contains(makefile, "krew-index-pr: ##") {
@@ -2858,20 +3519,30 @@ func TestKrewIndexSubmissionIsAMaintainersCommand(t *testing.T) {
 						continue
 					}
 					if strings.Contains(line, "krew-index-pr") {
-						t.Errorf("%s runs `%s`. A tag push must not open a pull request against "+
-							"somebody else's repository, and it would fail anyway: krew-index "+
-							"fetches every URI, and the assets do not exist until the release "+
-							"is published", path, line)
+						t.Errorf("%s runs `%s`. The krew-index pull request is the release "+
+							"bot's job, and this is the manual fallback: automating it would "+
+							"put this repository's credentials on a pull request against one "+
+							"it does not own, and it would fail anyway — krew-index fetches "+
+							"every URI, and the assets do not exist until the release is "+
+							"published", path, line)
 					}
 				}
 			}
 		}
 	}
 
-	// And the procedure is written down, because it is the one release step a
-	// maintainer has to remember.
+	// And the procedure is written down. It is no longer a step on every release,
+	// which makes writing it down matter more rather than less: a fallback nobody
+	// documented is one nobody finds on the day the bot is down.
 	releasing := readFile(t, "docs/RELEASING.md")
-	for _, want := range []string{"make krew-index-pr", "kubernetes-sigs/krew-index", "HOMEBREW_TAP_TOKEN"} {
+	for _, want := range []string{
+		"make krew-index-pr", "kubernetes-sigs/krew-index", "HOMEBREW_TAP_TOKEN",
+		// Task 18.8: whoever cuts the next release must not have to read the
+		// workflow to learn whether the krew step is theirs.
+		"rajatjindal/krew-release-bot",
+		"The first submission is manual",
+		krewTemplate,
+	} {
 		if !strings.Contains(releasing, want) {
 			t.Errorf("docs/RELEASING.md does not mention %q", want)
 		}

@@ -149,6 +149,9 @@ type BlameDocument struct {
 	Base string
 	// Coverage is the pre-rendered coverage summary for the header.
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was watching.
+	// See documentHeader.CoverageAbsent.
+	CoverageAbsent bool
 	// Rows are the fields, in the order they are to be displayed.
 	Rows []BlameRow
 	// Notices are written to standard error, in order.
@@ -160,6 +163,7 @@ func (d BlameDocument) header() documentHeader {
 	return documentHeader{
 		Kind: d.Kind, Object: d.Object, Cluster: d.Cluster, UID: d.UID,
 		Window: d.Window, Base: d.Base, Coverage: d.Coverage,
+		CoverageAbsent: d.CoverageAbsent,
 	}
 }
 
@@ -185,10 +189,11 @@ func WriteBlame(out, errOut io.Writer, doc BlameDocument, opts Options) error {
 
 // renderBlame builds the stdout half: the header, a blank line, and the table.
 func renderBlame(doc BlameDocument, opts Options) string {
-	p := palette{enabled: opts.Color}
+	severity := NewSeverity(opts.Color)
+	p := severity.palette
 
 	var built strings.Builder
-	built.WriteString(renderHeader(doc.header(), p))
+	built.WriteString(renderHeader(doc.header(), severity))
 	if len(doc.Rows) == 0 {
 		// No table, not an empty one — the choice every document in this package
 		// makes. A heading row with nothing under it implies the question was
@@ -278,7 +283,7 @@ func fieldCell(row BlameRow, cell string, width int) string {
 
 // blameCells renders one row's columns, unpainted, so the layout can be measured.
 func blameCells(row BlameRow, showFields bool, opts Options) []string {
-	cells := []string{blameField(row), lastChangedCell(row, opts.Wide)}
+	cells := []string{blameField(row), lastChangedCell(row, opts.Wide, opts.Zone)}
 	if opts.Wide {
 		cells = append(cells, valueOrDash(row.ResourceVersion))
 	}
@@ -298,11 +303,11 @@ func blameField(row BlameRow) string {
 
 // lastChangedCell is when the field was last written, or the statement that the
 // write is older than the window.
-func lastChangedCell(row BlameRow, wide bool) string {
+func lastChangedCell(row BlameRow, wide bool, zone Zone) string {
 	if !row.Attributed {
 		return BeforeWindow
 	}
-	return formatTimestamp(row.TS, wide)
+	return formatTimestamp(row.TS, wide, zone)
 }
 
 // blameActor names who made the last write.

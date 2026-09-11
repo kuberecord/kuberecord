@@ -146,7 +146,10 @@ var noopAudit = []auditedFlag{
 		"fragment that would make Events appear (Task 16.1). The mirror case is explained too: a " +
 		"document made entirely of Event rows is a timeline in which the object appears never to " +
 		"have changed, and explainNoChanges says against the same coverage whether it was watched " +
-		"and quiet or never watched at all (Task 17.3)"},
+		"and quiet or never watched at all (Task 17.3). Where the object was never watched the " +
+		"finding absorbs the flag rather than printing a second paragraph beneath itself, and " +
+		"eventsClause gives the same three states inside it — measured through the same " +
+		"eventScopeQuery, never assumed (Tasks 18.5 and 18.7)"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},
@@ -180,6 +183,10 @@ var noopAudit = []auditedFlag{
 	{"force-path-style", alwaysVisible, "as --backend"},
 	{"prefix", alwaysVisible, "as --backend"},
 	{"path", alwaysVisible, "as --backend"},
+	{"use", explained, "activation is reported whenever it happens, and the one invocation that " +
+		"can change nothing — --use on the profile that already answers — says so in those words " +
+		"rather than exiting non-zero (activePointerReport). The write itself is announced either " +
+		"way, so the flag is never the only thing that would have been on the screen"},
 
 	// `completion`.
 	{"no-descriptions", alwaysVisible, "all four generators honour it; the two that cobra offers " +
@@ -190,23 +197,31 @@ var noopAudit = []auditedFlag{
 
 	// kuberecord's global surface.
 	{"output", deliberatelySilent, "every format a command cannot render is refused by name. " +
-		"`wide` on `version`, `config view`, `config get-profiles` and `config resolve` renders " +
-		"identically to `table`, and that is the flag's guarantee honoured rather than dropped: " +
-		"`wide` means the same table with nothing elided, and those four documents elide nothing " +
-		"at any width — the profile listing's cells are addresses and paths people paste, so " +
-		"nothing in it is ever shortened. On the four `config` subcommands that write, `table` " +
-		"and `wide` render no document at all — the report of a write is the confirmation on " +
-		"stderr, and its data is the file. docs/CLI.md's format matrix says so"},
+		"`wide` on `version`, `config view`, `config get-profiles`, `config current-profile` and " +
+		"`config resolve` renders identically to `table`, and that is the flag's guarantee " +
+		"honoured rather than dropped: `wide` means the same table with nothing elided, and " +
+		"those five documents elide nothing at any width — the profile listing's cells are " +
+		"addresses and paths people paste, and the active profile's name is one token — so " +
+		"nothing in any of them is ever shortened. On the four `config` subcommands that write, " +
+		"`table` and `wide` render no document at all — the report of a write is the " +
+		"confirmation on stderr, and its data is the file. docs/CLI.md's format matrix says so"},
 	{"color", deliberatelySilent, "a rendering mode, never a request for content: it changes how " +
 		"a line is painted and never which lines there are. A notice about colour would be the " +
 		"noise it was warning about"},
+	{"tz", explained, "every instant it moves says which frame it is in, on the value, so `--tz " +
+		"utc` on the default is visibly the default rather than invisibly one (Task 18.9). The " +
+		"case that could have been silent is the structured one, and it is not a no-op: `--tz " +
+		"Europe/Warsaw -o json` is refused nothing and changes nothing, because `ts` is a machine " +
+		"contract (D46) — TestStructuredOutputIgnoresTZ pins the byte-identity and " +
+		"frameAudit records the flag as the reason the question is asked at all"},
 	{"cluster-id", deliberatelySilent, chainInput},
 	{"sink", deliberatelySilent, chainInput},
 	{"source", deliberatelySilent, chainInput},
-	{"profile", deliberatelySilent, chainInput + ". `config get-profiles` reads the same file " +
-		"and deliberately does not consult it: CURRENT is the file's active pointer, as the `*` " +
-		"in `kubectl config get-contexts` is, and what this invocation would resolve to is the " +
-		"other command's question"},
+	{"profile", deliberatelySilent, chainInput + ". `config get-profiles` and " +
+		"`config current-profile` read the same file and deliberately do not consult it: both " +
+		"report the file's active pointer, as the `*` in `kubectl config get-contexts` and the " +
+		"name from `kubectl config current-context` do, and what this invocation would resolve " +
+		"to is `config resolve`'s question"},
 	{"operator-namespace", deliberatelySilent, chainInput},
 	{"sink-addr", explained, "it is refused by name on `config set-profile`, where it would " +
 		"otherwise parse, change no field, and leave its author believing they had set the " +

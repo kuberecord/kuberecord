@@ -102,6 +102,7 @@ import (
 
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/cli/resolve"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
@@ -183,23 +184,18 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 
 	code := exit.CodeFor(err)
 
-	// A quiet failure has already said everything it has to say, beside the
-	// document it qualifies. See Error.Quiet.
-	var coded *exit.Error
-	if errors.As(err, &coded) && coded.Quiet {
-		return code
-	}
-
 	// Built as one string and written once. Two writes would let another
 	// writer's line land between the message and the usage block that explains
 	// it, and stderr is shared with whatever else the shell has pointed at it.
-	diagnostic := fmt.Sprintf("error: %v\n", err)
-	if code == exit.UsageError {
-		// A bare "unknown flag" with no reminder of what the flags are is a
-		// worse message than the one cobra would have printed unprompted.
-		diagnostic += "\n" + failed.UsageString()
+	//
+	// An empty diagnostic is a quiet failure, and the write is skipped rather
+	// than performed with nothing in it: a zero-length write is still a write to
+	// whatever stderr is, and "the exit path said nothing" should mean it said
+	// nothing at all.
+	diagnostic := failureDiagnostic(err, code, failed, diagnosticColor(flags, streams))
+	if diagnostic == "" {
+		return code
 	}
-	diagnostic += remediationAdvice(err, failed, flags, streams)
 
 	// The write is checked rather than discarded because every fallible call
 	// here is, and then deliberately not acted on: a failure means stderr itself
@@ -211,6 +207,65 @@ func RunContext(ctx context.Context, args []string, streams genericiooptions.IOS
 	}
 
 	return code
+}
+
+// diagnosticColor decides whether the failure diagnostic is painted.
+//
+// From ErrOut, and never from Out, because they are two destinations and this
+// text goes to one of them. Somebody piping stdout into `jq` while watching
+// stderr in a terminal is the common shape of an invocation that fails, and they
+// should see the failure the way every other line stderr carries is seen;
+// somebody redirecting stderr into a file must not find escape sequences in it,
+// however interactive stdout happens to be.
+//
+// It is a function rather than an expression at the call site so that there is
+// one place holding the answer to "which stream decides", and so that the two
+// blocks written in the same call — the `error:` line and the remediation
+// routes — cannot come to disagree about it.
+func diagnosticColor(flags *options.GlobalFlags, streams genericiooptions.IOStreams) bool {
+	if flags == nil {
+		return false
+	}
+	return options.ShouldColorize(flags.Color, streams.ErrOut)
+}
+
+// failureDiagnostic is everything stderr receives about a failed invocation, or
+// the empty string when it is to receive nothing.
+//
+// It takes the colour decision rather than the streams, which is the point of its
+// signature: the renderer of a message bound for stderr then has no way to reach
+// stdout, and no way to answer a question diagnosticColor has already answered.
+// It writes nothing either, so the single-write property belongs to its caller
+// and the whole document is assertable as a value.
+//
+// The three parts are painted differently on purpose. The `error:` line is a
+// Failure — the reader must be able to find it beneath a notice in amber and
+// provenance in dim, which is what it could not do while it was the only
+// unpainted line on the screen (D39). The usage block is cobra's own page of flag
+// descriptions and is handed on untouched, because a page of red is a page nobody
+// reads. The remediation routes keep the tiers their own renderer gave them: they
+// are guidance rather than failure, and painting them red would flatten the
+// distinction Task 17.4 drew between a dead end and the ways around it.
+func failureDiagnostic(err error, code int, failed *cobra.Command, colorize bool) string {
+	// A quiet failure has already said everything it has to say, beside the
+	// document it qualifies. See Error.Quiet.
+	var coded *exit.Error
+	if errors.As(err, &coded) && coded.Quiet {
+		return ""
+	}
+
+	// The newline is left outside the paint so that the reset lands at the end of
+	// the sentence rather than at the start of the next line, which is what keeps
+	// a coloured document the plain one with escapes in it.
+	severity := render.NewSeverity(colorize)
+	diagnostic := severity.Failure(fmt.Sprintf("error: %v", err)) + "\n"
+
+	if code == exit.UsageError {
+		// A bare "unknown flag" with no reminder of what the flags are is a
+		// worse message than the one cobra would have printed unprompted.
+		diagnostic += "\n" + failed.UsageString()
+	}
+	return diagnostic + remediationAdvice(err, failed, colorize)
 }
 
 // remediation is a failure that carries the routes past itself.
@@ -248,9 +303,11 @@ var (
 // The failures it explains can be raised anywhere — during resolution, or from the
 // first query several layers below a command — and this is the one place every
 // path ends up. Colour is decided from --color, NO_COLOR and whether stderr is a
-// terminal, and only here are all three known. And rendering once, into
-// RunContext's single write, is what keeps the message out of the middle of a
-// half-drawn table.
+// terminal, and only here are all three known — diagnosticColor is where that
+// decision is made, and it is passed in rather than repeated so that this block
+// and the `error:` line above it cannot disagree about it. And rendering once,
+// into RunContext's single write, is what keeps the message out of the middle of
+// a half-drawn table.
 //
 // cobra's own name for the command that failed is passed through, so the
 // invocation the message tells the reader to re-run is the one they actually
@@ -258,9 +315,7 @@ var (
 // command it is explaining is the one it was about to recommend. It is the only
 // thing this layer adds; the words belong to resolve/diagnose.go and
 // resolve/profileroutes.go.
-func remediationAdvice(
-	err error, failed *cobra.Command, flags *options.GlobalFlags, streams genericiooptions.IOStreams,
-) string {
+func remediationAdvice(err error, failed *cobra.Command, colorize bool) string {
 	var advisable remediation
 	if !errors.As(err, &advisable) {
 		return ""
@@ -269,10 +324,6 @@ func remediationAdvice(
 	commandPath := ""
 	if failed != nil {
 		commandPath = failed.CommandPath()
-	}
-	colorize := false
-	if flags != nil {
-		colorize = options.ShouldColorize(flags.Color, streams.ErrOut)
 	}
 	return "\n" + advisable.Render(commandPath, colorize)
 }

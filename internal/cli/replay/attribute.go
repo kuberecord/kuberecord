@@ -104,6 +104,10 @@ type Attribution struct {
 	// field list it yields describes an earlier instant than the attribution does.
 	stale bool
 
+	// zone is the frame the notices below spell their instants in. See
+	// AttributeRun.
+	zone render.Zone
+
 	// Notices are the qualifications the replay produced, in order.
 	//
 	// They are exported because they are half the result: a field list that
@@ -124,8 +128,12 @@ type Attribution struct {
 // seed is the state as it stood immediately before the first row, or nil when
 // none could be established. A nil seed is not a failure: the fields the window's
 // own patches name are still attributable, and the caller says what was lost.
-func AttributeRun(seed []byte, rows []render.TimelineRow) Attribution {
-	result := Attribution{writes: map[string]fieldWrite{}, state: seed}
+//
+// zone is the frame the notices spell their instants in, threaded for the reason
+// PriorValues states: these lines are read beside a table of the same instants,
+// and one invocation may not mix frames (Task 18.9).
+func AttributeRun(seed []byte, rows []render.TimelineRow, zone render.Zone) Attribution {
+	result := Attribution{writes: map[string]fieldWrite{}, state: seed, zone: zone}
 
 	for _, row := range rows {
 		if row.Change.EventType == query.EventKubernetes {
@@ -138,7 +146,7 @@ func AttributeRun(seed []byte, rows []render.TimelineRow) Attribution {
 			result.Notices = append(result.Notices, render.Notice{
 				Text: fmt.Sprintf("this incarnation was deleted at %s, so the fields below are what it "+
 					"held immediately before the deletion rather than what it holds now",
-					render.FormatInstant(row.Change.TS)),
+					zone.Instant(row.Change.TS)),
 			})
 			return result
 		}
@@ -166,7 +174,7 @@ func (a *Attribution) record(row render.TimelineRow) {
 		a.Notices = append(a.Notices, render.Notice{
 			Text: fmt.Sprintf("the patch recorded at %s could not be decoded (%s), so the fields it "+
 				"moved are still attributed to whatever wrote them before it",
-				render.FormatInstant(row.Change.TS), row.PatchErr),
+				a.zone.Instant(row.Change.TS), row.PatchErr),
 		})
 	case len(row.Ops) > 0:
 		for _, op := range row.Ops {
@@ -248,7 +256,7 @@ func (a *Attribution) advance(row render.TimelineRow) {
 		Text: fmt.Sprintf("the fields listed below are the ones the object held at %s: the patch "+
 			"recorded there did not apply to the reconstructed state (%v), so anything added or "+
 			"removed after it is missing from the list. The attribution of the fields that are "+
-			"listed is unaffected", render.FormatInstant(row.Change.TS), err),
+			"listed is unaffected", a.zone.Instant(row.Change.TS), err),
 	})
 }
 

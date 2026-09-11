@@ -1,5 +1,6 @@
 === stdout ===
 === stderr ===
 → updated profile "local" in /home/engineer/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ "local" is the active profile: this stanza is what the next command reads
 === exit ===
 0 (success)

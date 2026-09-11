@@ -167,6 +167,7 @@ plugs into.
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
 | `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
 | `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
+| `--tz <zone>` | `utc` | Display timestamps in this zone: `utc`, `local`, or an IANA name such as `Europe/Warsaw`. A non-UTC zone is rendered with an explicit offset — `2026-09-11 00:41:13.263+02:00` — never bare. **It changes the display and never the stored or structured value**: `-o json`, `-o jsonl` and `-o yaml` stay in UTC whatever it says, because the recorded column is UTC. See [Timestamps are UTC](#timestamps-are-utc). |
 | `--max-objects <n>` | `0` (no limit) | Abort a scan that fetches more than this many stored objects, naming this flag. It bounds the *work*, which `--limit` cannot do without an index — see [Cold scans](#cold-scans). |
 | `--yes` | assumed off a terminal | Answer the confirmation a wide or unmeasurable scan of an unindexed backend asks for. Assumed when the output is not a terminal, so a script never waits on a prompt. |
 | `-v`, `--v <n>` | `0` | Verbosity of the diagnostics written to **stderr**. It never changes what goes to stdout, so raising it cannot disturb a pipe. |
@@ -224,11 +225,11 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-TIME (UTC)               EVENT     ACTOR                      CHANGE
-2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
-2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
-2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+TIME (UTC)                EVENT     ACTOR                      CHANGE
+2026-08-28 14:02:58.001Z  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply  ~ spec.…resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager    3 ops
+2026-08-28 14:09:40.900Z  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
 ! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
@@ -245,11 +246,61 @@ identity, which step of the resolution chain answered. **On a terminal those
 recede, unless the chain chose something you would not assume** — see
 [Where the data comes from](#where-the-data-comes-from).
 
+A line opening `error:` is the third register, and it is **red**: it says no
+result arrived, which is a different thing from a notice qualifying one that did.
+Everything printed after it — a usage block, or the routes past the failure — keeps
+the weight it was written in, so the line that stopped the command stays the one
+that stands out. See [Exit codes](#exit-codes).
+
+**The header's `Coverage` value carries a notice's weight when nothing was
+watching.** `Coverage: none recorded for this scope` is the whole of the
+[no-coverage finding](#an-empty-result-is-never-presented-on-its-own) in one line,
+and the `error:` below it says the same thing at length — so a reader who stops at
+the header is told it at the same severity rather than at the weight of a cluster
+name. Coverage that is *present* is unchanged, and so is
+`not reported by this backend`: that one is a permanent property of an archive tier
+rather than a finding about the object you asked about, and it has a notice of its
+own on stderr. Every label in the header stays provenance.
+
 **Rows read oldest first, so the newest change is the last line printed** — the
 one immediately above your prompt, because this CLI does not page. Which changes
 are selected is a separate matter and has not moved: `--limit` still takes the
 **newest** N, and only their layout runs forward. `--reverse` puts the newest at
 the top.
+
+### Timestamps are UTC
+
+**Every instant is UTC, and every instant says so on the value.** The `Z` on
+`2026-08-28 14:02:58.001Z` is not decoration: a column heading scrolls off a long
+table and does not travel when a row is pasted into a ticket, and a bare
+`2026-08-28 14:02:58.001` reads as a local time in whatever zone the next person
+is in. The default is UTC because the recorded column is
+`DateTime64(9, 'UTC')` and [`docs/QUERIES.md`](QUERIES.md) is UTC — a CLI showing
+local time while the SQL shows UTC would be two views of one audit trail
+disagreeing.
+
+`--tz` changes the display and nothing else:
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --tz Europe/Warsaw
+TIME (Europe/Warsaw)           EVENT     ACTOR                      CHANGE
+2026-08-28 16:02:58.001+02:00  Added     kubectl-client-side-apply  full state recorded
+```
+
+It takes `utc` (the default, and legal to state), `local`, or an IANA location
+name; anything else is a usage error naming those forms. A non-UTC zone is always
+rendered with an explicit numeric offset, never bare — that prohibition is the
+whole reason this is a flag rather than something you do with a shell alias. The
+heading names the **zone** rather than an offset, because `Europe/Warsaw` is
+`+02:00` in summer and `+01:00` in winter and a table spanning the change would
+otherwise carry a heading that is wrong for half its rows.
+
+It applies to every human-facing instant in the invocation — table rows, the
+header block, notices and errors — so one command never mixes frames. It reaches
+**no** structured output: `-o json`, `-o jsonl` and `-o yaml` emit UTC always, in
+every envelope kind and including `metadata`, because `ts` is part of the
+[versioned contract](#structured-output) and a consumer must not
+find its meaning depends on the shell that produced it.
 
 ### Flags
 
@@ -281,12 +332,12 @@ summarized as `N ops`, and `--full` expands it:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments --full
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager    3 ops
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10
 
-2026-08-28 14:09:40.900  Modified  deployment-controller      ~ spec.replicas: 5 → 7
+2026-08-28 14:09:40.900Z  Modified  deployment-controller      ~ spec.replicas: 5 → 7
 ```
 
 An expanded block is closed by a blank line, and only a row that actually
@@ -369,7 +420,7 @@ time, and there are exactly three answers:
 |----------------|--------------|
 | The scope was watched across the whole window | `no changes recorded … The scope was confirmed watched over <interval>` — the silence is real. |
 | The scope opened *after* the window started | A warning naming that instant and the rule that opened it: a change before then would not have been recorded. |
-| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result — [`scopes`](#scopes) is where you go next. |
+| No scope ever covered it | Exit **3**, and a message saying so. This is a finding, not an empty result — [`scopes`](#scopes) is where you go next. Under [`--with-events`](#--with-events-that-finds-no-events) it also accounts for the flag, so there is one explanation and not two. |
 
 A backend with no scope log to read says that instead, and exits `0`: it cannot
 tell the three apart, and pretending otherwise would be the failure this section
@@ -414,6 +465,7 @@ three:
 | Events were being recorded | `Events were confirmed recorded over <interval>` — nothing was said about this object while that scope was open. |
 | No rule streams Events | The gap, and the YAML that closes it. |
 | No scope log to read | It says it cannot tell those two apart. Exit stays `0`. |
+| Nothing was watching the object either | Nothing here: the no-coverage finding says it instead, having asked this same question. See below. |
 
 The second is the common one, because the `events` watch preset ships disabled
 and a rule has to name `Event` before anything is captured. It is no longer what
@@ -432,6 +484,55 @@ environment that exists to demonstrate it.
 A bare `timeline` says none of this. The notice is owed to somebody who asked for
 Events; a command that volunteered it to everyone would be answering a question
 nobody put to it, and the coverage read that builds it is not paid for either.
+
+**Nor does an object nothing was ever watching.** There the timeline is already the
+exit **3** [no-coverage finding](#an-empty-result-is-never-presented-on-its-own),
+and that finding absorbs the point in a clause of its own — asking the table
+above's question itself, and reporting whichever of its answers came back:
+
+```
+error: no watch coverage recorded for the requested scope: nothing was ever
+watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+not evidence that it did not change — and no Kubernetes Event about it was
+recorded either, which is the same absence rather than a second one to fix:
+Events were confirmed recorded over 2026-09-08T21:09:09Z → open
+(clusterstreamrule//quickstart); the `scopes` command lists what is being
+recorded
+```
+
+That is the answer when Events **are** being captured, and it is the only one of
+the three that can call the two absences one absence. When they are not, they are
+two gaps with two fixes, and fixing either leaves the other:
+
+```
+error: no watch coverage recorded for the requested scope: nothing was ever
+watching v1/Pod payments/checkout-7d4f in cluster "prod-eu-1", so this silence is
+not evidence that it did not change — and no rule streams Events to this sink
+either, so these are two gaps rather than one: capturing this object's kind would
+record its changes, and Events would still be missing until a rule names them as
+well; the `scopes` command lists what is being recorded.
+Add Events to a rule as well:
+    - group: ""
+      version: v1
+      kind: Event
+```
+
+And when the backend has no scope log, or has one it could not read, it says so
+and guesses at neither:
+
+```
+… — and whether any Kubernetes Event about it was recorded cannot be said: this
+backend has no scope log; the `scopes` command lists what is being recorded
+```
+
+Both halves used to be printed as separate paragraphs, the second at length and
+with the YAML above it. They were two findings for one cause, and the fix in the
+longer of them was a fix for a problem that does not exist yet: a rule capturing
+`Event` would still record nothing about an object no rule covers. The flag is
+still accounted for — it is named in the clause rather than left looking like a
+flag that was ignored — and the invocation still pays for one Event coverage read,
+never two: the clause and the notice ask the identical question and only one of
+them is ever reached.
 
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read
@@ -496,9 +597,14 @@ wider than seven days is [confirmed first](#cold-scans).
 
 ### Colour, width and paging
 
-Colour follows `--color=auto|always|never`. Under `auto` it is on only when stdout
-is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`,
-which is what the flag is for. The table is laid out to the terminal's width, or
+Colour follows `--color=auto|always|never`. Under `auto` it is on only when the
+stream being written to is a terminal and `NO_COLOR` is unset; `--color=always`
+overrides `NO_COLOR`, which is what the flag is for. The two streams are decided
+separately, because they are two destinations: the table is coloured when
+**stdout** is a terminal, and notices, provenance and the `error:` line when
+**stderr** is. `kuberecord timeline … -o json | jq` on a terminal therefore still
+shows a failure in red, and `2> failure.log` still captures one with no escape
+sequences in it. The table is laid out to the terminal's width, or
 to 120 columns when output is not a terminal. **There is no pager**: output goes
 to stdout and stays there, so `| less -R` is yours to choose.
 
@@ -530,12 +636,12 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply
   ~ spec.template.spec.containers[0].resources.limits.memory
       - 2Gi
       + 512Mi
 
-2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager
   ~ spec.replicas
       - 3
       + 5
@@ -720,6 +826,12 @@ MANIFEST`, which is not. Provenance is a fact you need available and do not need
 to re-read; that one phrase is the line that has to survive you skimming past the
 rest of them.
 
+One value in it is not provenance either. `coverage: none recorded for this scope`
+means the reconstruction rests on a period nobody was recording, so it carries a
+notice's weight in the [same vocabulary the header block
+uses](#colour-width-and-paging) — the one line in this block that changes what the
+document is worth. Coverage that is present stays as dim as the label beside it.
+
 The header solves this for a person and not for a script: stderr is the stream
 `2>/dev/null` discards and a pipe never reads, so `get … -o json | jq` would
 otherwise receive a reconstruction with nothing in its input saying so. The same
@@ -781,19 +893,19 @@ Window:   2026-08-28T14:04:00Z to now
 Base:     2026-08-28T14:02:58Z (Added) plus 1 patch
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-FIELD                                                     LAST CHANGED             ACTOR
-metadata.annotations.deployment.kubernetes.io/revision    2026-08-28 14:09:40.900  unknown
-spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044  argocd-application-controller
-spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044  argocd-application-controller
-spec.minReadySeconds  (removed)                           2026-08-28 14:05:02.117  kube-controller-manager
-spec.paused                                               2026-08-28 14:05:02.117  kube-controller-manager
-spec.replicas                                             2026-08-28 14:05:02.117  kube-controller-manager
-apiVersion                                                (before window)          -
-kind                                                      (before window)          -
-metadata.name                                             (before window)          -
-metadata.namespace                                        (before window)          -
-spec.template.spec.containers[0].image                    (before window)          -
-spec.template.spec.containers[0].name                     (before window)          -
+FIELD                                                     LAST CHANGED              ACTOR
+metadata.annotations.deployment.kubernetes.io/revision    2026-08-28 14:09:40.900Z  unknown
+spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044Z  argocd-application-controller
+spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044Z  argocd-application-controller
+spec.minReadySeconds  (removed)                           2026-08-28 14:05:02.117Z  kube-controller-manager
+spec.paused                                               2026-08-28 14:05:02.117Z  kube-controller-manager
+spec.replicas                                             2026-08-28 14:05:02.117Z  kube-controller-manager
+apiVersion                                                (before window)           -
+kind                                                      (before window)           -
+metadata.name                                             (before window)           -
+metadata.namespace                                        (before window)           -
+spec.template.spec.containers[0].image                    (before window)           -
+spec.template.spec.containers[0].name                     (before window)           -
 ```
 
 Rows are most recently written first, so the top of the page is what moved last.
@@ -845,7 +957,7 @@ last written before any bounded window, and they are listed with `(before window
 in place of a timestamp rather than dropped — a dropped row would read as a field
 the object does not have. Widen `--since` and they acquire an attribution.
 
-The two cells go together: `(before window)` in LAST CHANGED and `-` in ACTOR. That
+The two cells go together: `(before window)` in LAST CHANGED  and `-` in ACTOR. That
 dash is not `unknown`, which is what a change that recorded no field managers
 renders as. One says no change was read for this field; the other says a change was
 read and had no name on it.
@@ -865,16 +977,16 @@ saying how many of the object's fields each row now stands for:
 
 ```console
 $ kuberecord blame deploy/checkout -n payments --depth 2
-FIELD                            LAST CHANGED             FIELDS  ACTOR
-metadata.annotations             2026-08-28 14:09:40.900  1       unknown
-spec.template                    2026-08-28 14:07:20.044  4       argocd-application-controller
-spec.minReadySeconds  (removed)  2026-08-28 14:05:02.117  1       kube-controller-manager
-spec.paused                      2026-08-28 14:05:02.117  1       kube-controller-manager
-spec.replicas                    2026-08-28 14:05:02.117  1       kube-controller-manager
-apiVersion                       2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-kind                             2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-metadata.name                    2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-metadata.namespace               2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+FIELD                            LAST CHANGED              FIELDS  ACTOR
+metadata.annotations             2026-08-28 14:09:40.900Z  1       unknown
+spec.template                    2026-08-28 14:07:20.044Z  4       argocd-application-controller
+spec.minReadySeconds  (removed)  2026-08-28 14:05:02.117Z  1       kube-controller-manager
+spec.paused                      2026-08-28 14:05:02.117Z  1       kube-controller-manager
+spec.replicas                    2026-08-28 14:05:02.117Z  1       kube-controller-manager
+apiVersion                       2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+kind                             2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+metadata.name                    2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+metadata.namespace               2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
 ```
 
 (The window is unbounded here, so nothing is older than it.)
@@ -909,10 +1021,10 @@ Cluster: prod-eu-1
 Scope:   every kind in namespace payments
 Window:  all recorded history
 
-KIND             NAMESPACE  FROM                     TO                       RULE
-apps/Deployment  payments   2026-06-01 08:00:00.000  2026-07-02 09:14:00.000  StreamRule/payments/workloads
-apps/Deployment  (all)      2026-07-02 09:14:00.000  (open)                   ClusterStreamRule/all-workloads
-ConfigMap        payments   2026-07-02 09:14:00.000  2026-08-11 17:31:22.000  (not recorded)
+KIND             NAMESPACE  FROM                      TO                        RULE
+apps/Deployment  payments   2026-06-01 08:00:00.000Z  2026-07-02 09:14:00.000Z  StreamRule/payments/workloads
+apps/Deployment  (all)      2026-07-02 09:14:00.000Z  (open)                    ClusterStreamRule/all-workloads
+ConfigMap        payments   2026-07-02 09:14:00.000Z  2026-08-11 17:31:22.000Z  (not recorded)
 ```
 
 | Flag | Meaning |
@@ -1198,6 +1310,7 @@ it out here.
 | [`version`](#version) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config view`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config get-profiles`](#config-view-and-config-get-profiles) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [`config current-profile`](#config-current-profile) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | [`config resolve`](#config-resolve) | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config set-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
 | `config use-profile` | ✅ default | ✅ | ❌ | ✅ | ✅ | ❌ |
@@ -1214,10 +1327,11 @@ Each ❌ has a reason, and the error says it:
   than a row, and there is nothing for a tabular format to lay out. Its default is
   `yaml`, which is the shape people want and the one that carries the **NOT A
   DEPLOYABLE MANIFEST** header inside the document rather than on another stream.
-- **`version`, `config view`, `config get-profiles`, `config resolve` and the four
-  `config` subcommands that write refuse `jsonl`.** It is a streaming format for a
-  result larger than memory, and each of these is exactly one document — a profile
-  listing included, since it is as long as the configuration file and no longer.
+- **`version`, `config view`, `config get-profiles`, `config current-profile`,
+  `config resolve` and the four `config` subcommands that write refuse `jsonl`.** It
+  is a streaming format for a result larger than memory, and each of these is exactly
+  one document — a profile listing included, since it is as long as the configuration
+  file and no longer, and the active profile's name most of all.
 - **The four `config` subcommands that write render nothing at all for `table` and
   `wide`.** Their whole report is the confirmation on stderr, because the data of
   a write is the file it wrote — and there is no result set to lay out in columns.
@@ -1229,18 +1343,19 @@ Each ❌ has a reason, and the error says it:
   because a configuration file *is* YAML and `table` is the global default a user
   who typed no `-o` at all arrives with. `diff` is refused: there is no patch here.
 - **`config resolve` refuses `diff` too**, and for the same reason: it reports two
-  chains of decisions, and there is no patch anywhere in it. So does
-  `config get-profiles`, which reports the state of a file.
+  chains of decisions, and there is no patch anywhere in it. So do
+  `config get-profiles`, which reports the state of a file, and
+  `config current-profile`, whose whole answer is one word.
 
 And one ✅ is worth a sentence, because it looks like a flag being ignored and is
-not. **`wide` on `version`, `config view`, `config get-profiles` and
-`config resolve` renders exactly what `table` does**, and on the four writing
-`config` subcommands it renders no document at all, as `table` does. `wide` means
-*the same table with nothing elided*, and each of these is a document that elides
-nothing at any width — a build identity, a configuration file, a profile listing
-whose cells are addresses and paths people paste, two chains of decisions, a write
-that has already been confirmed on stderr — so the flag's guarantee is met rather than
-dropped. Where a command genuinely cannot produce a format it refuses
+not. **`wide` on `version`, `config view`, `config get-profiles`,
+`config current-profile` and `config resolve` renders exactly what `table` does**,
+and on the four writing `config` subcommands it renders no document at all, as
+`table` does. `wide` means *the same table with nothing elided*, and each of these
+is a document that elides nothing at any width — a build identity, a configuration
+file, a profile listing whose cells are addresses and paths people paste, one
+profile name, two chains of decisions, a write that has already been confirmed on
+stderr — so the flag's guarantee is met rather than dropped. Where a command genuinely cannot produce a format it refuses
 it by name, which is the case the list above enumerates.
 
 For `table`, `wide` and `diff` the header, the notices and every explanation go to
@@ -1330,12 +1445,13 @@ It is a property of the rendering rather than of the contract. Nothing `jq` or
 `yq` returns depends on it, and a consumer reading `-o yaml` *positionally* is the
 only one that notices.
 
-**Six documents carry the same `apiVersion` without being envelopes**, and the
+**Seven documents carry the same `apiVersion` without being envelopes**, and the
 difference is deliberate. [`version`](#version) renders a `Version` document,
 `config view` renders a `Config` one,
 [`config get-profiles`](#config-view-and-config-get-profiles) renders a
-`Profiles`, [`config resolve`](#config-resolve) renders a `Resolution`, and the
-`config` subcommands that write render a
+`Profiles`, [`config current-profile`](#config-current-profile) renders a
+`CurrentProfile`, [`config resolve`](#config-resolve) renders a `Resolution`, and
+the `config` subcommands that write render a
 [`ProfileChange` or a `ContextMapping`](#writes-are-scriptable); none is the answer
 to a query, so none has a `metadata` block or an `items` list. A `Version` carrying
 `cluster_id: ""` and an empty coverage report would be inviting a consumer to read
@@ -1885,9 +2001,12 @@ That reads this same sink, records 127.0.0.1:9000 in place of the address above,
 and takes the database and the user from it. The forward is still yours to run:
 a profile records an address, it does not open a tunnel.
 
-Export KUBERECORD_CLICKHOUSE_PASSWORD first. A read-only ClickHouse user is the
-recommended credential for it, and the operator's own is not. Both routes, and
-why this tool will not forward the port for you:
+Export KUBERECORD_CLICKHOUSE_PASSWORD first: it is the variable that profile
+records, and the password it wants is the sink's own user's — a credential that can
+write to the audit trail. Add --username <read-only user> to the set-profile line
+above to read as one instead, and it records a variable of its own.
+
+Both routes, and why this tool will not forward the port for you:
 docs/CLI.md#running-the-cli-outside-the-cluster
 ```
 
@@ -1924,9 +2043,6 @@ substituting the forwarded address for the one only the cluster can resolve:
 
 ```console
 $ kubectl kuberecord config set-profile local --from-sink ClickHouseSink/default
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ "local" is now the active profile
-
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so the profile records
@@ -1934,6 +2050,9 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
     kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
 …
+
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
 
 $ export KUBERECORD_CLICKHOUSE_PASSWORD=…
 $ kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
@@ -1944,9 +2063,11 @@ $ kubectl kuberecord timeline deploy/checkout-api -n quickstart-demo
 The port-forward is still yours to run — a profile records an address, it does not
 open a tunnel — but nothing else has to be repeated, and the profile survives the
 kubeconfig context changing under it. The password is **not** copied out of the
-sink's Secret: the profile names an environment variable, and what you export
-there should be [a read-only ClickHouse user](#the-read-only-clickhouse-user)
-rather than the operator's own credential, which can write to the audit trail.
+sink's Secret: the profile names an environment variable, and the password that
+variable has to hold is the password of the user the profile records. That user is
+the sink's own by default, and the sink's own can write to the audit trail — so add
+`--username` to read as [a read-only one](#the-read-only-clickhouse-user) instead,
+which also gives the profile a variable of its own to read.
 The whole subcommand, including which flags survive `--from-sink` and what an
 `S3Sink` does instead, is [`--from-sink`](#--from-sink). If you would rather not
 learn a flag to get here, `kubectl kuberecord config set-profile` with nothing after
@@ -2236,13 +2357,18 @@ $ kuberecord config set-profile prod --backend clickhouse \
 # Or read the whole stanza out of the sink the operator already writes to.
 $ kuberecord config set-profile local --from-sink ClickHouseSink/default
 
+# The same, and read through it from here on: --use activates what it writes.
+$ kuberecord config set-profile local --from-sink ClickHouseSink/default --use
+
 $ kuberecord config set-profile archive --backend s3 --bucket acme-audit \
     --prefix kuberecord --endpoint https://minio.internal:9000 --force-path-style
 
 $ kuberecord config set-profile laptop --backend local --path ~/archives/kuberecord
 
-# Choose the active one.
+# Choose the active one, and ask which it is.
 $ kuberecord config use-profile archive
+$ kuberecord config current-profile
+$ PROFILE=$(kuberecord config current-profile) || exit 1
 
 # Remove one. Deleting the active profile needs --force, which also clears the
 # active pointer.
@@ -2261,26 +2387,31 @@ $ kuberecord config view -o json | jq .profiles
 # whether its credential resolves on this machine.
 $ kuberecord config get-profiles
 
+# Or just the active profile's name, which is the shape a script wants.
+$ kuberecord config current-profile
+
 # Ask what the resolution chains would choose, without running a query.
 $ kuberecord config resolve
 $ kuberecord config resolve --check
 ```
 
-Seven subcommands, and three of them have flags of their own:
+Eight subcommands, and three of them have flags of their own:
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
-| `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags) |
+| `config set-profile` | `[NAME]` | the table below — or none of them, which [asks](#asking-instead-of-knowing-the-flags). `--use` names no field, so it asks too |
 | `config use-profile` | `NAME` | none |
+| [`config current-profile`](#config-current-profile) | none | none |
 | `config delete-profile` | `NAME` | `--force` — see [the profile lifecycle](#creating-replacing-and-deleting-a-profile) |
 | `config set-context-cluster-id` | `[CONTEXT] CLUSTER_ID` | none — with one argument it writes the current context, which `--context` selects |
 | `config view` | none | none — `-o yaml` (the default) or `-o json` |
 | `config get-profiles` | none | none — see [`config view` and `config get-profiles`](#config-view-and-config-get-profiles) |
 | `config resolve` | none | `--check` — see [`config resolve`](#config-resolve) |
 
-Three of them write nothing. `config view` prints the file and
-[`config get-profiles`](#config-view-and-config-get-profiles) prints its state;
-`config resolve` is here because a profile is one step of
+Four of them write nothing. `config view` prints the file,
+[`config get-profiles`](#config-view-and-config-get-profiles) prints its state and
+[`config current-profile`](#config-current-profile) prints the active profile's
+name alone; `config resolve` is here because a profile is one step of
 [where the data comes from](#where-the-data-comes-from), and the question it
 answers is the one a reader of this file has when the file turns out not to be the
 step that won.
@@ -2299,7 +2430,7 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--backend <kind>` | — | `backend`. One of `clickhouse`, `s3`, `local`. Required unless `--from-sink` is given. |
 | `--addr <host:port>` | `clickhouse` | `clickhouse.addr` |
 | `--database <name>` | `clickhouse` | `clickhouse.database` |
-| `--username <user>` | `clickhouse` | `clickhouse.username` |
+| `--username <user>` | `clickhouse` | `clickhouse.username`. Survives `--from-sink`; a user other than the sink's own also defaults `passwordEnv` to a variable of its own — see [the read-only user](#the-read-only-clickhouse-user). |
 | `--password-env <VAR>` | `clickhouse` | `clickhouse.passwordEnv` |
 | `--password-file <path>` | `clickhouse` | `clickhouse.passwordFile` |
 | `--tls` | `clickhouse` | `clickhouse.tls` |
@@ -2309,6 +2440,7 @@ both halves, for the same reason the file refuses a mismatched stanza:
 | `--force-path-style` | `s3` | `s3.forcePathStyle` |
 | `--path <dir>` | `local` | `local.path` — the directory containing `format=jsonl-v1/`. |
 | `--prefix <prefix>` | `s3`, `local` | `prefix`. No leading or trailing slash. |
+| `--use` | — | `currentProfile` — makes this profile the active one as well as writing it. See [activation is opt-in](#activation-is-opt-in). |
 
 There is no `--password`. That is not an omission: see the first rule above.
 
@@ -2330,15 +2462,30 @@ reference resolves on this machine**, checked as the table is drawn.
 ```console
 $ kuberecord config get-profiles
 # /home/you/.config/kuberecord/config.yaml
-CURRENT  NAME     BACKEND     TARGET                       CREDENTIAL
-         archive  s3          s3://audit-archive/prod      ambient
-*        local    clickhouse  127.0.0.1:9000/kuberecord    env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
-         prod     clickhouse  ch.observability:9000/audit  env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+CURRENT  NAME     BACKEND     TARGET                                     CREDENTIAL
+         archive  s3          s3://audit-archive/prod                    ambient
+*        local    clickhouse  kuberecord_ro@127.0.0.1:9000/kuberecord     env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
+         prod     clickhouse  kuberecord_ro@ch.observability:9000/audit  env KUBERECORD_CLICKHOUSE_PASSWORD (set)
+         writer   clickhouse  kuberecord@127.0.0.1:9000/kuberecord       env KUBERECORD_CLICKHOUSE_PASSWORD (not set)
 ```
 
 The `*` and the `CURRENT` column are `kubectl config get-contexts`'s own, so the
 output is legible without instruction. Rows are sorted by name. The file's path
 goes to **stderr**, so `-o json | jq` receives the document alone.
+
+**A ClickHouse `TARGET` names the user**, in the spelling a connection string uses:
+`user@host:port/database`, with the defaults a query would apply — `kuberecord` for
+an unnamed database, `default` for an unnamed user. `local` and `writer` above are
+the reason. They read the same database at the same address through the same
+password variable and differ in nothing else, so the `CREDENTIAL` column cannot
+tell them apart: it reports *where* a password comes from and not *whose*. Add
+`--username` to a profile and this is where the choice is visible.
+
+**`config current-profile` prints the active profile's name and nothing else.** It
+is the third question in this family and the only one shaped for a program rather
+than a reader: the table is the answer to *"what is in the file"*, and one token is
+the answer to *"what do I put in `$PROFILE`"*. See
+[`config current-profile`](#config-current-profile).
 
 **The credential column is the reason to run this rather than `view`.** A profile
 stores the *name* of an environment variable or the *path* of a file; whether that
@@ -2399,7 +2546,7 @@ $ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.
   "name": "local",
   "current": true,
   "backend": "clickhouse",
-  "target": "127.0.0.1:9000/kuberecord",
+  "target": "kuberecord_ro@127.0.0.1:9000/kuberecord",
   "credential": {
     "source": "env",
     "reference": "KUBERECORD_CLICKHOUSE_PASSWORD",
@@ -2416,10 +2563,83 @@ $ kuberecord config get-profiles -o json | jq '.profiles[] | select(.credential.
 | `profiles[].name` | The key this profile has in the file. |
 | `profiles[].current` | Whether this is the active profile — the row the `*` marks. A field rather than something to derive by comparing with `currentProfile`. |
 | `profiles[].backend` | `clickhouse`, `s3` or `local`. |
-| `profiles[].target` | The locator, with defaults applied: the address and database a query would open rather than the fields as typed. |
+| `profiles[].target` | The locator, with defaults applied: the address and database a query would open rather than the fields as typed, and for `clickhouse` the user it opens them as — `user@host:port/database`. The same string the `TARGET` column prints. |
 | `profiles[].credential.source` | `env`, `file`, `ambient` or `none`. |
 | `profiles[].credential.reference` | The variable name or the file path. Absent for a source that names neither. |
 | `profiles[].credential.state` | `set`, `not set`, `present`, `missing`, `unreadable` or `not checked` — the table above, in one field. A word rather than a boolean: `resolves: false` on an ambient credential nobody checked would be a claim this command did not make. |
+
+#### `config current-profile`
+
+**`config get-profiles` is for a reader; this is for a program.** They report the
+same fact — which profile is active — and the difference is entirely one of shape.
+The table marks the active row with `*`, which is right when the question is what
+the file holds and wrong when the question is what to put in a variable:
+
+```console
+$ kuberecord config current-profile
+local
+
+$ PROFILE=$(kuberecord config current-profile) || exit 1
+```
+
+One token on stdout, no header, no decoration, and **nothing on stderr** — which
+is where this departs from `config view` and `config get-profiles`, both of which
+print the file's path there. `kubectl config current-context` prints nothing beside
+its answer either, and the path is available from this command's own `-o json` for
+a program that needs it. Extracting the starred row from the table is three lines
+of `awk` and breaks the day an unrelated profile's address gets longer, because the
+columns are laid out to the width of their content.
+
+**No active profile is an error, and exits `1`.** That is the point of it: `$( )`
+cannot tell an empty answer from no answer, so a script that captured `""` and
+carried on would query wherever the rest of
+[the resolution chain](#where-the-data-comes-from) reached — a sink discovered from
+the cluster, most likely — while believing it had been told which profile to use.
+The message names the way out, and which way out depends on what the file holds:
+
+```console
+$ kuberecord config current-profile
+error: no profile is active in ~/.config/kuberecord/config.yaml, so there is no name to print: choose one with `kuberecord config use-profile archive`, or see which of them has a credential that resolves right now with `kuberecord config get-profiles` (also defined: prod)
+```
+
+A file that defines no profiles at all gets the other message. It does not offer
+`use-profile`, because there is nothing to switch to and a remedy naming no command
+reads as though you should have known which name to substitute — and it says
+plainly that an empty file is not a broken one, since every command that queries
+data resolves perfectly well without a profile:
+
+```console
+$ kuberecord config current-profile
+error: no profile is active, and ~/.config/kuberecord/config.yaml defines none: write one with `kuberecord config set-profile`, which with no flags asks for what it needs, after which `kuberecord config get-profiles` reports the file's state. An empty file is not a broken one — with no profile, resolution falls through to discovering a sink from the cluster — but there is no name to print, and printing nothing would let a script carry on as though it had been told which profile to use
+```
+
+**Nothing is contacted**, and unlike `config get-profiles` not even the environment
+is read: there is no credential reference in the answer to resolve. **`CURRENT` is
+the file's active pointer, not this invocation's** — `--profile` does not change
+what this prints, for the reason it does not move the `*` in the table. What *this*
+command line would resolve to has nine steps behind it and is
+[`config resolve`](#config-resolve)'s question.
+
+`-o json` and `-o yaml` render a `CurrentProfile` document. Two fields, and the
+restraint is deliberate: what the profile points at and whether its credential
+resolves is `get-profiles`' subject, and
+`config get-profiles -o json | jq '.profiles[] | select(.current)'` is the way to
+ask for it.
+
+```console
+$ kuberecord config current-profile -o json
+{
+  "apiVersion": "cli.kuberecord.io/v1alpha1",
+  "kind": "CurrentProfile",
+  "path": "/home/you/.config/kuberecord/config.yaml",
+  "currentProfile": "local"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `path` | The file the pointer was read from, so documents collected from several machines are distinguishable. It is the one fact the bare form omits. |
+| `currentProfile` | The active profile's name. Never empty in a rendered document: no active profile is a failure with no document at all, which is what distinguishes it from the same field on a [`Profiles`](#config-view-and-config-get-profiles) listing, where `""` is an ordinary state. Spelled the way `Profiles` and `ProfileChange` spell it, so one `jq` path reads the active profile out of all three. |
 
 #### Creating, replacing and deleting a profile
 
@@ -2498,9 +2718,10 @@ a confusion [`config resolve`](#config-resolve) was partly built to diagnose, an
 removal is the fix you reach for the moment you have diagnosed it.
 
 That closes the lifecycle: **create** with `set-profile`, **inspect** with
-[`config get-profiles`](#config-view-and-config-get-profiles), **switch** with
-`use-profile`, **delete** with `delete-profile`. Every step is a command, and none
-of them is a text editor.
+[`config get-profiles`](#config-view-and-config-get-profiles) or
+[`config current-profile`](#config-current-profile), **switch** with
+`use-profile`, **delete** with `delete-profile`. It is `kubectl config`'s own five
+verbs, one for one, and every step is a command rather than a text editor.
 
 It is not inert in a second way either: a profile that answers stops the chain even
 when it cannot be resolved, so a stanza pointing at a variable you no longer export
@@ -2508,6 +2729,67 @@ fails every command rather than quietly letting discovery take over. That failur
 names `use-profile`, `delete-profile` and both flag routes past it — see [A profile
 that cannot resolve is
 fatal](#a-profile-that-cannot-resolve-is-fatal-and-says-what-to-do-instead).
+
+#### Activation is opt-in
+
+**Writing a profile does not make it the one that answers.** The active profile is
+consulted by every command that names neither [`--source`](#--source) nor
+`--sink`, so activating on every write would point `timeline`, `diff` and `get` at
+a store you may have written in order to *inspect* it — a side effect on
+everything you type next, decided by a command you ran to record an address.
+`kubectl config set-context` does not switch either.
+
+**`--use` writes and activates in one command**, and that is the whole of the
+concession:
+
+```console
+$ kuberecord config set-profile archive --backend s3 --bucket acme-audit --use
+→ wrote profile "archive" in ~/.config/kuberecord/config.yaml
+→ made "archive" the active profile, as asked
+```
+
+Without it, the write says nothing about which profile answers — and where there
+is somewhere to be sent next, the `config use-profile` line is printed instead:
+[`--from-sink`](#--from-sink) and [the
+questions](#asking-instead-of-knowing-the-flags) both end with it.
+
+**A profile written into an otherwise empty file is activated anyway**, and the
+line says why:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
+```
+
+There is nothing to displace and no second reading of it: the only profile in the
+file is the one that answers, and requiring a second command to make it usable
+would be ceremony with no decision in it. It is the single exception, and both
+halves of the rule are load-bearing — **a cleared pointer is not an empty file.**
+`config delete-profile --force` deliberately leaves a file with profiles in it and
+no active one, so that resolution falls through to discovering a sink; the next
+profile written there is *not* activated, because there is a decision to make and
+`--use` is where it is made.
+
+**`--use` on the profile that already answers changes nothing, and says so.** It is
+not an error — the write succeeded and the profile is active, which is the state
+the invocation asked for — but a flag with no visible effect has to account for
+itself:
+
+```console
+$ kuberecord config set-profile local --backend clickhouse --addr 127.0.0.1:9000 --use
+→ updated profile "local" in ~/.config/kuberecord/config.yaml (was: ClickHouse at 10.0.1.5:9000/kuberecord)
+→ --use changed nothing: "local" is already the active profile
+```
+
+Rewriting the profile that answers says so too, whether or not `--use` was given,
+because that write is the one an upsert notice cannot describe on its own: the
+stanza it just replaced is the one the next command reads.
+
+**Activation is reported whenever it happens**, in the same
+[provenance](#colour-width-and-paging) register as the rest of this subcommand's
+lines. Where the answer comes from must be legible in scrollback, and a change to
+it that nobody typed most of all.
 
 #### Writes are scriptable
 
@@ -2566,9 +2848,6 @@ because no question about recorded history was asked. Both carry the same
 
 ```console
 $ kuberecord config set-profile local --from-sink ClickHouseSink/default
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
-→ "local" is now the active profile
-
 ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 
 That name resolves inside the cluster and nowhere else, so the profile records
@@ -2578,10 +2857,21 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
 Database kuberecord and user kuberecord are the sink's own.
 Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
-The profile does not copy it: it reads $KUBERECORD_CLICKHOUSE_PASSWORD.
-Export a read-only ClickHouse user's password there rather than the operator's,
-which is a credential that can write to the audit trail. See docs/CLI.md.
+The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD.
+
+That user is the sink's own writer, so this profile can write to the audit trail.
+Give --username a read-only user instead; the grants it needs are at
+docs/CLI.md#the-read-only-clickhouse-user
+
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+→ made "local" the active profile (it is the only one)
 ```
+
+**The explanation comes before the confirmation**, and that ordering is
+deliberate: the `→` line looks like an ending, and everything still to be done —
+the port-forward, and whose password the variable has to hold — was underneath it.
+The confirmation is the last thing said about the write, and what follows it is
+about the active pointer and your next command.
 
 It reads the named sink through the same discovery path a query uses, and writes
 the stanza its kind calls for. It is the second of the two routes in [Running the
@@ -2611,8 +2901,21 @@ hand-written stanza. A Secret you may not read is a notice, not a failure: nothi
 in the written profile depends on it, and being unable to read it is the ordinary
 state this whole subcommand exists for. Both routes rest on that — the questions
 [behave the same way](#asking-instead-of-knowing-the-flags), and differ only in
-asking where the password comes from rather than assuming the default, because
+asking the two credential questions rather than taking their defaults, because
 there is somebody there to ask.
+
+**`--username` and the variable are one decision.** A profile reading as a
+[read-only user](#the-read-only-clickhouse-user) defaults to a variable derived
+from that user's name rather than to `KUBERECORD_CLICKHOUSE_PASSWORD`, because a
+username and a password are halves of one credential and two profiles naming two
+principals cannot share one variable. The message above says which principal was
+written and where its password comes from, in one sentence, and it recommends a
+read-only user only when the profile does not already read as one:
+
+| `--username` | The profile reads as | Its password comes from | The message |
+|---|---|---|---|
+| omitted, or the sink's own user | the sink's own user | `KUBERECORD_CLICKHOUSE_PASSWORD` | says that user can write to the audit trail, and names `--username` |
+| a different user | that user | `KUBERECORD_CLICKHOUSE_PASSWORD_<THAT_USER>` | states the pair, and recommends nothing — the advice has been taken |
 
 Four flags survive `--from-sink`, and they are the ones a `ClickHouseSink` cannot
 state or must not state for a *reader*: `--addr`, `--username`, `--password-env` /
@@ -2627,10 +2930,11 @@ cluster, and its credentials are not in this file at all. A cluster-internal
 a scheme and a certificate name as well as a host, so substituting a forwarded port
 for it is not a guess this command makes.
 
-**The profile is written, not activated.** An existing choice is never overridden;
-the `config use-profile` line to run next is printed instead. The one exception is
-the rule the whole subcommand already follows: the first profile in an empty file
-becomes the active one, and says so.
+**The profile is written, not activated**, unless `--use` is given. An existing
+choice is never overridden; the `config use-profile` line to run next is printed
+instead. The one exception is the rule the whole subcommand already follows: a
+profile written into an otherwise empty file becomes the active one, and says so.
+See [activation is opt-in](#activation-is-opt-in).
 
 #### Asking instead of knowing the flags
 
@@ -2663,17 +2967,41 @@ That name resolves inside the cluster and nowhere else.
 
 ClickHouse native-protocol endpoint, as host:port.
 > [127.0.0.1:9000]
-→ wrote profile "local" in ~/.config/kuberecord/config.yaml
+
+ClickHouseSink/default authenticates as kuberecord, which can write to the
+audit trail.
+
+Which ClickHouse user this profile reads as. A read-only user is the recommended posture; see docs/CLI.md#the-read-only-clickhouse-user.
+> [kuberecord] kuberecord_ro
+
+Where does kuberecord_ro's password come from?
+  1) environment — an environment variable, named next
+  2) file — a file, named next
+> [environment]
+
+Name of an environment variable holding the ClickHouse password.
+> [KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO]
+
+Make this the active profile? [y/N] n
+
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
 …
+→ wrote profile "local" in ~/.config/kuberecord/config.yaml
 → to make it the active profile: `kuberecord config use-profile local`
 
 The same thing without the questions:
-  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000
+  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000 --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO
 ```
 
-Five things about it are worth stating, because each is a decision rather than an
+Nine things about it are worth stating, because each is a decision rather than an
 accident:
 
+- **What was written is explained before the write is confirmed.** The `→` line
+  looks like an ending, so a reader who stops at the first one has missed the
+  port-forward the profile expects and the credential guidance underneath it. The
+  order is the explanation, then the confirmation, then where the active pointer
+  stands, then the equivalent command — outwards from the profile to what to do
+  next.
 - **The last line is the point.** The questions are for somebody who does not know
   the flags; the equivalent command is what they are holding afterwards. It is the
   line to paste into a bug report, the line to lift into a CI job, and the reason a
@@ -2688,6 +3016,22 @@ accident:
 - **There is no password prompt**, and cannot be: a profile never stores a password
   inline, so what is asked for is the *name* of an environment variable or the path
   of a file. Nothing secret is typed, echoed, held in memory or left in scrollback.
+- **The user and the password source are one decision, so they are one pair of
+  questions.** A ClickHouse username and password are halves of one credential, and
+  the moment the CLI is about to recommend a
+  [read-only user](#the-read-only-clickhouse-user) is the moment it has to ask which
+  user rather than recommend one and record another. So the second question names
+  the answer to the first, and the variable it offers is derived from it. Pressing
+  return through both writes exactly what `--from-sink` writes with no flags: this
+  adds a question, not a requirement.
+- **The last question is the only one that is not about the profile**, and it
+  defaults to no: making this the active profile changes where every later command
+  reads from, so it is asked rather than assumed — and `--use` answers it before it
+  is asked. It is skipped where there is nothing to decide: a first profile in an
+  empty file is activated regardless, and a profile that already answers cannot be
+  made to answer more. Answer yes and the printed command gains `--use`, so the
+  line reproduces the activation as well as the stanza. See [activation is
+  opt-in](#activation-is-opt-in).
 - **Off a terminal it is an error, never a wait.** Standard input that is not a
   terminal exits `2` naming both flag forms. A wizard that blocked in CI would hang
   the pipeline until something killed it, and the message saying what was wanted
@@ -2710,14 +3054,13 @@ accident:
   Cannot read its Secret (forbidden) — that is fine: a profile stores where
   your password lives, not the operator's.
 
-  Where does the ClickHouse password come from?
-    1) environment — an environment variable, named next
-    2) file — a file, named next
-  > [environment]
+  ClickHouseSink/default authenticates as kuberecord, which can write to the
+  audit trail.
   ```
 
-  The equivalent command printed at the end gains the `--password-env` or
-  `--password-file` the answer chose, so it still reproduces the profile exactly.
+  The two credential questions follow, exactly as they do when the Secret *was*
+  read: the sentence above them is the only difference, and it is there because a
+  reader who has just been refused a Secret should be told that nothing is broken.
   Every *other* way reading the sink can fail — a custom resource that is gone, one
   you may not read, one whose spec does not decode — still ends the command, because
   each is a failure of the thing you named in the menu.
@@ -2855,13 +3198,13 @@ never writes: give it a credential that cannot.
 CREATE USER kuberecord_ro IDENTIFIED WITH sha256_password BY 'a-password-you-generated';
 
 -- The two tables of the frozen v1 schema, and nothing else.
-GRANT SELECT ON kuberecord.resource_states TO kuberecord_ro;
-GRANT SELECT ON kuberecord.watch_scopes   TO kuberecord_ro;
+GRANT SELECT ON kuberecord.resource_states TO  kuberecord_ro;
+GRANT SELECT ON kuberecord.watch_scopes   TO  kuberecord_ro;
 
 -- Belt and braces: no writes, and a bound on how long one analyst's question runs.
 CREATE SETTINGS PROFILE kuberecord_readonly
   SETTINGS readonly = 1, max_execution_time = 60
-  TO kuberecord_ro;
+  TO  kuberecord_ro;
 ```
 
 Then, on each engineer's machine:
@@ -2872,6 +3215,27 @@ $ kuberecord config set-profile prod --backend clickhouse \
     --addr clickhouse.example:9000 --database kuberecord \
     --username kuberecord_ro --password-env KUBERECORD_CLICKHOUSE_PASSWORD
 ```
+
+Or, against a cluster whose sink the CLI can see, without looking any of it up:
+
+```console
+$ kuberecord config set-profile prod --from-sink ClickHouseSink/default \
+    --username kuberecord_ro
+```
+
+**A username and a password are one credential pair.** `--username` is one of the
+four flags [`--from-sink`](#--from-sink) accepts for exactly this reason: a profile
+records which user it reads as, so the password it reads has to be that user's. A
+profile naming `kuberecord_ro` and a variable holding the operator's password
+authenticates as neither.
+
+That is also why a profile reading as somebody other than the sink's own user gets
+a **variable of its own** — `KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO` for the
+user above, uppercased with everything a shell will not accept replaced by `_`.
+One variable holds one password, so four profiles naming four principals and all
+reading `KUBERECORD_CLICKHOUSE_PASSWORD` are four profiles of which at most one
+authenticates. The variable is printed when the profile is written, and
+`--password-env` overrides it.
 
 Why this rather than widening Kubernetes RBAC so everyone can read the operator's
 Secret: that Secret holds the credential the operator **writes** with. Handing it to
@@ -3041,6 +3405,13 @@ per hour. Ctrl-C stops all five.
 `diff --exit-code` is the one place `0` and `1` carry a second meaning, which is
 why it is opt-in: it overloads codes that otherwise only mean success and failure.
 Code `3` outranks it either way.
+
+Every code but `0` prints one `error:` line to stderr, **red** on a terminal, in a
+single write so that nothing else sharing stderr can land inside it. A usage error
+appends the command's own usage block beneath it, uncoloured — a page of flag
+descriptions in red is a page nobody reads. `diff --exit-code`'s exit `1` is the
+exception that prints no line at all: the changes it found are in the document
+above, and calling that a failure would misread it.
 
 Code `3` is the one worth scripting against. Every other tool in this space
 collapses "your query matched nothing" and "nothing was ever recorded here" into a

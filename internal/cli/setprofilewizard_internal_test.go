@@ -72,6 +72,18 @@ func wizardHome(t *testing.T) string {
 // for.
 func scriptedWizard(t *testing.T, answers ...string) (*setProfileWizard, *strings.Builder) {
 	t.Helper()
+	return colouredWizard(t, false, answers...)
+}
+
+// colouredWizard is scriptedWizard with the colour decision made explicitly.
+//
+// The two share one body so that a coloured transcript and a plain one differ in
+// nothing but that decision — the property the golden pair exists to show, and one
+// a second constructor would quietly stop guaranteeing.
+func colouredWizard(
+	t *testing.T, colorize bool, answers ...string,
+) (*setProfileWizard, *strings.Builder) {
+	t.Helper()
 
 	// No trailing newline for an empty script, so that "answer nothing" is an
 	// immediate EOF rather than one blank line — which would be answered with the
@@ -86,7 +98,8 @@ func scriptedWizard(t *testing.T, answers ...string) (*setProfileWizard, *string
 	return &setProfileWizard{
 		streams:   genericiooptions.IOStreams{In: in, Out: &out, ErrOut: &errOut},
 		in:        bufio.NewReader(in),
-		severity:  render.NewSeverity(false),
+		severity:  render.NewSeverity(colorize),
+		colorize:  colorize,
 		invokedAs: options.StandaloneName,
 		newResolver: func() (*resolve.BackendResolver, error) {
 			t.Errorf("the wizard built a resolver for a run that declined discovery")
@@ -554,7 +567,7 @@ func TestTheWizardAsksForAProfileNameWhenTheArgumentIsAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve.LoadConfig: %v", err)
 	}
-	if _, ok := cfg.Profiles["laptop"]; !ok {
+	if _, ok := cfg.Profiles[profileLaptop]; !ok {
 		t.Errorf("the file holds no profile named laptop: %+v", cfg)
 	}
 }
@@ -604,8 +617,15 @@ func TestEveryProfileFlagIsInTheTable(t *testing.T) {
 		}
 	}
 
+	// The two flags that are not fields of a profile, listed rather than pattern
+	// matched so that a third one has to be argued for here. --from-sink fills every
+	// field in from a custom resource, and --use says what to do with the file's
+	// active pointer once the stanza is written — so neither has a question of its
+	// own in the table, and neither is a value --from-sink could disagree with.
+	notAField := []string{options.FlagFromSink, options.FlagUse}
+
 	command.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
-		if f.Name == options.FlagFromSink || slices.Contains(named, f.Name) {
+		if slices.Contains(notAField, f.Name) || slices.Contains(named, f.Name) {
 			return
 		}
 		t.Errorf("--%s is registered on config set-profile but is not in profileFieldFlags, "+
@@ -630,7 +650,14 @@ func TestTheWizardReachesFromSinkWithoutTheUserKnowingIt(t *testing.T) {
 	// behaviour and is asserted where that behaviour lives.
 	seedActiveProfile(t, path)
 
-	wizard, errOut := scriptedWizard(t, "y", "1", "")
+	// y — read it from a sink; 1 — the ClickHouseSink; then the offered address,
+	// the offered user, the environment and the offered variable, all by pressing
+	// return. Four defaults, and they write what --from-sink writes with no flags.
+	//
+	// The last answer is the last question: no, leave the seeded profile active.
+	// It is asked at all because this file already has one — a write into an empty
+	// file has nothing to decide and is not asked (activationIsADecision).
+	wizard, errOut := scriptedWizard(t, "y", "1", "", "", "", "", "n")
 	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
 
 	if err := wizard.run(t.Context(), "local"); err != nil {
@@ -677,7 +704,8 @@ func TestTheWizardReachesFromSinkWithoutTheUserKnowingIt(t *testing.T) {
 		"config use-profile local",
 		// And the flags that would have done it without the questions.
 		"The same thing without the questions:",
-		"  kuberecord config set-profile local --from-sink ClickHouseSink/default --addr 127.0.0.1:9000",
+		"  kuberecord config set-profile local --from-sink ClickHouseSink/default " +
+			"--addr 127.0.0.1:9000 --password-env " + resolve.DefaultPasswordEnv,
 	} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("stderr never says %q:\n%s", want, errOut)
@@ -694,7 +722,7 @@ func TestTheWizardReachesFromSinkWithoutTheUserKnowingIt(t *testing.T) {
 func TestTheWizardRecordsAnAddressTheUserGaveInstead(t *testing.T) {
 	resolver, _, path := fromSinkFixture(t)
 
-	wizard, errOut := scriptedWizard(t, "y", "ClickHouseSink/default", "127.0.0.1:19000")
+	wizard, errOut := scriptedWizard(t, "y", "ClickHouseSink/default", "127.0.0.1:19000", "", "", "")
 	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
 
 	if err := wizard.run(t.Context(), "local"); err != nil {
@@ -710,7 +738,8 @@ func TestTheWizardRecordsAnAddressTheUserGaveInstead(t *testing.T) {
 	}
 	for _, want := range []string{
 		"as --addr asked",
-		"--from-sink ClickHouseSink/default --addr 127.0.0.1:19000",
+		"--from-sink ClickHouseSink/default --addr 127.0.0.1:19000 --password-env " +
+			resolve.DefaultPasswordEnv,
 	} {
 		if !strings.Contains(errOut.String(), want) {
 			t.Errorf("stderr never says %q:\n%s", want, errOut)
@@ -753,6 +782,214 @@ func TestDiscoveryThatFindsNothingSaysSoAndCarriesOn(t *testing.T) {
 	}
 	if cfg.Profiles["laptop"].Local == nil {
 		t.Errorf("the fall-through did not write a local profile: %+v", cfg)
+	}
+}
+
+// The last question, and the two states in which it is not asked.
+//
+// Its default is the decision (D38): the active profile answers every later
+// command that names no source, so a wizard that switched by default would
+// redirect `timeline`, `diff` and `get` to a store somebody wrote in order to
+// inspect. One keystroke is the whole cost of the other answer, and whichever way
+// it goes the outcome is reported and reproduced by the printed command.
+
+// TestTheWizardsLastQuestionDefaultsToNo.
+//
+// Pressing return through it leaves the file's existing choice alone, and the
+// `use-profile` line is then the thing to run next — which is the behaviour every
+// wizard case had before the question existed.
+func TestTheWizardsLastQuestionDefaultsToNo(t *testing.T) {
+	path := wizardHome(t)
+	seedActiveProfile(t, path)
+
+	// No to the sink, the local backend, its directory, no prefix — and then the
+	// last question, answered by pressing return.
+	wizard, errOut := scriptedWizard(t, "n", "local", "/archives/kuberecord", "", "")
+	if err := wizard.run(t.Context(), "laptop"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+
+	// The default is in the prompt itself, which is the half that survives having
+	// no colour: [y/N] is where a reader learns which way return goes.
+	if !strings.Contains(errOut.String(), "Make this the active profile? [y/N]") {
+		t.Errorf("the last question is not asked, or does not default to no:\n%s", errOut)
+	}
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != "already-chosen" {
+		t.Errorf("currentProfile = %q, want the profile that was already chosen", cfg.CurrentProfile)
+	}
+	if _, ok := cfg.Profiles[profileLaptop]; !ok {
+		t.Errorf("the profile was not written: %+v", cfg.Profiles)
+	}
+	for _, want := range []string{
+		"config use-profile laptop",
+		"kuberecord config set-profile laptop --backend local --path /archives/kuberecord",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr never says %q:\n%s", want, errOut)
+		}
+	}
+	// The flag reproduces the outcome, and this outcome did not include an
+	// activation — so printing it would make the line write a profile the
+	// questions did not.
+	if strings.Contains(errOut.String(), "--"+options.FlagUse) {
+		t.Errorf("the equivalent command activates a profile the questions left alone:\n%s", errOut)
+	}
+}
+
+// TestTheWizardActivatesWhenTheAnswerIsYes is the other answer.
+//
+// Both halves of it matter. The pointer moves, and the printed command gains the
+// flag that moves it — a line reproducing the stanza and not the activation would
+// reproduce half of what its reader just watched happen.
+func TestTheWizardActivatesWhenTheAnswerIsYes(t *testing.T) {
+	path := wizardHome(t)
+	seedActiveProfile(t, path)
+
+	wizard, errOut := scriptedWizard(t, "n", "local", "/archives/kuberecord", "", "y")
+	if err := wizard.run(t.Context(), "laptop"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != profileLaptop {
+		t.Errorf("currentProfile = %q, want laptop", cfg.CurrentProfile)
+	}
+	for _, want := range []string{
+		`→ made "laptop" the active profile, as asked`,
+		"kuberecord config set-profile laptop --backend local --path /archives/kuberecord " +
+			"--" + options.FlagUse,
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr never says %q:\n%s", want, errOut)
+		}
+	}
+	// A flag nobody typed is not named. The line above reaches this transcript
+	// from a "yes" at a question, and the write reports it in words that are true
+	// on both routes.
+	if strings.Contains(errOut.String(), "as --"+options.FlagUse+" asked") {
+		t.Errorf("the write named a flag this run never carried:\n%s", errOut)
+	}
+	if strings.Contains(errOut.String(), "config use-profile laptop") {
+		t.Errorf("the next step was printed for something already done:\n%s", errOut)
+	}
+}
+
+// TestTheWizardDoesNotAskWhatItCannotHonour covers both states with no decision
+// in them.
+//
+// A question offered, answered, and then disregarded is worse than no question
+// (D31), and these are the two ways that could happen here: a first profile is
+// activated whatever the answer, and a profile that already answers cannot be made
+// to answer more — "no" would not deactivate it.
+func TestTheWizardDoesNotAskWhatItCannotHonour(t *testing.T) {
+	const question = "Make this the active profile?"
+
+	t.Run("the only profile in an empty file", func(t *testing.T) {
+		path := wizardHome(t)
+
+		wizard, errOut := scriptedWizard(t, "n", "local", "/archives/kuberecord", "")
+		if err := wizard.run(t.Context(), "laptop"); err != nil {
+			t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+		}
+		if strings.Contains(errOut.String(), question) {
+			t.Errorf("a write with nothing to displace asked whether to displace it:\n%s", errOut)
+		}
+		if !strings.Contains(errOut.String(), `→ made "laptop" the active profile (it is the only one)`) {
+			t.Errorf("the activation nobody asked for was not reported, or not explained:\n%s", errOut)
+		}
+		cfg, err := resolve.LoadConfig(path)
+		if err != nil {
+			t.Fatalf("resolve.LoadConfig: %v", err)
+		}
+		if cfg.CurrentProfile != profileLaptop {
+			t.Errorf("currentProfile = %q, want laptop", cfg.CurrentProfile)
+		}
+	})
+
+	t.Run("the profile that already answers", func(t *testing.T) {
+		path := wizardHome(t)
+		seedActiveProfile(t, path)
+
+		wizard, errOut := scriptedWizard(t, "n", "local", "/archives/elsewhere", "")
+		if err := wizard.run(t.Context(), "already-chosen"); err != nil {
+			t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+		}
+		if strings.Contains(errOut.String(), question) {
+			t.Errorf("the wizard asked whether to activate the profile that already answers:\n%s", errOut)
+		}
+		// What it says instead: the stanza just replaced is the live one, which is
+		// the fact the confirmation above cannot carry.
+		if !strings.Contains(errOut.String(),
+			`→ "already-chosen" is the active profile: this stanza is what the next command reads`) {
+			t.Errorf("rewriting the live profile did not say that it is live:\n%s", errOut)
+		}
+		if strings.Contains(errOut.String(), "config use-profile already-chosen") {
+			t.Errorf("the next step was printed for a profile that is already active:\n%s", errOut)
+		}
+	})
+}
+
+// TestUseAnswersTheLastQuestionBeforeItIsAsked.
+//
+// --use names no field, so an invocation carrying it alone still reaches the
+// questions — and the one question it has already answered is not asked again. The
+// activation is reported by the write, so nothing about it is silent.
+func TestUseAnswersTheLastQuestionBeforeItIsAsked(t *testing.T) {
+	path := wizardHome(t)
+	seedActiveProfile(t, path)
+
+	wizard, errOut := scriptedWizard(t, "n", "local", "/archives/kuberecord", "")
+	wizard.activate = true
+	if err := wizard.run(t.Context(), "laptop"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+
+	if strings.Contains(errOut.String(), "Make this the active profile?") {
+		t.Errorf("--%s was given and the question was asked anyway:\n%s", options.FlagUse, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	if cfg.CurrentProfile != profileLaptop {
+		t.Errorf("currentProfile = %q, want laptop: --%s was given", cfg.CurrentProfile, options.FlagUse)
+	}
+	if !strings.Contains(errOut.String(), `→ made "laptop" the active profile, as asked`) {
+		t.Errorf("the activation was not reported:\n%s", errOut)
+	}
+}
+
+// TestSetProfileWithOnlyUseStillAsks is the mode-selection half of the same
+// property, through the whole binary.
+//
+// --use says what to do with the active pointer and nothing about what to write,
+// so an invocation carrying it alone has named no field. Counting it as "the user
+// has said what they want" would send it to the flag path and refuse it for a
+// missing --backend it never claimed to carry; what it gets instead is the
+// refusal a flagless invocation off a terminal gets, which names both flag routes.
+func TestSetProfileWithOnlyUseStillAsks(t *testing.T) {
+	wizardHome(t)
+
+	streams, _, errOut := wizardStreams()
+	code := Run([]string{options.StandaloneName, "config", "set-profile", "laptop",
+		"--" + options.FlagUse}, streams)
+	if code != exit.UsageError {
+		t.Fatalf("exited %d, want %d: --%s names no field, so this invocation is one that "+
+			"wanted to be asked", code, exit.UsageError, options.FlagUse)
+	}
+	if !strings.Contains(errOut.String(), "standard input is not a terminal") {
+		t.Errorf("the refusal is not the one a flagless invocation gets:\n%s", errOut)
+	}
+	if strings.Contains(errOut.String(), "--"+options.FlagBackend+" \"\"") {
+		t.Errorf("--%s was treated as having said what to write:\n%s", options.FlagUse, errOut)
 	}
 }
 
@@ -867,11 +1104,102 @@ The archive's key prefix within the bucket or directory, with no leading or trai
 
 The archive's key prefix within the bucket or directory, with no leading or trailing slash.
 > → wrote profile "laptop" in <config>
-→ "laptop" is now the active profile
+→ made "laptop" the active profile (it is the only one)
 
 The same thing without the questions:
-  kuberecord config set-profile laptop --backend local --path /archives/kuberecord --prefix kuberecord
+  kuberecord config set-profile laptop --backend local --path /archives/kuberecord --prefix kuberecord --use
 `
+
+// wizardGoldens is the testdata subdirectory the discovery branch's transcripts
+// live in.
+//
+// The same directory the flag path's confirmations use, because they are two
+// routes to one write and a reviewer changing the order of its lines should see
+// every file that pins the order in one diff.
+const wizardGoldens = "config-profile"
+
+// TestTheWizardSaysWhatItWroteBeforeSayingThatItWrote is Task 18.5's first item,
+// and the whole of it is the sequence.
+//
+// Field use produced this:
+//
+//	> [127.0.0.1:9000]
+//	→ wrote profile "test-2" in …/config.yaml
+//	ClickHouseSink/default records …svc:9000.
+//	…
+//	→ to make it the active profile: …
+//	The same thing without the questions: …
+//
+// The first `→` is the one line in that block that looks like an ending, and
+// everything a reader still has to do was underneath it: the port-forward the
+// profile now expects, and which principal's password the variable it names has to
+// hold. A reader who stopped there had been told the write succeeded and nothing
+// about what would make it work.
+//
+// So the order is explanation, then the confirmation, then where the active
+// pointer stands, then the equivalent command — and this file is the assertion,
+// because the ordering is the deliverable rather than a wording preference. The
+// positional check beside it is what says which property the golden carries: a
+// reordering that a future edit made would otherwise be a golden diff a reviewer
+// could accept without noticing what it meant.
+//
+// Both colour modes, and the plain file is where the sequence is legible. The
+// coloured one is what pins that the port-forward line is still the block's one
+// emphasised line and that nothing in the reordering spent a tier.
+func TestTheWizardSaysWhatItWroteBeforeSayingThatItWrote(t *testing.T) {
+	for mode, colorize := range map[string]bool{"": false, "-color": true} {
+		t.Run("transcript"+mode, func(t *testing.T) {
+			resolver, _, path := fromSinkFixture(t)
+			// A profile already answers, so activation is a decision to be asked
+			// about and "no" is an answer that stands. Written into an empty file
+			// this profile would be activated regardless (D38's carve-out) and the
+			// `use-profile` line — one of the four steps whose order is under test —
+			// would correctly never be printed.
+			seedActiveProfile(t, path)
+
+			// y — read the settings from a sink; 1 — the ClickHouseSink; then the
+			// offered address, the offered user, the environment and the offered
+			// variable name, all by pressing return; and n, do not activate it,
+			// which is the answer that leaves the `use-profile` line to be printed.
+			wizard, errOut := colouredWizard(t, colorize, "y", "1", "", "", "", "", "n")
+			wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+			if err := wizard.run(t.Context(), "local"); err != nil {
+				t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+			}
+
+			got := strings.ReplaceAll(errOut.String(), path, "<config>")
+			assertInternalGolden(t, wizardGoldens, "wizard-from-sink"+mode, got)
+
+			// The property, stated as positions rather than left to the file: the
+			// explanation of what was written precedes the confirmation that it was,
+			// and the confirmation is the last thing said about the write.
+			plain := sgrSequence.ReplaceAllString(got, "")
+			explanation := strings.Index(plain, internalAddr+".")
+			confirmation := strings.Index(plain, `→ wrote profile "local"`)
+			nextStep := strings.Index(plain, "→ to make it the active profile")
+			equivalent := strings.Index(plain, "The same thing without the questions")
+			for _, step := range []struct {
+				name string
+				at   int
+			}{
+				{"the explanation", explanation},
+				{"the write confirmation", confirmation},
+				{"the activation route", nextStep},
+				{"the equivalent command", equivalent},
+			} {
+				if step.at < 0 {
+					t.Fatalf("%s is not in the transcript:\n%s", step.name, plain)
+				}
+			}
+			if explanation >= confirmation || confirmation >= nextStep || nextStep >= equivalent {
+				t.Errorf("the transcript reads out of order (explanation %d, confirmation %d, "+
+					"activation %d, equivalent %d):\n%s",
+					explanation, confirmation, nextStep, equivalent, plain)
+			}
+		})
+	}
+}
 
 // The read-only engineer's path, which is the shape most people who need a
 // profile actually have (D7): a kubeconfig that can list custom resources and not
@@ -914,8 +1242,9 @@ func TestTheWizardSurvivesASecretItCannotRead(t *testing.T) {
 	seedActiveProfile(t, path)
 
 	// y — read it from a sink; 1 — the ClickHouseSink; then the offered address,
-	// the environment, and the offered variable name, all by pressing return.
-	wizard, errOut := scriptedWizard(t, "y", "1", "", "", "")
+	// the offered user, the environment, and the offered variable name, all by
+	// pressing return; and no, do not make this the active profile.
+	wizard, errOut := scriptedWizard(t, "y", "1", "", "", "", "", "n")
 	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
 
 	if err := wizard.run(t.Context(), "local"); err != nil {
@@ -946,7 +1275,9 @@ func TestTheWizardSurvivesASecretItCannotRead(t *testing.T) {
 		"Read the connection settings from ClickHouseSink/default.",
 		"Cannot read its Secret (forbidden) — that is fine: a profile stores where",
 		"your password lives, not the operator's.",
-		"Where does the ClickHouse password come from?",
+		// Named for the user answered one question earlier, because the two are one
+		// credential pair (D37).
+		"Where does " + sinkUsername + "'s password come from?",
 		// And the equivalent reproduces what was assembled, password source
 		// included: without it the printed line would write a profile whose
 		// password came from somewhere the reader did not choose.
@@ -977,7 +1308,7 @@ func TestTheEquivalentReproducesAProfileDerivedWithoutItsSecret(t *testing.T) {
 	resolver, _, path := fromSinkFixture(t)
 	forbidSecretReads(t, resolver)
 
-	wizard, errOut := scriptedWizard(t, "y", "1", "127.0.0.1:19000", "file", "/run/secrets/ch")
+	wizard, errOut := scriptedWizard(t, "y", "1", "127.0.0.1:19000", "", "file", "/run/secrets/ch")
 	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
 
 	if err := wizard.run(t.Context(), "local"); err != nil {
@@ -1016,9 +1347,16 @@ func replayFromSink(t *testing.T, resolver *resolve.BackendResolver, args []stri
 	var (
 		fields   profileFields
 		fromSink string
+		use      bool
 	)
 	set := pflag.NewFlagSet("replay", pflag.ContinueOnError)
 	set.StringVar(&fromSink, options.FlagFromSink, "", "")
+	// Accepted and then unused, because this replay derives a stanza and --use
+	// decides nothing about one — it moves the file's active pointer. Registering
+	// it anyway is the point: the printed line has to parse against the flags the
+	// command really carries, so a flag the wizard prints and the command does not
+	// have fails here.
+	set.BoolVar(&use, options.FlagUse, false, "")
 	for _, field := range profileFieldFlags {
 		switch {
 		case field.str != nil:
@@ -1099,7 +1437,7 @@ func TestEveryOtherDerivationFailureStillEndsTheWizard(t *testing.T) {
 			}
 			dynamic.PrependReactor("get", "clickhousesinks", tc.react)
 
-			wizard, errOut := scriptedWizard(t, "y", "1", "", "", "")
+			wizard, errOut := scriptedWizard(t, "y", "1", "", "", "", "")
 			wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
 
 			err := wizard.run(t.Context(), "local")
@@ -1113,5 +1451,216 @@ func TestEveryOtherDerivationFailureStillEndsTheWizard(t *testing.T) {
 				t.Errorf("a failed derivation wrote %s anyway", path)
 			}
 		})
+	}
+}
+
+// The credential pair, asked as one decision (Task 18.1, D37).
+//
+// The discovery branch used to ask nothing about credentials when the Secret was
+// readable, which is the ordinary case. It took the user from the custom resource
+// and the variable from resolve.DefaultPasswordEnv, and then printed advice
+// telling the reader to export a *read-only* user's password into that variable —
+// beside a stanza saying `username: kuberecord`. Doing both authenticates as the
+// sink's writer with somebody else's password, so the advice could not be
+// followed at all.
+//
+// The two tests below are the two answers to the question that fixes it. Between
+// them they assert the property the AC is written around: no rendering of this
+// block recommends a principal other than the one written.
+
+// TestTheWizardKeepsTheSinksUserWhenNobodyNamesAnother.
+//
+// Pressing return through both questions has to write exactly what --from-sink
+// wrote before either existed. This adds a question, not a requirement — and the
+// stanza is the evidence.
+func TestTheWizardKeepsTheSinksUserWhenNobodyNamesAnother(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+
+	// The address, the user, the environment and the variable, all defaults.
+	wizard, errOut := scriptedWizard(t, "y", "1", "", "", "", "")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	want := resolve.ClickHouseProfile{
+		Addr:        "127.0.0.1:9000",
+		Database:    resolve.DefaultClickHouseDatabase,
+		Username:    sinkUsername,
+		PasswordEnv: resolve.DefaultPasswordEnv,
+	}
+	if stanza := cfg.Profiles["local"].ClickHouse; stanza == nil || *stanza != want {
+		t.Errorf("the stanza is %+v, want the one --from-sink writes with no flags: %+v", stanza, want)
+	}
+
+	for _, said := range []string{
+		// The consequence, above the question, so the answer is an informed one.
+		"ClickHouseSink/default authenticates as " + sinkUsername + ", which can write to the\naudit trail.",
+		// The pair, visible: the second question names the answer to the first.
+		"Where does " + sinkUsername + "'s password come from?",
+		// And the write's own explanation, which still has the recommendation to
+		// make because this profile has not taken it.
+		"That user is the sink's own writer, so this profile can write to the audit trail.",
+		"Give --username a read-only user instead",
+	} {
+		if !strings.Contains(errOut.String(), said) {
+			t.Errorf("stderr never says %q:\n%s", said, errOut)
+		}
+	}
+}
+
+// TestTheWizardRecordsTheReadOnlyUserItWasGiven is the other answer, and it holds
+// the AC's negative.
+//
+// Naming a different user is taking the advice, so the advice stops being printed:
+// repeating it above a stanza that has already followed it is the same defect in
+// the other direction. What is left is the pair that was recorded.
+func TestTheWizardRecordsTheReadOnlyUserItWasGiven(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+	seedActiveProfile(t, path)
+
+	// The address by default, then a read-only user, then the environment and the
+	// variable it was offered for that user, and no to the last question.
+	wizard, errOut := scriptedWizard(t, "y", "1", "", readOnlyUser, "", "", "n")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+	want := resolve.ClickHouseProfile{
+		Addr:     "127.0.0.1:9000",
+		Database: resolve.DefaultClickHouseDatabase,
+		Username: readOnlyUser,
+		// A variable of its own, so a second profile naming a second principal does
+		// not overwrite this one's password in the same shell.
+		PasswordEnv: readOnlyPasswordEnv,
+	}
+	if stanza := cfg.Profiles["local"].ClickHouse; stanza == nil || *stanza != want {
+		t.Errorf("the stanza is %+v, want %+v", stanza, want)
+	}
+
+	for _, said := range []string{
+		"Where does " + readOnlyUser + "'s password come from?",
+		"> [" + readOnlyPasswordEnv + "]",
+		readOnlyUser + "'s password comes from $" + readOnlyPasswordEnv,
+		// The flag line reproduces both halves of the pair.
+		"  kuberecord config set-profile local --from-sink ClickHouseSink/default " +
+			"--addr 127.0.0.1:9000 --username " + readOnlyUser + " --password-env " + readOnlyPasswordEnv,
+	} {
+		if !strings.Contains(errOut.String(), said) {
+			t.Errorf("stderr never says %q:\n%s", said, errOut)
+		}
+	}
+	// The AC's negative, and the reason this test exists: the advice has been
+	// taken, so the explanation printed after the write does not repeat it.
+	//
+	// The question's own preamble — "That user can write to the audit trail" — is
+	// deliberately not what is asserted against. It names the sink's user *above*
+	// the question, before any answer exists, and it is the sentence that makes
+	// naming another user an informed choice rather than a guess. Only the block
+	// printed after the write knows which principal was chosen.
+	for _, gone := range []string{
+		"That user is the sink's own writer, so this profile can write to the audit trail.",
+		"Give --username a read-only user instead",
+	} {
+		if strings.Contains(errOut.String(), gone) {
+			t.Errorf("the recommendation %q was repeated to somebody who had taken it:\n%s", gone, errOut)
+		}
+	}
+}
+
+// profileLaptop is the profile the questions write in the cases that read the
+// file back.
+//
+// A constant because those cases compare the file's active pointer and its
+// profiles map against it, and a name compared against a literal in five places
+// is a name one of them can be quietly wrong about. The literal stays where it is
+// an *answer* the wizard was scripted with or a fragment of a line it printed,
+// which are strings the reader is meant to see spelled out.
+const profileLaptop = "laptop"
+
+// readOnlyUser is the principal the pair tests name, and readOnlyPasswordEnv the
+// variable resolve.ReaderPasswordEnv derives for it.
+//
+// Spelled out rather than computed, because a test that built the expectation
+// with the function under test would pass for any sanitiser at all.
+const (
+	readOnlyUser        = "kuberecord_ro"
+	readOnlyPasswordEnv = resolve.DefaultPasswordEnv + "_KUBERECORD_RO"
+)
+
+// TestTheEquivalentReproducesAProfileReadingAsAnotherUser closes the loop the two
+// tests above open, on the flag this task adds to the printed line.
+//
+// --username is the half of the pair the equivalent command gained, and a printed
+// line carrying one half would write a profile that authenticates as nobody. So it
+// is parsed back out of stderr and put through the derivation the flag path runs.
+func TestTheEquivalentReproducesAProfileReadingAsAnotherUser(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+
+	wizard, errOut := scriptedWizard(t, "y", "1", "", readOnlyUser, "", "")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+
+	replayed := replayFromSink(t, resolver, equivalentArgs(t, errOut.String()))
+	if *replayed.Profile.ClickHouse != *cfg.Profiles["local"].ClickHouse {
+		t.Errorf("the printed command derives\n%+v\nwhere the questions wrote\n%+v",
+			replayed.Profile.ClickHouse, cfg.Profiles["local"].ClickHouse)
+	}
+}
+
+// TestFromSinkWithAUsernameAgreesWithTheWizard is D33 asserted directly.
+//
+// The prompting layer is a layer over the flag path, so a field the questions can
+// set is a field the flags can set, and the two have to produce the same stanza
+// from the same answer. If --from-sink could not express which user a profile
+// reads as, the wizard would have invented a field — and the equivalent command it
+// prints would be a line nobody can run.
+func TestFromSinkWithAUsernameAgreesWithTheWizard(t *testing.T) {
+	resolver, _, path := fromSinkFixture(t)
+
+	wizard, errOut := scriptedWizard(t, "y", "1", "", readOnlyUser, "", "")
+	wizard.newResolver = func() (*resolve.BackendResolver, error) { return resolver, nil }
+	if err := wizard.run(t.Context(), "local"); err != nil {
+		t.Fatalf("the wizard failed: %v\n%s", err, errOut)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("resolve.LoadConfig: %v", err)
+	}
+
+	// The flag path's own call, with the overrides `--from-sink <ref> --addr
+	// 127.0.0.1:9000 --username kuberecord_ro` produces and nothing said about the
+	// password: the derivation supplies the same variable the question offered.
+	fields := profileFields{Addr: "127.0.0.1:9000", Username: readOnlyUser}
+	derived, err := resolver.ProfileFromSink(t.Context(),
+		resolve.SinkRef{Kind: resolve.KindClickHouseSink, Name: "default"}, fields.overrides())
+	if err != nil {
+		t.Fatalf("--%s --%s: %v", options.FlagFromSink, options.FlagUsername, err)
+	}
+	if *derived.Profile.ClickHouse != *cfg.Profiles["local"].ClickHouse {
+		t.Errorf("--%s --%s derives\n%+v\nwhere the questions wrote\n%+v",
+			options.FlagFromSink, options.FlagUsername,
+			derived.Profile.ClickHouse, cfg.Profiles["local"].ClickHouse)
+	}
+	// And it says the same thing about it, which is the half a stanza comparison
+	// cannot see: the recommendation is gone on both routes or on neither.
+	if strings.Contains(derived.Explain(false), "can write to the audit trail") {
+		t.Errorf("the flag path warns about a credential the questions did not:\n%s", derived.Explain(false))
 	}
 }

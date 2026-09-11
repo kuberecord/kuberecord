@@ -597,6 +597,16 @@ func TestColourIsNothingButColour(t *testing.T) {
 			painted: render.NewSeverity(true).Emphasis(line),
 			plain:   render.NewSeverity(false).Emphasis(line),
 		},
+		// The fourth tier, and the one spent somewhere no case here can reach:
+		// the `error:` line at the top of internal/cli, which cannot be called
+		// from this package without an import cycle. The tier is asserted here
+		// beside its three siblings, and the whole assembled diagnostic — prefix,
+		// unpainted usage block, remediation routes — carries the same property
+		// where it is built, in errorseverity_internal_test.go.
+		"the failure tier": {
+			painted: render.NewSeverity(true).Failure(line),
+			plain:   render.NewSeverity(false).Failure(line),
+		},
 		// The one rendering that spends the vocabulary over a whole document
 		// rather than over a line. It is here for a reason the three tiers above
 		// are not: `get -o yaml` is what `yq` reads and what a redirect captures,

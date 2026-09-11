@@ -47,26 +47,47 @@ const credentialEnv = "KUBERECORD_TEST_CREDENTIAL_ENV"
 // prose half of a description would be the backend named twice on every row.
 // What the column needs is the locator, with the same defaults applied that
 // Describe applies — the address a query would open rather than the fields as
-// typed.
+// typed — and, for ClickHouse, the principal it opens it as (Task 18.5).
+//
+// shared is the part of the locator Describe carries too. It is separate from
+// want because the ClickHouse cases are the ones where the two deliberately
+// differ: the user belongs to the table's cell and not to a resolution notice,
+// so a Describe assertion over the whole target would be asserting the opposite
+// of the decision.
 func TestProfileTargetIsTheLocatorWithoutThePlainWords(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile Profile
 		want    string
+		shared  string
 	}{
 		{
 			name: "clickhouse",
 			profile: Profile{Backend: BackendClickHouse, ClickHouse: &ClickHouseProfile{
+				Addr: "10.0.1.5:9000", Database: "audit", Username: "kuberecord_ro",
+			}},
+			want:   "kuberecord_ro@10.0.1.5:9000/audit",
+			shared: "10.0.1.5:9000/audit",
+		},
+		{
+			// No user named, so the target reads as the one the driver would
+			// authenticate as. A blank there would let two profiles reading two
+			// principals render as one row, which is the ambiguity the user is in
+			// the cell to resolve.
+			name: "clickhouse with no user named",
+			profile: Profile{Backend: BackendClickHouse, ClickHouse: &ClickHouseProfile{
 				Addr: "10.0.1.5:9000", Database: "audit",
 			}},
-			want: "10.0.1.5:9000/audit",
+			want:   DefaultClickHouseUsername + "@10.0.1.5:9000/audit",
+			shared: "10.0.1.5:9000/audit",
 		},
 		{
 			name: "clickhouse with no database named",
 			profile: Profile{Backend: BackendClickHouse, ClickHouse: &ClickHouseProfile{
-				Addr: "10.0.1.5:9000",
+				Addr: "10.0.1.5:9000", Username: "kuberecord_ro",
 			}},
-			want: "10.0.1.5:9000/" + DefaultClickHouseDatabase,
+			want:   "kuberecord_ro@10.0.1.5:9000/" + DefaultClickHouseDatabase,
+			shared: "10.0.1.5:9000/" + DefaultClickHouseDatabase,
 		},
 		{
 			name: "s3 with a prefix",
@@ -104,15 +125,35 @@ func TestProfileTargetIsTheLocatorWithoutThePlainWords(t *testing.T) {
 			if got := test.profile.Target(); got != test.want {
 				t.Errorf("Target() = %q, want %q", got, test.want)
 			}
-			// The locator and the description are one implementation, so the
-			// second must contain the first. Two renderings of one address is how
-			// a reader ends up wondering whether they are two addresses.
-			if description := test.profile.Describe(); !strings.Contains(description, test.want) {
+			// The endpoint and the database are one implementation, so the
+			// description must carry them exactly as the target does. Two
+			// renderings of one address is how a reader ends up wondering whether
+			// they are two addresses.
+			shared := test.shared
+			if shared == "" {
+				shared = test.want
+			}
+			if description := test.profile.Describe(); !strings.Contains(description, shared) {
 				t.Errorf("Describe() = %q, which does not carry the locator %q",
-					description, test.want)
+					description, shared)
 			}
 		})
 	}
+
+	// And the property the column exists for: two profiles that differ only by
+	// the user they read as are two different cells.
+	t.Run("two profiles differing only by user", func(t *testing.T) {
+		writer := Profile{Backend: BackendClickHouse, ClickHouse: &ClickHouseProfile{
+			Addr: "10.0.1.5:9000", Database: "kuberecord", Username: "kuberecord",
+		}}
+		reader := Profile{Backend: BackendClickHouse, ClickHouse: &ClickHouseProfile{
+			Addr: "10.0.1.5:9000", Database: "kuberecord", Username: "kuberecord_ro",
+		}}
+		if writer.Target() == reader.Target() {
+			t.Errorf("both profiles render as %q, so the listing cannot tell them apart",
+				writer.Target())
+		}
+	})
 }
 
 // TestProfileCredentialReportsTheReferenceAndWhetherItResolves.

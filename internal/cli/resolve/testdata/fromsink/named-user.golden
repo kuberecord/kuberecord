@@ -1,0 +1,10 @@
+ClickHouseSink/default records clickhouse.kuberecord-quickstart.svc:9000.
+
+That name resolves inside the cluster and nowhere else, so the profile records
+127.0.0.1:9000 instead and expects a forwarded port beside it:
+
+    kubectl port-forward -n kuberecord-quickstart svc/clickhouse 9000:9000
+
+Database kuberecord is the sink's own; the user is kuberecord_ro, as --username asked.
+Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
+The profile does not copy it: kuberecord_ro's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD_KUBERECORD_RO.

@@ -81,6 +81,40 @@ that named no fix, a shortened row that never mentioned `--full`, and a
 `--with-events` that interleaved nothing and said nothing. Each was found by
 somebody at a terminal, in a place nobody had looked.
 
+### The frame sweep
+
+`internal/cli/frame_test.go` holds the third question the standing audit asks:
+**does any rendered value omit the unit or frame that makes it unambiguous when
+copied?** (D45)
+
+The three questions are one pattern seen from three sides, and each arrived from
+somebody at a terminal:
+
+| Question | Decision | Where it lives |
+|---|---|---|
+| Can this flag do nothing, and does the CLI say why? | D31 | `noop_test.go` |
+| When a command stops, does the error name the routes around the failure? | D34 | `affordance_test.go` |
+| Does a rendered value carry the unit or frame it needs when copied? | D45 | `frame_test.go` |
+
+The finding was a timestamp. `2026-09-10 22:41:13.263` was read as a local time
+and reported as wrong; it was UTC, and the `Z` had moved from the value to a
+column heading — which scrolls off a long table and does not travel when a row is
+pasted into a post-mortem. `frameAudit` now carries a row per **kind** of rendered
+value — instants, windows, durations, byte sizes, the three counts, identifiers —
+with the verdict and what makes it true. Kinds rather than call sites: a list of
+line numbers goes stale on the first refactor, while a list of quantities is a
+list of questions.
+
+The neighbouring candidates were checked and **none further was found**: durations
+render as `3d`/`2w`/`90m`, the units `--since` itself accepts; byte sizes render as
+`3.1 GiB` in the binary units an object store's console shows; counts carry their
+noun in the sentence. `TestEveryTabularSurfaceCarriesItsFrame` is the regression
+half, sweeping all five rendering commands in two zones for an instant with
+nothing after it.
+
+**When you add a rendered quantity, answer the question in a row:** what does a
+reader see if they copy this value out of the table on its own?
+
 ### The sink conformance suite
 
 `internal/sink/conformance` holds the properties every `sink.Writer` must uphold

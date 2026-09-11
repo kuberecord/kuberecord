@@ -70,6 +70,12 @@ import (
 // change to a warning rather than a drive-by edit.
 const notDeployable = "NOT A DEPLOYABLE MANIFEST"
 
+// coverageField is the header row whose value changes weight when nothing was
+// watching. It is a constant because ObjectProvenance branches on it, for the
+// reason render/timeline.go's coverageLabel is one: a label matched by literal in
+// two places is a label that eventually only matches in one.
+const coverageField = "coverage"
+
 // ObjectDocument is a reconstructed state, ready to be written.
 type ObjectDocument struct {
 	// Kind is the object's group and kind, "apps/Deployment", or the bare kind
@@ -101,6 +107,18 @@ type ObjectDocument struct {
 	// from a period that was watched, and the reader has to be able to see which
 	// they have (Invariant 9).
 	Coverage string
+	// CoverageAbsent reports that the summary above says nothing was ever
+	// watching this scope, which is what puts the value in the Warning tier.
+	//
+	// The rest of this block is provenance and stays there. That is not a
+	// contradiction: the tiers answer different questions, so amber on one value
+	// inside a dim block does not spend the block's one emphasis — which belongs
+	// to NOT A DEPLOYABLE MANIFEST and to nothing else. What it does mean is that
+	// a reader who passes over this header, as they do on every invocation, still
+	// sees the one line in it that says the reconstruction below rests on a period
+	// nobody was recording. See documentHeader.CoverageAbsent for why a flag
+	// rather than a reading of the sentence.
+	CoverageAbsent bool
 	// State is the reconstructed object.
 	State map[string]any
 	// Notices are written to standard error, in order.
@@ -414,11 +432,17 @@ func ObjectProvenance(doc ObjectDocument, severity Severity) string {
 		{"object", strings.TrimSpace(doc.Kind + " " + doc.Ref)},
 		{"cluster", valueOrUnrecorded(doc.Cluster)},
 		{"uid", valueOrUnrecorded(doc.UID)},
-		{"at", FormatInstant(reconstruction.At)},
+		// UTC whatever --tz asked for, and deliberately not a parameter of this
+		// function. Under -o yaml this block is a comment directly above
+		// metadata.reconstruction.at in the same stdout document, and a comment
+		// reading +02:00 over a field reading Z is one document disagreeing with
+		// itself; under -o json the identical block goes to stderr instead, so a
+		// frame here would also give one block two spellings (D19, D46).
+		{"at", UTC.Instant(reconstruction.At)},
 		{"base row", fmt.Sprintf("%s (%s)",
-			FormatInstant(reconstruction.BaseTS), valueOrUnrecorded(reconstruction.BaseEvent))},
+			UTC.Instant(reconstruction.BaseTS), valueOrUnrecorded(reconstruction.BaseEvent))},
 		{"patches applied", fmt.Sprintf("%d", reconstruction.PatchesApplied)},
-		{"coverage", valueOrUnrecorded(doc.Coverage)},
+		{coverageField, valueOrUnrecorded(doc.Coverage)},
 	}
 
 	width := 0
@@ -434,7 +458,22 @@ func ObjectProvenance(doc ObjectDocument, severity Severity) string {
 		severity.Emphasis(notDeployable) + severity.Provenance(".") + "\n")
 	built.WriteString(severity.Provenance("#") + "\n")
 	for _, field := range fields {
-		built.WriteString(severity.Provenance("# "+pad(field[0]+":", width+1)+" "+field[1]) + "\n")
+		label := "# " + pad(field[0]+":", width+1) + " "
+		// One field is painted in two pieces, so that the coverage finding carries
+		// the weight it carries in every other document's header (Task 18.5). Every
+		// other line stays a single painted string rather than being split for
+		// symmetry: the escapes around a line are what a coloured golden file holds,
+		// and rewriting six of them to make the seventh look like the others would
+		// be churn in the files that exist to make a colour change visible.
+		//
+		// Nothing is added, dropped or reordered either way. With colour off both
+		// tiers are the identity function and this is the same line it always was,
+		// which is the property TestColourIsNothingButColour holds every tier to.
+		if field[0] == coverageField && doc.CoverageAbsent {
+			built.WriteString(severity.Provenance(label) + severity.Warning(field[1]) + "\n")
+			continue
+		}
+		built.WriteString(severity.Provenance(label+field[1]) + "\n")
 	}
 	built.WriteString(severity.Provenance("#") + "\n")
 	for _, line := range []string{

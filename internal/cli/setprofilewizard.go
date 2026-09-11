@@ -111,6 +111,15 @@ type setProfileWizard struct {
 	// rendering nobody can produce is refused before anybody is asked anything.
 	format render.StructuredFormat
 
+	// activate is --use, given on an invocation that named no field and therefore
+	// reached the questions anyway.
+	//
+	// It answers the last question before it is asked rather than adding a flag
+	// the prompting layer has to interpret: a reader who typed --use has said what
+	// they want about the active pointer, and asking them again would be the
+	// question whose answer is disregarded that askActivation exists to avoid.
+	activate bool
+
 	// newResolver builds the cluster access the first question needs.
 	//
 	// It is a function rather than a resolver so that a wizard whose first answer
@@ -129,6 +138,7 @@ type setProfileWizard struct {
 func runSetProfileWizard(
 	cmd *cobra.Command, flags *options.GlobalFlags,
 	streams genericiooptions.IOStreams, invokedAs, name string, format render.StructuredFormat,
+	activate bool,
 ) error {
 	if !options.IsTerminalIn(streams.In) {
 		return errNoQuestionsToAsk(invokedAs)
@@ -142,6 +152,7 @@ func runSetProfileWizard(
 		colorize:  colorize,
 		invokedAs: invokedAs,
 		format:    format,
+		activate:  activate,
 		newResolver: func() (*resolve.BackendResolver, error) {
 			return resolve.NewBackendResolver(flags, streams, invokedAs)
 		},
@@ -199,7 +210,7 @@ func (w *setProfileWizard) gather(ctx context.Context, name string) error {
 		return err
 	}
 	if derived != nil {
-		return w.writeDerived(name, derived)
+		return w.writeDerived(ctx, name, derived)
 	}
 	return w.writeTyped(ctx, name)
 }
@@ -238,12 +249,14 @@ type derivedProfile struct {
 	profile *resolve.SinkProfile
 	addr    string
 
+	// username is the ClickHouse user this profile reads as, carried only when it
+	// is not the sink's own. Empty means the question was answered with the
+	// offered default, which is what --from-sink writes with no --username at all.
+	username string
+
 	// passwordEnv and passwordFile are the answer to the password-source question,
 	// carried for the same reason addr is: the equivalent command has to print the
 	// flag that reproduces the stanza, and only one of the two is ever set.
-	//
-	// They are empty on the ordinary path, where the question is not asked and the
-	// derivation supplies its own default — see askDerivedPassword.
 	passwordEnv  string
 	passwordFile string
 }
@@ -353,7 +366,7 @@ func (w *setProfileWizard) askDerivedAddr(
 	if answer != profile.RecordedAddr {
 		derived.addr = answer
 	}
-	if err := w.askDerivedPassword(ctx, derived); err != nil {
+	if err := w.askDerivedCredential(ctx, derived); err != nil {
 		return nil, err
 	}
 
@@ -364,6 +377,7 @@ func (w *setProfileWizard) askDerivedAddr(
 	// override the questions produced, because two derivations would each discard
 	// the other's.
 	over := resolve.ProfileOverrides{
+		Username:    derived.username,
 		PasswordEnv: derived.passwordEnv, PasswordFile: derived.passwordFile,
 	}
 	if answer != stanza.Addr {
@@ -379,55 +393,93 @@ func (w *setProfileWizard) askDerivedAddr(
 	return derived, nil
 }
 
-// askDerivedPassword asks where the password comes from, when the sink's own
-// Secret could not be read.
+// askDerivedCredential asks which ClickHouse user this profile reads as, and
+// where that user's password comes from.
 //
-// This is the read-only engineer's path, and it is the shape most of them have:
-// the operator's aggregated ClusterRole reads Secrets in its own namespace and
-// most people have less than that (D7). Everything the profile needs came out of
-// the custom resource — address, database, user — and the only thing missing is
-// confirmation of a value the profile was never going to store, so ending the
-// conversation here would throw away four answers over a check that was a nicety.
-// resolve/fromsink.go's "Why a Secret it cannot read is not a failure" is the
-// paragraph this implements; CredentialUnreadable is the fact it reads.
+// # Why it is one function and two adjacent questions
 //
-// It fires on a Secret that could not be *read*, and not on one that was read and
-// holds no password key. That second case says nothing about this reader's
-// permissions — it is a broken sink, which the operator reports on its own status
-// and Explain names the present keys for — so the derivation's default is as good
-// an answer there as it ever was.
+// A ClickHouse username and a password are one credential pair (D37). This branch
+// used to ask neither: it took the user from the custom resource and the variable
+// from resolve.DefaultPasswordEnv, and then printed advice telling the reader to
+// export a *read-only* user's password into that variable — beside a stanza
+// naming the sink's own writer. Following both is an authentication failure, and
+// the moment the CLI is about to recommend a different principal is the moment it
+// has to ask which principal, rather than recommend one and record another.
+//
+// So the two questions are adjacent and the second names the answer to the first.
+// Nothing is required by them: the offered default is the sink's own user, the
+// variable offered after it is what the derivation would have written for that
+// user, and pressing return through both writes exactly the stanza this branch
+// wrote before the questions existed.
+//
+// # The Secret nobody could read is a preamble, not a gate
+//
+// It used to be the condition on the whole function. That was Task 17.1's shape,
+// and it is the read-only engineer's path: the operator's aggregated ClusterRole
+// reads Secrets in its own namespace and most people have less than that (D7), so
+// the derivation is deliberately complete without it (resolve/fromsink.go's "Why a
+// Secret it cannot read is not a failure"). What it explains is why the questions
+// below are not simply answered from the cluster, which is worth a sentence
+// whenever it is true and is not a reason to ask nothing when it is false.
+//
+// CredentialUnreadable is the fact it reads, and it is empty for a Secret that was
+// read and found to hold no password key — that says nothing about this reader's
+// permissions. It is a broken sink, which the operator reports on its own status
+// and Explain names the present keys for.
 //
 // The notice is plain prose at full weight rather than a tier. It is not a Warning:
 // nothing here misleads, and the sentence exists precisely to stop the reader
 // concluding that something broke. It is not Provenance either, since it varies
 // between invocations and has to be read once rather than kept available. And the
 // emphasis in this block belongs to the equivalent command at the end (D27, D30).
-func (w *setProfileWizard) askDerivedPassword(ctx context.Context, derived *derivedProfile) error {
-	unreadable := derived.profile.CredentialUnreadable
-	if unreadable == "" {
-		return nil
-	}
-	if err := w.say("",
-		fmt.Sprintf("Read the connection settings from %s.", derived.ref),
-		fmt.Sprintf("Cannot read its Secret (%s) — that is fine: a profile stores where", unreadable),
-		"your password lives, not the operator's.",
-	); err != nil {
-		return err
+func (w *setProfileWizard) askDerivedCredential(ctx context.Context, derived *derivedProfile) error {
+	if unreadable := derived.profile.CredentialUnreadable; unreadable != "" {
+		if err := w.say("",
+			fmt.Sprintf("Read the connection settings from %s.", derived.ref),
+			fmt.Sprintf("Cannot read its Secret (%s) — that is fine: a profile stores where", unreadable),
+			"your password lives, not the operator's.",
+		); err != nil {
+			return err
+		}
 	}
 
-	// The typed path's question, over a profileFields carrying what the sink
-	// already answered, so the two references are refused and accepted by
-	// resolve.Profile.Validate on both routes rather than by a rule this branch
-	// invented (D33).
+	// A profileFields carrying what the sink already answered, so both questions
+	// are refused and accepted by resolve.Profile.Validate rather than by a rule
+	// this branch invented (D33).
 	stanza := derived.profile.Profile.ClickHouse
+	sinkUsername := stanza.Username
 	fields := &profileFields{
 		Backend:  string(resolve.BackendClickHouse),
 		Addr:     stanza.Addr,
 		Database: stanza.Database,
-		Username: stanza.Username,
+		Username: sinkUsername,
 		TLS:      stanza.TLS,
 	}
-	if err := w.askPassword(ctx, fields, false); err != nil {
+
+	// The consequence, above the question rather than inside it, for the reason
+	// askDerivedAddr puts the recorded address above --addr's: it is a fact about
+	// this cluster's sink, and the question itself is the one sentence describing
+	// --username that `--help` and the typed path also read.
+	//
+	// It names the user and what that user can do, and not the database beside it.
+	// Explain says "Database X and user Y are the sink's own" after the write, and
+	// printing the same sentence twice in one transcript would make the second
+	// reading look like a second fact.
+	if err := w.say("",
+		fmt.Sprintf("%s authenticates as %s, which can write to the", derived.ref, sinkUsername),
+		"audit trail.",
+	); err != nil {
+		return err
+	}
+	username, err := w.askString(ctx, profileFieldByName(options.FlagUsername), fields, sinkUsername)
+	if err != nil {
+		return err
+	}
+	if username != sinkUsername {
+		derived.username = username
+	}
+
+	if err := w.askPassword(ctx, fields, resolve.ReaderPasswordEnv(username, sinkUsername), false); err != nil {
 		return err
 	}
 	derived.passwordEnv, derived.passwordFile = fields.PasswordEnv, fields.PasswordFile
@@ -443,19 +495,25 @@ func (w *setProfileWizard) declineDiscovery(reason string) error {
 
 // writeDerived writes a profile the cluster described, and prints the flags that
 // would have written it.
-func (w *setProfileWizard) writeDerived(name string, derived *derivedProfile) error {
-	if err := writeProfile(profileWrite{
+func (w *setProfileWizard) writeDerived(ctx context.Context, name string, derived *derivedProfile) error {
+	activate, err := w.askActivation(ctx, name)
+	if err != nil {
+		return err
+	}
+	activated, err := writeProfile(profileWrite{
 		name:        name,
 		profile:     derived.profile.Profile,
 		explanation: derived.profile.Explain(w.colorize),
+		activate:    activate,
 		nextStep:    true,
 		invokedAs:   w.invokedAs,
 		severity:    w.severity,
 		format:      w.format,
-	}, w.streams); err != nil {
+	}, w.streams)
+	if err != nil {
 		return err
 	}
-	return w.sayEquivalent(w.equivalentFromSink(name, derived))
+	return w.sayEquivalent(w.equivalentFromSink(name, derived), activated)
 }
 
 // equivalentFromSink is the flag command for the discovery branch.
@@ -463,9 +521,22 @@ func (w *setProfileWizard) writeDerived(name string, derived *derivedProfile) er
 // Every override the questions produced is printed, and only those: the flags
 // below are exactly what askDerivedAddr handed to ProfileFromSink, so the command
 // re-run reaches the same derivation with the same inputs and writes the same
-// stanza. A password reference appears only when the Secret could not be read and
-// the reader was therefore asked — on the ordinary path the derivation supplies
-// its own default, and naming it here would print a flag that changed nothing.
+// stanza. They are printed in profileFieldFlags order, which is `--help`'s and
+// docs/CLI.md's, so a line lifted out of a transcript reads like a line somebody
+// wrote.
+//
+// --username appears when the profile reads as somebody other than the sink's
+// user, which is the condition under which the flag is load-bearing: derived from
+// the *value* rather than from whether the question was answered, exactly as
+// --addr is, so that pressing return prints nothing and typing the offered default
+// back does not print a flag that changes nothing.
+//
+// The password reference is printed whenever there is one, which on this branch is
+// always. That is deliberately not the value rule the two flags above follow: what
+// it pins is the variable resolve.ReaderPasswordEnv chose, and a line that omitted
+// it would reproduce this profile only for as long as that function keeps
+// answering the same way. The same reasoning --addr's rule is written with — a
+// printed command must not depend on a classifier agreeing next time.
 func (w *setProfileWizard) equivalentFromSink(name string, derived *derivedProfile) []string {
 	parts := []string{
 		commandNameOr(w.invokedAs), "config", "set-profile", shellArg(name),
@@ -473,6 +544,9 @@ func (w *setProfileWizard) equivalentFromSink(name string, derived *derivedProfi
 	}
 	if derived.addr != "" {
 		parts = append(parts, "--"+options.FlagAddr, shellArg(derived.addr))
+	}
+	if derived.username != "" {
+		parts = append(parts, "--"+options.FlagUsername, shellArg(derived.username))
 	}
 	switch {
 	case derived.passwordEnv != "":
@@ -493,13 +567,65 @@ func (w *setProfileWizard) writeTyped(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeProfile(profileWrite{
-		name: name, profile: profile, nextStep: true, invokedAs: w.invokedAs,
-		severity: w.severity, format: w.format,
-	}, w.streams); err != nil {
+	// After the fields and before the write, which is what makes it the last
+	// question on both branches: it is the only one whose subject is the file
+	// rather than the profile, and a question about what to do with a stanza has
+	// to come after the stanza exists.
+	activate, err := w.askActivation(ctx, name)
+	if err != nil {
 		return err
 	}
-	return w.sayEquivalent(fields.equivalent(w.invokedAs, name))
+	activated, err := writeProfile(profileWrite{
+		name: name, profile: profile, activate: activate, nextStep: true,
+		invokedAs: w.invokedAs, severity: w.severity, format: w.format,
+	}, w.streams)
+	if err != nil {
+		return err
+	}
+	return w.sayEquivalent(fields.equivalent(w.invokedAs, name), activated)
+}
+
+// askActivation is the last question: whether this profile should be the one that
+// answers from here on.
+//
+// It defaults to no, and that default is the decision rather than a preference
+// (D38). The active profile is a side effect on every later command in the shell,
+// so a wizard that switched by default would redirect `timeline`, `diff` and `get`
+// to a store somebody wrote in order to inspect it — D24's objection at the config
+// layer, and not something `kubectl config set-context` does either. One keystroke
+// is the whole cost of saying yes.
+//
+// Two states are not asked about at all, and activationIsADecision is where the
+// rule lives so that the answer and the write cannot disagree about it: a first
+// profile in an empty file is activated regardless, and a profile that already
+// answers cannot be made to answer more. Asking either would be offering a choice
+// that is disregarded whichever way it is given (D31).
+//
+// --use answers it before it is asked. It is not re-asked and not confirmed:
+// writeProfile reports the activation, so what the flag did is on the screen
+// without a question having been spent on it.
+func (w *setProfileWizard) askActivation(ctx context.Context, name string) (bool, error) {
+	if w.activate {
+		return true, nil
+	}
+
+	// Read here rather than carried in from the command, because the file may have
+	// been written by something else during the conversation and because this is
+	// the same read the write is about to do. A failure is returned rather than
+	// swallowed: the write would fail on it a moment later, and a question asked
+	// against a file that cannot be read is a question asked for nothing.
+	path, err := resolve.DefaultConfigPath()
+	if err != nil {
+		return false, exit.RuntimeErrorf("%w", err)
+	}
+	cfg, err := resolve.LoadConfig(path)
+	if err != nil {
+		return false, exit.RuntimeErrorf("%w", err)
+	}
+	if !activationIsADecision(cfg, name) {
+		return false, nil
+	}
+	return w.askYesNo(ctx, "Make this the active profile?", false)
 }
 
 // askFields asks for a backend and then for that backend's fields, in table
@@ -527,7 +653,12 @@ func (w *setProfileWizard) askFields(ctx context.Context) (profileFields, error)
 		// unreachable instead. It happens here, at --password-env's position in
 		// the table, so the question keeps its place in the order.
 		if field.name == options.FlagPasswordEnv && backend == resolve.BackendClickHouse {
-			if err := w.askPassword(ctx, &fields, true); err != nil {
+			// resolve.DefaultPasswordEnv rather than a per-user variable, because
+			// there is no sink's user here to read as somebody other than: a
+			// hand-written stanza names one principal and nothing is being
+			// replaced. It is also the variable docs/CLI.md's worked example
+			// exports beside this exact command.
+			if err := w.askPassword(ctx, &fields, resolve.DefaultPasswordEnv, true); err != nil {
 				return fields, err
 			}
 			continue
@@ -584,18 +715,32 @@ func (w *setProfileWizard) askBackend(ctx context.Context, fields *profileFields
 // *name* of an environment variable or the path of a file, so nothing secret is
 // typed, echoed or held — see this file's opening comment.
 //
+// The question names the user whose password it is asking about, because a
+// username and a password are one credential pair and this is the half that says
+// so out loud (D37). Both routes reach it with the user already answered —
+// --username sits immediately above --password-env in profileFieldFlags, and the
+// derived branch asks the two together — so the name is available on both and the
+// question is one question rather than two spellings of one. It falls back to "the
+// ClickHouse password" for a profile that names no user at all, which is a server
+// whose default user is the one being authenticated as.
+//
+// defaultEnv is what pressing return at the variable name writes. It is passed in
+// rather than read from a constant so that the value offered is the one the
+// derivation would have produced for the user just chosen (resolve.ReaderPasswordEnv),
+// which is what makes accepting every default reproduce --from-sink exactly.
+//
 // offerNone adds "nowhere — a server with no password", and the derived branch
 // does not ask for it. resolve.ProfileOverrides has no way to express *no
 // reference at all*: empty overrides are what --from-sink is given when nobody
-// names a password, and the derivation answers them with the default environment
-// variable on purpose (see resolve.clickHouseProfile). So an answer of "none"
-// there would produce KUBERECORD_CLICKHOUSE_PASSWORD anyway — a choice offered,
-// taken, and silently disregarded, which is the exact shape D31 is about. A
-// ClickHouseSink's credentialsSecretRef is a required field, so the sink whose
-// settings are being copied authenticates with a password; the answer is not one
-// this branch has to have.
+// names a password, and the derivation answers them with an environment variable
+// on purpose (see resolve.clickHouseProfile). So an answer of "none" there would
+// produce that variable anyway — a choice offered, taken, and silently
+// disregarded, which is the exact shape D31 is about. A ClickHouseSink's
+// credentialsSecretRef is a required field, so the sink whose settings are being
+// copied authenticates with a password; the answer is not one this branch has to
+// have.
 func (w *setProfileWizard) askPassword(
-	ctx context.Context, fields *profileFields, offerNone bool,
+	ctx context.Context, fields *profileFields, defaultEnv string, offerNone bool,
 ) error {
 	choices := []wizardChoice{
 		{value: "environment", description: "an environment variable, named next"},
@@ -605,19 +750,21 @@ func (w *setProfileWizard) askPassword(
 		choices = append(choices,
 			wizardChoice{value: "none", description: "nowhere — a server with no password"})
 	}
-	answer, err := w.menu(ctx, "Where does the ClickHouse password come from?", choices, true)
+	whose := "the ClickHouse"
+	if fields.Username != "" {
+		whose = fields.Username + "'s"
+	}
+	answer, err := w.menu(ctx, fmt.Sprintf("Where does %s password come from?", whose), choices, true)
 	if err != nil {
 		return err
 	}
 
 	switch answer {
 	case "environment":
-		// Offered as the default because the user has just said they want one,
-		// and this is the variable --from-sink writes, the unreachable-backend
-		// message tells them to export, and docs/CLI.md uses throughout. It is a
-		// suggestion the equivalent command prints in full, so the flag line
+		// Offered as the default because the user has just said they want one. It
+		// is a suggestion the equivalent command prints in full, so the flag line
 		// reproduces the profile without relying on it.
-		_, err = w.askString(ctx, profileFieldByName(options.FlagPasswordEnv), fields, resolve.DefaultPasswordEnv)
+		_, err = w.askString(ctx, profileFieldByName(options.FlagPasswordEnv), fields, defaultEnv)
 	case "file":
 		_, err = w.askString(ctx, profileFieldByName(options.FlagPasswordFile), fields, "")
 	}
@@ -859,7 +1006,18 @@ func (w *setProfileWizard) say(lines ...string) error {
 // The command is Emphasis, and it is the only emphasised line in the block, for
 // the reason the tier is defined with: it is the one line a reader skimming past
 // the write confirmation has to come away with.
-func (w *setProfileWizard) sayEquivalent(parts []string) error {
+//
+// --use is appended when the write activated the profile, so the line reproduces
+// the whole outcome and not only the stanza. It is derived from what happened
+// rather than from what was answered, exactly as --addr and --username are: a
+// profile activated because it was the only one in the file is a profile the
+// printed command has to activate on a machine whose file is not empty, or the
+// line would be a claim that stopped being true the moment somebody wrote a second
+// profile.
+func (w *setProfileWizard) sayEquivalent(parts []string, activated bool) error {
+	if activated {
+		parts = append(parts, "--"+options.FlagUse)
+	}
 	return w.say("", "The same thing without the questions:",
 		w.severity.Emphasis("  "+strings.Join(parts, " ")))
 }

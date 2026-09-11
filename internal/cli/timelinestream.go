@@ -77,7 +77,7 @@ func runTimelineStructured(
 ) error {
 	capabilities := backend.Engine.Capabilities()
 
-	from, to, windowNotice := timelineBounds(request, capabilities)
+	from, to, windowNotice := timelineBounds(request, capabilities, opts.Zone)
 	notices := appendNotice(nil, windowNotice)
 
 	// Same position as the gathered path's, and for the same reason: this is before
@@ -112,15 +112,38 @@ func runTimelineStructured(
 	// query of a cold read must be issued with — and these may walk partitions
 	// like any other. They are skipped when the emission failed, since the notices
 	// would be explaining the shape of an answer that was never produced.
+	//
+	// explainNoChanges is called here rather than beside the notices it belongs to,
+	// and that is Task 18.5's gate arriving on this path. Its answer decides whether
+	// the Event question is asked at all — the no-coverage finding absorbs the
+	// --with-events explanation, and two findings for one cause is noise — so it has
+	// to run before eventsNotice, which in turn has to run before the context is
+	// cancelled. It may ask that question itself, which is the other reason it
+	// belongs above the line rather than below it: since Task 18.7 the absorbed
+	// clause measures the Event scope instead of assuming it, and its read is a
+	// query like any other and must be issued while the cold-scan context is alive.
+	// The two are still exclusive, so the invocation pays for one of them at most.
+	// The gathered path's gate is the same condition in the same place relative to
+	// the same two calls (gatherChanges).
 	var (
-		predicate   render.Notice
-		attributed  bool
-		eventNotice render.Notice
+		predicate    render.Notice
+		attributed   bool
+		emptyNotices []render.Notice
+		emptyErr     error
+		eventNotice  render.Notice
 	)
 	if emitErr == nil {
 		predicate, attributed = predicateNotice(
-			ctx, backend.Engine, request, selection, from, to, emitted.sawChange)
-		eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent)
+			ctx, backend.Engine, request, selection, from, to, emitted.sawChange, opts.Zone)
+		if !attributed {
+			emptyNotices, emptyErr = explainNoChanges(request, from, to, emitted.shape(), coverage,
+				func() (coverageAnswer, error) {
+					return eventCoverage(ctx, backend, request, from, to)
+				}, opts.Zone)
+		}
+		if emptyErr == nil {
+			eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent, opts.Zone)
+		}
 	}
 
 	// Stopped here rather than left to the defer: the reading is over, and the
@@ -141,18 +164,14 @@ func runTimelineStructured(
 
 	notices = appendNotice(notices, deletionsNotice(capabilities, emitted.sawDeleted))
 
-	// Same order and same gate as the gathered path's, which is the half of this
+	// Same order and same gates as the gathered path's, which is the half of this
 	// file that is duplicated on purpose: an emptiness a query predicate produced
 	// is explained by the predicate rather than by coverage, and consulting
 	// coverage about it could report "nothing was watching" over a window that
-	// demonstrably held changes.
+	// demonstrably held changes. The Event notice is empty when the finding above
+	// absorbed it, which is decided where it is asked.
 	notices = appendNotice(notices, predicate)
-	var emptyErr error
-	if !attributed {
-		emptyNotices, err := explainNoChanges(request, from, to, emitted.shape(), coverage)
-		notices = append(notices, emptyNotices...)
-		emptyErr = err
-	}
+	notices = append(notices, emptyNotices...)
 	notices = appendNotice(notices, eventNotice)
 
 	if writeErr := render.WriteNotices(streams.ErrOut, notices, opts); writeErr != nil {

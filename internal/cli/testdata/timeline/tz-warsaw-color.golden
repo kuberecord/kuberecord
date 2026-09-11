@@ -1,0 +1,14 @@
+=== stdout ===
+[2mKind:[0m     apps/Deployment
+[2mObject:[0m   payments/checkout
+[2mCluster:[0m  prod-eu-1
+[2mUID:[0m      7c9e6679-7425-40de-944b-e07fc1f90ae7
+[2mCoverage:[0m 2026-07-02T11:14:00+02:00 → open (ClusterStreamRule/all-workloads)
+
+[2mTIME (Europe/Warsaw)           EVENT     ACTOR                      CHANGE[0m
+2026-08-28 16:02:58.001+02:00  [32mAdded[0m     kubectl-client-side-apply  full state recorded
+2026-08-28 16:03:11.482+02:00  [33mModified[0m  kubectl-client-side-apply  ~ spec.…resources.limits.memory: 2Gi → 512Mi
+2026-08-28 16:05:02.117+02:00  [33mModified[0m  kube-controller-manager    3 ops
+2026-08-28 16:09:40.900+02:00  [33mModified[0m  [2munknown[0m                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+=== stderr ===
+! [33m3 rows are shortened to fit the CHANGE column; pass --full to print every operation[0m

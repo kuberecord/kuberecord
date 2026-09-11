@@ -732,23 +732,43 @@ func (p Profile) Describe() string {
 // Target renders the bare locator this profile points at, with no prose around
 // it.
 //
-// It is Describe without the words: `10.0.1.5:9000/kuberecord` rather than
-// `ClickHouse at 10.0.1.5:9000/kuberecord`. The caller is a column headed TARGET
-// in a table whose previous column is headed BACKEND (see `config get-profiles`),
-// so the prose half would be the backend named twice on every row.
+// It is Describe without the words: `default@10.0.1.5:9000/kuberecord` rather
+// than `ClickHouse at 10.0.1.5:9000/kuberecord`. The caller is a column headed
+// TARGET in a table whose previous column is headed BACKEND (see
+// `config get-profiles`), so the prose half would be the backend named twice on
+// every row.
 //
-// The two are one implementation and not two agreeing ones: every describer below
-// is built from the locator, so a target read out of a table and a target read out
-// of a resolution notice cannot come to disagree about where a profile points.
 // Defaults are applied here for the reason Describe applies them — the subject is
-// where a query would actually go.
+// where a query would actually go, so a stanza naming no database reads
+// `kuberecord` and one naming no user reads `default`, which is who the driver
+// would authenticate as.
+//
+// # Why a ClickHouse target carries its user and a description does not
+//
+// The two were one string until Task 18.5, and the finding is that a table cannot
+// do its job with it. The CREDENTIAL column beside this one reports where a
+// password comes from and whether that reference resolves; it cannot report *whose*
+// password, so four profiles reading four principals through the same variable name
+// rendered as four identical rows — the ambiguity the column exists to resolve.
+// Task 18.1 made the username a field people vary, which is what turned that from
+// a latent asymmetry into a listing nobody can read.
+//
+// So the principal is part of the locator here, in the spelling every connection
+// string uses, rather than in a sixth column that would widen the table for one
+// backend's benefit. Describe is deliberately left as it was: its callers are
+// resolution notices and the `was:` clause of an upsert, where the sentence around
+// it already names the profile and where the reader is being told which *store*
+// answered rather than being asked to tell two stanzas apart.
 func (p Profile) Target() string {
 	switch p.Backend {
 	case BackendClickHouse:
 		if p.ClickHouse == nil {
 			break
 		}
-		return targetClickHouse(p.ClickHouse.Addr, valueOr(p.ClickHouse.Database, DefaultClickHouseDatabase))
+		return targetClickHouseAs(
+			valueOr(p.ClickHouse.Username, DefaultClickHouseUsername),
+			p.ClickHouse.Addr,
+			valueOr(p.ClickHouse.Database, DefaultClickHouseDatabase))
 	case BackendS3:
 		if p.S3 == nil {
 			break
@@ -796,6 +816,16 @@ func describeLocal(path string) string {
 // asymmetry is deliberate and Target says so at the call site.
 func targetClickHouse(addr, database string) string {
 	return addr + "/" + database
+}
+
+// targetClickHouseAs is that locator with the principal in front of it.
+//
+// Built on top of targetClickHouse rather than beside it, so that the endpoint and
+// the database are spelled in exactly one place and a table's cell cannot come to
+// disagree with a resolution notice about the half they share. See Target for why
+// only one of the two carries the user.
+func targetClickHouseAs(username, addr, database string) string {
+	return username + "@" + targetClickHouse(addr, database)
 }
 
 func targetS3(bucket, prefix string) string {

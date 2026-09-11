@@ -265,6 +265,16 @@ type TimelineQuery struct {
 	// Both group spellings of Event are correlated. Handling only one of them
 	// would drop whichever half of the cluster's events happens to be reported the
 	// other way, which is a silent hole rather than a visible gap.
+	//
+	// The Events half is an *independent* query and neither half gates the other
+	// (D40). An Event names its subject in its own row, so correlation never
+	// requires the subject to have been captured: an object whose own changes were
+	// never recorded — a Pod in a cluster whose rules watch Events and Deployments —
+	// still has every Event naming it, and a backend that resolved an incarnation
+	// first and returned early when there was none would report an empty answer it
+	// had never measured. That is not a hypothetical; it is what both backends did
+	// until Task 18.6, and it made the events-only case unreachable for the whole
+	// read plane.
 	IncludeEvents bool `json:"include_events"`
 }
 

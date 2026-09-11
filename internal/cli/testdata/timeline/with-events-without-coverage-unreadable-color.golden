@@ -1,0 +1,7 @@
+=== stdout ===
+[2mKind:[0m     apps/Deployment
+[2mObject:[0m   payments/checkout
+[2mCluster:[0m  prod-eu-1
+[2mCoverage:[0m [33mnone recorded for this scope[0m
+=== stderr ===
+error: no watch coverage recorded for the requested scope: nothing was ever watching apps/Deployment payments/checkout in cluster "prod-eu-1", so this silence is not evidence that it did not change — and whether any Kubernetes Event about it was recorded cannot be said: reading the watch scopes that cover Kubernetes Events in namespace payments: dial tcp 10.0.0.5:9000: connection refused; the `scopes` command lists what is being recorded

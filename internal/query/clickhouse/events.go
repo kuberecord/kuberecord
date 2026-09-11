@@ -51,14 +51,22 @@ import (
 // Field-path predicates need no exception: an Event row carries no diff, and a
 // row with no patch survives a field-path filter by the same rule that keeps a
 // first sighting in one.
+//
+// # Why the changes side may be exhausted before it starts
+//
+// The object's own history and the Events about it are independent queries and
+// neither gates the other (D40), so this is also the merge an object with no state
+// rows at all gets: an empty iterator on one side and the commentary on the other.
+// Nothing here needs to know which case it is in, which is the point.
 func (e *Engine) mergeEvents(
 	ctx context.Context, q query.TimelineQuery, uid string, changes query.ChangeIterator,
 ) (query.ChangeIterator, error) {
 	// uid is either one the caller pinned, one the newest-incarnation probe
-	// resolved, or empty for an all-incarnations timeline — Timeline has already
-	// short-circuited the case where nothing was recorded at all. Empty falls back
-	// to the forgiving key, (kind, namespace, name), which is the right one for a
-	// question that spans a delete-and-recreate.
+	// resolved, or empty — for an all-incarnations timeline, or for an object whose
+	// own changes were never recorded (eventsWithoutState). Empty falls back to the
+	// forgiving key, (kind, namespace, name), which is the right one for a question
+	// that spans a delete-and-recreate and the only one available for a subject with
+	// no incarnation to pin.
 	stmt := eventsStatement(q.Ref, q.From, q.To, uid, q.Reverse)
 	rows, err := e.conn.Query(ctx, stmt.SQL, stmt.Args...)
 	if err != nil {

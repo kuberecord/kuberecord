@@ -245,6 +245,15 @@ type agreementQuery struct {
 	// name identifies the question in a subtest name and in every failure message
 	// it produces.
 	name string
+	// eventsOnly asks the question about the corpus's second identity — the object
+	// named by Events and holding no state records — rather than about the object
+	// the rest of the corpus records.
+	//
+	// It is a flag rather than a query.ObjectRef so that a question states which of
+	// the corpus's two identities it is about and cannot name a third: an agreement
+	// question pointed at an identity the corpus never seeded would compare two
+	// empty answers and pass forever.
+	eventsOnly bool
 	// query is the question in its unbounded, unlimited form. Bounds are supplied
 	// per backend from Capabilities; the limit is posed as a second question, so
 	// that a limited answer can be checked against the unlimited one it is a prefix
@@ -258,13 +267,30 @@ type agreementQuery struct {
 	// sides: a backend that records deletions must return exactly this many, and one
 	// that does not must return none.
 	deletions int
+	// events is how many Kubernetes Event rows the corpus places in this question's
+	// answer, and it is stated for a reason a cross-backend comparison cannot supply
+	// on its own.
+	//
+	// Comparing two answers catches a defect one backend has. It cannot catch one
+	// they share — and the defect this identity was added for was shared: both
+	// resolved an incarnation first and returned an emptiness they had never
+	// measured, so they agreed, and agreeing about an unmeasured emptiness is the
+	// greenest possible way to be wrong (Task 18.6). A count the corpus declares is
+	// what makes the assertion positive on both sides, exactly as deletions does for
+	// the difference their declarations allow.
+	//
+	// No capability governs it. A Kubernetes Event is an ordinary record of an
+	// ordinary object, so every backend that can hold a record can hold one, and
+	// there is no truthful reduction that excuses returning fewer.
+	events int
 	// why states what the question is really pinning, for the failure message.
 	why string
 }
 
 // agreementQueries is the table both backends answer.
 //
-// Ref is filled in by the runner from the corpus, so a question here states only
+// Ref is filled in by the runner from the corpus — the state identity by default,
+// the events-only one where a question says so — so a question here states only
 // what makes it different from the others.
 func agreementQueries() []agreementQuery {
 	return []agreementQuery{
@@ -322,7 +348,47 @@ func agreementQueries() []agreementQuery {
 			query: query.TimelineQuery{UID: corpusUIDB}, deletions: 1,
 			why: "the newer incarnation, pinned explicitly rather than resolved",
 		},
+
+		// The events-only identity (D40, Task 18.6). Four questions, because the
+		// backends' shared defect was invisible to three of them: an object with no
+		// state records answered correctly whenever the *incarnation resolution* was
+		// bypassed, and wrongly on exactly the path the flagship command takes.
+		{
+			name: "EventsOnlyObject", eventsOnly: true,
+			query: query.TimelineQuery{IncludeEvents: true}, limit: 2, deletions: 0, events: 4,
+			why: "an object with no state records still has the Events naming it: an Event names " +
+				"its subject in its own row, so the two halves of a merged timeline are independent " +
+				"queries and neither gates the other. A backend that resolves an incarnation first " +
+				"and stops when there is none answers this with an emptiness it never measured",
+		},
+		{
+			name: "EventsOnlyWithoutTheFlag", eventsOnly: true,
+			query: query.TimelineQuery{}, deletions: 0,
+			why: "nobody asked about Events, so there is no second question to answer and the empty " +
+				"result is the whole of it — the half of the fix that must not have changed",
+		},
+		{
+			name: "EventsOnlyPinnedToTheSubject", eventsOnly: true,
+			query:     query.TimelineQuery{IncludeEvents: true, UID: EventsOnlySubjectUID},
+			deletions: 0, events: 4,
+			why: "the uid the Events themselves name, recorded nowhere else: pinning it must narrow " +
+				"the commentary to it rather than exclude commentary for having no state behind it",
+		},
+		{
+			name: "EventsOnlyPinnedToAnUnrecordedIncarnation", eventsOnly: true,
+			query: query.TimelineQuery{IncludeEvents: true, UID: CorpusUnrecordedUID}, deletions: 0,
+			why: "a pinned incarnation nothing recorded, in either half: it is named by no Event, so " +
+				"the narrowing leaves nothing, and both backends must leave the same nothing",
+		},
 	}
+}
+
+// refFor names the corpus identity a question is about.
+func refFor(q agreementQuery, c Corpus) query.ObjectRef {
+	if q.eventsOnly {
+		return c.EventsOnlyRef()
+	}
+	return c.Ref()
 }
 
 // agreeOnTimelines: both backends answer every question in the table the same way,
@@ -333,7 +399,7 @@ func agreeOnTimelines(t conformanceT, a, b Harness) {
 
 	for _, q := range agreementQueries() {
 		base := q.query
-		base.Ref = corpus.Ref()
+		base.Ref = refFor(q, corpus)
 		base.Limit = 0
 
 		gotA := agreementTimeline(t, a, boundedFor(capsOf(a), base, corpus), q.name)
@@ -355,6 +421,8 @@ func assertAgreedChanges(t conformanceT, a, b Harness, q agreementQuery, gotA, g
 
 	assertDeclaredDeletions(t, a, q, gotA)
 	assertDeclaredDeletions(t, b, q, gotB)
+	assertDeclaredEvents(t, a, q, gotA)
+	assertDeclaredEvents(t, b, q, gotB)
 
 	commonA := projectChanges(gotA, capsOf(b))
 	commonB := projectChanges(gotB, capsOf(a))
@@ -411,6 +479,39 @@ func assertDeclaredDeletions(t conformanceT, h Harness, q agreementQuery, got []
 			"that merely ended, and tells a reader an object is gone when nothing recorded it going.\n"+
 			"full answer:%s", q.name, backendOf(h), found, describeChanges(got))
 	}
+}
+
+// assertDeclaredEvents holds each backend to the number of Kubernetes Event rows
+// the corpus places in this answer.
+//
+// This is the clause that survives a defect both backends have. Every other
+// assertion in this file compares the two, and two backends that both answered an
+// events-only timeline with nothing agreed perfectly while the archive held four
+// Events about that object — which is precisely what happened for a release (Task
+// 18.6, D42). A declared count is measured against the corpus rather than against
+// the other implementation, so a shared miss is a failure on both sides instead of
+// consensus.
+//
+// It is also positive in the other direction: a backend returning *more* Event rows
+// than the corpus placed here has correlated an Event to an object it is not about,
+// which is a false statement attached to a real row and worse than a missing one.
+func assertDeclaredEvents(t conformanceT, h Harness, q agreementQuery, got []query.Change) {
+	t.Helper()
+
+	found := 0
+	for _, c := range got {
+		if c.EventType == query.EventKubernetes {
+			found++
+		}
+	}
+	if found == q.events {
+		return
+	}
+	t.Errorf("conformance: %s: %s returned %d Kubernetes Event row(s) for this question, but the "+
+		"corpus places %d there.\nfull answer:%s\nThis question pins: %s.\nA count is asserted "+
+		"against the corpus rather than against the other backend because two backends can agree "+
+		"about an answer neither of them measured.",
+		q.name, backendOf(h), found, q.events, describeChanges(got), q.why)
 }
 
 // assertLimitIsAPrefix requires a limited answer to be the first rows of the same

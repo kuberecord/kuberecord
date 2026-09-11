@@ -184,6 +184,7 @@ func getRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IOStr
 	return render.Options{
 		Width: options.TerminalWidth(streams.Out),
 		Color: options.ShouldColorize(flags.Color, streams.Out),
+		Zone:  flags.Zone(),
 	}
 }
 
@@ -241,7 +242,7 @@ func RunGet(
 	// which is what stops the two ever disagreeing about what was watching.
 	coverage, err := askCoverage(ctx, backend, request.scopeQuery(), describeObject(request.Ref))
 	if stateErr != nil {
-		return stateFailure(backend, request, coverage, err, stateErr)
+		return stateFailure(backend, request, coverage, err, stateErr, opts.Zone)
 	}
 	if err != nil {
 		return err
@@ -257,7 +258,15 @@ func RunGet(
 		BaseEvent:      reconstruction.BaseEvent,
 		PatchesApplied: reconstruction.PatchesApplied,
 		SHA256:         reconstruction.SHA256,
-		Coverage:       coverage.Summary(),
+		// UTC whatever --tz asked for, for the reason render.ObjectProvenance's own
+		// instants are. This command renders no table: its document is always an
+		// envelope, and this string is the `coverage:` line of the provenance block
+		// that sits above it — inside the stdout document under -o yaml, and on
+		// stderr under -o json. Following --tz would put a +02:00 comment over a
+		// metadata.coverage.summary the envelope spells in UTC, and would give one
+		// block two spellings depending on the format (D19, D46).
+		Coverage:       coverage.Summary(render.UTC),
+		CoverageAbsent: coverage.Absent(),
 		State:          reconstruction.Object,
 	}
 
@@ -311,11 +320,17 @@ func reconstructedUID(reconstruction *query.Reconstruction, requested string) st
 // that the header of a successful reconstruction and the explanation of an
 // unsuccessful one can never be built from two different readings of the scope
 // log.
+// zone is the frame the instants in the message are spelled in. An error is a
+// human-facing instant like any other, and one rendered in a frame the notices
+// above it are not in would be a single invocation answering "when" twice
+// (Task 18.9). The reconstructed document's own header is deliberately not in it
+// — see render.ObjectProvenance.
 func stateFailure(
 	backend *resolve.Backend, request GetRequest, coverage coverageAnswer, coverageErr, err error,
+	zone render.Zone,
 ) error {
 	object := describeObject(request.Ref)
-	instant := render.FormatInstant(request.At)
+	instant := zone.Instant(request.At)
 
 	switch {
 	case errors.Is(err, query.ErrCapabilityUnsupported):
@@ -340,7 +355,7 @@ func stateFailure(
 	}
 	return exit.RuntimeErrorf("no recorded state for %s at %s: it had not been observed by then, or it had "+
 		"already been deleted%s. The scope was watched over %s",
-		object, instant, pinnedIncarnationClause(request), describeInterval(coverage.Intervals[0]))
+		object, instant, pinnedIncarnationClause(request), describeInterval(coverage.Intervals[0], zone))
 }
 
 // pinnedIncarnationClause names --uid where it is one of the reasons nothing was

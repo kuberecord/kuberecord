@@ -7,7 +7,8 @@ That name resolves inside the cluster and nowhere else, so the profile records
 
 Database kuberecord and user kuberecord are the sink's own.
 Its own credential is Secret kuberecord-system/clickhouse-credentials, key "password".
-The profile does not copy it: it reads $KUBERECORD_CLICKHOUSE_PASSWORD.
-Export a read-only ClickHouse user's password there rather than the operator's,
-which is a credential that can write to the audit trail. See
+The profile does not copy it: kuberecord's password comes from $KUBERECORD_CLICKHOUSE_PASSWORD.
+
+That user is the sink's own writer, so this profile can write to the audit trail.
+Give --username a read-only user instead; the grants it needs are at
 docs/CLI.md#the-read-only-clickhouse-user

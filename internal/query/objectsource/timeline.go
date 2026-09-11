@@ -221,11 +221,24 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 	slices.SortStableFunc(marks, func(a, b incarnationMark) int { return a.ts.Compare(b.ts) })
 
 	uid, recorded := resolveIncarnation(q, marks)
-	if !recorded {
-		// Nothing named this object in the window. That is an empty result and not a
-		// statement that nothing happened — see Coverage, and Invariant 9.
+	if !recorded && !q.IncludeEvents {
+		// Nothing named this object in the window and nothing beyond it was asked
+		// about. That is an empty result and not a statement that nothing happened —
+		// see Coverage, and Invariant 9.
 		return nil, failure
 	}
+	// Deliberately not an early return when Events *were* asked about. An Event names
+	// its subject in its own line, so the commentary was collected without the object's
+	// own lines being consulted at all, and the two are independent questions of which
+	// neither gates the other (D40). Returning here discarded events this scan had
+	// already read and paid for, and reported an answer nobody had measured.
+	//
+	// resolveIncarnation yields the empty uid in that state, which is what makes the
+	// two steps below correct as they stand rather than in need of a branch: there is
+	// no incarnation to narrow the changes to, and none to pin the commentary to, so
+	// the events keep the forgiving (kind, namespace, name) key — the same one the
+	// table backend's events-only path uses, and the only one available for a subject
+	// with no incarnation.
 	if uid != "" {
 		changes = slices.DeleteFunc(changes, func(c query.Change) bool { return c.UID != uid })
 	}
@@ -380,6 +393,16 @@ type timelineWalkStep struct {
 // walk that counted raw changes would stop early on a query whose filter excludes most
 // of them. Predicates need no attention here — recordScan.keep applied them at decode
 // time, so a collected change has already survived them.
+//
+// One consequence is worth stating, because it looks like a missed optimisation and is
+// not. An object with no state lines anywhere in the window — the events-only subject
+// scanTimeline now answers — never produces a mark, so newestMark never finds one and
+// this walk never settles: it reads the window to the end. That is required rather than
+// merely conservative. An unread partition could hold a mark, and a mark would resolve
+// an incarnation, and a resolved incarnation *narrows the commentary* to the events
+// naming it — so a walk that stopped on Event rows alone could return rows a full scan
+// would have excluded, which is the divergence between the limited and unlimited forms
+// of one question that this whole function exists to prevent.
 func (e *Engine) answerIsSettled(q query.TimelineQuery, steps []timelineWalkStep, lo time.Time) bool {
 	ceiling := lo.Add(e.objectSpan)
 
@@ -458,6 +481,12 @@ func prefixesOf(spans []partition) []string {
 // contract says so, and a backend honouring both would answer a question nobody
 // asked. Otherwise it is the incarnation owning the newest mark, which is what "the
 // newest incarnation in the window" means and is why the marks are sorted first.
+//
+// recorded false no longer decides whether the timeline is empty. It says the window
+// holds no lines for the object *itself*, which settles which incarnation the state
+// half is about — there is none — and settles nothing about the Events naming it,
+// which are correlated from their own lines and never from the subject's (D40). See
+// scanTimeline, where the two halves part company.
 func resolveIncarnation(q query.TimelineQuery, marks []incarnationMark) (uid string, recorded bool) {
 	switch {
 	case q.UID != "":

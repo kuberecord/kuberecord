@@ -548,3 +548,154 @@ func isOrderedByTS(changes []query.Change) bool {
 	}
 	return true
 }
+
+// eventsOnlySubject is an object that has Events and no history of its own.
+//
+// A Pod, because that is the shape the field report arrived in and the shape the
+// quickstart produces: a rule capturing Events, Deployments and ConfigMaps leaves
+// every Pod in the namespace named by Events that were recorded and holding not one
+// line of its own.
+func eventsOnlySubject() query.ObjectRef {
+	target := testRef()
+	return query.ObjectRef{
+		ClusterID: target.ClusterID,
+		APIGroup:  "",
+		Kind:      "Pod",
+		Namespace: target.Namespace,
+		Name:      "checkout-7d4f-abcde",
+	}
+}
+
+// The incarnations the events-only fixture does and does not name. The first is
+// carried by the Events and by nothing else — an incarnation recorded only in the
+// commentary about it — and the second by nothing at all.
+const (
+	eventsOnlySubjectUID = "dddddddd-0000-0000-0000-000000000004"
+	unrecordedUID        = "eeeeeeee-0000-0000-0000-000000000005"
+)
+
+// eventsOnlyHistory is four Events about an object with no lines of its own.
+//
+// Four because that is how many the field report found in the archive's table
+// counterpart while the CLI reported none, and both spellings because a fixture
+// carrying one of them would leave half the coalesce untested on the one path this
+// fixture exists for.
+func eventsOnlyHistory() conformance.History {
+	return conformance.History{Rows: []conformance.Row{
+		eventRowAbout(30*time.Second, "", "pod.scheduled", "Scheduled"),
+		eventRowAbout(70*time.Second, "events.k8s.io", "pod.pulling", "Pulling"),
+		eventRowAbout(110*time.Second, "", "pod.failed", "FailedScheduling"),
+		eventRowAbout(150*time.Second, "events.k8s.io", "pod.killing", "Killing"),
+	}}
+}
+
+// eventRowAbout is eventRow for the events-only subject.
+//
+// It is a second helper rather than a subject parameter on the first, because
+// eventRow's callers assert about commentary *interleaved* with an object's own
+// changes: a subject parameter everywhere would let one of those fixtures name the
+// wrong object without the reading of the test changing at all.
+func eventRowAbout(offset time.Duration, apiGroup, name, reason string) conformance.Row {
+	row := eventRow(offset, apiGroup, name, reason, eventsOnlySubjectUID)
+	subject, target := "involvedObject", eventsOnlySubject()
+	if apiGroup != "" {
+		subject = "regarding"
+	}
+	row.Change.Data = fmt.Sprintf(
+		`{"reason":%q,%q:{"kind":%q,"namespace":%q,"name":%q,"uid":%q}}`,
+		reason, subject, target.Kind, target.Namespace, target.Name, eventsOnlySubjectUID)
+	return row
+}
+
+// Task 18.6, in the backend the audit found carrying the same shape.
+//
+// scanTimeline resolved the incarnation from the marks and returned before the
+// commentary merge whenever the window held no line naming the object — so an
+// object no rule watches got an empty timeline, and the Events this scan had
+// *already read and decoded* were thrown away on the way out.
+//
+// The archive is a real one, written to a directory through the fixture writer, so
+// what is under test here is the shipped scan rather than a stand-in's model of it.
+func TestEventsSurviveAMissingIncarnation(t *testing.T) {
+	t.Parallel()
+
+	subject := eventsOnlySubject()
+
+	tests := map[string]struct {
+		mutate func(*query.TimelineQuery)
+		want   int
+		why    string
+	}{
+		"the flag is set": {
+			mutate: func(q *query.TimelineQuery) { q.IncludeEvents = true },
+			want:   4,
+			why: "an object with no lines of its own still has the Events naming it: they are " +
+				"correlated from their own involvedObject and never from the subject's lines (D40)",
+		},
+		"the flag is not set": {
+			mutate: func(*query.TimelineQuery) {},
+			want:   0,
+			why: "nobody asked about Events, so there is no second question and the empty result is " +
+				"the whole of it",
+		},
+		"a reverse-limited query": {
+			mutate: func(q *query.TimelineQuery) { q.IncludeEvents, q.Reverse, q.Limit = true, true, 2 },
+			want:   2,
+			why: "the flagship command's own shape: the newest-first walk can never settle without a " +
+				"mark, so it reads the window out and the limit is applied to the answer",
+		},
+		"an unrecorded incarnation is pinned": {
+			mutate: func(q *query.TimelineQuery) { q.IncludeEvents, q.UID = true, unrecordedUID },
+			want:   0,
+			why: "a pinned incarnation narrows the commentary to the Events naming it, and an " +
+				"incarnation nothing ever recorded is named by none",
+		},
+		"the subject's own incarnation is pinned": {
+			mutate: func(q *query.TimelineQuery) { q.IncludeEvents, q.UID = true, eventsOnlySubjectUID },
+			want:   4,
+			why: "the uid the Events do name: pinning it is the narrowing working, not the absence of " +
+				"state lines mattering",
+		},
+		"every incarnation is asked for": {
+			mutate: func(q *query.TimelineQuery) { q.IncludeEvents, q.AllIncarnations = true, true },
+			want:   4,
+			why: "the one shape that always worked, because AllIncarnations reports the object as " +
+				"recorded without a mark — which is how narrowly the bug missed being seen",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			engine, _ := engineOver(t, eventsOnlyHistory(), Options{Prefix: "audit"})
+			q := wholeWindow(subject)
+			test.mutate(&q)
+
+			got := drain(t, engine, q)
+			if len(got) != test.want {
+				t.Fatalf("the timeline of an object with Events and no state returned %d change(s), "+
+					"want %d: %s", len(got), test.want, test.why)
+			}
+			for i, change := range got {
+				if change.EventType != query.EventKubernetes {
+					t.Errorf("row %d is stamped %q, want %q — every row of this answer is a Kubernetes "+
+						"Event, and the stamp is the only thing a reader has to tell one from a change "+
+						"to the object itself", i, change.EventType, query.EventKubernetes)
+				}
+			}
+			for i := 1; i < len(got); i++ {
+				// The emission order is the one Reverse selects, so the same assertion
+				// reads either way round rather than being skipped on the reversed case.
+				out := got[i].TS.Before(got[i-1].TS)
+				if q.Reverse {
+					out = got[i].TS.After(got[i-1].TS)
+				}
+				if out {
+					t.Errorf("rows %d and %d are out of emission order (%s then %s)", i-1, i,
+						got[i-1].TS.Format(time.RFC3339Nano), got[i].TS.Format(time.RFC3339Nano))
+				}
+			}
+		})
+	}
+}

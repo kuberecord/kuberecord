@@ -188,14 +188,14 @@ Cluster:  kuberecord-quickstart
 UID:      e1a6782e-b181-4c9c-9222-48480b61c21a
 Coverage: 2026-09-06T20:54:37Z → open (clusterstreamrule//quickstart)
 
-TIME (UTC)               EVENT     ACTOR                            CHANGE
-2026-09-06 20:54:37.660  Snapshot  kube-controller-manager,kubectl  full state recorded (snapshot)
-2026-09-06 20:54:37.661  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-a…
-2026-09-06 20:54:39.945  Modified  kube-controller-manager,kubectl  ~ spec.replicas: 1 → 3
-2026-09-06 20:54:39.953  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-a…
-2026-09-06 20:54:39.954  Modified  kube-controller-manager,kubectl  11 ops
-2026-09-06 20:54:39.980  Modified  kube-controller-manager,kubectl  + status.unavailableReplicas: 2
-2026-09-06 20:54:39.998  Modified  kube-controller-manager,kubectl  2 ops
+TIME (UTC)                EVENT     ACTOR                            CHANGE
+2026-09-06 20:54:37.660Z  Snapshot  kube-controller-manager,kubectl  full state recorded (snapshot)
+2026-09-06 20:54:37.661Z  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-…
+2026-09-06 20:54:39.945Z  Modified  kube-controller-manager,kubectl  ~ spec.replicas: 1 → 3
+2026-09-06 20:54:39.953Z  Event     kube-controller-manager          ScalingReplicaSet: Scaled up replica set checkout-…
+2026-09-06 20:54:39.954Z  Modified  kube-controller-manager,kubectl  11 ops
+2026-09-06 20:54:39.980Z  Modified  kube-controller-manager,kubectl  + status.unavailableReplicas: 2
+2026-09-06 20:54:39.998Z  Modified  kube-controller-manager,kubectl  2 ops
 ! 2 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
@@ -248,7 +248,7 @@ Or without a local client, straight through the pod:
 kubectl exec -n kuberecord-quickstart deploy/clickhouse -- \
   clickhouse-client --user kuberecord --password quickstart --database kuberecord \
   --query "SELECT ts, event_type, kind, namespace, name, actors
-           FROM resource_states
+           FROM  resource_states
            WHERE cluster_id = 'kuberecord-quickstart'
            ORDER BY ts DESC LIMIT 20
            FORMAT PrettyCompact"
@@ -271,7 +271,7 @@ Three more worth running:
 ```sql
 -- The flag flip as one RFC 6902 operation, not a second copy of the ConfigMap.
 SELECT ts, name, diff
-FROM resource_states
+FROM  resource_states
 WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'ConfigMap'
   AND name = 'checkout-config' AND event_type = 'Modified'
 ORDER BY ts DESC LIMIT 1;
@@ -282,7 +282,7 @@ ORDER BY ts DESC LIMIT 1;
 -- state each time the API server bumps its count.
 SELECT ts, JSONExtractString(data, 'reason') AS reason,
        JSONExtractString(data, 'message')    AS message
-FROM resource_states
+FROM  resource_states
 WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'Event'
   AND JSONExtractString(data, 'involvedObject', 'name') = 'checkout-api'
 ORDER BY ts ASC LIMIT 10;
@@ -292,7 +292,7 @@ ORDER BY ts ASC LIMIT 10;
 SELECT name,
        JSONExtractString(data, 'data', 'feature_flags') AS feature_flags,
        JSONExtractString(data, 'data', 'password')      AS password
-FROM resource_states
+FROM  resource_states
 WHERE cluster_id = 'kuberecord-quickstart' AND kind = 'ConfigMap'
   AND name = 'checkout-config' AND data != ''
 ORDER BY ts ASC LIMIT 1;

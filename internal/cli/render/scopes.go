@@ -171,7 +171,7 @@ func renderScopeTable(doc ScopesDocument, opts Options, p palette) string {
 		widths[i] = displayWidth(headings[i])
 	}
 	for _, interval := range doc.Intervals {
-		cells := scopeCells(interval, opts.Wide)
+		cells := scopeCells(interval, opts.Wide, opts.Zone)
 		for i := range widths {
 			widths[i] = max(widths[i], displayWidth(cells[i]))
 		}
@@ -211,15 +211,15 @@ func renderScopeRow(cells []string, widths []int, p palette) string {
 }
 
 // scopeCells renders one interval's five columns, unpainted.
-func scopeCells(interval query.ScopeInterval, wide bool) []string {
+func scopeCells(interval query.ScopeInterval, wide bool, zone Zone) []string {
 	to := OpenInterval
 	if interval.To != nil {
-		to = formatTimestamp(*interval.To, wide)
+		to = formatTimestamp(*interval.To, wide, zone)
 	}
 	return []string{
 		ScopeKind(interval),
 		ScopeNamespace(interval),
-		formatTimestamp(interval.From, wide),
+		formatTimestamp(interval.From, wide, zone),
 		to,
 		ScopeRule(interval),
 	}

@@ -55,7 +55,14 @@ import (
 const coverageUnavailable = "not reported by this backend"
 
 // coverageSummary renders the header's coverage line.
-func coverageSummary(intervals []query.ScopeInterval, err error) string {
+//
+// zone is a parameter and never a default, because this one function serves two
+// readers with opposite requirements. The document header follows --tz like every
+// other human-facing instant; metadata.coverage.summary in a JSON or YAML
+// envelope is a machine contract and stays UTC whatever was asked for, so
+// coverageAnswer.Report calls this with render.UTC one line away from where
+// Summary calls it with the invocation's frame (D19, D46).
+func coverageSummary(intervals []query.ScopeInterval, err error, zone render.Zone) string {
 	if err != nil {
 		return coverageUnavailable
 	}
@@ -63,27 +70,27 @@ func coverageSummary(intervals []query.ScopeInterval, err error) string {
 	case 0:
 		return "none recorded for this scope"
 	case 1:
-		return describeInterval(intervals[0])
+		return describeInterval(intervals[0], zone)
 	}
 	// query.CoverageOf returns them oldest first, so the span is the first
 	// interval's start to the last end — and any still-open interval makes the
 	// whole span open, because the recorder is watching now.
 	return fmt.Sprintf("%s %s %s, %d intervals",
-		render.FormatInstant(intervals[0].From), render.Arrow, describeSpanEnd(intervals), len(intervals))
+		zone.Instant(intervals[0].From), render.Arrow, describeSpanEnd(intervals, zone), len(intervals))
 }
 
 // describeInterval renders one watched period and the rule that opened it.
-func describeInterval(interval query.ScopeInterval) string {
+func describeInterval(interval query.ScopeInterval, zone render.Zone) string {
 	end := "open"
 	if interval.To != nil {
-		end = render.FormatInstant(*interval.To)
+		end = zone.Instant(*interval.To)
 	}
 	return fmt.Sprintf("%s %s %s (%s)",
-		render.FormatInstant(interval.From), render.Arrow, end, describeRule(interval))
+		zone.Instant(interval.From), render.Arrow, end, describeRule(interval))
 }
 
 // describeSpanEnd is where several intervals collectively stop.
-func describeSpanEnd(intervals []query.ScopeInterval) string {
+func describeSpanEnd(intervals []query.ScopeInterval, zone render.Zone) string {
 	var latest time.Time
 	for _, interval := range intervals {
 		if interval.To == nil {
@@ -93,7 +100,7 @@ func describeSpanEnd(intervals []query.ScopeInterval) string {
 			latest = *interval.To
 		}
 	}
-	return render.FormatInstant(latest)
+	return zone.Instant(latest)
 }
 
 // describeRule names the rule that opened a scope, or says that it is not
@@ -135,14 +142,23 @@ func describeRule(interval query.ScopeInterval) string {
 // so that exit.CodeFor gives it exit code 3 without this call site having to know
 // the number. Everything else is a notice: the command succeeded, and what it
 // found was silence with an explanation attached.
+//
+// events is the Event scope's coverage, unasked. It is a function rather than an
+// answer because exactly one branch below spends it — the finding, under
+// --with-events — and a caller that resolved it eagerly would buy a round trip
+// for every empty timeline in order to serve one of them. Deferring it also keeps
+// the gate in a single place: the condition under which the question is worth
+// asking is the condition under which the clause is printed, and those are the
+// same three lines. See uncoveredNoChanges.
 func explainNoChanges(
 	request TimelineRequest, from, to time.Time, shape timelineShape, coverage coverageAnswer,
+	events eventCoverageFunc, zone render.Zone,
 ) ([]render.Notice, error) {
 	if shape.changes {
 		return nil, nil
 	}
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 	lead := describeNoChanges(shape, object, window)
 
 	if coverage.Gap != nil {
@@ -153,7 +169,7 @@ func explainNoChanges(
 	}
 
 	if len(coverage.Intervals) == 0 {
-		return uncoveredNoChanges(request, shape, object)
+		return uncoveredNoChanges(request, shape, object, events, zone)
 	}
 
 	earliest := coverage.Intervals[0]
@@ -162,13 +178,13 @@ func explainNoChanges(
 			Text: fmt.Sprintf("%s, but %s was not being watched before "+
 				"%s, when %s opened the scope: a change before then would not have been recorded",
 				lead, describeKind(request.Ref),
-				render.FormatInstant(earliest.From), describeRule(earliest)),
+				zone.Instant(earliest.From), describeRule(earliest)),
 		}}, nil
 	}
 
 	return []render.Notice{{
 		Text: fmt.Sprintf("%s. The scope was confirmed watched over "+
-			"%s, so nothing changed in that period", lead, describeInterval(earliest)),
+			"%s, so nothing changed in that period", lead, describeInterval(earliest, zone)),
 	}}, nil
 }
 
@@ -212,11 +228,59 @@ func describeNoChanges(shape timelineShape, object, window string) string {
 // Both spellings name `scopes` for the same reason: the route out of "nothing was
 // watching this kind" is to go and look at what is, and it is the next thing to
 // type rather than the next thing to read (D34).
+//
+// # Why the finding absorbs --with-events
+//
+// The no-rows branch is the one path where this file answers a question the reader
+// asked and eventsNotice's question at once, and until Task 18.5 it answered them
+// separately: a Pod nobody had ever watched produced this finding and then a
+// second, longer notice explaining that no rule streams Events, complete with the
+// three lines of YAML that would add one. Both were true. Neither was useful in
+// that order — a rule capturing Events would still record nothing about an object
+// no rule covers, so the fix the second one printed was the fix for a problem the
+// reader does not have yet.
+//
+// So the clause is here, in the finding, and the notice is withheld at the call
+// site (gatherChanges). It appears only under --with-events, because nobody else
+// asked about Events and a sentence answering an unasked question is the noise
+// this is removing.
+//
+// # Why the clause asks a question of its own (Task 18.7)
+//
+// It shipped stating a shared cause it had never checked. The signature was
+// (request, shape, object): no coverage of any kind reached it, so "no Event
+// about it was recorded either, which is the same absence" was asserted on the
+// strength of the flag having been passed. It was true in the case field testing
+// happened to produce and false in the one it did not — a rule that genuinely
+// does not capture Events makes these two gaps with two fixes, and telling that
+// reader they have one sends them to correlation instead of to their rule.
+//
+// So the clause consults the Event scope, through the same eventScopeQuery and
+// askCoverage the standalone notice uses (see eventCoverage): two formulations of
+// one question is how the two answers come to differ. The three states are
+// explainNoChanges's own, in its order and for its reason — one absence with one
+// fix, two absences with two, and an inability that is reported rather than
+// resolved into a guess.
+//
+// # Ordering with Task 18.6
+//
+// Neither task substitutes for the other, and both are needed for this sentence
+// to mean anything. 18.6 made Events *reachable*: both backends resolved an
+// incarnation first and returned an empty iterator when the object had no rows of
+// its own, so for exactly the objects that reach this branch the Events query was
+// never issued. 18.7 makes the sentence about them *true*. With 18.6 alone this
+// clause still misreports an Event scope nothing was watching; with 18.7 alone it
+// reports accurately about a query that never ran.
 func uncoveredNoChanges(
-	request TimelineRequest, shape timelineShape, object string,
+	request TimelineRequest, shape timelineShape, object string, events eventCoverageFunc,
+	zone render.Zone,
 ) ([]render.Notice, error) {
 	kind := describeKind(request.Ref)
 	if shape.events {
+		// The rows are the answer to the Event question and no coverage read can
+		// improve on them: Events about this object are demonstrably recorded,
+		// because they are on the page. Asking anyway would buy a round trip to
+		// confirm what the reader is looking at.
 		return []render.Notice{{
 			Text: fmt.Sprintf("every row here is a Kubernetes Event: nothing was ever watching %s %s "+
 				"in cluster %q, so its own changes were never recorded. The Events are here because a "+
@@ -224,9 +288,79 @@ func uncoveredNoChanges(
 				"is being recorded", kind, object, request.Ref.ClusterID, scopesCommand),
 		}}, nil
 	}
+	clause, fix := eventsClause(request, events, zone)
 	return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
-		"not evidence that it did not change; the `%s` command lists what is being recorded",
-		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, scopesCommand)
+		"not evidence that it did not change%s; the `%s` command lists what is being recorded%s",
+		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, clause, scopesCommand, fix)
+}
+
+// eventCoverageFunc asks the Event scope's coverage question, once and only if
+// it is asked at all.
+//
+// The one implementation is eventCoverage, which lives beside the notice that
+// shares it; this names the shape so that the reasoning in coverage.go stays a
+// function of answers rather than of a backend and a context. It returns
+// askCoverage's own pair: a coverageAnswer whose Gap is a backend with no scope
+// log, and an error that is a scope log which exists and could not be read.
+type eventCoverageFunc func() (coverageAnswer, error)
+
+// eventsClause is the --with-events half of the finding: what is known about the
+// Event scope, and the fix when there is one.
+//
+// Two strings rather than one because the finding's route out — the `scopes`
+// command — ends its sentence, and one of the states has something to print after
+// it. The clause is spliced before that route and the fix after it, so every state
+// shares a single spelling of the sentence it qualifies and a single spelling of
+// the route, which is what keeps a change to either from having to be made once
+// per state.
+//
+// Four cases for explainNoChanges's three states: the inability is spelled twice,
+// once for a backend that has no scope log and once for a scope log that could
+// not be read, because Invariant 4 asks the second to name what failed and the
+// first has nothing to name. Neither resolves into a guess, which is the whole of
+// what makes it one state.
+//
+// A failed coverage read is degraded into words rather than returned, exactly as
+// explainNoEvents degrades it: the finding is already this invocation's failure
+// and carries the exit code a script reads, and replacing it with the sub-query's
+// failure would report the wrong one of the two. The cause is named rather than
+// swallowed (Invariant 4).
+func eventsClause(request TimelineRequest, events eventCoverageFunc, zone render.Zone) (clause, fix string) {
+	if !request.WithEvents {
+		// Nobody asked. See the paragraph above the function this serves.
+		return "", ""
+	}
+
+	coverage, err := events()
+	switch {
+	case err != nil:
+		// askCoverage's own words name the scope it could not read, so the cause is
+		// pasted on bare rather than introduced a second time.
+		return " — and whether any Kubernetes Event about it was recorded cannot be said: " +
+			err.Error(), ""
+	case coverage.Gap != nil:
+		return " — and whether any Kubernetes Event about it was recorded cannot be said: this " +
+			"backend has no scope log", ""
+	case len(coverage.Intervals) == 0:
+		// Two gaps, named as two. Fixing either leaves the other, so the fix for the
+		// second is printed here rather than left to a notice that is not reached —
+		// and it is printed after the route, because the route is the next thing to
+		// type and a block of YAML is the next thing to read (D34).
+		return " — and no rule streams Events to this sink either, so these are two gaps rather " +
+				"than one: capturing this object's kind would record its changes, and Events would " +
+				"still be missing until a rule names them as well",
+			".\nAdd Events to a rule as well:\n" + eventRuleFragment()
+	}
+
+	// The claim the whole task is about, now with the evidence for it beside it.
+	// The earliest interval, as every other confirmed-coverage state in this file
+	// names the earliest one: it is the oldest evidence there is that something was
+	// recording, and describeInterval prints both of its ends so the reader can
+	// judge how much of their window it covers rather than taking the sentence's
+	// word for it.
+	return " — and no Kubernetes Event about it was recorded either, which is the same absence " +
+		"rather than a second one to fix: Events were confirmed recorded over " +
+		describeInterval(coverage.Intervals[0], zone), ""
 }
 
 // Invariant 9 applied to a sub-query.
@@ -310,7 +444,27 @@ func eventIntervals(intervals []query.ScopeInterval) []query.ScopeInterval {
 	return kept
 }
 
+// eventRuleFragment is the three lines of YAML that add Events to a rule.
+//
+// One spelling, two readers. explainNoEvents prints it to somebody whose object
+// is watched and whose Events are not; eventsClause prints it to somebody with
+// neither, where it is the second of two fixes. The gap is the same gap and the
+// remedy is the same remedy, and two copies of it is how one of them comes to
+// name a group, a version or a kind the other does not.
+//
+// The core spelling is given because it is the shorter of the two the operator
+// records under, and a rule naming either gets the same stream (see eventKind).
+func eventRuleFragment() string {
+	return fmt.Sprintf("    - group: %q\n      version: v1\n      kind: %s",
+		eventGroupCore, eventKind)
+}
+
 // explainNoEvents says why --with-events interleaved nothing.
+//
+// It is not reached at all when the object's own scope had no coverage: that
+// finding absorbs this one, and gatherChanges is where the gate lives. What is
+// left here is a document whose subject *was* being watched, so every state below
+// is a statement about Events alone.
 //
 // coverage is the answer to eventScopeQuery, already narrowed by eventIntervals,
 // and readErr is a scope log that exists and could not be read. The three states
@@ -330,9 +484,10 @@ func eventIntervals(intervals []query.ScopeInterval) []query.ScopeInterval {
 // the other half that the scope log does not support.
 func explainNoEvents(
 	request TimelineRequest, from, to time.Time, coverage coverageAnswer, readErr error,
+	zone render.Zone,
 ) render.Notice {
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 
 	switch {
 	case readErr != nil:
@@ -355,12 +510,8 @@ func explainNoEvents(
 		// kind — is longer than printing it. Both Event spellings work here and
 		// the core one is given, because it is the shorter of the two and a rule
 		// naming either gets the same stream.
-		return render.Notice{Text: fmt.Sprintf(
-			"--with-events found no Events: no rule streams Events to this sink.\n"+
-				"Add them to a rule and they will appear here:\n"+
-				"    - group: %q\n"+
-				"      version: v1\n"+
-				"      kind: %s", eventGroupCore, eventKind)}
+		return render.Notice{Text: "--with-events found no Events: no rule streams Events to this " +
+			"sink.\nAdd them to a rule and they will appear here:\n" + eventRuleFragment()}
 	}
 
 	// The earliest interval, as explainNoChanges names the earliest one: it is the
@@ -370,7 +521,7 @@ func explainNoEvents(
 	return render.Notice{Text: fmt.Sprintf(
 		"--with-events found no Events for %s in %s. Events were confirmed recorded over %s, so "+
 			"nothing was said about it while that scope was open",
-		object, window, describeInterval(coverage.Intervals[0]))}
+		object, window, describeInterval(coverage.Intervals[0], zone))}
 }
 
 // Invariant 9 applied to a predicate, and D31's fourth instance.
@@ -423,10 +574,10 @@ func explainNoEvents(
 // finding — and its exit 3 — reachable under a filter, since a window nobody was
 // watching holds no changes to find.
 func explainNoMatches(
-	request TimelineRequest, from, to time.Time, hadChanges bool, probeErr error,
+	request TimelineRequest, from, to time.Time, hadChanges bool, probeErr error, zone render.Zone,
 ) (render.Notice, bool) {
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 	predicates := describePredicates(request)
 
 	switch {

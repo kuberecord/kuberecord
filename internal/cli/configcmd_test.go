@@ -66,8 +66,9 @@ func TestConfigSetProfileWritesWhatItWasTold(t *testing.T) {
 	if !strings.Contains(stderr, `wrote profile "prod"`) {
 		t.Errorf("stderr does not confirm the write: %s", stderr)
 	}
-	// The first profile in an empty file becomes the active one, and says so.
-	if !strings.Contains(stderr, `"prod" is now the active profile`) {
+	// The first profile in an empty file becomes the active one, and says so —
+	// including why, since nobody asked for it.
+	if !strings.Contains(stderr, `made "prod" the active profile (it is the only one)`) {
 		t.Errorf("stderr does not say the profile was activated: %s", stderr)
 	}
 
@@ -97,8 +98,8 @@ func TestConfigSetProfileWritesWhatItWasTold(t *testing.T) {
 		"--backend", "s3", "--bucket", "acme-audit", "--prefix", "kuberecord"); code != exit.Success {
 		t.Fatalf("config set-profile for the second profile exited %d: %s", code, stderr)
 	}
-	if strings.Contains(stderr, "is now the active profile") {
-		t.Errorf("adding a second profile silently changed the active one: %s", stderr)
+	if strings.Contains(stderr, `made "archive" the active profile`) {
+		t.Errorf("adding a second profile changed the active one: %s", stderr)
 	}
 	cfg, err = resolve.LoadConfig(path)
 	if err != nil {
@@ -294,7 +295,7 @@ profiles:
 	if err != nil {
 		t.Fatalf("resolve.LoadConfig: %v", err)
 	}
-	if cfg.CurrentProfile != "archive" {
+	if cfg.CurrentProfile != profileArchive {
 		t.Errorf("currentProfile = %q, want archive", cfg.CurrentProfile)
 	}
 
