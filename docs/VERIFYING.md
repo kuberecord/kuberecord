@@ -58,8 +58,8 @@ So `checksums.txt` and the artifact attestation describe the chart however you
 obtained it:
 
 ```sh
-helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0
-sha256sum kuberecord-0.3.0.tgz     # the same line checksums.txt carries
+helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.4.0
+sha256sum kuberecord-0.4.0.tgz     # the same line checksums.txt carries
 ```
 
 ## Prerequisites
@@ -147,8 +147,8 @@ gh attestation verify oci://ghcr.io/yelzhy/kuberecord:v0.2.0 \
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
-  ghcr.io/kuberecord/kuberecord:v0.2.1
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
+  ghcr.io/kuberecord/kuberecord:v0.4.0
 ```
 
 Both flags are load-bearing, and cosign refuses a keyless verification without
@@ -171,7 +171,7 @@ repository name cannot match in the middle of the string:
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/kuberecord/kuberecord/\.github/workflows/release\.yml@refs/tags/' \
-  ghcr.io/kuberecord/kuberecord:v0.2.1
+  ghcr.io/kuberecord/kuberecord:v0.4.0
 ```
 
 cosign prints the checks it performed — that the claims match, that the
@@ -186,12 +186,12 @@ per architecture:
 
 ```sh
 # The multi-arch index's own digest: the hash of its manifest bytes.
-digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.2.1 \
+digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.4.0 \
   | sha256sum | cut -d' ' -f1)"
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
   "ghcr.io/kuberecord/kuberecord@$digest"
 ```
 
@@ -203,14 +203,14 @@ under the same identity:
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
-  ghcr.io/kuberecord/charts/kuberecord:0.3.0
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
+  ghcr.io/kuberecord/charts/kuberecord:0.4.0
 ```
 
 **Note the two version strings, which differ by one character on purpose.** A
-Helm chart version is semver without a `v`, so the artifact's tag is `0.3.0` —
+Helm chart version is semver without a `v`, so the artifact's tag is `0.4.0` —
 while the tag the workflow ran on, and therefore the certificate identity it was
-issued, is `v0.3.0`. Copying the `v` into the reference asks the registry for an
+issued, is `v0.4.0`. Copying the `v` into the reference asks the registry for an
 artifact that does not exist; dropping it from the identity asks cosign for a
 signature nobody made.
 
@@ -221,12 +221,12 @@ To pin what you verified, resolve the digest first and install that — the same
 argument as for the image, since a chart tag is just as mutable:
 
 ```sh
-digest="$(helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.3.0 2>&1 \
+digest="$(helm pull oci://ghcr.io/kuberecord/charts/kuberecord --version 0.4.0 2>&1 \
   | sed -n 's/^Digest: *//p')"
 
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
   "ghcr.io/kuberecord/charts/kuberecord@$digest"
 
 helm install kuberecord "oci://ghcr.io/kuberecord/charts/kuberecord@$digest" \
@@ -255,7 +255,7 @@ that a file agrees with a list that arrived beside it.
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
   checksums.txt
 
 # 2. What you downloaded is what the list describes.
@@ -279,7 +279,7 @@ Then unpack it. Both names are in every archive, and which one you install decid
 how you invoke it:
 
 ```sh
-tar -xzf kuberecord_v0.3.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.4.0_linux_amd64.tar.gz
 
 # As a kubectl plugin: kubectl finds it by file name alone.
 install -m 0755 kubectl-kuberecord ~/.local/bin/kubectl-kuberecord
@@ -310,7 +310,7 @@ against the release:
 
 ```sh
 # What krew was told, checked against what this release signed.
-curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.0/kuberecord.yaml
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.4.0/kuberecord.yaml
 sha256sum kuberecord.yaml          # the line checksums.txt carries for it
 ```
 
@@ -326,7 +326,7 @@ this?" but "what built this, from which source, on which runner?". It is a
 [SLSA](https://slsa.dev/) statement generated by GitHub, and `gh` verifies it:
 
 ```sh
-gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.2.1 \
+gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.4.0 \
   --repo kuberecord/kuberecord \
   --signer-workflow kuberecord/kuberecord/.github/workflows/release.yml
 ```
@@ -343,16 +343,16 @@ gh attestation verify install.yaml \
   --repo kuberecord/kuberecord \
   --signer-workflow kuberecord/kuberecord/.github/workflows/release.yml
 
-gh attestation verify kuberecord-0.2.1.tgz --repo kuberecord/kuberecord
-gh attestation verify kuberecord-0.2.1-sbom.spdx.json --repo kuberecord/kuberecord
+gh attestation verify kuberecord-0.4.0.tgz --repo kuberecord/kuberecord
+gh attestation verify kuberecord-0.4.0-sbom.spdx.json --repo kuberecord/kuberecord
 ```
 
 To verify somewhere without network access, fetch the bundles first and carry
 them with the artifacts:
 
 ```sh
-gh attestation download oci://ghcr.io/kuberecord/kuberecord:v0.2.1 --repo kuberecord/kuberecord
-gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.2.1 \
+gh attestation download oci://ghcr.io/kuberecord/kuberecord:v0.4.0 --repo kuberecord/kuberecord
+gh attestation verify oci://ghcr.io/kuberecord/kuberecord:v0.4.0 \
   --repo kuberecord/kuberecord --bundle <the downloaded .jsonl>
 ```
 
@@ -407,8 +407,8 @@ in nothing else.
 Read either one, or hand it to a scanner (`grype` is a separate install):
 
 ```sh
-syft convert kuberecord-0.3.0-sbom.spdx.json -o table
-grype sbom:./kuberecord-cli-0.3.0-sbom.spdx.json
+syft convert kuberecord-0.4.0-sbom.spdx.json -o table
+grype sbom:./kuberecord-cli-0.4.0-sbom.spdx.json
 ```
 
 ## Pinning what you verified
@@ -417,7 +417,7 @@ Verifying a tag and then deploying that tag leaves a gap: a tag is a mutable
 pointer. Resolve it once, verify the digest, and deploy the digest.
 
 ```sh
-digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.2.1 \
+digest="sha256:$(docker buildx imagetools inspect --raw ghcr.io/kuberecord/kuberecord:v0.4.0 \
   | sha256sum | cut -d' ' -f1)"
 ```
 
@@ -490,7 +490,7 @@ A failure is a reason to stop, not a reason to reach for
 | `no matching CertificateIdentity found` on `v0.2.0`, where `got` names `yelzhy/kuberecord` | Expected. That release was signed before the repository moved to the `kuberecord` organization, and its certificate is immutable — see [Which identity verifies which release](#which-identity-verifies-which-release). Pin the old identity for that tag. |
 | `no signatures found` | The image predates v0.2.0, or it was mirrored by a tool that copies manifests without their signatures. |
 | `no signatures found` on the **chart**, or the registry reports no such artifact | Chart signing — and the chart in the registry at all — starts at `v0.3.0`. For anything earlier the `.tgz` on the Release page is the whole of what was published. |
-| `manifest unknown` for a chart tag that should exist | Almost always the leading `v`. The chart's tag is `0.3.0`; only the certificate identity carries `v0.3.0`, because that is the git tag the workflow ran on. |
+| `manifest unknown` for a chart tag that should exist | Almost always the leading `v`. The chart's tag is `0.4.0`; only the certificate identity carries `v0.4.0`, because that is the git tag the workflow ran on. |
 | `gh attestation verify` finds no attestation | The same two causes, plus: `--repo` names the repository the attestation was recorded against, which is not necessarily the registry namespace. |
 | A checksum mismatch | Re-download before concluding anything; a truncated download is far more likely than a tampered asset. Then verify the provenance, which does not depend on `checksums.txt` being honest. |
 | `sha256sum -c` reports `No such file or directory` for assets you did not download | Expected. `checksums.txt` covers everything a release attaches; it checks what is present. `--ignore-missing` silences it on GNU coreutils. |

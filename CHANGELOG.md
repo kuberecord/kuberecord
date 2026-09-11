@@ -16,6 +16,31 @@ than a summary of them.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+The release that makes the CLI teach rather than only answer. v0.3.0 shipped five
+commands that work when everything resolves, and every report that came back from
+using them in anger was about the other case: a dial failure whose entire message
+was `no such host`, a flag that returned nothing and could not be told apart from
+a flag being ignored, an error painted lighter than the warning above it, and a
+timestamp that read as a local time two hours from the one it named. So the
+errors now name the fix, the way the rest of this codebase already did — and a
+named profile becomes something you create, list, activate and delete, so the
+route around a wrong address is one you write down once instead of retyping.
+
+**The CLI is what changed.** The operator records the same rows under the same
+frozen schema and watches the same resources under the same RBAC. An upgrade is
+the image tag plus one CRD *description* — the text `kubectl explain` prints for
+`spec.resources`, which now says what watching `kind: Event` costs. No CRD schema
+moved and neither frozen format moved, so there is nothing to migrate.
+
+**Four things break for anyone scripting against CLI output**, all spelled out
+under **Changed — BREAKING: CLI output**: every timestamp carries a trailing `Z`,
+`timeline` and `diff` display oldest first with `--reverse` inverted, `data` and
+`diff` are real JSON rather than strings containing JSON, and `-o yaml` emits its
+keys in declaration order. No instant and no value moved; what changed is how each
+one is spelled.
+
 ### Added
 
 - **`kuberecord config set-profile --use` writes a profile and makes it the active
@@ -2340,7 +2365,8 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kuberecord/kuberecord/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/kuberecord/kuberecord/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kuberecord/kuberecord/compare/v0.2.1...v0.3.0

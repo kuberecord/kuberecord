@@ -375,7 +375,7 @@ object by object, and the acceptance suite runs against each of them unmodified.
 ```sh
 # Helm, from the chart registry — no checkout, no download
 helm install kuberecord oci://ghcr.io/kuberecord/charts/kuberecord \
-  --version 0.3.2 \
+  --version 0.4.0 \
   --namespace kuberecord-system --create-namespace \
   --set clusterID=prod-eu-west-1
 
@@ -387,14 +387,14 @@ make deploy IMG=<some-registry>/kuberecord:tag
 ```
 
 The chart's tag carries no `v` — a Helm chart version is plain semver — and it
-tracks the operator release exactly, so `--version 0.3.2` installs `v0.3.2`. It is
+tracks the operator release exactly, so `--version 0.4.0` installs `v0.4.0`. It is
 published from v0.3.0 onward; earlier tags ship the chart as a release asset only.
 
 Both artifacts are also attached to every [release](https://github.com/kuberecord/kuberecord/releases),
 with checksums, if you would rather download a tag than pull one:
 
 ```sh
-kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.3.2/install.yaml
+kubectl apply -f https://github.com/kuberecord/kuberecord/releases/download/v0.4.0/install.yaml
 ```
 
 And the chart in this repository installs directly, which is what a contributor
@@ -413,14 +413,14 @@ the registry is signed too, under the same identity:
 ```sh
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.2.1 \
-  ghcr.io/kuberecord/kuberecord:v0.2.1
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
+  ghcr.io/kuberecord/kuberecord:v0.4.0
 
 # The chart. The identity keeps the `v`; the artifact's tag does not.
 cosign verify \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.3.0 \
-  ghcr.io/kuberecord/charts/kuberecord:0.3.0
+  --certificate-identity https://github.com/kuberecord/kuberecord/.github/workflows/release.yml@refs/tags/v0.4.0 \
+  ghcr.io/kuberecord/charts/kuberecord:0.4.0
 ```
 
 The identity above is the one to pin from **v0.2.1** onward. `v0.1.0` and `v0.2.0`
@@ -504,12 +504,12 @@ kubectl kuberecord timeline deploy/checkout -n payments
 brew install kuberecord/tap/kuberecord
 
 # 3. The release archive, directly — five platforms, Windows included.
-curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.3.2/kuberecord_v0.3.2_linux_amd64.tar.gz
-tar -xzf kuberecord_v0.3.2_linux_amd64.tar.gz
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.4.0/kuberecord_v0.4.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.4.0_linux_amd64.tar.gz
 install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
 
 # 4. From source, with a Go toolchain.
-go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.3.2
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.4.0
 ```
 
 krew installs the plugin name only — that is what a plugin manager is for — so
