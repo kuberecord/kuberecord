@@ -99,7 +99,10 @@ func TestDiffAttributesEachChange(t *testing.T) {
 		t.Fatalf("RunDiff: %v", err)
 	}
 
-	const want = "2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply"
+	// The frame is on the value and no longer a trailing word. `…482Z UTC` would
+	// name one instant twice, and under --tz it would name two different frames
+	// for one moment — see diffTimestamp (Task 18.9).
+	const want = "2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply"
 	if !strings.Contains(stdout, want) {
 		t.Errorf("a change is not attributed.\nwant a line containing %q\ngot:\n%s", want, stdout)
 	}

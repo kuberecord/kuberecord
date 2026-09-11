@@ -164,7 +164,7 @@ func runDiffCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.window.since, local.window.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now, flags.Zone())
 	if err != nil {
 		return err
 	}
@@ -224,6 +224,7 @@ func diffRenderOptions(
 		Color: options.ShouldColorize(flags.Color, streams.Out),
 		Wide:  flags.Output == options.OutputWide,
 		Full:  local.full,
+		Zone:  flags.Zone(),
 	}
 }
 
@@ -250,7 +251,7 @@ func RunDiff(
 	ctx context.Context, backend *resolve.Backend, request DiffRequest,
 	streams genericiooptions.IOStreams, opts render.Options,
 ) error {
-	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams)
+	gathered, err := gatherChanges(ctx, backend, request.Timeline, streams, opts.Zone)
 	if err != nil {
 		return err
 	}
@@ -293,7 +294,7 @@ func writeDiffAnswer(
 			Object:         describeObject(request.Timeline.Ref),
 			Cluster:        request.Timeline.Ref.ClusterID,
 			UID:            gathered.UID,
-			Coverage:       gathered.Coverage.Summary(),
+			Coverage:       gathered.Coverage.Summary(opts.Zone),
 			CoverageAbsent: gathered.Coverage.Absent(),
 			Changes:        gathered.Rows,
 			Notices:        notices,

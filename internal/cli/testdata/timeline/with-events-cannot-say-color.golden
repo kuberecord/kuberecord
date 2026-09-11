@@ -5,8 +5,8 @@
 [2mUID:[0m      7c9e6679-7425-40de-944b-e07fc1f90ae7
 [2mCoverage:[0m not reported by this backend
 
-[2mTIME (UTC)               EVENT     ACTOR                      CHANGE[0m
-2026-08-28 14:02:58.001  [32mAdded[0m     kubectl-client-side-apply  full state recorded
-2026-08-28 14:05:02.117  [33mModified[0m  kube-controller-manager    ~ spec.replicas: 3 → 5
+[2mTIME (UTC)                EVENT     ACTOR                      CHANGE[0m
+2026-08-28 14:02:58.001Z  [32mAdded[0m     kubectl-client-side-apply  full state recorded
+2026-08-28 14:05:02.117Z  [33mModified[0m  kube-controller-manager    ~ spec.replicas: 3 → 5
 === stderr ===
 ! [33m--with-events found no Events for payments/checkout in all recorded history, and this backend has no scope log: it cannot say whether that means nothing was recorded about it or that no rule streams Events to this sink[0m

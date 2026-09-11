@@ -55,7 +55,14 @@ import (
 const coverageUnavailable = "not reported by this backend"
 
 // coverageSummary renders the header's coverage line.
-func coverageSummary(intervals []query.ScopeInterval, err error) string {
+//
+// zone is a parameter and never a default, because this one function serves two
+// readers with opposite requirements. The document header follows --tz like every
+// other human-facing instant; metadata.coverage.summary in a JSON or YAML
+// envelope is a machine contract and stays UTC whatever was asked for, so
+// coverageAnswer.Report calls this with render.UTC one line away from where
+// Summary calls it with the invocation's frame (D19, D46).
+func coverageSummary(intervals []query.ScopeInterval, err error, zone render.Zone) string {
 	if err != nil {
 		return coverageUnavailable
 	}
@@ -63,27 +70,27 @@ func coverageSummary(intervals []query.ScopeInterval, err error) string {
 	case 0:
 		return "none recorded for this scope"
 	case 1:
-		return describeInterval(intervals[0])
+		return describeInterval(intervals[0], zone)
 	}
 	// query.CoverageOf returns them oldest first, so the span is the first
 	// interval's start to the last end — and any still-open interval makes the
 	// whole span open, because the recorder is watching now.
 	return fmt.Sprintf("%s %s %s, %d intervals",
-		render.FormatInstant(intervals[0].From), render.Arrow, describeSpanEnd(intervals), len(intervals))
+		zone.Instant(intervals[0].From), render.Arrow, describeSpanEnd(intervals, zone), len(intervals))
 }
 
 // describeInterval renders one watched period and the rule that opened it.
-func describeInterval(interval query.ScopeInterval) string {
+func describeInterval(interval query.ScopeInterval, zone render.Zone) string {
 	end := "open"
 	if interval.To != nil {
-		end = render.FormatInstant(*interval.To)
+		end = zone.Instant(*interval.To)
 	}
 	return fmt.Sprintf("%s %s %s (%s)",
-		render.FormatInstant(interval.From), render.Arrow, end, describeRule(interval))
+		zone.Instant(interval.From), render.Arrow, end, describeRule(interval))
 }
 
 // describeSpanEnd is where several intervals collectively stop.
-func describeSpanEnd(intervals []query.ScopeInterval) string {
+func describeSpanEnd(intervals []query.ScopeInterval, zone render.Zone) string {
 	var latest time.Time
 	for _, interval := range intervals {
 		if interval.To == nil {
@@ -93,7 +100,7 @@ func describeSpanEnd(intervals []query.ScopeInterval) string {
 			latest = *interval.To
 		}
 	}
-	return render.FormatInstant(latest)
+	return zone.Instant(latest)
 }
 
 // describeRule names the rule that opened a scope, or says that it is not
@@ -145,13 +152,13 @@ func describeRule(interval query.ScopeInterval) string {
 // same three lines. See uncoveredNoChanges.
 func explainNoChanges(
 	request TimelineRequest, from, to time.Time, shape timelineShape, coverage coverageAnswer,
-	events eventCoverageFunc,
+	events eventCoverageFunc, zone render.Zone,
 ) ([]render.Notice, error) {
 	if shape.changes {
 		return nil, nil
 	}
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 	lead := describeNoChanges(shape, object, window)
 
 	if coverage.Gap != nil {
@@ -162,7 +169,7 @@ func explainNoChanges(
 	}
 
 	if len(coverage.Intervals) == 0 {
-		return uncoveredNoChanges(request, shape, object, events)
+		return uncoveredNoChanges(request, shape, object, events, zone)
 	}
 
 	earliest := coverage.Intervals[0]
@@ -171,13 +178,13 @@ func explainNoChanges(
 			Text: fmt.Sprintf("%s, but %s was not being watched before "+
 				"%s, when %s opened the scope: a change before then would not have been recorded",
 				lead, describeKind(request.Ref),
-				render.FormatInstant(earliest.From), describeRule(earliest)),
+				zone.Instant(earliest.From), describeRule(earliest)),
 		}}, nil
 	}
 
 	return []render.Notice{{
 		Text: fmt.Sprintf("%s. The scope was confirmed watched over "+
-			"%s, so nothing changed in that period", lead, describeInterval(earliest)),
+			"%s, so nothing changed in that period", lead, describeInterval(earliest, zone)),
 	}}, nil
 }
 
@@ -266,6 +273,7 @@ func describeNoChanges(shape timelineShape, object, window string) string {
 // reports accurately about a query that never ran.
 func uncoveredNoChanges(
 	request TimelineRequest, shape timelineShape, object string, events eventCoverageFunc,
+	zone render.Zone,
 ) ([]render.Notice, error) {
 	kind := describeKind(request.Ref)
 	if shape.events {
@@ -280,7 +288,7 @@ func uncoveredNoChanges(
 				"is being recorded", kind, object, request.Ref.ClusterID, scopesCommand),
 		}}, nil
 	}
-	clause, fix := eventsClause(request, events)
+	clause, fix := eventsClause(request, events, zone)
 	return nil, fmt.Errorf("%w: nothing was ever watching %s %s in cluster %q, so this silence is "+
 		"not evidence that it did not change%s; the `%s` command lists what is being recorded%s",
 		query.ErrNoCoverage, kind, object, request.Ref.ClusterID, clause, scopesCommand, fix)
@@ -317,7 +325,7 @@ type eventCoverageFunc func() (coverageAnswer, error)
 // and carries the exit code a script reads, and replacing it with the sub-query's
 // failure would report the wrong one of the two. The cause is named rather than
 // swallowed (Invariant 4).
-func eventsClause(request TimelineRequest, events eventCoverageFunc) (clause, fix string) {
+func eventsClause(request TimelineRequest, events eventCoverageFunc, zone render.Zone) (clause, fix string) {
 	if !request.WithEvents {
 		// Nobody asked. See the paragraph above the function this serves.
 		return "", ""
@@ -352,7 +360,7 @@ func eventsClause(request TimelineRequest, events eventCoverageFunc) (clause, fi
 	// word for it.
 	return " — and no Kubernetes Event about it was recorded either, which is the same absence " +
 		"rather than a second one to fix: Events were confirmed recorded over " +
-		describeInterval(coverage.Intervals[0]), ""
+		describeInterval(coverage.Intervals[0], zone), ""
 }
 
 // Invariant 9 applied to a sub-query.
@@ -476,9 +484,10 @@ func eventRuleFragment() string {
 // the other half that the scope log does not support.
 func explainNoEvents(
 	request TimelineRequest, from, to time.Time, coverage coverageAnswer, readErr error,
+	zone render.Zone,
 ) render.Notice {
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 
 	switch {
 	case readErr != nil:
@@ -512,7 +521,7 @@ func explainNoEvents(
 	return render.Notice{Text: fmt.Sprintf(
 		"--with-events found no Events for %s in %s. Events were confirmed recorded over %s, so "+
 			"nothing was said about it while that scope was open",
-		object, window, describeInterval(coverage.Intervals[0]))}
+		object, window, describeInterval(coverage.Intervals[0], zone))}
 }
 
 // Invariant 9 applied to a predicate, and D31's fourth instance.
@@ -565,10 +574,10 @@ func explainNoEvents(
 // finding — and its exit 3 — reachable under a filter, since a window nobody was
 // watching holds no changes to find.
 func explainNoMatches(
-	request TimelineRequest, from, to time.Time, hadChanges bool, probeErr error,
+	request TimelineRequest, from, to time.Time, hadChanges bool, probeErr error, zone render.Zone,
 ) (render.Notice, bool) {
 	object := describeObject(request.Ref)
-	window := options.DescribeWindow(from, to)
+	window := options.DescribeWindow(from, to, zone)
 	predicates := describePredicates(request)
 
 	switch {

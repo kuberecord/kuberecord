@@ -166,7 +166,68 @@ than a summary of them.
   would list sinks from, so an invocation carrying one is precisely one that wants
   to be asked.
 
+- **`--tz` displays timestamps in a zone of your choosing.** It takes `utc` (the
+  default, and legal to state), `local`, or an IANA name such as `Europe/Warsaw`,
+  and a non-UTC zone is always rendered with an explicit offset:
+
+  ```console
+  $ kuberecord timeline deploy/checkout -n payments --tz Europe/Warsaw
+  TIME (Europe/Warsaw)           EVENT     ACTOR                      CHANGE
+  2026-08-28 16:02:58.001+02:00  Added     kubectl-client-side-apply  full state recorded
+  ```
+
+  Never bare, and that prohibition is the whole reason this is a flag rather than
+  something you do with a shell alias — a local timestamp with no offset is
+  exactly the value this release is fixing. The heading names the *zone* rather
+  than an offset, because `Europe/Warsaw` is `+02:00` in summer and `+01:00` in
+  winter and a table spanning the change would otherwise carry a heading wrong for
+  half its rows.
+
+  It applies to **every** human-facing instant in the invocation — table rows, the
+  header block, notices, errors — so one command never mixes frames. It reaches
+  **no** structured output: `-o json`, `-o jsonl` and `-o yaml` emit UTC always, in
+  every envelope kind and including `metadata`, because `ts` is part of the
+  versioned contract and a consumer must not find its meaning depends on the shell
+  that produced it. A test asserts that `-o json` is byte-identical with and
+  without `--tz`.
+
+  **The default stays UTC**, deliberately. The recorded column is
+  `DateTime64(9, 'UTC')` and `docs/QUERIES.md` is UTC; a CLI showing local time
+  while the SQL shows UTC would be two views of one audit trail disagreeing, and
+  evidence exported for an auditor cannot be in the timezone of whoever ran the
+  command.
+
 ### Changed — BREAKING: CLI output
+
+- **Every timestamp carries its frame on the value.** The default table renders
+  `2026-08-28 14:02:58.001Z`, where it used to render `2026-08-28 14:02:58.001`
+  with the `Z` only in the `TIME (UTC)` column heading:
+
+  ```diff
+  - TIME (UTC)               EVENT     ACTOR                      CHANGE
+  - 2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
+  + TIME (UTC)                EVENT     ACTOR                      CHANGE
+  + 2026-08-28 14:02:58.001Z  Added     kubectl-client-side-apply  full state recorded
+  ```
+
+  A heading scrolls off a long table and it does not travel when a row is pasted
+  into a ticket or a post-mortem — where `2026-08-28 14:02:58.001` reads as a local
+  time in whatever zone the next person is in. It was reported that way: a tester
+  two hours ahead of UTC read `22:41` as an evening time and it was the following
+  morning where they were sitting. `-o wide` and the header block always carried
+  the marker; this brings the third rendering into line with them rather than
+  changing what any of them means.
+
+  `diff`'s block headings lose the trailing word `UTC` — `2026-08-28 14:03:11.482
+  UTC` becomes `2026-08-28 14:03:11.482Z` — because with the frame on the value the
+  word names it twice, and under `--tz` it would name two different frames for one
+  instant. `blame`'s `LAST CHANGED` and `scopes`' `FROM`/`TO` gain the marker they
+  never had at all.
+
+  **No instant moved**, in any rendering. The columns to the left of `CHANGE` are
+  one character wider, so a long field path in the flagship row now elides one
+  segment earlier; a script reading the `TIME` column with `awk` is unaffected, and
+  one comparing the whole string is not.
 
 - **`timeline` and `diff` display oldest first, and `--reverse` now means newest
   first.** Both commands read top to bottom in the order the changes happened, so

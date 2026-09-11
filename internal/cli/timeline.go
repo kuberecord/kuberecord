@@ -211,7 +211,7 @@ func runTimelineCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.window.since, local.window.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now, flags.Zone())
 	if err != nil {
 		return err
 	}
@@ -314,7 +314,11 @@ func objectRefFor(
 // are computed against the same instant: a --since and a --until evaluated a
 // microsecond apart would produce a window whose width depended on how fast the
 // process started.
-func parseWindow(since, until string, now time.Time) (from, to time.Time, err error) {
+// zone is the frame the contradiction below spells its two instants in. A usage
+// error is a human-facing instant like any other, and one rendered in a frame the
+// rest of the invocation is not in would make the reader convert before they
+// could see why the bounds cross (Task 18.9).
+func parseWindow(since, until string, now time.Time, zone render.Zone) (from, to time.Time, err error) {
 	if since != "" {
 		if from, err = options.ParseInstant(since, now); err != nil {
 			return time.Time{}, time.Time{}, err
@@ -328,7 +332,7 @@ func parseWindow(since, until string, now time.Time) (from, to time.Time, err er
 	if !from.IsZero() && !to.IsZero() && to.Before(from) {
 		return time.Time{}, time.Time{}, exit.UsageErrorf(
 			"the window ends before it starts: --since resolves to %s and --until to %s",
-			render.FormatInstant(from), render.FormatInstant(to))
+			zone.Instant(from), zone.Instant(to))
 	}
 	return from, to, nil
 }
@@ -386,6 +390,7 @@ func timelineRenderOptions(
 		Color: options.ShouldColorize(flags.Color, streams.Out),
 		Wide:  flags.Output == options.OutputWide,
 		Full:  local.full,
+		Zone:  flags.Zone(),
 	}
 }
 
@@ -645,7 +650,7 @@ func RunTimeline(
 		return runTimelineStructured(ctx, backend, request, streams, opts)
 	}
 
-	gathered, err := gatherChanges(ctx, backend, request, streams)
+	gathered, err := gatherChanges(ctx, backend, request, streams, opts.Zone)
 	if err != nil {
 		return err
 	}
@@ -656,7 +661,7 @@ func RunTimeline(
 		Cluster:        request.Ref.ClusterID,
 		UID:            gathered.UID,
 		Incarnations:   gathered.Incarnations,
-		Coverage:       gathered.Coverage.Summary(),
+		Coverage:       gathered.Coverage.Summary(opts.Zone),
 		CoverageAbsent: gathered.Coverage.Absent(),
 		Rows:           gathered.Rows,
 		Notices:        gathered.Notices,
@@ -680,7 +685,7 @@ func RunTimeline(
 // reads as a bug. Completing it and saying which end was supplied answers the
 // question they asked.
 func timelineBounds(
-	request TimelineRequest, capabilities query.Capabilities,
+	request TimelineRequest, capabilities query.Capabilities, zone render.Zone,
 ) (from, to time.Time, notice render.Notice) {
 	from, to = request.From, request.To
 	if !capabilities.TimeBoundRequired || (!from.IsZero() && !to.IsZero()) {
@@ -697,7 +702,7 @@ func timelineBounds(
 		from, to = now.Add(-options.DefaultWindow), now
 		return from, to, render.Notice{Text: fmt.Sprintf(
 			"the %s backend cannot answer an unbounded question, so the window defaults to %s; "+
-				"pass --since to widen it", capabilities.Backend, options.DescribeWindow(from, to))}
+				"pass --since to widen it", capabilities.Backend, options.DescribeWindow(from, to, zone))}
 	case from.IsZero():
 		from = to.Add(-options.DefaultWindow)
 	default:
@@ -705,7 +710,8 @@ func timelineBounds(
 	}
 	return from, to, render.Notice{Text: fmt.Sprintf(
 		"the %s backend needs both ends of a window, so this one was completed to %s; "+
-			"pass --since and --until to set it yourself", capabilities.Backend, options.DescribeWindow(from, to))}
+			"pass --since and --until to set it yourself", capabilities.Backend,
+		options.DescribeWindow(from, to, zone))}
 }
 
 // timelineQuery builds the read-plane query.
@@ -810,6 +816,7 @@ func timelineQueryError(ctx context.Context, request TimelineRequest, err error)
 // were already ascending and attribute every prior value to the wrong change.
 func priorValueNotices(
 	ctx context.Context, engine query.QueryEngine, request TimelineRequest, rows []render.TimelineRow,
+	zone render.Zone,
 ) []render.Notice {
 	if len(rows) == 0 || request.NoPriorValues {
 		return nil
@@ -822,7 +829,7 @@ func priorValueNotices(
 
 	ascending := slices.Clone(rows)
 	slices.Reverse(ascending)
-	return replay.PriorValues(ctx, engine, request.Ref, ascending)
+	return replay.PriorValues(ctx, engine, request.Ref, ascending, zone)
 }
 
 // deletionsNotice reports a backend that cannot record deletions, when nothing

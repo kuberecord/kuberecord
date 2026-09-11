@@ -205,14 +205,20 @@ func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 //
 // An unbounded end is spelled "now" rather than left blank, because a sentence
 // explaining an empty result has to name both edges to be an explanation at all.
-func DescribeWindow(from, to time.Time) string {
+//
+// zone is a parameter rather than a package default because a single invocation
+// must not mix frames: this sentence appears on stderr beside a table whose rows
+// carry the same instants, and a window in UTC above a timeline in Europe/Warsaw
+// would be two answers to "when" in one screen. Pass render.UTC for the
+// structured path, which never follows --tz (D46).
+func DescribeWindow(from, to time.Time, zone render.Zone) string {
 	switch {
 	case from.IsZero() && to.IsZero():
 		return "all recorded history"
 	case from.IsZero():
-		return fmt.Sprintf("everything up to %s", render.FormatInstant(to))
+		return fmt.Sprintf("everything up to %s", zone.Instant(to))
 	case to.IsZero():
-		return fmt.Sprintf("%s to now", render.FormatInstant(from))
+		return fmt.Sprintf("%s to now", zone.Instant(from))
 	}
-	return fmt.Sprintf("%s to %s", render.FormatInstant(from), render.FormatInstant(to))
+	return fmt.Sprintf("%s to %s", zone.Instant(from), zone.Instant(to))
 }

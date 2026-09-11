@@ -275,7 +275,15 @@ func TestTimelineRendersTheFlagshipTable(t *testing.T) {
 	// The row the acceptance criteria name, asserted by content as well as by
 	// golden file: a golden file that drifted would keep passing after being
 	// regenerated, and this line is the one thing that must not.
-	const flagship = "~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi"
+	//
+	// It used to read `spec.…containers[0].resources.limits.memory` and elides one
+	// segment further since Task 18.9, which is arithmetic rather than drift: the
+	// TIME column grew by the one character its frame occupies, the CHANGE column
+	// is whatever the others leave over, and the path fitted the old budget exactly.
+	// Elide gives up whole segments, so one column of pressure costs a whole one.
+	// The operation, the field, the values and the arrow — everything the row exists
+	// to say — are unchanged.
+	const flagship = "~ spec.…resources.limits.memory: 2Gi → 512Mi"
 	if !strings.Contains(stdout, flagship) {
 		t.Errorf("the flagship row is missing.\nwant a line containing %q\ngot:\n%s", flagship, stdout)
 	}
@@ -495,10 +503,17 @@ func TestTimelineDefaultSelectsTheNewestChanges(t *testing.T) {
 // tableTimestamps spells the TIME column.
 //
 // The fixture is written oldest first, so the newest n are its last n.
+//
+// The spelling comes from the renderer rather than from a layout string copied
+// beside it, which is what stops this test failing for a reason it is not about:
+// it was a literal until the narrow layout gained its trailing frame (Task 18.9),
+// and a second copy of a layout is a copy that goes stale. tableTimestamps splits
+// the TIME cell on its space and rejoins it with a `T`, so the same substitution
+// is made here.
 func newestTimestamps(history []query.Change, n int) []string {
 	stamps := make([]string, 0, n)
 	for _, change := range history[len(history)-n:] {
-		stamps = append(stamps, change.TS.UTC().Format("2006-01-02T15:04:05.000"))
+		stamps = append(stamps, strings.Replace(render.UTC.Narrow(change.TS), " ", "T", 1))
 	}
 	return stamps
 }

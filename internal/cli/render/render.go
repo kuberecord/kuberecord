@@ -119,6 +119,11 @@ type Options struct {
 	// Full prints every operation of every patch, unelided, beneath its row.
 	// Nothing is shortened under it: that is what the flag is for.
 	Full bool
+
+	// Zone is the frame every human-facing instant is rendered in. The zero value
+	// is UTC, which is the default (D46) and the only frame the structured path
+	// ever uses — see Zone.
+	Zone Zone
 }
 
 // width reports the column budget, resolving zero to the default.

@@ -4,8 +4,8 @@
 [2mCluster:[0m  prod-eu-1
 [2mCoverage:[0m [33mnone recorded for this scope[0m
 
-[2mTIME (UTC)               EVENT  ACTOR                    CHANGE[0m
-2026-08-28 14:03:20.310  [35mEvent[0m  kube-controller-manager  ScalingReplicaSet: Scaled up replica set checkout-7d4f to 5
-2026-08-28 14:06:44.020  [35mEvent[0m  replicaset-controller    [31m⚠[0m FailedCreate: pods "checkout-7d4f-" is forbidden: exceeded q…
+[2mTIME (UTC)                EVENT  ACTOR                    CHANGE[0m
+2026-08-28 14:03:20.310Z  [35mEvent[0m  kube-controller-manager  ScalingReplicaSet: Scaled up replica set checkout-7d4f to 5
+2026-08-28 14:06:44.020Z  [35mEvent[0m  replicaset-controller    [31m⚠[0m FailedCreate: pods "checkout-7d4f-" is forbidden: exceeded …
 === stderr ===
 ! [33mevery row here is a Kubernetes Event: nothing was ever watching apps/Deployment payments/checkout in cluster "prod-eu-1", so its own changes were never recorded. The Events are here because a rule captures Events, not because this object is watched; the `scopes` command lists what is being recorded[0m

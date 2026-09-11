@@ -45,7 +45,11 @@ import (
 // golden files assert them, and a heading that drifted from what the tests pin
 // would be a silent change to something people script `awk` against.
 const (
-	columnTime     = "TIME (UTC)"
+	// columnTime is the heading without its frame. The frame is appended by
+	// Zone.TimeColumn, because the column's contents are in whatever zone the
+	// invocation asked for and a heading that named a different one would be the
+	// disagreement Task 18.9 exists to close, one layer along.
+	columnTime     = "TIME"
 	columnUID      = "UID"
 	columnEvent    = "EVENT"
 	columnRevision = "RESOURCE VERSION"
@@ -95,10 +99,27 @@ const uidPrefixLength = 8
 // time.RFC3339Nano, which trims trailing zeros: that would render one row as
 // .9 and its neighbour as .482913004, and a column of timestamps at varying
 // precision reads as data of varying precision.
+//
+// The narrow layout keeps its space in place of RFC 3339's `T` and its
+// milliseconds, and it is not allowed to keep dropping the trailing marker for
+// them: a column heading is not attached to the data. `TIME (UTC)` scrolls off a
+// nine-row table and does not travel when a row is pasted into a post-mortem,
+// where `2026-09-10 22:41:13.263` reads as a local time two hours from the
+// instant it names (D45).
+//
+// The first three are the UTC layouts and their trailing `Z` is a literal — Go
+// reads `Z` as a marker only when `0700` or `07:00` follows it. The zoned three
+// below spell that suffix out, so a non-UTC frame renders an explicit numeric
+// offset and never a bare local time. That prohibition is the whole reason --tz
+// is a flag rather than something a reader does with a shell alias.
 const (
-	narrowTimeLayout = "2006-01-02 15:04:05.000"
+	narrowTimeLayout = "2006-01-02 15:04:05.000Z"
 	wideTimeLayout   = "2006-01-02T15:04:05.000000000Z"
 	headerTimeLayout = "2006-01-02T15:04:05Z"
+
+	narrowZonedTimeLayout = "2006-01-02 15:04:05.000-07:00"
+	wideZonedTimeLayout   = "2006-01-02T15:04:05.000000000-07:00"
+	headerZonedTimeLayout = "2006-01-02T15:04:05-07:00"
 )
 
 // TimelineRow is one change, decoded as far as rendering needs it.
@@ -491,7 +512,7 @@ func renderIncarnations(doc documentHeader, indent int) string {
 func renderTable(doc TimelineDocument, opts Options, p palette) (string, int) {
 	showUID := doc.showUID(opts)
 
-	headings := []string{columnTime}
+	headings := []string{opts.Zone.TimeColumn()}
 	if showUID {
 		headings = append(headings, columnUID)
 	}
@@ -555,7 +576,7 @@ func headerLine(headings []string, widths []int) string {
 // plainCells renders every column but CHANGE, unpainted, so the layout can be
 // measured.
 func plainCells(row TimelineRow, showUID bool, opts Options) []string {
-	cells := []string{formatTimestamp(row.Change.TS, opts.Wide)}
+	cells := []string{formatTimestamp(row.Change.TS, opts.Wide, opts.Zone)}
 	if showUID {
 		cells = append(cells, formatUID(row.Change.UID, opts.Wide))
 	}
@@ -783,21 +804,18 @@ func elided(row TimelineRow, changeWidth int) bool {
 }
 
 // formatTimestamp renders a change's instant at the precision the format asks
-// for. Everything is UTC: the header column says so, and a timeline whose rows
-// were in local time would be unusable the moment two engineers compared them.
-func formatTimestamp(ts time.Time, wide bool) string {
-	if wide {
-		return ts.UTC().Format(wideTimeLayout)
-	}
-	return ts.UTC().Format(narrowTimeLayout)
-}
-
-// FormatInstant renders a timestamp for the header and for a notice.
+// for, in the frame the invocation asked for.
 //
-// It is exported because the command builds the coverage summary and the
-// empty-result explanation, and those must not spell an instant differently from
-// the way the document does.
-func FormatInstant(ts time.Time) string { return ts.UTC().Format(headerTimeLayout) }
+// The frame is on the value rather than only on the heading above it, and the
+// default is UTC because the schema column is UTC and docs/QUERIES.md is UTC: a
+// CLI showing local time while the SQL shows UTC would be two views of one audit
+// trail disagreeing (D46).
+func formatTimestamp(ts time.Time, wide bool, zone Zone) string {
+	if wide {
+		return zone.Wide(ts)
+	}
+	return zone.Narrow(ts)
+}
 
 // formatUID abbreviates a UID for the table, or does not for -o wide.
 func formatUID(uid string, wide bool) string {

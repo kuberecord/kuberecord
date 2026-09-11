@@ -25,6 +25,8 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/klog/v2"
+
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
 // Flag names that other parts of the CLI, and its tests, refer to by name.
@@ -50,6 +52,19 @@ const (
 
 	// FlagColor selects colour behaviour.
 	FlagColor = "color"
+
+	// FlagTZ selects the frame human-facing instants are displayed in.
+	//
+	// It changes the display and never the data: the schema column is
+	// DateTime64(9, 'UTC'), docs/QUERIES.md is UTC, and structured output stays
+	// UTC whatever this says, so that `ts` cannot come to mean something different
+	// depending on whose shell produced it (D19, D46).
+	//
+	// It is named here rather than typed at its registration because the flag row
+	// in docs/CLI.md, the completion menu and the rejection message all spell it,
+	// and the spellings nobody compiles are the ones that drift — the same reason
+	// FlagSinkAddr is named here.
+	FlagTZ = "tz"
 
 	// FlagSink names a configured sink to read through, as kind/name.
 	FlagSink = "sink"
@@ -233,6 +248,10 @@ type GlobalFlags struct {
 	// Color is the colour mode, validated at parse time.
 	Color ColorMode
 
+	// TZ is the frame human-facing instants are displayed in, validated at parse
+	// time. Its zero value renders UTC, which is the default (D46).
+	TZ TimeZone
+
 	// Sink names a configured sink as kind/name.
 	Sink string
 
@@ -304,6 +323,11 @@ func (g *GlobalFlags) AddFlags(flags *pflag.FlagSet) {
 	flags.Var(&g.Color, FlagColor,
 		fmt.Sprintf("When to colourise output. One of: %s. NO_COLOR is honoured under auto.",
 			JoinValues(colorModes)))
+	flags.Var(&g.TZ, FlagTZ,
+		fmt.Sprintf("Display timestamps in this zone: %s, or an IANA name such as Europe/Warsaw. "+
+			"A non-UTC zone is rendered with an explicit offset. It changes the display only — "+
+			"json, jsonl and yaml stay in UTC, because the recorded column is UTC.",
+			JoinValues(zoneKeywords)))
 	flags.StringVar(&g.Sink, FlagSink, g.Sink,
 		"Read through a configured sink, as kind/name (for example ClickHouseSink/default).")
 	flags.StringVar(&g.Source, FlagSource, g.Source,
@@ -345,6 +369,15 @@ func (g *GlobalFlags) Namespace() (string, error) {
 	}
 	return namespace, nil
 }
+
+// Zone is the frame this invocation renders its human-facing instants in.
+//
+// It is a method rather than a field read at each site so that "which frame" has
+// one answer per invocation. Every table row, header field, notice and error
+// message in one command must be in one zone; a caller that reached for the flag
+// value itself would be a caller that could reach for it in one place and not in
+// another.
+func (g *GlobalFlags) Zone() render.Zone { return g.TZ.Zone() }
 
 // ApplyVerbosity pushes the parsed -v level into klog, so that the diagnostics
 // client-go and cli-runtime emit obey it.

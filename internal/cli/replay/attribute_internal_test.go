@@ -225,7 +225,7 @@ func TestAttributeRun(t *testing.T) {
 				seed = []byte(test.seed)
 			}
 
-			result := AttributeRun(seed, test.rows)
+			result := AttributeRun(seed, test.rows, render.UTC)
 			got := describeBlame(result.BlameRows(test.fields, test.depth))
 			if !slices.Equal(got, test.want) {
 				t.Errorf("the attribution is wrong.\nwant %v\ngot  %v", test.want, got)
@@ -238,7 +238,7 @@ func TestAttributeRun(t *testing.T) {
 // TestBlameRowsCountCollapsedFields is the other half of --depth: a collapsed row
 // has to say how many fields it stands for, or it reads as a single field.
 func TestBlameRowsCountCollapsedFields(t *testing.T) {
-	result := AttributeRun([]byte(`{"spec":{"template":{"spec":{"x":"1","y":"2","z":"3"}}}}`), nil)
+	result := AttributeRun([]byte(`{"spec":{"template":{"spec":{"x":"1","y":"2","z":"3"}}}}`), nil, render.UTC)
 
 	rows := result.BlameRows(nil, 2)
 	if len(rows) != 1 {

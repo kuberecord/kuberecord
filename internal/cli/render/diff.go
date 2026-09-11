@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/kuberecord/kuberecord/internal/query"
 )
@@ -185,7 +184,13 @@ func renderChangeBlock(row TimelineRow, opts Options, p palette) string {
 // controller's own logs to line an event up against a reconcile.
 func changeHeaderLine(row TimelineRow, opts Options, p palette) string {
 	parts := []string{
-		diffTimestamp(row.Change.TS, opts.Wide),
+		// The same rendering the table's TIME column uses, and nothing appended
+		// to it. This line used to spell "UTC" as a word, because a diff has no
+		// column heading to carry the frame — the right instinct answered in the
+		// wrong place. The value carries its own marker now, so the word would
+		// name one frame twice under the default and two different frames under
+		// --tz, where `…482+02:00 UTC` is simply false (Task 18.9, D45).
+		formatTimestamp(row.Change.TS, opts.Wide, opts.Zone),
 		p.eventColor(row.Change.EventType),
 	}
 	if opts.Wide {
@@ -197,18 +202,6 @@ func changeHeaderLine(row TimelineRow, opts Options, p palette) string {
 		actor = p.dim(actor)
 	}
 	return strings.Join(append(parts, actor), gutter)
-}
-
-// diffTimestamp renders a change's instant for a header line.
-//
-// The narrow form says "UTC" in words because, unlike the table, a diff has no
-// column heading to carry it — and a timestamp whose zone a reader has to assume
-// is a timestamp two engineers will eventually disagree about.
-func diffTimestamp(ts time.Time, wide bool) string {
-	if wide {
-		return formatTimestamp(ts, true)
-	}
-	return formatTimestamp(ts, false) + " UTC"
 }
 
 // hunkLines renders the body of one change.

@@ -325,6 +325,7 @@ func mustCompleteFlag(cmd *cobra.Command, flag string, fn cobra.CompletionFunc) 
 func registerGlobalCompletions(root *cobra.Command) {
 	mustCompleteFlag(root, options.FlagOutput, fixedEnum(options.OutputFormats(), outputFormatDescriptions))
 	mustCompleteFlag(root, options.FlagColor, fixedEnum(options.ColorModes(), colorModeDescriptions))
+	mustCompleteFlag(root, options.FlagTZ, fixedEnum(options.ZoneKeywords(), zoneDescriptions))
 	mustCompleteFlag(root, options.FlagProfile, completeProfileNames)
 	mustCompleteFlag(root, options.FlagSink, completeSinkRefs)
 }
@@ -350,6 +351,20 @@ var colorModeDescriptions = map[options.ColorMode]string{
 	options.ColorAuto:   "colour a terminal, unless NO_COLOR is set",
 	options.ColorAlways: "colour even into a pipe, and over NO_COLOR",
 	options.ColorNever:  "never colour",
+}
+
+// zoneDescriptions is the same for --tz.
+//
+// Only the two keywords are offered, and the six hundred IANA names deliberately
+// are not. The standard library exposes no way to enumerate the database — the
+// menu would have to be a list compiled in beside it, which is a second
+// definition of what --tz accepts and the one that goes stale on a tzdata bump —
+// and a menu that long is one nobody reads anyway. Typing a location name in full
+// still works, and always did; this is the same trade the resource-kind menu
+// makes with a cluster's CRDs.
+var zoneDescriptions = map[string]string{
+	options.ZoneUTC:   "the default, and the frame the schema records in",
+	options.ZoneLocal: "this host's zone, shown with an explicit offset",
 }
 
 // backendDescriptions is the same for `config set-profile --backend`, naming what

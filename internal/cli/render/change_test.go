@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kuberecord/kuberecord/internal/cli/render"
 	"github.com/kuberecord/kuberecord/internal/query"
@@ -308,12 +309,17 @@ func cellFor(t *testing.T, change query.Change, ops []render.Op, changeWidth int
 
 // fixedColumns is the width the columns left of CHANGE take for a single row.
 //
-// TIME is 23 columns of timestamp plus its gutter, EVENT is the event type or its
+// TIME is a rendered timestamp plus its gutter, EVENT is the event type or its
 // heading, whichever is longer, and ACTOR is "unknown" or its heading — both
 // widened to their headings for the short values these tests use.
+//
+// The timestamp is measured rather than counted. It was the literal 23 until the
+// narrow layout gained its trailing frame (Task 18.9), and a hard-coded width
+// here fails every case in this file for a reason none of them is about — so the
+// one thing the layout is allowed to change is asked of the layout itself.
 func fixedColumns(change query.Change) int {
 	event := max(len(change.EventType), len("EVENT"))
-	return 23 + 2 + event + 2 + len("unknown") + 2
+	return len(render.UTC.Narrow(time.Time{})) + 2 + event + 2 + len("unknown") + 2
 }
 
 func renderRows(t *testing.T, doc render.TimelineDocument, opts render.Options) string {

@@ -208,6 +208,12 @@ var noopAudit = []auditedFlag{
 	{"color", deliberatelySilent, "a rendering mode, never a request for content: it changes how " +
 		"a line is painted and never which lines there are. A notice about colour would be the " +
 		"noise it was warning about"},
+	{"tz", explained, "every instant it moves says which frame it is in, on the value, so `--tz " +
+		"utc` on the default is visibly the default rather than invisibly one (Task 18.9). The " +
+		"case that could have been silent is the structured one, and it is not a no-op: `--tz " +
+		"Europe/Warsaw -o json` is refused nothing and changes nothing, because `ts` is a machine " +
+		"contract (D46) — TestStructuredOutputIgnoresTZ pins the byte-identity and " +
+		"frameAudit records the flag as the reason the question is asked at all"},
 	{"cluster-id", deliberatelySilent, chainInput},
 	{"sink", deliberatelySilent, chainInput},
 	{"source", deliberatelySilent, chainInput},

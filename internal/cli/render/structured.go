@@ -456,6 +456,13 @@ func jsonKind(value json.RawMessage) string {
 // would be the fallback this refusal exists to avoid, one stream over, and the
 // column can hold a full object whose contents nobody asked to have on their
 // terminal.
+//
+// The instant is UTC and does not follow --tz, which is the one error message in
+// this CLI that does not. It names a row of the envelope this function refused to
+// finish, and a reader matching it against `ts` needs the spelling the envelope
+// uses (D19, D46). Threading a Zone here would also be handing the structured
+// path the formatter it exists not to have. It carries its frame either way:
+// RFC 3339 over a UTC instant ends in `Z`.
 func corruptColumn(change query.Change, column, want string, err error) error {
 	return fmt.Errorf(
 		"the change recorded at %s (%s) has an unreadable %s column, which must be %s: %w. "+

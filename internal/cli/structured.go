@@ -77,8 +77,15 @@ type coverageAnswer struct {
 	Gap error
 }
 
-// Summary renders the answer as the sentence every document's header carries.
-func (a coverageAnswer) Summary() string { return coverageSummary(a.Intervals, a.Gap) }
+// Summary renders the answer as the sentence every document's header carries, in
+// the frame the invocation asked for.
+//
+// zone is a parameter and Report below is not, which is the whole of the
+// structured firewall in this file: a header a person reads follows --tz like the
+// table under it, and the identical sentence inside an envelope does not (D46).
+func (a coverageAnswer) Summary(zone render.Zone) string {
+	return coverageSummary(a.Intervals, a.Gap, zone)
+}
 
 // Absent reports that nothing was ever watching the scope this answer is about.
 //
@@ -110,7 +117,12 @@ func (a coverageAnswer) Report() render.CoverageReport {
 	}
 	return render.CoverageReport{
 		Available: a.Gap == nil,
-		Summary:   a.Summary(),
+		// UTC whatever --tz asked for. This sentence is a field of a versioned
+		// envelope whose instants are a machine contract (D19), and a summary whose
+		// frame depended on the shell that produced it would be one more thing a
+		// consumer has to normalize before it can compare two runs (D46). The human
+		// header takes the same sentence from Summary with the invocation's frame.
+		Summary:   coverageSummary(a.Intervals, a.Gap, render.UTC),
 		Intervals: intervals,
 	}
 }

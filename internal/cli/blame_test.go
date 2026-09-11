@@ -156,9 +156,9 @@ func TestBlameAttributesEveryField(t *testing.T) {
 	// Asserted by content as well as by golden file: a golden regenerated after a
 	// regression would keep passing, and these are the rows the command exists for.
 	for _, want := range [][]string{
-		{"spec.template.spec.containers[0].resources.limits.memory", "2026-08-28 14:07:20.044",
+		{"spec.template.spec.containers[0].resources.limits.memory", "2026-08-28 14:07:20.044Z",
 			"argocd-application-controller"},
-		{"spec.replicas", "2026-08-28 14:05:02.117", "kube-controller-manager"},
+		{"spec.replicas", "2026-08-28 14:05:02.117Z", "kube-controller-manager"},
 	} {
 		if !hasRow(stdout, want...) {
 			t.Errorf("the flagship attribution is missing.\nwant the row %v\ngot:\n%s", want, stdout)
@@ -170,7 +170,7 @@ func TestBlameAttributesEveryField(t *testing.T) {
 	// replace that never names it. Crediting kubectl is the wrong answer that looks
 	// right.
 	if hasRow(stdout, "spec.template.spec.containers[0].resources.limits.memory",
-		"2026-08-28 14:03:11.482", "kubectl-client-side-apply") {
+		"2026-08-28 14:03:11.482Z", "kubectl-client-side-apply") {
 		t.Errorf("a field is credited to the last change that named it rather than to the last "+
 			"change that wrote it:\n%s", stdout)
 	}
@@ -189,7 +189,7 @@ func TestBlameMarksARemovedField(t *testing.T) {
 		t.Errorf("a field the window deleted is missing from the table, or is not marked:\n%s", stdout)
 	}
 	if !hasRow(stdout, "spec.minReadySeconds", render.RemovedMarker,
-		"2026-08-28 14:05:02.117", "kube-controller-manager") {
+		"2026-08-28 14:05:02.117Z", "kube-controller-manager") {
 		t.Errorf("the removal is not attributed to the change that made it:\n%s", stdout)
 	}
 }
@@ -248,7 +248,7 @@ func TestBlameCollapsesAtDepth(t *testing.T) {
 
 	// The four fields under spec.template collapse into one row that says so. A
 	// collapsed row without its count would claim a single field last changed then.
-	if !hasRow(stdout, "spec.template", "2026-08-28 14:07:20.044", "4", "argocd-application-controller") {
+	if !hasRow(stdout, "spec.template", "2026-08-28 14:07:20.044Z", "4", "argocd-application-controller") {
 		t.Errorf("a collapsed row does not carry the newest write under it, or its field count:\n%s",
 			stdout)
 	}

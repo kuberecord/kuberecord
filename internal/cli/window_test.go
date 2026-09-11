@@ -25,6 +25,7 @@ import (
 	"github.com/kuberecord/kuberecord/internal/cli"
 	"github.com/kuberecord/kuberecord/internal/cli/exit"
 	"github.com/kuberecord/kuberecord/internal/cli/options"
+	"github.com/kuberecord/kuberecord/internal/cli/render"
 )
 
 // TestParseInstantReadsBothGrammars covers the one flag that takes either a
@@ -109,7 +110,7 @@ func TestDescribeWindow(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := options.DescribeWindow(test.from, test.to); got != test.want {
+			if got := options.DescribeWindow(test.from, test.to, render.UTC); got != test.want {
 				t.Errorf("options.DescribeWindow = %q, want %q", got, test.want)
 			}
 		})

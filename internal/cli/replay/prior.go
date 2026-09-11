@@ -88,12 +88,17 @@ import (
 // which is not necessarily the order it is displayed in. The caller re-sorts a
 // copy rather than this function taking a display-ordered slice and guessing,
 // because a replay walked backwards is a replay that produces plausible nonsense.
+// zone is the frame the notices spell their instants in. It is threaded rather
+// than defaulted because these lines are printed beside a table whose rows carry
+// the same instants, and a notice naming a moment in a frame the table is not in
+// would be one invocation answering "when" twice (Task 18.9).
 func PriorValues(
 	ctx context.Context, engine query.QueryEngine, ref query.ObjectRef, rows []render.TimelineRow,
+	zone render.Zone,
 ) []render.Notice {
 	var notices []render.Notice
 	for _, group := range byIncarnation(rows) {
-		if notice, ok := replayGroup(ctx, engine, ref, group); ok {
+		if notice, ok := replayGroup(ctx, engine, ref, group, zone); ok {
 			notices = append(notices, notice)
 		}
 	}
@@ -139,6 +144,7 @@ func byIncarnation(rows []render.TimelineRow) [][]render.TimelineRow {
 // news.
 func replayGroup(
 	ctx context.Context, engine query.QueryEngine, ref query.ObjectRef, rows []render.TimelineRow,
+	zone render.Zone,
 ) (render.Notice, bool) {
 	first := firstNeedingPriorValue(rows)
 	if first < 0 {
@@ -161,7 +167,7 @@ func replayGroup(
 		if advanceErr != nil {
 			return render.Notice{
 				Text: fmt.Sprintf("prior values stop at %s: %s. Rows after it show the new value only",
-					render.FormatInstant(row.Change.TS), advanceErr),
+					zone.Instant(row.Change.TS), advanceErr),
 			}, true
 		}
 		state = next

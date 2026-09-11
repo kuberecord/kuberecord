@@ -432,9 +432,15 @@ func ObjectProvenance(doc ObjectDocument, severity Severity) string {
 		{"object", strings.TrimSpace(doc.Kind + " " + doc.Ref)},
 		{"cluster", valueOrUnrecorded(doc.Cluster)},
 		{"uid", valueOrUnrecorded(doc.UID)},
-		{"at", FormatInstant(reconstruction.At)},
+		// UTC whatever --tz asked for, and deliberately not a parameter of this
+		// function. Under -o yaml this block is a comment directly above
+		// metadata.reconstruction.at in the same stdout document, and a comment
+		// reading +02:00 over a field reading Z is one document disagreeing with
+		// itself; under -o json the identical block goes to stderr instead, so a
+		// frame here would also give one block two spellings (D19, D46).
+		{"at", UTC.Instant(reconstruction.At)},
 		{"base row", fmt.Sprintf("%s (%s)",
-			FormatInstant(reconstruction.BaseTS), valueOrUnrecorded(reconstruction.BaseEvent))},
+			UTC.Instant(reconstruction.BaseTS), valueOrUnrecorded(reconstruction.BaseEvent))},
 		{"patches applied", fmt.Sprintf("%d", reconstruction.PatchesApplied)},
 		{coverageField, valueOrUnrecorded(doc.Coverage)},
 	}

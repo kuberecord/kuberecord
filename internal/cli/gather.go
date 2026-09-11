@@ -107,14 +107,19 @@ type gatherResult struct {
 // The rows come back in display order, which by default is oldest first. Only the
 // *query* is newest-first, and it stays that way whatever is displayed: see
 // timelineQuery.
+// zone is the frame every notice this function builds spells its instants in.
+// It is threaded rather than defaulted because these lines are printed beside a
+// table of the same instants, and a single invocation must not mix frames
+// (Task 18.9). It never reaches the coverage summary an envelope carries — see
+// coverageAnswer.Report.
 func gatherChanges(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
-	streams genericiooptions.IOStreams,
+	streams genericiooptions.IOStreams, zone render.Zone,
 ) (gatherResult, error) {
 	var result gatherResult
 	capabilities := backend.Engine.Capabilities()
 
-	from, to, windowNotice := timelineBounds(request, capabilities)
+	from, to, windowNotice := timelineBounds(request, capabilities, zone)
 	result.From, result.To = from, to
 	result.Notices = appendNotice(result.Notices, windowNotice)
 
@@ -151,7 +156,7 @@ func gatherChanges(
 	}
 
 	result.Notices = append(result.Notices,
-		priorValueNotices(ctx, backend.Engine, request, result.Rows)...)
+		priorValueNotices(ctx, backend.Engine, request, result.Rows, zone)...)
 
 	// The replay above needed every row of the consecutive run. Narrowing for
 	// display happens only now, so that a path filter costs the reader the rows
@@ -178,7 +183,7 @@ func gatherChanges(
 		deletionsNotice(capabilities, sawDeletion(result.Rows)))
 
 	result.Notices = appendNotice(result.Notices,
-		displayFilterNotice(request, from, to, scanned, len(result.Rows)))
+		displayFilterNotice(request, from, to, scanned, len(result.Rows), zone))
 
 	// Measured once, after the rows are final, and read by the three notices
 	// below. They are three questions about the same document — did a predicate
@@ -192,7 +197,7 @@ func gatherChanges(
 	// scanned and len(Rows) are both zero and an emptiness the filter produced is
 	// indistinguishable from an empty window. See predicateNotice.
 	predicate, attributed := predicateNotice(
-		ctx, backend.Engine, request, selection, from, to, shape.changes)
+		ctx, backend.Engine, request, selection, from, to, shape.changes, zone)
 	result.Notices = appendNotice(result.Notices, predicate)
 
 	if !attributed && (len(result.Rows) > 0 || scanned == 0) {
@@ -207,7 +212,7 @@ func gatherChanges(
 		// below is withheld — so the two never both run and the round trip is bought
 		// exactly once, by whichever of them is reached (Task 18.7).
 		emptyNotices, emptyErr := explainNoChanges(request, from, to, shape, coverage,
-			func() (coverageAnswer, error) { return eventCoverage(ctx, backend, request, from, to) })
+			func() (coverageAnswer, error) { return eventCoverage(ctx, backend, request, from, to) }, zone)
 		result.Notices = append(result.Notices, emptyNotices...)
 		result.Empty = emptyErr
 	}
@@ -233,7 +238,7 @@ func gatherChanges(
 	// round trip on the one path that has nothing to learn from it.
 	if result.Empty == nil {
 		result.Notices = appendNotice(result.Notices,
-			eventsNotice(ctx, backend, request, from, to, shape.events))
+			eventsNotice(ctx, backend, request, from, to, shape.events, zone))
 	}
 	return result, nil
 }
@@ -255,13 +260,13 @@ func gatherChanges(
 // explainNoEvents, which states why.
 func eventsNotice(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
-	from, to time.Time, interleaved bool,
+	from, to time.Time, interleaved bool, zone render.Zone,
 ) render.Notice {
 	if !request.WithEvents || interleaved {
 		return render.Notice{}
 	}
 	coverage, err := eventCoverage(ctx, backend, request, from, to)
-	return explainNoEvents(request, from, to, coverage, err)
+	return explainNoEvents(request, from, to, coverage, err, zone)
 }
 
 // eventCoverage asks the scope log whether Events were being recorded where the
@@ -332,7 +337,9 @@ func displayRows(rows []render.TimelineRow, paths []string) []render.TimelineRow
 // `--limit 100 --field spec.replicas` returning three hunks reads as three
 // changes in the window, and the reader has no way to see the ninety-seven that
 // were fetched, replayed and then set aside.
-func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, shown int) render.Notice {
+func displayFilterNotice(
+	request TimelineRequest, from, to time.Time, scanned, shown int, zone render.Zone,
+) render.Notice {
 	if len(request.DisplayFieldPaths) == 0 || scanned == shown {
 		return render.Notice{}
 	}
@@ -341,7 +348,7 @@ func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, s
 		return render.Notice{
 			Text: fmt.Sprintf("%d changes are recorded for %s in %s, and none of them touched %s; "+
 				"the window itself is not empty", scanned, describeObject(request.Ref),
-				options.DescribeWindow(from, to), paths),
+				options.DescribeWindow(from, to, zone), paths),
 		}
 	}
 	return render.Notice{Text: fmt.Sprintf(
@@ -371,13 +378,13 @@ func displayFilterNotice(request TimelineRequest, from, to time.Time, scanned, s
 // the coverage explanation.
 func predicateNotice(
 	ctx context.Context, engine query.QueryEngine, request TimelineRequest,
-	selection incarnationChoice, from, to time.Time, renderedChange bool,
+	selection incarnationChoice, from, to time.Time, renderedChange bool, zone render.Zone,
 ) (render.Notice, bool) {
 	if !request.filtered() || renderedChange {
 		return render.Notice{}, false
 	}
 	hadChanges, err := anyChangeInWindow(ctx, engine, request, selection, from, to)
-	return explainNoMatches(request, from, to, hadChanges, err)
+	return explainNoMatches(request, from, to, hadChanges, err, zone)
 }
 
 // anyChangeInWindow asks whether this window holds a single change at all.

@@ -267,6 +267,15 @@ func TestEnumeratedFlagsCompleteTheirValues(t *testing.T) {
 			want: stringsOf(options.ColorModes()),
 		},
 		{
+			// The two keywords only. The IANA half of the accepted set is six
+			// hundred names the standard library cannot enumerate, and a menu that
+			// long is one nobody reads — the same trade the resource-kind menu
+			// makes with a cluster's CRDs. Typing a location name in full works.
+			name: "--" + options.FlagTZ,
+			args: []string{"--" + options.FlagTZ, ""},
+			want: options.ZoneKeywords(),
+		},
+		{
 			name: "--" + options.FlagBackend,
 			args: []string{"config", "set-profile", "example", "--" + options.FlagBackend, ""},
 			want: stringsOf(resolve.BackendKinds),

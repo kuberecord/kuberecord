@@ -157,7 +157,7 @@ func runScopesCommand(
 	}
 
 	now := time.Now()
-	from, to, err := parseWindow(local.window.since, local.window.until, now)
+	from, to, err := parseWindow(local.window.since, local.window.until, now, flags.Zone())
 	if err != nil {
 		return err
 	}
@@ -229,6 +229,7 @@ func scopesRenderOptions(flags *options.GlobalFlags, streams genericiooptions.IO
 		Width: options.TerminalWidth(streams.Out),
 		Color: options.ShouldColorize(flags.Color, streams.Out),
 		Wide:  flags.Output == options.OutputWide,
+		Zone:  flags.Zone(),
 	}
 }
 
@@ -359,7 +360,7 @@ func RunScopes(
 	if writeErr := writeScopesAnswer(backend, request, coverage, notices, streams, opts); writeErr != nil {
 		return writeErr
 	}
-	return scopesFinding(request, coverage.Intervals)
+	return scopesFinding(request, coverage.Intervals, opts.Zone)
 }
 
 // writeScopesAnswer renders the answer in whichever shape was asked for.
@@ -371,7 +372,7 @@ func writeScopesAnswer(
 		document := render.ScopesDocument{
 			Cluster:   request.ClusterID,
 			Scope:     request.describeScope(),
-			Window:    options.DescribeWindow(request.From, request.To),
+			Window:    options.DescribeWindow(request.From, request.To, opts.Zone),
 			Intervals: coverage.Intervals,
 			Notices:   notices,
 		}
@@ -414,14 +415,14 @@ func writeScopesAnswer(
 // reaches when it works the same fact out from the other end. A script watching
 // for "was anything recording this" therefore keys on one code whichever command
 // it asked.
-func scopesFinding(request ScopesRequest, intervals []query.ScopeInterval) error {
+func scopesFinding(request ScopesRequest, intervals []query.ScopeInterval, zone render.Zone) error {
 	if len(intervals) > 0 {
 		return nil
 	}
 	return fmt.Errorf("%w: no watch scope covering %s was open in cluster %q during %s, so a "+
 		"silence there is not evidence that nothing changed — nothing was being recorded to change",
 		query.ErrNoCoverage, request.describeScope(), request.ClusterID,
-		options.DescribeWindow(request.From, request.To))
+		options.DescribeWindow(request.From, request.To, zone))
 }
 
 // coveringNamespaceNotice explains a cluster-wide row in a namespaced question.

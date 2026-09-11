@@ -167,6 +167,7 @@ plugs into.
 | `--operator-namespace <ns>` | searched, then `kuberecord-system` | Where a sink's credentials Secret and the operator's Deployment are looked for. |
 | `-o`, `--output <format>` | `table` | One of `table`, `wide`, `json`, `jsonl`, `yaml`, `diff`. Not every command accepts every one — see [Output formats](#output-formats). |
 | `--color <mode>` | `auto` | `auto`, `always` or `never`. Under `auto`, colour is on only when stdout is a terminal and `NO_COLOR` is unset; `--color=always` overrides `NO_COLOR`, which is what the flag is for. |
+| `--tz <zone>` | `utc` | Display timestamps in this zone: `utc`, `local`, or an IANA name such as `Europe/Warsaw`. A non-UTC zone is rendered with an explicit offset — `2026-09-11 00:41:13.263+02:00` — never bare. **It changes the display and never the stored or structured value**: `-o json`, `-o jsonl` and `-o yaml` stay in UTC whatever it says, because the recorded column is UTC. See [Timestamps are UTC](#timestamps-are-utc). |
 | `--max-objects <n>` | `0` (no limit) | Abort a scan that fetches more than this many stored objects, naming this flag. It bounds the *work*, which `--limit` cannot do without an index — see [Cold scans](#cold-scans). |
 | `--yes` | assumed off a terminal | Answer the confirmation a wide or unmeasurable scan of an unindexed backend asks for. Assumed when the output is not a terminal, so a script never waits on a prompt. |
 | `-v`, `--v <n>` | `0` | Verbosity of the diagnostics written to **stderr**. It never changes what goes to stdout, so raising it cannot disturb a pipe. |
@@ -224,11 +225,11 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-TIME (UTC)               EVENT     ACTOR                      CHANGE
-2026-08-28 14:02:58.001  Added     kubectl-client-side-apply  full state recorded
-2026-08-28 14:03:11.482  Modified  kubectl-client-side-apply  ~ spec.…containers[0].resources.limits.memory: 2Gi → 512Mi
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
-2026-08-28 14:09:40.900  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
+TIME (UTC)                EVENT     ACTOR                      CHANGE
+2026-08-28 14:02:58.001Z  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply  ~ spec.…resources.limits.memory: 2Gi → 512Mi
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager    3 ops
+2026-08-28 14:09:40.900Z  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
 ! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
 ```
 
@@ -267,6 +268,40 @@ are selected is a separate matter and has not moved: `--limit` still takes the
 **newest** N, and only their layout runs forward. `--reverse` puts the newest at
 the top.
 
+### Timestamps are UTC
+
+**Every instant is UTC, and every instant says so on the value.** The `Z` on
+`2026-08-28 14:02:58.001Z` is not decoration: a column heading scrolls off a long
+table and does not travel when a row is pasted into a ticket, and a bare
+`2026-08-28 14:02:58.001` reads as a local time in whatever zone the next person
+is in. The default is UTC because the recorded column is
+`DateTime64(9, 'UTC')` and [`docs/QUERIES.md`](QUERIES.md) is UTC — a CLI showing
+local time while the SQL shows UTC would be two views of one audit trail
+disagreeing.
+
+`--tz` changes the display and nothing else:
+
+```console
+$ kuberecord timeline deploy/checkout -n payments --tz Europe/Warsaw
+TIME (Europe/Warsaw)           EVENT     ACTOR                      CHANGE
+2026-08-28 16:02:58.001+02:00  Added     kubectl-client-side-apply  full state recorded
+```
+
+It takes `utc` (the default, and legal to state), `local`, or an IANA location
+name; anything else is a usage error naming those forms. A non-UTC zone is always
+rendered with an explicit numeric offset, never bare — that prohibition is the
+whole reason this is a flag rather than something you do with a shell alias. The
+heading names the **zone** rather than an offset, because `Europe/Warsaw` is
+`+02:00` in summer and `+01:00` in winter and a table spanning the change would
+otherwise carry a heading that is wrong for half its rows.
+
+It applies to every human-facing instant in the invocation — table rows, the
+header block, notices and errors — so one command never mixes frames. It reaches
+**no** structured output: `-o json`, `-o jsonl` and `-o yaml` emit UTC always, in
+every envelope kind and including `metadata`, because `ts` is part of the
+[versioned contract](#structured-output) and a consumer must not
+find its meaning depends on the shell that produced it.
+
 ### Flags
 
 | Flag | What it does |
@@ -297,12 +332,12 @@ summarized as `N ops`, and `--full` expands it:
 
 ```console
 $ kubectl kuberecord timeline deploy/checkout -n payments --full
-2026-08-28 14:05:02.117  Modified  kube-controller-manager    3 ops
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager    3 ops
     ~ spec.replicas: 3 → 5
     + spec.paused: true
     - spec.minReadySeconds: 10
 
-2026-08-28 14:09:40.900  Modified  deployment-controller      ~ spec.replicas: 5 → 7
+2026-08-28 14:09:40.900Z  Modified  deployment-controller      ~ spec.replicas: 5 → 7
 ```
 
 An expanded block is closed by a blank line, and only a row that actually
@@ -601,12 +636,12 @@ Cluster:  prod-eu-1
 UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-2026-08-28 14:03:11.482 UTC  Modified  kubectl-client-side-apply
+2026-08-28 14:03:11.482Z  Modified  kubectl-client-side-apply
   ~ spec.template.spec.containers[0].resources.limits.memory
       - 2Gi
       + 512Mi
 
-2026-08-28 14:05:02.117 UTC  Modified  kube-controller-manager
+2026-08-28 14:05:02.117Z  Modified  kube-controller-manager
   ~ spec.replicas
       - 3
       + 5
@@ -858,19 +893,19 @@ Window:   2026-08-28T14:04:00Z to now
 Base:     2026-08-28T14:02:58Z (Added) plus 1 patch
 Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
 
-FIELD                                                     LAST CHANGED             ACTOR
-metadata.annotations.deployment.kubernetes.io/revision    2026-08-28 14:09:40.900  unknown
-spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044  argocd-application-controller
-spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044  argocd-application-controller
-spec.minReadySeconds  (removed)                           2026-08-28 14:05:02.117  kube-controller-manager
-spec.paused                                               2026-08-28 14:05:02.117  kube-controller-manager
-spec.replicas                                             2026-08-28 14:05:02.117  kube-controller-manager
-apiVersion                                                (before window)          -
-kind                                                      (before window)          -
-metadata.name                                             (before window)          -
-metadata.namespace                                        (before window)          -
-spec.template.spec.containers[0].image                    (before window)          -
-spec.template.spec.containers[0].name                     (before window)          -
+FIELD                                                     LAST CHANGED              ACTOR
+metadata.annotations.deployment.kubernetes.io/revision    2026-08-28 14:09:40.900Z  unknown
+spec.template.spec.containers[0].resources.limits.cpu     2026-08-28 14:07:20.044Z  argocd-application-controller
+spec.template.spec.containers[0].resources.limits.memory  2026-08-28 14:07:20.044Z  argocd-application-controller
+spec.minReadySeconds  (removed)                           2026-08-28 14:05:02.117Z  kube-controller-manager
+spec.paused                                               2026-08-28 14:05:02.117Z  kube-controller-manager
+spec.replicas                                             2026-08-28 14:05:02.117Z  kube-controller-manager
+apiVersion                                                (before window)           -
+kind                                                      (before window)           -
+metadata.name                                             (before window)           -
+metadata.namespace                                        (before window)           -
+spec.template.spec.containers[0].image                    (before window)           -
+spec.template.spec.containers[0].name                     (before window)           -
 ```
 
 Rows are most recently written first, so the top of the page is what moved last.
@@ -922,7 +957,7 @@ last written before any bounded window, and they are listed with `(before window
 in place of a timestamp rather than dropped — a dropped row would read as a field
 the object does not have. Widen `--since` and they acquire an attribution.
 
-The two cells go together: `(before window)` in LAST CHANGED and `-` in ACTOR. That
+The two cells go together: `(before window)` in LAST CHANGED  and `-` in ACTOR. That
 dash is not `unknown`, which is what a change that recorded no field managers
 renders as. One says no change was read for this field; the other says a change was
 read and had no name on it.
@@ -942,16 +977,16 @@ saying how many of the object's fields each row now stands for:
 
 ```console
 $ kuberecord blame deploy/checkout -n payments --depth 2
-FIELD                            LAST CHANGED             FIELDS  ACTOR
-metadata.annotations             2026-08-28 14:09:40.900  1       unknown
-spec.template                    2026-08-28 14:07:20.044  4       argocd-application-controller
-spec.minReadySeconds  (removed)  2026-08-28 14:05:02.117  1       kube-controller-manager
-spec.paused                      2026-08-28 14:05:02.117  1       kube-controller-manager
-spec.replicas                    2026-08-28 14:05:02.117  1       kube-controller-manager
-apiVersion                       2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-kind                             2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-metadata.name                    2026-08-28 14:02:58.001  1       kubectl-client-side-apply
-metadata.namespace               2026-08-28 14:02:58.001  1       kubectl-client-side-apply
+FIELD                            LAST CHANGED              FIELDS  ACTOR
+metadata.annotations             2026-08-28 14:09:40.900Z  1       unknown
+spec.template                    2026-08-28 14:07:20.044Z  4       argocd-application-controller
+spec.minReadySeconds  (removed)  2026-08-28 14:05:02.117Z  1       kube-controller-manager
+spec.paused                      2026-08-28 14:05:02.117Z  1       kube-controller-manager
+spec.replicas                    2026-08-28 14:05:02.117Z  1       kube-controller-manager
+apiVersion                       2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+kind                             2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+metadata.name                    2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
+metadata.namespace               2026-08-28 14:02:58.001Z  1       kubectl-client-side-apply
 ```
 
 (The window is unbounded here, so nothing is older than it.)
@@ -986,10 +1021,10 @@ Cluster: prod-eu-1
 Scope:   every kind in namespace payments
 Window:  all recorded history
 
-KIND             NAMESPACE  FROM                     TO                       RULE
-apps/Deployment  payments   2026-06-01 08:00:00.000  2026-07-02 09:14:00.000  StreamRule/payments/workloads
-apps/Deployment  (all)      2026-07-02 09:14:00.000  (open)                   ClusterStreamRule/all-workloads
-ConfigMap        payments   2026-07-02 09:14:00.000  2026-08-11 17:31:22.000  (not recorded)
+KIND             NAMESPACE  FROM                      TO                        RULE
+apps/Deployment  payments   2026-06-01 08:00:00.000Z  2026-07-02 09:14:00.000Z  StreamRule/payments/workloads
+apps/Deployment  (all)      2026-07-02 09:14:00.000Z  (open)                    ClusterStreamRule/all-workloads
+ConfigMap        payments   2026-07-02 09:14:00.000Z  2026-08-11 17:31:22.000Z  (not recorded)
 ```
 
 | Flag | Meaning |
@@ -3163,13 +3198,13 @@ never writes: give it a credential that cannot.
 CREATE USER kuberecord_ro IDENTIFIED WITH sha256_password BY 'a-password-you-generated';
 
 -- The two tables of the frozen v1 schema, and nothing else.
-GRANT SELECT ON kuberecord.resource_states TO kuberecord_ro;
-GRANT SELECT ON kuberecord.watch_scopes   TO kuberecord_ro;
+GRANT SELECT ON kuberecord.resource_states TO  kuberecord_ro;
+GRANT SELECT ON kuberecord.watch_scopes   TO  kuberecord_ro;
 
 -- Belt and braces: no writes, and a bound on how long one analyst's question runs.
 CREATE SETTINGS PROFILE kuberecord_readonly
   SETTINGS readonly = 1, max_execution_time = 60
-  TO kuberecord_ro;
+  TO  kuberecord_ro;
 ```
 
 Then, on each engineer's machine:

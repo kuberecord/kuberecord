@@ -77,7 +77,7 @@ func runTimelineStructured(
 ) error {
 	capabilities := backend.Engine.Capabilities()
 
-	from, to, windowNotice := timelineBounds(request, capabilities)
+	from, to, windowNotice := timelineBounds(request, capabilities, opts.Zone)
 	notices := appendNotice(nil, windowNotice)
 
 	// Same position as the gathered path's, and for the same reason: this is before
@@ -134,15 +134,15 @@ func runTimelineStructured(
 	)
 	if emitErr == nil {
 		predicate, attributed = predicateNotice(
-			ctx, backend.Engine, request, selection, from, to, emitted.sawChange)
+			ctx, backend.Engine, request, selection, from, to, emitted.sawChange, opts.Zone)
 		if !attributed {
 			emptyNotices, emptyErr = explainNoChanges(request, from, to, emitted.shape(), coverage,
 				func() (coverageAnswer, error) {
 					return eventCoverage(ctx, backend, request, from, to)
-				})
+				}, opts.Zone)
 		}
 		if emptyErr == nil {
-			eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent)
+			eventNotice = eventsNotice(ctx, backend, request, from, to, emitted.sawEvent, opts.Zone)
 		}
 	}
 
