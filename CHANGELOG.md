@@ -16,6 +16,48 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`spec.resources[].eventFilter` narrows Event capture by the fields an Event
+  carries.** Naming `v1/Event` in a rule has until now been one switch: every Event
+  in the scope is recorded, so an operator who wants scheduling failures also takes
+  every `Pulled` and `Started` in the namespace. A `labelSelector` cannot help —
+  it matches the *Event's* own labels, and Events carry essentially none, so it
+  narrows the scope to nothing rather than to something.
+
+  Six axes, each a column of the Event itself: `types` (`Normal`, `Warning`),
+  `reasons` and `excludeReasons` (mutually exclusive), `sourceComponents`,
+  `subjectKinds` and `subjectNames`. Within a list, OR; across fields, AND; an
+  absent or empty list is no constraint, and a rule with no `eventFilter` records
+  exactly what it recorded before.
+
+  ```yaml
+  - group: ""
+    version: v1
+    kind: Event
+    eventFilter:
+      excludeReasons: [Pulling, Pulled, Created, Started, Scheduled]
+      subjectKinds: [Pod, ReplicaSet]
+  ```
+
+  **This narrows relevance, not volume.** A recurring Event is updated in place to
+  bump its `count`, so its content genuinely changes, hash dedup cannot suppress
+  it, and every recurrence writes another full row — under every filter here. The
+  distributions make that worse than it sounds: `Normal` events are numerous and
+  fire roughly once, while `Warning` events are fewer and recur for as long as the
+  fault persists, so `types: [Warning]` drops most rows in a healthy cluster and
+  almost none in an unhealthy one.
+
+  An `eventFilter` on anything but an Event is **rejected at admission**, because
+  a Deployment carries none of these fields: the filter would match nothing and
+  the entry would record an empty stream while the rule reported `Ready=True`.
+  `subjectNames` is exact-match only and says so where it is typed — it fits
+  stable names (`postgres-0`) and is useless for the Pods of a Deployment, whose
+  names are generated and change on every rollout.
+
+  No schema change: `deploy/clickhouse/schema/` is untouched, and Event coverage
+  stays reconstructible from `rule_ref`.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five

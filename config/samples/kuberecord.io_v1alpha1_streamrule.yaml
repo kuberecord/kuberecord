@@ -29,6 +29,34 @@ spec:
     labelSelector:
       matchLabels:
         kuberecord.io/audit: "true"
+  # Events are streamed in a built-in Events mode: full state every row, no
+  # diffs, and a TTL expiry is recorded as nothing rather than as a deletion.
+  # Capture is scope-wide — every Event in this namespace, not only those about
+  # the Deployments and ConfigMaps above.
+  - group: ""
+    version: v1
+    kind: Event
+    # A labelSelector would be useless here — it matches the *Event's* labels,
+    # and Events carry none — so Events are narrowed on the fields they do
+    # carry. Within a list, OR; across fields, AND: this records every Event
+    # about a Pod or a ReplicaSet except the ones a healthy rollout emits.
+    #
+    # Excluding is preferred over `reasons` (the include list, which cannot be
+    # combined with this one): an exclusion keeps the reasons nobody has thought
+    # of yet, whereas an include list silently stops recording the day a new
+    # operator starts emitting something worth seeing.
+    #
+    # `types: [Warning]` is the other common shape, and is deliberately not
+    # combined with the exclusions below: every reason listed there is a Normal
+    # event, so naming both would leave three clauses that can never reject
+    # anything the first one did not.
+    #
+    # None of this bounds volume. It narrows *which* Events are recorded; the
+    # API server bumps a recurring Event's count in place, so every recurrence
+    # is still another full row.
+    eventFilter:
+      excludeReasons: [Pulling, Pulled, Created, Started, Scheduled, SuccessfulCreate]
+      subjectKinds: [Pod, ReplicaSet]
   # Added to the sink's own redaction floor — a rule can add paths, never remove
   # them. A path matching nothing in a given object is a silent no-op, so one
   # entry can cover a mixed resources list.
