@@ -48,6 +48,26 @@ type fakeEngine struct {
 	// events are the Kubernetes Events correlated to it, oldest first, already
 	// stamped with query.EventKubernetes as an engine would stamp them on merge.
 	events []query.Change
+	// treeEvents are Events naming objects *other* than the one being asked
+	// about, correlated only when a query names their subject in Subjects.
+	//
+	// They are kept apart from events rather than being one list the fake filters,
+	// because the two model different halves of the contract and only one of them
+	// is this fake's business. Whether an Event naming the object comes back is
+	// settled by the backends' own suites, over a real subject predicate; what a
+	// command test needs is that the tree an ownership walk found *reaches* the
+	// query, and that an Event naming a descendant is correlated when it does and
+	// not when it does not. Each of these carries involvedObject, because the
+	// SUBJECT column is read out of exactly that.
+	treeEvents []query.Change
+
+	// ownership is the ownership answer the walk reads, and ownershipErr fails
+	// the read. A fake with neither is an engine whose archive holds no ownership
+	// edges at all, which is a real state and the one an empty tree comes from.
+	ownership        []query.OwnedObject
+	ownershipErr     error
+	ownershipQueries []query.OwnershipQuery
+
 	// incarnations, intervals and state are what the three supporting calls
 	// answer with.
 	incarnations []query.Incarnation
@@ -163,6 +183,11 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 				selected = append(selected, event)
 			}
 		}
+		for _, event := range f.treeEvents {
+			if inWindow(event.TS, q.From, q.To) && namesOneOf(event, q.Subjects) {
+				selected = append(selected, event)
+			}
+		}
 	}
 
 	slices.SortStableFunc(selected, func(a, b query.Change) int { return a.TS.Compare(b.TS) })
@@ -174,6 +199,64 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 	}
 	f.opened++
 	return &fakeIterator{changes: selected, engine: f}, nil
+}
+
+// namesOneOf reports whether an Event's recorded subject is one of the objects a
+// query asked to correlate.
+//
+// By (kind, name) read out of the Event's own payload, in both API spellings:
+// v1/Event names its subject in involvedObject and events.k8s.io/v1 names it in
+// regarding, and a fake that read one of them would quietly stop correlating half
+// of a cluster's commentary — which is the defect the real predicate is written
+// against, so it is not one this stand-in may have either.
+//
+// The namespace is not compared because every fixture in this package is in one,
+// and a comparison that is constant certifies nothing.
+func namesOneOf(event query.Change, subjects []query.ObjectRef) bool {
+	var doc struct {
+		InvolvedObject eventSubjectFields `json:"involvedObject"`
+		Regarding      eventSubjectFields `json:"regarding"`
+	}
+	if err := json.Unmarshal([]byte(event.Data), &doc); err != nil {
+		return false
+	}
+	kind := firstNonBlank(doc.InvolvedObject.Kind, doc.Regarding.Kind)
+	name := firstNonBlank(doc.InvolvedObject.Name, doc.Regarding.Name)
+	return slices.ContainsFunc(subjects, func(ref query.ObjectRef) bool {
+		return ref.Kind == kind && ref.Name == name
+	})
+}
+
+// eventSubjectFields are the two members of either subject spelling this fake
+// compares on.
+type eventSubjectFields struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+
+// firstNonBlank coalesces the two spellings per field, which is the reading the
+// published recipes and both backends use.
+func firstNonBlank(first, second string) string {
+	if first != "" {
+		return first
+	}
+	return second
+}
+
+// Ownership answers the optional half of the read plane that `--owned` walks.
+//
+// It records the question for the same reason Timeline and Coverage do: which scope
+// the walk asked about is part of the command's behaviour and is invisible in the
+// page — a walk that asked about the wrong namespace would return an empty tree,
+// which is also what an object that owns nothing returns.
+func (f *fakeEngine) Ownership(
+	_ context.Context, q query.OwnershipQuery,
+) ([]query.OwnedObject, error) {
+	f.ownershipQueries = append(f.ownershipQueries, q)
+	if f.ownershipErr != nil {
+		return nil, f.ownershipErr
+	}
+	return f.ownership, nil
 }
 
 // StateAt hands back the one document the fixture holds, whatever instant is

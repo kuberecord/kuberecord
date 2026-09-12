@@ -428,6 +428,53 @@ func agreementQueries() []agreementQuery {
 				"incarnation here, so no unread partition can change the narrowing — and a walk " +
 				"that settled early must return the prefix the unlimited answer starts with",
 		},
+		// TimelineQuery.Subjects, which is the read-plane half of `timeline --owned`
+		// (Task 21.1). The corpus needs nothing new for it: it already holds an object
+		// with history and no commentary, and a second one with commentary and no
+		// history, so asking about the first *and naming the second as a subject* is
+		// exactly the shape an ownership walk produces — a root whose Events are
+		// elsewhere in the tree.
+		//
+		// What the pair pins is that widening the correlation adds the subject's Events
+		// to both backends' answers identically, and that it adds nothing else: the
+		// state half stays the root's, which is the asymmetry the field's own
+		// documentation turns on and the one a merged multi-object stream would break.
+		{
+			name: "OwnedSubjects",
+			query: query.TimelineQuery{
+				IncludeEvents: true, Subjects: []query.ObjectRef{corpusEventsOnlyRef()},
+			},
+			deletions: 1, events: 4,
+			why: "an ownership walk's tree reaching the Event correlation: the root's own nine " +
+				"changes, plus the four Events of a subject with no state rows of its own. A " +
+				"backend that pinned the subjects to the root's incarnation would return the " +
+				"changes and none of the commentary, and one that read the subjects' state as " +
+				"well would return rows nothing in the answer could attribute",
+		},
+		{
+			name: "OwnedSubjectsEventsOnly",
+			query: query.TimelineQuery{
+				IncludeEvents: true, EventsOnly: true,
+				Subjects: []query.ObjectRef{corpusEventsOnlyRef()},
+			},
+			deletions: 0, events: 4,
+			why: "`--owned --events-only`, the flagship combination: the tree's commentary and " +
+				"none of the root's own changes. The root has no Events of its own here, so a " +
+				"backend that dropped the subjects would answer empty — and would agree with " +
+				"itself while doing it",
+		},
+		{
+			name: "OwnedSubjectsPinnedToTheRoot",
+			query: query.TimelineQuery{
+				IncludeEvents: true, Subjects: []query.ObjectRef{corpusEventsOnlyRef()},
+				UID: corpusUIDB,
+			},
+			deletions: 1, events: 4,
+			why: "a pinned root beside a widened correlation. The pin narrows the object's own " +
+				"commentary and must not reach the subjects: a dependent does not share its " +
+				"owner's UID, so a backend applying the pin to the whole merged stream would " +
+				"silently undo the widening beside it",
+		},
 		{
 			name: "EventsOnlyFlagPinnedToTheSubject", commentaryOnlySubject: true,
 			query: query.TimelineQuery{

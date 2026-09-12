@@ -59,6 +59,14 @@ const (
 	// eventSeriesField holds events.k8s.io/v1's {count, lastObservedTime} for an
 	// Event the API server aggregated into a series.
 	eventSeriesField = "series"
+	// eventInvolvedObjectField is core v1's name for the object the Event is about.
+	eventInvolvedObjectField = "involvedObject"
+	// eventRegardingField is what events.k8s.io/v1 renamed it to.
+	eventRegardingField = "regarding"
+	// eventSubjectKindField and eventSubjectNameField are the two members of either
+	// spelling that the SUBJECT column shows.
+	eventSubjectKindField = "kind"
+	eventSubjectNameField = "name"
 )
 
 // EventTypeWarning is the Event type that earns a glyph.
@@ -76,6 +84,20 @@ type EventDetail struct {
 	// Reporter is the controller that wrote the Event, used as the row's actor
 	// when the Event object itself carries no field managers.
 	Reporter string
+	// SubjectKind and SubjectName are the object the Event is about, read from
+	// whichever of the two API spellings carries it.
+	//
+	// They are here rather than being derived by a caller because this is already
+	// the one place that knows both spellings, and a second reading of the same
+	// payload is a second chance to handle only one of them — which would render
+	// half a cluster's commentary as an unattributed row (see this file's preamble).
+	//
+	// The engine correlated the row by matching these very fields, so on any row
+	// that reached a renderer they are populated. They are read back rather than
+	// assumed because `--owned` merges several objects' Events into one stream, and
+	// the row itself is the only place the answer survives.
+	SubjectKind string
+	SubjectName string
 	// Count is how many times this Event had fired when the row was recorded, or
 	// 0 when the Event carries no count at all.
 	//
@@ -86,6 +108,22 @@ type EventDetail struct {
 	// timeline holds. A row that did not say so would leave a reader counting
 	// rows, which is the one reading the archive cannot support.
 	Count int
+}
+
+// Subject renders the object the Event is about, the way the SUBJECT column names
+// one: Kind/name, or the bare name when the payload gave no kind.
+//
+// Empty when the payload named neither, which the caller reports as unknown rather
+// than filling in from the document's own header — see subjectCell.
+func (e EventDetail) Subject() string {
+	switch {
+	case e.SubjectName == "":
+		return ""
+	case e.SubjectKind == "":
+		return e.SubjectName
+	default:
+		return e.SubjectKind + "/" + e.SubjectName
+	}
 }
 
 // Warning reports whether this Event earns the warning glyph.
@@ -106,12 +144,15 @@ func ParseEvent(data string) (EventDetail, bool) {
 	if err := json.Unmarshal([]byte(data), &object); err != nil || object == nil {
 		return EventDetail{}, false
 	}
+	kind, name := eventSubject(object)
 	return EventDetail{
-		Type:     stringField(object, eventTypeField),
-		Reason:   stringField(object, eventReasonField),
-		Message:  firstNonEmpty(stringField(object, eventMessageField), stringField(object, eventNoteField)),
-		Reporter: eventReporter(object),
-		Count:    eventCount(object),
+		Type:        stringField(object, eventTypeField),
+		Reason:      stringField(object, eventReasonField),
+		Message:     firstNonEmpty(stringField(object, eventMessageField), stringField(object, eventNoteField)),
+		Reporter:    eventReporter(object),
+		SubjectKind: kind,
+		SubjectName: name,
+		Count:       eventCount(object),
 	}, true
 }
 
@@ -226,6 +267,24 @@ func numberField(object map[string]any, name string) int {
 		return 0
 	}
 	return whole
+}
+
+// eventSubject reads the object an Event is about, across both APIs.
+//
+// The two spellings are coalesced *per field* rather than per object, which is the
+// reading the published recipes and both backends' correlation already use: an
+// Event whose payload carries one key with some members empty is still attributed
+// on the members it does fill.
+func eventSubject(object map[string]any) (kind, name string) {
+	for _, field := range []string{eventInvolvedObjectField, eventRegardingField} {
+		subject, ok := object[field].(map[string]any)
+		if !ok {
+			continue
+		}
+		kind = firstNonEmpty(kind, stringField(subject, eventSubjectKindField))
+		name = firstNonEmpty(name, stringField(subject, eventSubjectNameField))
+	}
+	return kind, name
 }
 
 // eventReporter finds the controller that authored the Event, across both APIs.

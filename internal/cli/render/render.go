@@ -139,6 +139,18 @@ type Options struct {
 	// is looking at. See eventsHint.
 	EventsOnly bool
 
+	// Owned says the answer may hold rows about objects other than the one the
+	// header names, which is what gives the table its SUBJECT column.
+	//
+	// It is the flag rather than a scan of the rows, and the difference is the one
+	// D31 keeps closing. A `--owned` walk that reached a tree whose Events all
+	// happen to be the root's would produce a page with no descendant row on it,
+	// and dropping the column there would leave the reader unable to tell "the
+	// descendants said nothing" from "the flag did nothing". The column is the
+	// visible half of the answer to that, and it is present whenever the question
+	// was asked.
+	Owned bool
+
 	// Zone is the frame every human-facing instant is rendered in. The zero value
 	// is UTC, which is the default (D46) and the only frame the structured path
 	// ever uses — see Zone.

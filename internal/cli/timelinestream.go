@@ -97,6 +97,16 @@ func runTimelineStructured(
 	selection, selectionNotices := chooseIncarnation(ctx, backend.Engine, request, from, to)
 	notices = append(notices, selectionNotices...)
 
+	// Same position as the gathered path's, and for the same reason: the walk starts
+	// from the incarnation just resolved, and the subjects it finds are a predicate
+	// of the timeline query below. See resolveOwnedTree.
+	owned, err := resolveOwnedTree(ctx, backend, request, selection, from, to, opts.Zone)
+	if err != nil {
+		return err
+	}
+	request.Subjects = owned.subjects
+	notices = append(notices, owned.notices...)
+
 	// The scope the rows will come from, which under --events-only is the Events'
 	// rather than the object's — and which reaches metadata.coverage in the envelope
 	// as well as the table's header. A script comparing two runs is owed the same

@@ -72,6 +72,13 @@ const (
 		"countIf(event_type = 'Deleted') AS deletions"
 	fakeScopeColumns = "api_group, kind, namespace, action, rule_ref, ts"
 
+	// fakeOwnershipColumns is the ownership read's projection, spelled out here for
+	// the reason the others are: a stand-in that imported the builder's own constant
+	// would agree with it whatever it said.
+	fakeOwnershipColumns = "api_group, kind, namespace, name, uid, " +
+		"countIf(data != '') AS state_rows, " +
+		"argMaxIf(JSONExtractRaw(data, 'metadata', 'ownerReferences'), ts, data != '') AS owner_refs"
+
 	// fakeClusterIDColumn is the cluster-identity probe, which both tables answer
 	// and which is the only read in this package with no WHERE clause at all.
 	fakeClusterIDColumn = "DISTINCT cluster_id"
@@ -79,6 +86,16 @@ const (
 
 // fakeEventGroups is the both-spellings predicate, likewise spelled out here.
 const fakeEventGroups = "api_group IN ('', 'events.k8s.io')"
+
+// fakeNotEvents is the predicate an ownership read carries to leave Kubernetes
+// Events out of the group.
+//
+// Spelled out for fakeEventGroups' reason, and pinned rather than tolerated for a
+// sharper one: an ownership scan that dropped it would still return every tree this
+// suite asserts, because an Event owns nothing and is owned by nothing. The
+// exclusion is a cost decision whose absence is invisible in the answer, which is
+// exactly the kind that has to be pinned in the statement.
+const fakeNotEvents = "NOT (kind = 'Event' AND api_group IN ('', 'events.k8s.io'))"
 
 // fakeSubjectMatch renders the Event subject predicate this stand-in will answer.
 //
@@ -364,6 +381,8 @@ func (s *fakeStore) evaluateStates(p parsedStatement) (driver.Rows, error) {
 		return projectNewestUID(p, rows)
 	case fakeSpanColumns:
 		return projectSpans(p, rows)
+	case fakeOwnershipColumns:
+		return projectOwnership(p, rows)
 	case fakeClusterIDColumn:
 		return projectClusterIDs(p, clusterIDsOf(rows))
 	}
@@ -437,6 +456,10 @@ func stateMatcher(predicate string, cursor *argCursor) (func(stateRow) bool, err
 		return equalsColumn(cursor, func(r stateRow) string { return r.uid })
 	case fakeEventGroups:
 		return func(r stateRow) bool { return r.apiGroup == "" || r.apiGroup == "events.k8s.io" }, nil
+	case fakeNotEvents:
+		return func(r stateRow) bool {
+			return r.kind != "Event" || (r.apiGroup != "" && r.apiGroup != "events.k8s.io")
+		}, nil
 	case "ts >= ?":
 		bound, err := cursor.instant()
 		if err != nil {
@@ -473,8 +496,126 @@ func stateMatcher(predicate string, cursor *argCursor) (func(stateRow) bool, err
 		}
 		return func(r stateRow) bool { return eventSubject(r.data, field) == want }, nil
 	}
+	if strings.HasPrefix(predicate, "((") && strings.HasSuffix(predicate, "))") {
+		return subjectAlternativesMatcher(predicate, cursor)
+	}
 	return nil, fmt.Errorf("stand-in: no predicate of a %s read is spelled %q, so this harness cannot "+
 		"evaluate what the backend asked for", tableResourceStates, predicate)
+}
+
+// subjectAlternativesMatcher evaluates the disjunction a --owned timeline's Event
+// read carries: the object's own subject clause, then one per descendant.
+//
+// It takes the predicate apart rather than pattern-matching the whole string,
+// because the whole string is a function of how many descendants the walk found and
+// a stand-in that only recognised a two-subject form would silently stop covering
+// the three-subject one. What it insists on is the *shape*: parenthesised
+// alternatives, each a conjunction of subject-field comparisons it already knows,
+// with the arguments consumed strictly left to right. A builder that bound a
+// namespace where a name belonged would satisfy the shape and fail the property.
+func subjectAlternativesMatcher(predicate string, cursor *argCursor) (func(stateRow) bool, error) {
+	inner := strings.TrimSuffix(strings.TrimPrefix(predicate, "("), ")")
+	var tests []func(stateRow) bool
+
+	for alternative := range strings.SplitSeq(inner, " OR ") {
+		if !strings.HasPrefix(alternative, "(") || !strings.HasSuffix(alternative, ")") {
+			return nil, fmt.Errorf("stand-in: %q is not a parenthesised subject alternative", alternative)
+		}
+		var clauses []func(stateRow) bool
+		for clause := range strings.SplitSeq(
+			strings.TrimSuffix(strings.TrimPrefix(alternative, "("), ")"), " AND ") {
+			field, ok := subjectFieldOf(clause)
+			if !ok {
+				return nil, fmt.Errorf(
+					"stand-in: %q is not a subject comparison this harness can evaluate", clause)
+			}
+			want, err := cursor.str()
+			if err != nil {
+				return nil, err
+			}
+			clauses = append(clauses, func(r stateRow) bool { return eventSubject(r.data, field) == want })
+		}
+		tests = append(tests, func(r stateRow) bool {
+			return !slices.ContainsFunc(clauses, func(c func(stateRow) bool) bool { return !c(r) })
+		})
+	}
+	return func(r stateRow) bool {
+		return slices.ContainsFunc(tests, func(t func(stateRow) bool) bool { return t(r) })
+	}, nil
+}
+
+// subjectFieldOf names the subject field one comparison is about, or refuses it.
+func subjectFieldOf(clause string) (string, bool) {
+	for _, field := range subjectFields {
+		if clause == fakeSubjectMatch(field) {
+			return field, true
+		}
+	}
+	return "", false
+}
+
+// projectOwnership answers the ownership read: one row per (identity, incarnation),
+// with the count of data-bearing rows and the newest one's ownerReferences.
+func projectOwnership(p parsedStatement, rows []stateRow) (driver.Rows, error) {
+	wanted := []string{
+		"GROUP BY api_group, kind, namespace, name, uid",
+		"ORDER BY api_group, kind, namespace, name, uid",
+	}
+	if !slices.Equal(p.tail, wanted) {
+		return nil, fmt.Errorf("stand-in: an ownership read must be %q, not %q", wanted, p.tail)
+	}
+
+	type group struct {
+		row    stateRow
+		states int
+		newest time.Time
+		owners string
+	}
+	order := make([]string, 0, len(rows))
+	groups := map[string]*group{}
+	for _, r := range rows {
+		key := strings.Join([]string{r.apiGroup, r.kind, r.namespace, r.name, r.uid}, "\x00")
+		g, seen := groups[key]
+		if !seen {
+			g = &group{row: r}
+			groups[key] = g
+			order = append(order, key)
+		}
+		if r.data == "" {
+			continue
+		}
+		g.states++
+		if !g.newest.IsZero() && !r.ts.After(g.newest) {
+			continue
+		}
+		g.newest = r.ts
+		g.owners = ownerReferencesJSON(r.data)
+	}
+
+	slices.Sort(order)
+	out := make([][]any, 0, len(order))
+	for _, key := range order {
+		g := groups[key]
+		out = append(out, []any{
+			g.row.apiGroup, g.row.kind, g.row.namespace, g.row.name, g.row.uid,
+			uint64(g.states), g.owners,
+		})
+	}
+	return newFakeRows(out, nil), nil
+}
+
+// ownerReferencesJSON is JSONExtractRaw(data, 'metadata', 'ownerReferences'):
+// the array as written, or the empty string when the document has none.
+func ownerReferencesJSON(data string) string {
+	var doc struct {
+		Metadata struct {
+			OwnerReferences json.RawMessage `json:"ownerReferences"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(data), &doc); err != nil {
+		return ""
+	}
+	return string(doc.Metadata.OwnerReferences)
 }
 
 // equalsColumn is the common case: a column compared against a bound string.

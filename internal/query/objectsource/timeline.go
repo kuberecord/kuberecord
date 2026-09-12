@@ -54,6 +54,17 @@ type incarnationMark struct {
 type correlatedEvent struct {
 	change     query.Change
 	subjectUID string
+
+	// root reports that the Event named the object the timeline is about, rather
+	// than one of the descendants an ownership walk added
+	// (query.TimelineQuery.Subjects).
+	//
+	// It exists because the incarnation pin applies to one of those and not to the
+	// other. A caller who pinned a UID pinned the object they asked about; a
+	// dependent does not share its owner's UID, so applying the pin to the whole
+	// merged stream would correlate the root's Events and silently drop every other
+	// object's — the tree rendered as a single object, with nothing saying so.
+	root bool
 }
 
 // timelineAccumulator is what one object contributed to a scan. One per object,
@@ -100,6 +111,13 @@ type recordScan struct {
 
 	// events asks for Kubernetes Events naming the object to be collected too.
 	events bool
+
+	// subjects are the additional objects whose Events are wanted, which an
+	// ownership walk found (query.TimelineQuery.Subjects). They widen the
+	// commentary and nothing else: their own state lines are not retained, because
+	// a change carries no identity and a merged multi-object state stream could not
+	// be attributed row by row.
+	subjects []query.ObjectRef
 }
 
 // decode reads one object and accumulates what it holds for this scan.
@@ -123,7 +141,8 @@ func (s recordScan) decode(acc *timelineAccumulator, body io.Reader) error {
 			acc.changes = append(acc.changes, change)
 		case s.events && line.ClusterID == s.ref.ClusterID && line.isEvent():
 			subject := line.subject()
-			if !subject.namesTarget(s.ref) {
+			root := subject.namesTarget(s.ref)
+			if !root && !s.namesSubject(subject) {
 				return nil
 			}
 			change := line.change()
@@ -133,10 +152,22 @@ func (s recordScan) decode(acc *timelineAccumulator, body io.Reader) error {
 			// tell a row *about* the object from a row about something that happened
 			// to it.
 			change.EventType = query.EventKubernetes
-			acc.events = append(acc.events, correlatedEvent{change: change, subjectUID: subject.UID})
+			acc.events = append(acc.events,
+				correlatedEvent{change: change, subjectUID: subject.UID, root: root})
 		}
 		return nil
 	})
+}
+
+// namesSubject reports whether an Event's subject is one of the objects an
+// ownership walk added.
+//
+// The comparison is namesTarget's — (kind, namespace, name) read out of the Event's
+// own payload — and deliberately not the uid. A subject arrived from a walk that
+// had already resolved its incarnation, and the forgiving key is the right one for
+// a dependent recreated under the same name inside the window.
+func (s recordScan) namesSubject(subject eventSubject) bool {
+	return slices.ContainsFunc(s.subjects, subject.namesTarget)
 }
 
 // inWindow reports whether an instant falls in the scan's window, inclusive. A zero
@@ -284,6 +315,7 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 func timelineScan(q query.TimelineQuery) recordScan {
 	return recordScan{
 		ref: q.Ref, from: q.From, to: q.To, retain: !q.EventsOnly, events: q.IncludeEvents,
+		subjects: q.Subjects,
 		keep: func(c query.Change) bool {
 			return query.MatchesActors(c, q.Actors, q.ExcludeActors) &&
 				query.MatchesFieldPaths(c, q.FieldPaths)
@@ -475,7 +507,8 @@ func (e *Engine) answerIsSettled(q query.TimelineQuery, steps []timelineWalkStep
 		for _, event := range steps[i].acc.events {
 			// The same narrowing mergeCommentary performs: commentary is pinned to the
 			// resolved incarnation, and left alone when the timeline spans every one.
-			if (uid == "" || event.subjectUID == uid) && !event.change.TS.Before(ceiling) {
+			if (uid == "" || !event.root || event.subjectUID == uid) &&
+				!event.change.TS.Before(ceiling) {
 				rows++
 			}
 		}
@@ -551,6 +584,11 @@ func resolveIncarnation(q query.TimelineQuery, marks []incarnationMark) (uid str
 // which is right to add precisely when the caller has already said which
 // incarnation they mean.
 //
+// The narrowing reaches the *object's own* commentary and not the commentary about
+// the descendants an ownership walk added. A dependent does not share its owner's
+// UID, so a pin applied to the whole stream would empty the tree half of every
+// pinned --owned timeline — see correlatedEvent.root.
+//
 // The actor predicates deliberately did not reach here. An Event's actors are the
 // field managers of the Event object — the controller that wrote it, never whoever
 // changed the object it is about — so filtering commentary by them would empty the
@@ -565,7 +603,7 @@ func resolveIncarnation(q query.TimelineQuery, marks []incarnationMark) (uid str
 func mergeCommentary(changes []query.Change, events []correlatedEvent, uid string) []query.Change {
 	commentary := make([]query.Change, 0, len(events))
 	for _, event := range events {
-		if uid != "" && event.subjectUID != uid {
+		if uid != "" && event.root && event.subjectUID != uid {
 			continue
 		}
 		commentary = append(commentary, event.change)

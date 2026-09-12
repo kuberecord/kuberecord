@@ -491,7 +491,7 @@ func explainNoEvents(
 	request TimelineRequest, from, to time.Time, coverage coverageAnswer, readErr error,
 	zone render.Zone,
 ) render.Notice {
-	object := describeObject(request.Ref)
+	object := describeEventTarget(request)
 	window := options.DescribeWindow(from, to, zone)
 	// The flag the reader typed, not the one this function was written for. Both ask
 	// the same question and only one of them was passed, and a notice naming the
@@ -531,6 +531,31 @@ func explainNoEvents(
 		"%s found no Events for %s in %s. Events were confirmed recorded over %s, so "+
 			"nothing was said about it while that scope was open",
 		flag, object, window, describeInterval(coverage.Intervals[0], zone))}
+}
+
+// describeEventTarget names what the Event question was asked about.
+//
+// Ordinarily the object, and under --owned the object *and* the tree beneath it —
+// because that is what was searched. A sentence reading "no Events for
+// payments/checkout" beneath a walk that correlated nine Pods as well would be a
+// claim narrower than the measurement behind it, which is D41 read the other way
+// round: the notice must not understate what it looked at any more than it may
+// overstate it. A reader who saw the narrow wording would go and look for the Pods'
+// Events by hand.
+func describeEventTarget(request TimelineRequest) string {
+	object := describeObject(request.Ref)
+	if len(request.Subjects) == 0 {
+		return object
+	}
+	return fmt.Sprintf("%s or the %s it owns", object, countOwnedObjects(len(request.Subjects)))
+}
+
+// countOwnedObjects renders a descendant count with the right number on the noun.
+func countOwnedObjects(n int) string {
+	if n == 1 {
+		return "1 object"
+	}
+	return fmt.Sprintf("%d objects", n)
 }
 
 // Invariant 9 applied to a predicate, and D31's fourth instance.

@@ -52,6 +52,15 @@ import (
 // row with no patch survives a field-path filter by the same rule that keeps a
 // first sighting in one.
 //
+// # Why the subjects are here and the object's own changes are not
+//
+// TimelineQuery.Subjects widens *this* half and only this half. An Event names its
+// subject in its own row, so a merged Event row says which object it is about; a
+// change row carries no identity at all, and merging several objects' state would
+// produce patches nothing could attribute. So the tree an ownership walk found
+// reaches the statement below, and the state read one statement up is still about
+// one object.
+//
 // # Why the changes side may be exhausted before it starts
 //
 // The object's own history and the Events about it are independent queries and
@@ -67,7 +76,7 @@ func (e *Engine) mergeEvents(
 	// forgiving key, (kind, namespace, name), which is the right one for a question
 	// that spans a delete-and-recreate and the only one available for a subject with
 	// no incarnation to pin.
-	stmt := eventsStatement(q.Ref, q.From, q.To, uid, q.Reverse)
+	stmt := eventsStatement(q.Ref, q.From, q.To, uid, q.Subjects, q.Reverse)
 	rows, err := e.conn.Query(ctx, stmt.SQL, stmt.Args...)
 	if err != nil {
 		if closeErr := changes.Close(); closeErr != nil {
