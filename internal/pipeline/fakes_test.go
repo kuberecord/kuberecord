@@ -209,6 +209,11 @@ type fakeWriter struct {
 	// pure diff stream, and one that does states its own cadence explicitly
 	// rather than inheriting a number from the harness.
 	checkpointEvery int
+	// coalesceWindow makes this writer a CoalescePolicy. It starts at 0 —
+	// coalescing off — for the same reason checkpointEvery does: a test that says
+	// nothing about Event volume gets a row per bump, which is what every test
+	// written before Phase 20 assumed.
+	coalesceWindow time.Duration
 	// notify fans out accepted records so a test can wait for one instead of
 	// polling. It is buffered generously and never blocks Enqueue.
 	notify chan sink.Record
@@ -240,6 +245,23 @@ func (w *fakeWriter) setCheckpointEvery(n int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.checkpointEvery = n
+}
+
+// CoalesceWindow implements CoalescePolicy, so the fake sink declares its Event
+// count-bump window through the same per-work-item writer lookup the real sinks
+// do rather than through a back door into the pipeline.
+func (w *fakeWriter) CoalesceWindow() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.coalesceWindow
+}
+
+// setCoalesceWindow declares this sink's Event coalescing window; 0 records every
+// count bump.
+func (w *fakeWriter) setCoalesceWindow(d time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.coalesceWindow = d
 }
 
 func (w *fakeWriter) Enqueue(_ context.Context, job sink.Job) error {

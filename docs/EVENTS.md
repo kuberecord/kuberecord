@@ -24,6 +24,10 @@ untrue.
 
 - **Every row carries the whole Event, never a diff**, so a `count` bump is
   readable on its own. `Checkpoint` rows never appear for Events.
+- **`count` is cumulative, and the number of rows is not a frequency.** A row says
+  how often the Event had fired by that instant, not how often it fired since the
+  previous row — the two differ because rows are coalesced
+  ([below](#bounding-it-coalescewindow)).
 - **An Event's expiry is recorded as nothing at all** — no `Deleted` row, ever,
   not for its ~1h TTL, not for a `kubectl delete event`. An Event's history
   simply stops, so "no deletion" must not be read as "still live" the way it can
@@ -181,7 +185,9 @@ namespaces.
 
 Everything above is about **which Event streams are kept**. This is about how
 many rows each one produces, and the two are different axes: **no filter on this
-page bounds this.**
+page bounds this.** What does is a knob on the sink rather than on the rule, and
+it is [below](#bounding-it-coalescewindow) — after the thing it exists for, so
+that it is not read as the answer to relevance.
 
 **A `count` bump writes a whole row.** When the same thing happens again the API
 server does not create a second Event — it **updates the existing one in place**,
@@ -210,9 +216,76 @@ sounds, because they run opposite to intuition:
 So `types: [Warning]` drops most rows in a healthy cluster and almost none in an
 unhealthy one. It narrows a stream to what an operator wants to read — which is
 worth having — and it does not bound what that stream costs when the cluster is
-on fire. **No mechanism in this release bounds the recurrence itself**; what
-bounds it today is the scope you chose and the retention you set, which is what
-the next section is for.
+on fire. **What bounds the recurrence is a knob on the sink**, not on the rule.
+
+### Bounding it: `coalesceWindow`
+
+`spec.writer.coalesceWindow` is how long a sink suppresses an Event whose **only**
+change since the last row it recorded is that it happened again. It is on
+`ClickHouseSink` and `S3Sink` alike, defaults to `1m`, and accepts `0s` or a
+duration between `1s` and `30m` ([`docs/CRDS.md`](CRDS.md)).
+
+Within the window a bump writes nothing, so a crash-looping pod costs rows
+proportional to **how long it lasted** rather than to how often `kubelet` restated
+it. The hundred rows of the section above become a handful, and the handful still
+says what fired, when it started, what it said and how many times: `count` is
+cumulative, so the rows that survive carry every occurrence the suppressed ones
+would have restated ([`docs/SCHEMA.md`](SCHEMA.md#rows-and-occurrences)).
+
+**Only a restatement is ever suppressed.** The comparison is by exclusion — every
+field the Event carries is compared *except* the ones a bump rewrites — so all of
+these write immediately, whatever the window says:
+
+| Still written at once | Why |
+|---|---|
+| A changed `message`, `reason`, `type` or subject | A different fact, not the same one again. |
+| The Event's first sighting | Nothing has been recorded to compare it against, which is what makes "when it started" exact under every window. |
+| A new Event object under an old name | The UID is inside the comparison. |
+| A field a future Kubernetes version adds | Unrecognised means compared, so a new signal is never silently dropped. |
+| The first Event after an operator restart | The state is in memory and is not meant to survive; the operator cannot know what it did not record. |
+
+**What you trade is the instant of each intermediate bump** — and only that. "It
+bumped at 14:04:02, then 14:04:33, then 14:05:11" is what a window costs you. What
+fired, when it started, what it said and how many times are all still on the page.
+The archive trails the live `count` by at most one window while a burst runs, and
+settles on the true figure within one window of the burst ending, because a
+suppressed bump schedules the Event to be looked at again when the window expires.
+
+**It is per sink, deliberately.** The trade is archive resolution against write
+volume, and that belongs to whoever owns the backend and pays for its storage — so
+in a tee ([`docs/TEE.md`](TEE.md)) the hot ClickHouse tier and the cold archive can
+run different windows off one watch, which is usually what you want.
+
+### Choosing a window
+
+| Window | What a steadily bursting Event costs | Choose it when |
+|---|---|---|
+| `0s` | One row per bump — the full amplifier. | You need every re-emission's own timestamp: a forensic requirement, or an investigation into emission timing itself. Nothing else recovers it, so this is the one choice that cannot be made retroactively. |
+| `1m` *(default)* | At most one row per minute, per Event. | You have no specific reason to choose otherwise. Kubernetes' own re-emission intervals back off to minutes, so a burst still renders as a series of rows rather than collapsing to a single point. |
+| `5m` | At most one row per five minutes. | A cluster-wide Event rule, or a namespace with routinely unhealthy workloads. `kubelet`'s `BackOff` back-off tops out at about five minutes, so a steady crash-loop collapses to roughly one row per re-emission cycle. |
+| `15m`–`30m` | A handful of rows an hour, per Event. | An archive tier kept for the record rather than for the resolution — an `S3Sink` under a long retention, where `count` on a sparse row answers the compliance question and the shape of the burst does not. |
+
+Three bounds explain themselves once you know where they come from:
+
+- **The floor is `1s`**, because a window below it is indistinguishable from `0s`
+  while looking as though it is on.
+- **The ceiling is `30m`**, because looking at a suppressed Event again means
+  reading it from the watch cache, and an Event's default TTL is about an hour — a
+  window approaching that would race the expiry that removes the very object the
+  final `count` has to be read from.
+- **`0s` is spelled out rather than implied by omission.** An operator who wants
+  every bump recorded has to be able to say so, and the default being on means
+  saying nothing is a decision too.
+
+A window costs nothing on a cluster that is not bursting: the skip only ever fires
+on a pure restatement, so a namespace whose Events each happen once writes exactly
+the rows it wrote before. How much it is absorbing where it does fire is
+`kuberecord_pipeline_event_coalesce_skips_total`, read against the write counters
+([`docs/OPERATING.md`](OPERATING.md)).
+
+**It does not replace the scope or the retention.** Three different bounds, in
+series: the scope decides which Event streams exist at all, the window decides how
+many rows each one writes, and the retention decides how long those rows are kept.
 
 ## Sizing an Event rule
 
@@ -231,7 +304,12 @@ In descending order of how much they buy:
    the unfiltered rule at the API server as well as in storage. Size the rule as
    though it were not there: it changes which streams are kept, not how deep each
    one goes.
-4. **Treat a cluster-wide Event rule as a decision.** It is defensible — an Event
+4. **Set the sink's `coalesceWindow` for depth.** This is the knob that changes
+   the arithmetic rather than the selection, and it is the reason a cluster-wide
+   Event rule is now a defensible production configuration rather than a bet on
+   the cluster staying healthy. It lives on the sink because it trades archive
+   resolution for write volume; [choosing one](#choosing-a-window) is above.
+5. **Treat a cluster-wide Event rule as a decision.** It is defensible — an Event
    stream nobody scoped is also one nobody has to remember to widen — but take it
    having looked at two numbers first: the retention TTL on `resource_states`
    ([Suggested TTL](SCHEMA.md#suggested-ttl-optional-non-mandatory) and
@@ -262,6 +340,16 @@ That is why an object nobody ever watched can still have Events.
 |---|---|
 | [`timeline --with-events`](CLI.md#--with-events-that-finds-no-events) | Interleaves the Events recorded about the object with the object's own changes, in one table, oldest first. The reading you usually want, since the point is which change an Event followed. |
 | [`timeline --events-only`](CLI.md#--events-only) | The Events and none of the object's own changes. It **implies** `--with-events`. |
+
+**An Event that has fired more than once shows its count**, beside the reason:
+
+```
+2026-08-28 14:07:03.771Z  Event  kubelet  ⚠ BackOff ×50: Back-off restarting failed container …
+```
+
+That number is cumulative and is the only place the frequency survives, since the
+rows between it and the previous one were coalesced. Do not count rows: a row is a
+state, not an occurrence ([`docs/SCHEMA.md`](SCHEMA.md#rows-and-occurrences)).
 
 Two things about `--events-only` are worth knowing before you script against it:
 
@@ -310,7 +398,8 @@ own decision.
 
 ## See also
 
-- [CRDS.md](CRDS.md) — the full `StreamRule` and `ClusterStreamRule` reference.
+- [CRDS.md](CRDS.md) — the full `StreamRule` and `ClusterStreamRule` reference,
+  and `spec.writer.coalesceWindow` on both sink kinds.
 - [SCHEMA.md](SCHEMA.md#kubernetes-events) — the frozen row schema, and what an
   Event row holds.
 - [CLI.md](CLI.md#timeline) — the `timeline` reference in full.

@@ -114,6 +114,36 @@ func TestClickHouseSinkValidation(t *testing.T) {
 			obj:  sinkWithWriter(WriterSpec{CheckpointEvery: ptrTo(int32(10000))}),
 		},
 		{
+			// 0s is the opt-out — every Event count bump recorded — so it is
+			// admitted rather than caught by the floor, exactly as checkpointEvery's
+			// zero is. A knob whose off position is unrepresentable is not a knob.
+			name: "coalescewindow-zero-is-accepted-as-the-off-switch",
+			obj:  sinkWithWriter(WriterSpec{CoalesceWindow: durationPtr("0s")}),
+		},
+		{
+			// The floor is an honesty bound: a window below it suppresses nothing
+			// while looking as though coalescing were on.
+			name:    "coalescewindow-below-the-floor-is-rejected",
+			obj:     sinkWithWriter(WriterSpec{CoalesceWindow: durationPtr("500ms")}),
+			wantErr: "coalesceWindow must be 0s",
+		},
+		{
+			// The ceiling is a correctness bound: the flush that records an Event's
+			// final count re-reads it from the watch cache, and an Event's default
+			// TTL is about an hour.
+			name:    "coalescewindow-above-the-ceiling-is-rejected",
+			obj:     sinkWithWriter(WriterSpec{CoalesceWindow: durationPtr("31m")}),
+			wantErr: "coalesceWindow must be 0s",
+		},
+		{
+			name: "coalescewindow-at-the-floor-is-accepted",
+			obj:  sinkWithWriter(WriterSpec{CoalesceWindow: durationPtr("1s")}),
+		},
+		{
+			name: "coalescewindow-at-the-ceiling-is-accepted",
+			obj:  sinkWithWriter(WriterSpec{CoalesceWindow: durationPtr("30m")}),
+		},
+		{
 			name:    "workers-above-range-is-rejected",
 			obj:     sinkWithWriter(WriterSpec{Workers: ptrTo(int32(65))}),
 			wantErr: "should be less than or equal to 64",
@@ -218,6 +248,7 @@ func TestClickHouseSinkDefaults(t *testing.T) {
 		{field: "spec.writer.enqueueTimeout", got: durationString(got.Spec.Writer.EnqueueTimeout), want: "2s"},
 		{field: "spec.writer.drainTimeout", got: durationString(got.Spec.Writer.DrainTimeout), want: "15s"},
 		{field: "spec.writer.checkpointEvery", got: int32String(got.Spec.Writer.CheckpointEvery), want: "50"},
+		{field: "spec.writer.coalesceWindow", got: durationString(got.Spec.Writer.CoalesceWindow), want: "1m0s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {

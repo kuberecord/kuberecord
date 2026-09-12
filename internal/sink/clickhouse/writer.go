@@ -71,6 +71,19 @@ const (
 	// zero is therefore *meaningful* here and is never clamped to this default —
 	// only a negative value is.
 	DefaultCheckpointEvery = 50
+	// DefaultCoalesceWindow is how long a Kubernetes Event whose only change is a
+	// `count` bump is suppressed before the next row for it is written. The API
+	// server updates an Event in place to say "this happened again", so every bump
+	// changes the content, hash dedup cannot suppress it, and each one costs a
+	// full-state row — a crash-looping pod writes one complete Event JSON per
+	// re-emission (see internal/pipeline/coalesce.go).
+	//
+	// One minute bounds a bursting Event to 60 rows an hour however hard it
+	// bursts, while keeping the archive within a minute of the live `count`, which
+	// is what somebody reading a timeline during an incident needs. Zero disables
+	// coalescing; like DefaultCheckpointEvery, zero is therefore *meaningful* here
+	// and is never clamped to this default — only a negative value is.
+	DefaultCoalesceWindow = 1 * time.Minute
 )
 
 const (
@@ -151,6 +164,16 @@ type Config struct {
 	// explicit, since cmd/main.go resolves the optional CR field before building
 	// this struct.
 	CheckpointEvery int
+
+	// CoalesceWindow is how long this sink suppresses a Kubernetes Event whose
+	// only change since the last recorded row is its `count` and its timestamps,
+	// bounding the Event volume amplifier. Sourced from the sink's own
+	// spec.writer.coalesceWindow, which the CRD defaults to DefaultCoalesceWindow.
+	//
+	// Zero is meaningful — it records every bump, the behaviour before this field
+	// existed — so it is deliberately *not* treated as "unset" the way the timeout
+	// knobs above are; only a negative value falls back to the default.
+	CoalesceWindow time.Duration
 }
 
 // Metrics is the narrow slice of pipeline metrics CHWriter records. It is an
@@ -253,6 +276,13 @@ type CHWriter struct {
 	// of a running one, which is what keeps this lock-free on the hot path.
 	checkpointEvery int
 
+	// coalesceWindow is this sink's Event count-bump window, read by the pipeline
+	// through the CoalesceWindow method below (it implements
+	// pipeline.CoalescePolicy). It is installed, overwritten, written once and
+	// read lock-free exactly as checkpointEvery above is, and for the same
+	// reasons.
+	coalesceWindow time.Duration
+
 	// maxIsolationPhase caps the whole per-row poison-isolation phase of one
 	// flushBatch (all rows, not each row), so a hung backend cannot pin a worker
 	// for insertTimeout × batchMaxRows. It is not a NewCHWriter parameter (the
@@ -332,6 +362,7 @@ func NewCHWriter(conn driver.Conn, queueSize, workers, batchMaxRows int, insertT
 		maxRetryBackoff:      maxRetryBackoff,
 		shutdownDrainTimeout: shutdownDrainTimeout,
 		checkpointEvery:      DefaultCheckpointEvery,
+		coalesceWindow:       DefaultCoalesceWindow,
 		maxIsolationPhase:    defaultMaxIsolationPhase,
 		drainCtx:             context.Background(),
 		metrics:              metrics,
@@ -368,6 +399,11 @@ func Open(cfg Config, metrics Metrics) (*CHWriter, error) {
 		// value (which no CRD-validated spec can produce) keeps the default.
 		w.checkpointEvery = cfg.CheckpointEvery
 	}
+	if cfg.CoalesceWindow >= 0 {
+		// And zero as "record every Event count bump", for the same reason: an
+		// operator who wants every bump must be able to say so.
+		w.coalesceWindow = cfg.CoalesceWindow
+	}
 	return w, nil
 }
 
@@ -380,6 +416,16 @@ func Open(cfg Config, metrics Metrics) (*CHWriter, error) {
 // carries full state is a property of the record, and this writer only ever
 // inserts the row it is handed.
 func (w *CHWriter) CheckpointEvery() int { return w.checkpointEvery }
+
+// CoalesceWindow implements pipeline.CoalescePolicy: how long this sink suppresses
+// a Kubernetes Event whose only change is a `count` bump, or 0 when the sink's
+// owner wants every bump recorded.
+//
+// Like CheckpointEvery it is a policy read and not a write-path decision: the
+// pipeline consults it while deciding whether a row exists at all, because
+// suppressing a redundant row is a property of the stream rather than of the
+// insert, and this writer only ever inserts the row it is handed.
+func (w *CHWriter) CoalesceWindow() time.Duration { return w.coalesceWindow }
 
 // startAutoCreate applies the shipped DDL in the background, when this writer
 // was opened with AutoCreateSchema.

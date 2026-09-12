@@ -63,6 +63,16 @@ type normalizedObject struct {
 	// informer transform's annotation (or harvested directly from managedFields
 	// when no transform ran). Never nil.
 	Actors []string
+	// normalized is the map JSON was marshalled from: stripped, redacted, and
+	// aliasing the caller's object for everything it did not have to copy (see
+	// stripVolatileFields). It is carried so the Event coalescing projection can
+	// be taken from the very content the row would have held, without a second
+	// pass over the object or a re-parse of JSON.
+	//
+	// It must not be mutated or retained past the Process call that produced it,
+	// for the reason stripVolatileFields states: the values under it belong to the
+	// informer's shared cache.
+	normalized map[string]any
 }
 
 // normalizeObject strips the volatile and operator-internal fields from obj,
@@ -131,7 +141,8 @@ func normalizeObject(obj *unstructured.Unstructured, policy *RedactionPolicy) (n
 		out.Actors = ExtractActors(obj)
 	}
 
-	objJSON, err := json.Marshal(policy.Apply(stripVolatileFields(obj.Object, hasActorsAnnotation)))
+	normalized := policy.Apply(stripVolatileFields(obj.Object, hasActorsAnnotation))
+	objJSON, err := json.Marshal(normalized)
 	if err != nil {
 		return normalizedObject{}, err
 	}
@@ -139,6 +150,7 @@ func normalizeObject(obj *unstructured.Unstructured, policy *RedactionPolicy) (n
 
 	out.JSON = objJSON
 	out.Hash = hex.EncodeToString(hashBytes[:])
+	out.normalized = normalized
 	return out, nil
 }
 
@@ -555,6 +567,34 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 	// is resolved once because three separate branches below consult it.
 	ephemeral := key.ephemeral()
 
+	// coalesceWindow is how long this sink suppresses a pure `count` bump, and
+	// coalesceHash is this state of the Event with the bump fields taken out — the
+	// two halves of the Event volume answer (see coalesce.go). Both are resolved
+	// here, once, because the decision is taken in the dedup block below while the
+	// row that settles it is remembered in the commit callback at the bottom.
+	//
+	// Nothing is computed at all unless the key is an Event *and* the sink asked
+	// for coalescing, so a cluster streaming no Events, or a sink that set 0s,
+	// pays nothing for this.
+	var coalesceWindow time.Duration
+	var coalesceHash string
+	if ephemeral {
+		if coalesceWindow = coalesceWindowFor(writer); coalesceWindow > 0 {
+			projected, projectErr := eventCoalesceHash(norm.normalized)
+			if projectErr != nil {
+				// Unreachable in practice — the projection is a subset of a map that
+				// json.Marshal has just succeeded on — but degrading beats retrying
+				// (Invariant 5). Disabling coalescing for this one row writes it and
+				// remembers nothing, so the stream is larger than it needed to be and
+				// identical in content. Failing the item instead would re-queue a work
+				// item whose only problem is a row it could have written.
+				log.Error(projectErr, "⚠️ Could not project this Event for count-bump coalescing, recording it in full")
+				coalesceWindow = 0
+			}
+			coalesceHash = projected
+		}
+	}
+
 	var eventType = "Added"
 	var diffString = ""
 
@@ -614,7 +654,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				// Deleted rows carry empty data/diff/sha256 in schema v1 —
 				// event_type alone marks the deletion (see docs/SCHEMA.md).
 				closeRecord := sink.Record{
-					Timestamp:  time.Now().UTC(),
+					Timestamp:  p.now().UTC(),
 					ClusterID:  p.clusterID,
 					EventType:  "Deleted",
 					APIGroup:   key.Group,
@@ -648,6 +688,23 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 			if cachedEntry.Hash == norm.Hash {
 				p.metrics.dedupSkips.Inc()
 				return nil // Duplicate
+			}
+
+			// The same Event, having happened again and nothing more. Hash dedup
+			// cannot suppress it — `count` really did change — so this is where the
+			// Event volume amplifier is bounded instead (see coalesce.go).
+			//
+			// It is decided *before* Reserve, which is the whole of Invariant 3's
+			// share of this feature: a skip takes no version, leaves no pending
+			// entry, and issues no job, so there is nothing for a commit to belong
+			// to and the version gating below is untouched. The key comes back when
+			// the window expires, and reads the Event's `count` as it stands then.
+			if flushAfter, skip := st.coalesce.decide(objectKey, coalesceHash, coalesceWindow, p.now()); skip {
+				p.metrics.eventCoalesceSkips.Inc()
+				p.requeueAfter(key, flushAfter)
+				log.V(1).Info("🧮 Coalescing an Event count bump into the last recorded row",
+					"flush_after", flushAfter.String(), "window", coalesceWindow.String())
+				return nil
 			}
 
 			// switchToFullState is the shared fallback for every case where a
@@ -839,6 +896,12 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 		dataString = string(norm.JSON)
 	}
 
+	// stampedAt is this row's instant, read once. It is the row's ts *and* the
+	// instant the coalescer measures its window from, and those two must be the
+	// same reading: a window measured from a different clock than the row it
+	// follows would drift against the archive it is bounding.
+	stampedAt := p.now().UTC()
+
 	record := sink.Record{
 		// Timestamp is stamped exactly once here, at processing time, and is never
 		// re-stamped on retry: insertArgs renders it into the positional args
@@ -846,7 +909,7 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 		// the identical ts. That immutability is precisely what makes a
 		// re-inserted row byte-identical and lets resource_states
 		// (ReplacingMergeTree) collapse it on merge — see docs/SCHEMA.md.
-		Timestamp:       time.Now().UTC(),
+		Timestamp:       stampedAt,
 		ClusterID:       p.clusterID,
 		EventType:       eventType,
 		APIGroup:        key.Group,
@@ -872,6 +935,13 @@ func (p *Pipeline) processUpsert(ctx context.Context, log logr.Logger, key Key, 
 				// pending marker into a confirmed cache entry, unless a
 				// newer write has already superseded this one.
 				st.cache.CommitIfCurrent(objectKey, version, confirmedEntry)
+				// And only now is there a *recorded* row for a later bump to be
+				// compared against. Remembering it here rather than at enqueue is
+				// what keeps a failed write recoverable: the revert below leaves no
+				// entry, so the re-queued key writes instead of coalescing away a
+				// change the sink never took. A non-Event, or a sink with
+				// coalescing off, remembers nothing (see coalescer.remember).
+				st.coalesce.remember(objectKey, coalesceHash, stampedAt, coalesceWindow)
 				return
 			}
 			log.Error(errAsyncWriteFailed, "Write failed after retries, reverting cache and re-queueing the key")
@@ -947,7 +1017,7 @@ func (p *Pipeline) emitDelete(ctx context.Context, log logr.Logger, key Key, st 
 	// observed live state (see CacheEntry.APIVersion) because identity — and
 	// therefore the queue key — is version-agnostic.
 	record := sink.Record{
-		Timestamp:  time.Now().UTC(),
+		Timestamp:  p.now().UTC(),
 		ClusterID:  p.clusterID,
 		EventType:  "Deleted",
 		APIGroup:   key.Group,
@@ -1004,6 +1074,15 @@ func (p *Pipeline) emitDelete(ctx context.Context, log logr.Logger, key Key, st 
 // deletion is ever claimed for a write and no GC pass runs over an Events scope.
 func (p *Pipeline) forgetEphemeral(key Key, st *sinkState) {
 	objectKey := key.cacheKey()
+	// The coalescing entry goes unconditionally, ahead of the claim and
+	// independently of its outcome. It is not version-gated state — nothing
+	// in-flight can resurrect it, because a commit only ever *writes* an entry for
+	// the row it just settled — and an Event that has expired will never be
+	// compared against again under this name. Leaving them behind would be an
+	// unbounded leak on the highest-churn kind in a cluster, which is the same
+	// reason the cache entry below cannot stay either.
+	st.coalesce.forget(objectKey)
+
 	_, version, outcome := st.cache.ReserveDelete(objectKey, "")
 	if outcome != deleteClaimed {
 		return

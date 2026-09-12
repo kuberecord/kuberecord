@@ -194,7 +194,7 @@ type S3ObjectLockSpec struct {
 
 // S3WriterSpec sizes an S3Sink's asynchronous write path.
 //
-// It is deliberately a strict subset of ClickHouse's WriterSpec, and the three
+// It is deliberately a near-subset of ClickHouse's WriterSpec, and the three
 // absentees are not oversights:
 //
 //   - batchMaxRows and batchMaxWait have no meaning here, because for S3 the
@@ -210,7 +210,14 @@ type S3ObjectLockSpec struct {
 //     process is watching produces a Modified carrying a patch, identically to the
 //     ClickHouse side (docs/TEE.md); it is the *first* sighting that differs.
 //
-// What the four shared knobs mean is identical to their ClickHouse twins, down to
+// coalesceWindow is deliberately *not* a fourth absentee, and the reason is the
+// mirror image of checkpointEvery's. It governs how many rows a bursting Event
+// produces, and an archive tier is the backend that can least afford them: it
+// accumulates whole objects in memory before it writes any of them, so a crash
+// loop is paid for twice — once in maxObjectBytes and once in retained storage
+// nobody can DELETE out from under Object Lock.
+//
+// What the five shared knobs mean is identical to their ClickHouse twins, down to
 // the defaults, so an author who has tuned one sink has tuned both. That identity
 // is asserted against the generated schemas rather than left to review — see
 // TestSharedWriterKnobsAgreeAcrossSinks.
@@ -259,6 +266,53 @@ type S3WriterSpec struct {
 	// +optional
 	// +kubebuilder:default="15s"
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// CoalesceWindow is how long this sink suppresses a Kubernetes Event whose
+	// only change since the last recorded row is its `count` and its timestamps.
+	//
+	// It is the knob that bounds the Event volume amplifier. The API server bumps
+	// an Event's `count` in place when the same thing happens again, so the
+	// content genuinely changes, hash dedup cannot suppress it, and every bump
+	// writes a full-state row (see docs/SCHEMA.md's "Event volume"). A pod
+	// crash-looping for twenty minutes writes one complete Event JSON per
+	// re-emission. Within this window those rows collapse to one, and the rows
+	// that remain still say what fired, when it started and how many times —
+	// `count` is cumulative, so no occurrence is lost, only rows that restate it.
+	//
+	// **Only a bump is ever suppressed.** A changed `message`, `reason`, `type` or
+	// subject is a different fact and is written immediately whatever the window
+	// says, and so is any field a future Kubernetes version adds: the comparison
+	// is by exclusion, so an unrecognised field defaults to writing.
+	//
+	// The last bump of a burst is never lost. A suppressed bump schedules the
+	// Event to be reconsidered when the window expires, and that reconsideration
+	// writes the Event as it then stands — so the archive trails the live `count`
+	// by at most this long, and settles on the true one once the burst ends.
+	//
+	// `0s` disables coalescing entirely for this sink: every bump is recorded, as
+	// it was before this field existed. The floor of 1s is an honesty bound — a
+	// window below it is indistinguishable from `0s` while looking as though it is
+	// on — and the ceiling of 30m is a correctness one: the reconsideration reads
+	// the Event from the watch cache, and an Event's default TTL is about an hour,
+	// so a window approaching it would race the expiry that removes the very
+	// object the final `count` has to be read from.
+	//
+	// It is per-sink because it trades archive resolution for write volume, and
+	// that trade belongs to whoever owns the backend and pays for its storage.
+	// Coalescing state is in memory and does not survive a restart, so the first
+	// Event observed after one is written — correctly, since the operator cannot
+	// know what it did not record.
+	//
+	// The bound is one CEL rule rather than Minimum/Maximum for the reason
+	// S3RotationSpec.MaxObjectAge above records: a duration is a string in the schema,
+	// controller-gen refuses a Pattern on a metav1.Duration, and `duration()`
+	// errors on an unparseable string, which the API server reports as machinery
+	// failing rather than as the author's value being wrong. Putting the shape
+	// match first makes the rule total.
+	// +optional
+	// +kubebuilder:default="1m"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+(ns|us|ms|s|m|h))+$') && (duration(self) == duration('0s') || (duration(self) >= duration('1s') && duration(self) <= duration('30m')))",message="coalesceWindow must be 0s (record every count bump) or a duration between 1s and 30m, spelled without a fractional component (30s, 5m, 1h30m)"
+	CoalesceWindow *metav1.Duration `json:"coalesceWindow,omitempty"`
 }
 
 // S3WriterMemoryBudgetBytes is the ceiling S3SinkSpec's cross-field rule puts on

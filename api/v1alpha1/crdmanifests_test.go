@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -490,7 +491,9 @@ const (
 // write path has tuned the other's, and the fields that are missing are missing
 // for a stated reason rather than by oversight.
 var (
-	sharedWriterKnobs         = []string{"queueSize", "workers", "enqueueTimeout", "drainTimeout"}
+	sharedWriterKnobs = []string{
+		"queueSize", "workers", "enqueueTimeout", "drainTimeout", "coalesceWindow",
+	}
 	clickHouseOnlyWriterKnobs = []string{"batchMaxRows", "batchMaxWait", "checkpointEvery"}
 )
 
@@ -573,7 +576,7 @@ func TestS3SinkWorkerMemoryRuleIsGenerated(t *testing.T) {
 }
 
 // TestSharedWriterKnobsAgreeAcrossSinks pins the relationship between
-// ClickHouseSink's WriterSpec and S3Sink's S3WriterSpec: the four shared knobs
+// ClickHouseSink's WriterSpec and S3Sink's S3WriterSpec: the five shared knobs
 // validate and default identically, and the three ClickHouse-only ones exist
 // nowhere on the S3 side.
 //
@@ -594,6 +597,11 @@ func TestS3SinkWorkerMemoryRuleIsGenerated(t *testing.T) {
 // checkpointEvery would be a cadence over diffs a Writer-only sink never writes
 // — a knob that silently does nothing is worse than no knob, so their
 // absence is asserted rather than assumed.
+//
+// coalesceWindow is on the shared side for the mirror-image reason: it governs how
+// many rows a bursting Event produces, and the suppression happens in the pipeline
+// rather than in either backend, so a window that differed between the two sinks
+// would be two answers to one question about the same stream.
 func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 	chWriter := schemaNode(t, clickHouseSinkCRDFile,
 		crdSpecSchema(t, clickHouseSinkCRDFile), "properties", "writer", "properties")
@@ -602,7 +610,17 @@ func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 
 	// The keys the API server actually enforces. `description` is excluded by
 	// omission, not by oversight.
-	enforced := []string{"type", "format", "default", "minimum", "maximum"}
+	//
+	// x-kubernetes-validations is in the list because a duration knob carries its
+	// bound as a CEL rule rather than as minimum/maximum — controller-gen refuses a
+	// Pattern on a metav1.Duration, so coalesceWindow's range lives there and
+	// nowhere else. Leaving it out would let the two sinks accept different windows
+	// while this test reported them identical.
+	//
+	// Comparison is by reflect.DeepEqual rather than ==, and that is forced rather
+	// than stylistic: a validation list is a []any, which is not comparable, so ==
+	// would panic at the first duration knob instead of failing a drift check.
+	enforced := []string{"type", "format", "default", "minimum", "maximum", "x-kubernetes-validations"}
 
 	for _, knob := range sharedWriterKnobs {
 		t.Run(knob, func(t *testing.T) {
@@ -611,10 +629,10 @@ func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 			for _, key := range enforced {
 				chValue, onCH := ch[key]
 				s3Value, onS3 := s3[key]
-				if onCH != onS3 || chValue != s3Value {
+				if onCH != onS3 || !reflect.DeepEqual(chValue, s3Value) {
 					t.Errorf("spec.writer.%s disagrees on %q: ClickHouseSink has %v (present=%v), "+
 						"S3Sink has %v (present=%v).\n"+
-						"The four shared writer knobs are an API promise that tuning one sink tunes "+
+						"The five shared writer knobs are an API promise that tuning one sink tunes "+
 						"the other; they are separate Go types only so each can explain itself in its "+
 						"own backend's terms.",
 						knob, key, chValue, onCH, s3Value, onS3)

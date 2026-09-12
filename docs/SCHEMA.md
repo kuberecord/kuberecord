@@ -138,15 +138,22 @@ that `kind = 'Event'` in one of those two groups.
 
 An Event is append-only ephemera, not durable cluster state: the API server
 creates one, **updates it in place** to bump `count` when the same thing happens
-again, and lets it expire after roughly an hour. Three schema-visible
+again, and lets it expire after roughly an hour. Four schema-visible
 consequences follow.
 
 **Every Event row carries full `data`, and `diff` is always empty.** The
-interesting row is the Event as it stood when its count changed, and a reader
+interesting row is the Event as it stood when it was last recorded, and a reader
 should be able to take a `count`, a `message` or an `involvedObject` straight off
 it. Hash dedup still runs, so a resync that re-delivers an unchanged Event writes
 nothing. `Checkpoint` rows therefore never appear for Events — there is no
 diff-only run for one to interrupt.
+
+**A row is a state, not an occurrence.** One row says *this Event stood in this
+state at this instant, having fired `count` times since it first appeared*.
+`count` is cumulative rather than per-row, so how often something happened is in
+that number and never in how many rows the query returned — see [Rows and
+occurrences](#rows-and-occurrences), which is the one property of this kind a
+reader is most likely to get wrong.
 
 **An Event's expiry is recorded as nothing at all.** There is no `Deleted` row
 for a `v1/Event` or an `events.k8s.io/v1/Event`, ever — not for TTL expiry, not
@@ -171,8 +178,53 @@ it cannot manufacture the deletions the previous paragraph rules out.
 captured?" is answerable exactly as it is for every other kind.
 
 Query recipes for Events — including "everything that happened to object X around
-time T" — are in [`docs/QUERIES.md`](QUERIES.md). What an Event rule costs to run,
-and the one knob that looks like it narrows it and does not, are below.
+time T" — are in [`docs/QUERIES.md`](QUERIES.md). How to read a row's `count`,
+what an Event rule costs to run, and the one knob that looks like it narrows it
+and does not, are below.
+
+#### Rows and occurrences
+
+**`count` is how often it fired. The number of rows is not.** This is the section
+to read before writing any aggregate over `kind = 'Event'`, because the two
+numbers look interchangeable and answer different questions.
+
+One row means *this Event stood in this state at this instant, having fired
+`count` times since it first appeared*. The count is cumulative: an Event
+recorded at `count: 3` and again at `count: 50` fired 47 more times between the
+two rows, and those 47 occurrences are **not** missing from the archive — they are
+in the second row's number. So:
+
+- **To ask how often an Event fired**, read `count` off its latest row — `max`
+  over the rows of one Event `uid`, never `count()` over the rows. The recipe is
+  [How often did this Event fire?](QUERIES.md#how-often-did-this-event-fire).
+- **Never sum `count` across an Event's own rows.** Each row restates the running
+  total, so summing double-counts every occurrence the previous row already
+  carried. Summing *across different* Event `uid`s is fine, and is what the
+  [noisiest reasons](QUERIES.md#noisiest-reasons-in-a-window) recipe does.
+- **Do not read row density as frequency.** The interval between two rows of one
+  Event is bounded by the sink's
+  [`spec.writer.coalesceWindow`](CRDS.md) — a bump inside that window writes no
+  row — so it is a function of a storage setting and of elapsed time, not of how
+  often the Event recurred.
+
+**Three spellings, one number.** Core `v1` writes `count`. `events.k8s.io/v1`
+renders a legacy Event's count as `deprecatedCount` and fills `series.count` only
+for an Event the API server aggregated into a series. Take the largest of the
+three, and treat an Event carrying none of them as having fired once. The CLI
+reads them the same way, which is what lets a `jq` recipe over `-o json` and a SQL
+query over the same row agree.
+
+**A coalesced archive and an uncoalesced one agree about what fired and when it
+started.** A first sighting is never suppressed — there is nothing yet to compare
+it against — so the row that opens a burst is written at the instant the Event
+first appeared, under every window. What the window changes is how many rows
+restate it while it persists, and how long the archive trails the live `count`:
+at most one window, settling on the true figure within one window of the burst
+ending. This was already the shape of the data before coalescing existed, because
+counting rows never measured occurrences anyway — a warm-up List can deliver an
+Event already at `count: 12`, and a bump landing between two watch deliveries was
+always one row. The window makes a gap that was incidental into one that is
+deliberate, which is why it is written down here rather than left to be inferred.
 
 #### Event volume
 
@@ -210,6 +262,14 @@ rollout under a cluster-wide scope makes Events the dominant term in write
 volume. **The amplifier peaks exactly when a cluster is unhealthy** — which is
 when the write path has least headroom, and when somebody is reading the audit
 trail.
+
+That arithmetic is what the sink's `spec.writer.coalesceWindow` bounds, and it is
+the uncoalesced figure: with a window set, a bump inside it writes no row at all,
+so the same crash-loop costs rows proportional to how long it lasted rather than
+to how often `kubelet` restated it. Nothing is lost in the collapse, because
+`count` is cumulative — see [Rows and occurrences](#rows-and-occurrences) for what
+the surviving rows mean, and the bullets [below](#the-knob-that-is-not-there) for
+why this and an `eventFilter` are different levers.
 
 **A `labelSelector` does not narrow this, and looks as though it should.** A
 selector on a `WatchedResource` is matched against the *watched object's own*
@@ -287,8 +347,8 @@ With capture-time correlation it would not be — Event coverage would become a
 function of runtime state nothing records, and a coverage claim that cannot be
 reconstructed from the rule is not a claim anyone should make.
 
-**Where this went instead.** One of these has shipped and one has not, and the
-difference is the whole point of this section:
+**Where this went instead.** Two separate axes, and the difference between them
+is the whole point of this section:
 
 - **Filtering on fields the Event itself carries** — shipped, as
   `spec.resources[].eventFilter`: `type`, `reason` (or a list of reasons to
@@ -298,13 +358,18 @@ difference is the whole point of this section:
   attestable, which is exactly what `collectEvents` is not.
   [`docs/EVENTS.md`](EVENTS.md) is the reference.
 - **Count-bump coalescing** — attacking the amplifier rather than the width of
-  the stream — has **not** shipped, and remains a direction rather than a
-  commitment. The rows a crash-loop writes are near-identical by construction,
-  and that is a different lever from deciding which Events to capture at all.
+  the stream — shipped as `spec.writer.coalesceWindow` on both sink kinds. Within
+  the window, an Event whose only change is its `count` and its timestamps writes
+  no row, so a bursting Event costs rows proportional to elapsed time rather than
+  to `count`. Anything else about it — a changed `message`, `reason`, `type` or
+  subject — writes immediately, and `0s` records every bump. This is a different
+  lever from deciding which Events to capture at all, and neither substitutes for
+  the other.
 
-**So sizing is still done with the scope.** An `eventFilter` chooses which Event
-streams are kept; nothing yet changes how many rows a recurring Event produces,
-so size a rule as though no filter were on it.
+**So sizing is done with the scope and the window.** An `eventFilter` chooses
+which Event streams are kept, and `coalesceWindow` bounds how deep each one goes;
+a filter on its own changes no recurring Event's row count, so size a rule as
+though no filter were on it.
 
 ### Redaction
 

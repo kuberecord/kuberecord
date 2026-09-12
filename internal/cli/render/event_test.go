@@ -81,6 +81,92 @@ func TestParseEventReadsBothAPISpellings(t *testing.T) {
 	}
 }
 
+// TestParseEventReadsTheOccurrenceCountInEverySpelling is the count half of the
+// same promise, and it matters for a reason the other fields do not have.
+//
+// A sink coalesces the rows of a bursting Event inside its
+// spec.writer.coalesceWindow, so how often an Event fired is carried by `count`
+// and by nothing else — a reader cannot recover it by counting rows. Missing the
+// spelling one API uses would therefore not render a blank cell, which is
+// visible: it would render a crash-loop that fired two hundred times exactly like
+// one that fired once.
+//
+// The three spellings are taken as a maximum rather than as a first-populated
+// chain, which is the form docs/QUERIES.md publishes as `greatest(count,
+// deprecatedCount, series.count)`. The CLI and that SQL read the same stored row,
+// so a divergence here would make a `jq` recipe and a query disagree about a
+// number they both take off `data`.
+func TestParseEventReadsTheOccurrenceCountInEverySpelling(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want int
+	}{
+		{
+			name: "v1 count",
+			data: `{"reason":"BackOff","count":47}`,
+			want: 47,
+		},
+		{
+			name: "events.k8s.io/v1 deprecatedCount",
+			data: `{"reason":"BackOff","deprecatedCount":12}`,
+			want: 12,
+		},
+		{
+			name: "events.k8s.io/v1 series.count",
+			data: `{"reason":"BackOff","series":{"count":9,"lastObservedTime":"2026-08-28T14:06:44Z"}}`,
+			want: 9,
+		},
+		{
+			name: "an Event carrying two spellings takes the larger",
+			data: `{"reason":"BackOff","deprecatedCount":1,"series":{"count":9}}`,
+			want: 9,
+		},
+		{
+			name: "no count at all is nothing to render, not one",
+			data: `{"reason":"Scheduled","message":"Assigned to node-3"}`,
+			want: 0,
+		},
+		{
+			name: "a series with no count in it",
+			data: `{"reason":"BackOff","series":{"lastObservedTime":"2026-08-28T14:06:44Z"}}`,
+			want: 0,
+		},
+		{
+			name: "a string where a number belongs is absent, not parsed",
+			data: `{"reason":"BackOff","count":"47"}`,
+			want: 0,
+		},
+		{
+			name: "a fractional count is not rounded into one a reader would trust",
+			data: `{"reason":"BackOff","count":3.5}`,
+			want: 0,
+		},
+		{
+			name: "a count no API server wrote is not believed",
+			data: `{"reason":"BackOff","count":1e30}`,
+			want: 0,
+		},
+		{
+			name: "a negative count is not believed either",
+			data: `{"reason":"BackOff","count":-4}`,
+			want: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := render.ParseEvent(test.data)
+			if !ok {
+				t.Fatalf("ParseEvent reported no data for %q", test.data)
+			}
+			if got.Count != test.want {
+				t.Errorf("ParseEvent(%s).Count = %d, want %d", test.data, got.Count, test.want)
+			}
+		})
+	}
+}
+
 // TestParseEventReportsAbsentData covers the only case that is genuinely nothing
 // to render.
 func TestParseEventReportsAbsentData(t *testing.T) {
@@ -127,6 +213,39 @@ func TestEventSummary(t *testing.T) {
 			name:   "a multi-line message is flattened",
 			detail: render.EventDetail{Type: "Normal", Reason: "Pulled", Message: "line one\nline two"},
 			want:   "Pulled: line one line two",
+		},
+		{
+			name: "a recurrence carries its count beside the reason",
+			detail: render.EventDetail{
+				Type: "Warning", Reason: "BackOff",
+				Message: "Back-off restarting failed container", Count: 47,
+			},
+			want: "⚠ BackOff ×47: Back-off restarting failed container",
+		},
+		{
+			name:   "a reason with no message keeps it too",
+			detail: render.EventDetail{Type: "Warning", Reason: "Unhealthy", Count: 6},
+			want:   "⚠ Unhealthy ×6",
+		},
+		{
+			name:   "with no reason to hang it on, the count leads the cell",
+			detail: render.EventDetail{Type: "Normal", Message: "something happened", Count: 3},
+			want:   "×3 something happened",
+		},
+		{
+			name:   "and leads the fallback sentence, which is most of what is left to say",
+			detail: render.EventDetail{Type: "Warning", Count: 200},
+			want:   "⚠ ×200 Kubernetes Event with no reason or message recorded",
+		},
+		{
+			name:   "one occurrence is the ordinary case and is not marked",
+			detail: render.EventDetail{Type: "Normal", Reason: "Scheduled", Message: "Assigned", Count: 1},
+			want:   "Scheduled: Assigned",
+		},
+		{
+			name:   "and neither is an Event that carries no count at all",
+			detail: render.EventDetail{Type: "Normal", Reason: "Scheduled", Message: "Assigned"},
+			want:   "Scheduled: Assigned",
 		},
 	}
 

@@ -73,6 +73,12 @@ type ConnectionSpec struct {
 // clickhouse.Default* constants, so an unset field keeps the behavior an
 // operator already tuned against.
 //
+// Two more knobs sit alongside them with no --writer-* twin at all, because
+// neither describes the *process* doing the writing: CheckpointEvery is a
+// property of the history you want to be able to reconstruct, and CoalesceWindow
+// of the resolution you want the Event stream recorded at. Both default from the
+// CRD itself, so a fleet-wide fallback could only disagree with the schema.
+//
 // None of these knobs can make a write block the hot path — Enqueue is a
 // bounded hand-off in every configuration. They trade memory
 // (QueueSize) and end-to-end latency (BatchMaxWait) against insert efficiency
@@ -149,6 +155,53 @@ type WriterSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10000
 	CheckpointEvery *int32 `json:"checkpointEvery,omitempty"`
+
+	// CoalesceWindow is how long this sink suppresses a Kubernetes Event whose
+	// only change since the last recorded row is its `count` and its timestamps.
+	//
+	// It is the knob that bounds the Event volume amplifier. The API server bumps
+	// an Event's `count` in place when the same thing happens again, so the
+	// content genuinely changes, hash dedup cannot suppress it, and every bump
+	// writes a full-state row (see docs/SCHEMA.md's "Event volume"). A pod
+	// crash-looping for twenty minutes writes one complete Event JSON per
+	// re-emission. Within this window those rows collapse to one, and the rows
+	// that remain still say what fired, when it started and how many times —
+	// `count` is cumulative, so no occurrence is lost, only rows that restate it.
+	//
+	// **Only a bump is ever suppressed.** A changed `message`, `reason`, `type` or
+	// subject is a different fact and is written immediately whatever the window
+	// says, and so is any field a future Kubernetes version adds: the comparison
+	// is by exclusion, so an unrecognised field defaults to writing.
+	//
+	// The last bump of a burst is never lost. A suppressed bump schedules the
+	// Event to be reconsidered when the window expires, and that reconsideration
+	// writes the Event as it then stands — so the archive trails the live `count`
+	// by at most this long, and settles on the true one once the burst ends.
+	//
+	// `0s` disables coalescing entirely for this sink: every bump is recorded, as
+	// it was before this field existed. The floor of 1s is an honesty bound — a
+	// window below it is indistinguishable from `0s` while looking as though it is
+	// on — and the ceiling of 30m is a correctness one: the reconsideration reads
+	// the Event from the watch cache, and an Event's default TTL is about an hour,
+	// so a window approaching it would race the expiry that removes the very
+	// object the final `count` has to be read from.
+	//
+	// It is per-sink because it trades archive resolution for write volume, and
+	// that trade belongs to whoever owns the backend and pays for its storage.
+	// Coalescing state is in memory and does not survive a restart, so the first
+	// Event observed after one is written — correctly, since the operator cannot
+	// know what it did not record.
+	//
+	// The bound is one CEL rule rather than Minimum/Maximum for the reason
+	// S3RotationSpec.MaxObjectAge records: a duration is a string in the schema,
+	// controller-gen refuses a Pattern on a metav1.Duration, and `duration()`
+	// errors on an unparseable string, which the API server reports as machinery
+	// failing rather than as the author's value being wrong. Putting the shape
+	// match first makes the rule total.
+	// +optional
+	// +kubebuilder:default="1m"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+(ns|us|ms|s|m|h))+$') && (duration(self) == duration('0s') || (duration(self) >= duration('1s') && duration(self) <= duration('30m')))",message="coalesceWindow must be 0s (record every count bump) or a duration between 1s and 30m, spelled without a fractional component (30s, 5m, 1h30m)"
+	CoalesceWindow *metav1.Duration `json:"coalesceWindow,omitempty"`
 }
 
 // ClickHouseSinkSpec is the desired state of a ClickHouseSink.

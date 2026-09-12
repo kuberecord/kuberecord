@@ -56,6 +56,7 @@ func baseConfig() Config {
 		EnqueueTimeout:       2 * time.Second,
 		ShutdownDrainTimeout: 15 * time.Second,
 		CheckpointEvery:      DefaultCheckpointEvery,
+		CoalesceWindow:       DefaultCoalesceWindow,
 	}
 }
 
@@ -97,6 +98,11 @@ func TestConfigFingerprint(t *testing.T) {
 		// the next restart.
 		{"checkpoint cadence", func(c *Config) { c.CheckpointEvery = 10 }},
 		{"checkpointing disabled", func(c *Config) { c.CheckpointEvery = 0 }},
+		// And the Event coalescing window, for the same reason: it is read off the
+		// running writer (CoalesceWindow), so a fingerprint that ignored it would
+		// leave the old window bounding the Event stream until the next restart.
+		{"coalescing window", func(c *Config) { c.CoalesceWindow = 5 * time.Minute }},
+		{"coalescing disabled", func(c *Config) { c.CoalesceWindow = 0 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

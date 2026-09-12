@@ -61,11 +61,12 @@ func (c Config) Fingerprint() string {
 	// See the branch below for what the unreachable constant is and is not.
 	if _, err := fmt.Fprintf(h,
 		"addr=%q db=%q user=%q pass=%q dial=%q read=%q autocreate=%t "+
-			"batchrows=%d batchwait=%q queue=%d workers=%d enqueue=%q drain=%q checkpoint=%d",
+			"batchrows=%d batchwait=%q queue=%d workers=%d enqueue=%q drain=%q checkpoint=%d coalesce=%q",
 		c.Addr, c.Database, c.Username, c.Password,
 		c.DialTimeout.String(), c.ReadTimeout.String(), c.AutoCreateSchema,
 		c.BatchMaxRows, c.BatchMaxWait.String(), c.WriteQueueSize, c.WriteWorkers,
 		c.EnqueueTimeout.String(), c.ShutdownDrainTimeout.String(), c.CheckpointEvery,
+		c.CoalesceWindow.String(),
 	); err != nil {
 		// Unreachable by hash.Hash's contract: its Write never returns an error, so
 		// Fprintf to one cannot fail. The constant is a tombstone, not a mitigation

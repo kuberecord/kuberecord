@@ -278,13 +278,48 @@ func s3SinkShapeCases() []apiCase {
 			wantErr: "spec.objectLock.mode: Required value",
 		},
 
-		// The writer. The four knobs are the shared ones, and they are bounded
+		// The writer. The five knobs are the shared ones, and they are bounded
 		// exactly as ClickHouse's are — see TestSharedWriterKnobsAgreeAcrossSinks
 		// for the assertion that the two schemas actually agree.
 		{
 			name:    "writer-workers-above-range-is-rejected",
 			obj:     s3SinkWithWriter(S3WriterSpec{Workers: ptrTo(int32(65))}),
 			wantErr: "should be less than or equal to 64",
+		},
+		{
+			// 0s is the opt-out — every Event count bump recorded — and it has to
+			// stay expressible, so it is admitted rather than caught by the floor.
+			name: "writer-coalescewindow-of-zero-is-accepted",
+			obj:  s3SinkWithWriter(S3WriterSpec{CoalesceWindow: durationPtr("0s")}),
+		},
+		{
+			name:    "writer-coalescewindow-below-the-floor-is-rejected",
+			obj:     s3SinkWithWriter(S3WriterSpec{CoalesceWindow: durationPtr("500ms")}),
+			wantErr: "coalesceWindow must be 0s",
+		},
+		{
+			name:    "writer-coalescewindow-above-the-ceiling-is-rejected",
+			obj:     s3SinkWithWriter(S3WriterSpec{CoalesceWindow: durationPtr("31m")}),
+			wantErr: "coalesceWindow must be 0s",
+		},
+		{
+			name: "writer-coalescewindow-at-the-bounds-is-accepted",
+			obj:  s3SinkWithWriter(S3WriterSpec{CoalesceWindow: durationPtr("1s")}),
+		},
+		{
+			name: "writer-coalescewindow-at-the-ceiling-is-accepted",
+			obj:  s3SinkWithWriter(S3WriterSpec{CoalesceWindow: durationPtr("30m")}),
+		},
+		{
+			// Same reason maxObjectAge has this case: the rule leads with a
+			// `matches` so an unparseable value is rejected *by the rule*, with its
+			// own message, rather than erroring inside duration().
+			name: "writer-coalescewindow-that-is-not-a-duration-is-rejected-by-the-rule",
+			obj: unstructuredS3Sink(map[string]any{
+				"bucket": "kuberecord-audit",
+				"writer": map[string]any{"coalesceWindow": "banana"},
+			}),
+			wantErr: "coalesceWindow must be 0s",
 		},
 		{
 			name:    "writer-queuesize-below-range-is-rejected",
@@ -623,7 +658,7 @@ func TestS3SinkOmittedRotationAndWriterStayAbsent(t *testing.T) {
 //
 // It is asserted through a real apiserver round-trip rather than by reading the
 // CRD YAML because CRD defaulting is what an operator actually experiences: write
-// one field, get these values. The four writer numbers are deliberately the same
+// one field, get these values. The five writer values are deliberately the same
 // ones a ClickHouseSink defaults to — an author who has tuned one sink has tuned
 // both — and TestSharedWriterKnobsAgreeAcrossSinks is what keeps that true.
 func TestS3SinkDefaults(t *testing.T) {
@@ -654,6 +689,7 @@ func TestS3SinkDefaults(t *testing.T) {
 		{field: "spec.writer.workers", got: int32String(got.Spec.Writer.Workers), want: "4"},
 		{field: "spec.writer.enqueueTimeout", got: durationString(got.Spec.Writer.EnqueueTimeout), want: "2s"},
 		{field: "spec.writer.drainTimeout", got: durationString(got.Spec.Writer.DrainTimeout), want: "15s"},
+		{field: "spec.writer.coalesceWindow", got: durationString(got.Spec.Writer.CoalesceWindow), want: "1m0s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {
