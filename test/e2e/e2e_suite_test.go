@@ -84,7 +84,7 @@ const (
 const (
 	minioNamespace  = "kuberecord-e2e-minio"
 	minioDeployment = "minio"
-	minioImage      = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
+	minioImage      = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"
 	// minioSecret holds the server's root credentials, in the fixture's own
 	// namespace; s3CredentialsSecret holds the same key pair beside the operator,
 	// which is the only namespace it may read Secrets from (Task 1.9).

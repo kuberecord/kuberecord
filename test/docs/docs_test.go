@@ -2161,3 +2161,124 @@ func TestSourceAndSinkAddrAreComparedAndLinked(t *testing.T) {
 		}
 	}
 }
+
+// minioImagePins is every place kuberecord pins the MinIO server image, with the
+// expression that reads each one.
+//
+// MinIO is a fixture rather than a shipped component — it stands in for a bucket
+// in two examples, in the e2e S3 scenario and in the integration target — so the
+// pin is written down six times in four languages, and until this test nothing
+// connected them.
+var minioImagePins = []struct {
+	file    string
+	pattern *regexp.Regexp
+	role    string
+}{
+	{
+		file:    "Makefile",
+		pattern: regexp.MustCompile(`MINIO_IT_IMAGE \?= (\S+)`),
+		role:    "the container `make test-integration` runs",
+	},
+	{
+		file:    "test/e2e/e2e_suite_test.go",
+		pattern: regexp.MustCompile(`minioImage\s*=\s*"([^"]+)"`),
+		role:    "the image the e2e S3 scenario side-loads",
+	},
+	{
+		file:    "test/e2e/manifests/minio.yaml",
+		pattern: regexp.MustCompile(`(?m)^\s*image:\s*(\S+)`),
+		role:    "the fixture that scenario applies",
+	},
+	{
+		file:    "examples/zero-infra/zero-infra.sh",
+		pattern: regexp.MustCompile(`MINIO_IMAGE="([^"]+)"`),
+		role:    "the image the zero-infrastructure quickstart side-loads",
+	},
+	{
+		file:    "examples/zero-infra/minio.yaml",
+		pattern: regexp.MustCompile(`(?m)^\s*image:\s*(\S+)`),
+		role:    "the object store that quickstart applies",
+	},
+	{
+		file:    "examples/tee/minio.yaml",
+		pattern: regexp.MustCompile(`(?m)^\s*image:\s*(\S+)`),
+		role:    "the cold tier of the tee example",
+	},
+}
+
+// minioSideloadPairs are the two places one image is named twice: once by the
+// thing that loads it into the kind node, once by the manifest that consumes it.
+var minioSideloadPairs = []struct{ loader, manifest string }{
+	{loader: "test/e2e/e2e_suite_test.go", manifest: "test/e2e/manifests/minio.yaml"},
+	{loader: "examples/zero-infra/zero-infra.sh", manifest: "examples/zero-infra/minio.yaml"},
+}
+
+// TestMinIOImagePinsAgree keeps those six pins one value, and keeps that value
+// addressed to a registry that answers.
+//
+// Two distinct failures live here and only one of them is loud.
+//
+// The loud one is the registry. MinIO withdrew the `minio/minio` repository from
+// Docker Hub, so the short form every one of these files carried resolves to a
+// repository that is not there and fails with `pull access denied ... may require
+// 'docker login'`. That message names authentication, which is not the problem,
+// so the next person to shorten a pin back to `minio/minio` would spend the
+// afternoon on registry credentials instead. The rule is therefore mechanical
+// rather than a matter of taste: every pin names its registry explicitly, and the
+// check is Docker's own resolution rule — a reference's first path component is a
+// registry only if it contains a dot or a colon.
+//
+// The quiet one is drift between a side-load and the manifest that consumes it.
+// Both quickstart paths pull the image to the host, load it into the kind node,
+// and apply a Deployment that pins it `IfNotPresent`. Those are two spellings of
+// one string, and when they disagree nothing fails at apply time — the kubelet
+// simply pulls instead, and a bump becomes an intermittent timeout on whichever
+// runner has the slowest registry access. test/e2e's tee scenario already escapes
+// this by reading the pin out of the example rather than repeating it
+// (teeExampleImage); these two pairs repeat it, so they are checked here.
+//
+// The pins are compared to each other rather than to a constant spelled in this
+// file, so bumping the image stays a six-file change and does not become a
+// seventh place to forget.
+func TestMinIOImagePinsAgree(t *testing.T) {
+	pins := make(map[string]string, len(minioImagePins))
+	for _, site := range minioImagePins {
+		match := site.pattern.FindStringSubmatch(readFile(t, site.file))
+		if match == nil {
+			t.Fatalf("%s pins no MinIO image; it is %s", site.file, site.role)
+		}
+		pins[site.file] = match[1]
+	}
+
+	// The two side-loaded pairs first, because their drift is the one that does
+	// not announce itself.
+	for _, pair := range minioSideloadPairs {
+		if pins[pair.loader] != pins[pair.manifest] {
+			t.Errorf("%s side-loads %q but %s pins %q; the kubelet would pull instead of "+
+				"using the loaded copy, and the run would fail on registry access rather than on the change",
+				pair.loader, pins[pair.loader], pair.manifest, pins[pair.manifest])
+		}
+	}
+
+	// Then all six as one value. A fixture that is two different builds depending
+	// on which entry point brought it up is a suite asserting on something the
+	// examples do not ship.
+	reference := pins[minioImagePins[0].file]
+	for _, site := range minioImagePins[1:] {
+		if pins[site.file] != reference {
+			t.Errorf("%s pins %q but %s pins %q; one MinIO image, six spellings of it",
+				minioImagePins[0].file, reference, site.file, pins[site.file])
+		}
+	}
+
+	// And the registry, on every pin rather than on the reference, so a single
+	// shortened line is named rather than hidden behind whichever one sorts first.
+	for _, site := range minioImagePins {
+		host, _, ok := strings.Cut(pins[site.file], "/")
+		if !ok || !strings.ContainsAny(host, ".:") {
+			t.Errorf("%s pins %q, which names no registry and so resolves to Docker Hub, "+
+				"where minio/minio no longer exists; %s must name its registry",
+				site.file, pins[site.file], site.role)
+		}
+	}
+}

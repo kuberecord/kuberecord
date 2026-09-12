@@ -207,6 +207,38 @@ than a summary of them.
   two shipped, and that count-bump coalescing did not. Its closing line, that
   sizing is still done with the scope, is now the point rather than a placeholder.
 
+### Fixed
+
+- **The MinIO fixture is pulled from `quay.io`; Docker Hub no longer serves it.**
+  MinIO withdrew the `minio/minio` repository from Docker Hub, and every pin here
+  named it in the short form that resolves there. Three workflows failed at once
+  on the same line — the e2e S3 scenario, the integration suites and the
+  zero-infrastructure quickstart — each reporting `pull access denied for
+  minio/minio, repository does not exist or may require 'docker login'`. That
+  message names authentication, which was never the problem: the repository
+  itself is gone, and `latest` fails identically to the pinned tag.
+
+  The image is unchanged. `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` is
+  MinIO's other official registry serving the same release — `sha256:a1ea29fa…`,
+  `linux/amd64` and `linux/arm64`, and the same `mc` and `base64` that
+  `test/harness` execs inside the pod to read an archive back. Only the address
+  changed, in the six files that carry it: the integration target's container,
+  the e2e fixture and the constant that side-loads it, the zero-infrastructure
+  quickstart's script and manifest, and the tee example's cold tier.
+
+  **A test now holds the six together**, because six spellings of one string with
+  nothing connecting them is what turned a vendor's registry decision into three
+  red workflows. It checks that they are one value, and that each names its
+  registry — by Docker's own resolution rule, that the first path component
+  contains a dot or a colon, so any unqualified pin is caught rather than this
+  one specifically. It checks separately that each side-load agrees with the
+  manifest consuming it, which is the quiet half: both quickstarts load the image
+  into the kind node and apply it `IfNotPresent`, so a drift there does not fail
+  at apply time — it makes the kubelet pull, and a bump becomes an intermittent
+  timeout on whichever runner has the slowest registry access. The e2e tee
+  scenario already avoided this by reading the pin out of the example instead of
+  repeating it; these two pairs repeat it.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five
