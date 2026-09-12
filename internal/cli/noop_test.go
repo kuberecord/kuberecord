@@ -159,6 +159,17 @@ var noopAudit = []auditedFlag{
 		"backend that cannot say. The flags it leaves with nothing to act on are named too, once " +
 		"and with their values, by inertPredicateNotice: --actor and --field narrow the object's " +
 		"own changes, which this excludes, and a predicate that filtered nothing must say so (D31)"},
+	{"owned", explained, "it can produce a page identical to its absence in four ways and says " +
+		"which one it is in each. A walk that reached no descendant says so and names the two " +
+		"reasons a tree can be invisible — a kind nobody captured, and a window with no full " +
+		"state in it. A walk that reached some but not all counts the objects it could not " +
+		"attribute and names their kinds, apart from the objects whose own ownership could not " +
+		"be read, because those two have different remedies (D41). The depth and breadth bounds " +
+		"report themselves when they actually cut something. And a backend with no ownership " +
+		"half refuses outright rather than answering the un-widened question, since that " +
+		"inability is permanent and a reader would meet it on every invocation. The visible " +
+		"half is the SUBJECT column and the header's `Owned` line, which are present whenever " +
+		"the question was asked rather than whenever it found something"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},

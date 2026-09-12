@@ -1,0 +1,12 @@
+=== stdout ===
+Kind:              apps/Deployment
+Object:            payments/checkout
+Cluster:           prod-eu-1
+Owned:             3 objects (Pod, ReplicaSet)
+Coverage (Events): 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+
+TIME (UTC)                SUBJECT                   EVENT  ACTOR                    CHANGE
+2026-08-28 14:03:20.310Z  Deployment/checkout       Event  kube-controller-manager  ScalingReplicaSet: Scaled up replic…
+2026-08-28 14:06:44.020Z  ReplicaSet/checkout-7d4f  Event  replicaset-controller    ⚠ FailedCreate: pods "checkout-7d4f…
+2026-08-28 14:07:03.771Z  Pod/checkout-7d4f-ldw5j   Event  default-scheduler        ⚠ FailedScheduling: 0/9 nodes are a…
+=== stderr ===

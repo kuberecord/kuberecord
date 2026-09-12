@@ -317,6 +317,7 @@ find its meaning depends on the shell that produced it.
 | `--full` | Print every operation of every patch, unshortened. The footer names it when a row was shortened without it. |
 | `--with-events` | Interleave the Kubernetes Events recorded about the object. |
 | `--events-only` | Show those Events and none of the object's own changes. Implies `--with-events`. The coverage in the header becomes the coverage of **Events**, because that is the scope the rows came from — see [below](#--events-only). |
+| `--owned` | Also correlate the Events of the objects this one owns, walking `metadata.ownerReferences` over recorded state. Implies `--with-events`, adds a `SUBJECT` column, and says what the archive could not show it — see [below](#--owned). |
 
 `-o wide` adds the full UID and the resource version, and prints timestamps at the
 nanosecond precision the schema records.
@@ -637,6 +638,83 @@ There is **no `kuberecord events` command**, and this is why: it would ask what
 `timeline` asks and hide rows of the answer, so it would need most of `timeline`'s
 flags and would drift from them. The name is kept for a namespace-wide Event search,
 which would be a differently-shaped question.
+
+### `--owned`
+
+*"Show me this Deployment's Pods' Events"* is the query no rule can be written for.
+The tree is Deployment → ReplicaSet → Pod, and a Pod's name carries a generated
+suffix that does not exist until the Pod does and changes on every rollout — so
+[`eventFilter.subjectNames`](EVENTS.md#filtering-what-is-captured) looks like it
+answers this and does not.
+
+At read time the names exist. `metadata.ownerReferences` is in the stored state of
+every captured object, so the tree is a query over rows the archive already holds:
+
+```
+$ kuberecord timeline deploy/checkout -n payments --events-only --owned
+
+Kind:              apps/Deployment
+Object:            payments/checkout
+Cluster:           prod-eu-1
+Owned:             3 objects (Pod, ReplicaSet)
+Coverage (Events): 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+
+TIME (UTC)                SUBJECT                   EVENT  ACTOR                    CHANGE
+2026-08-28 14:03:20.310Z  Deployment/checkout       Event  kube-controller-manager  ScalingReplicaSet: Scaled up …
+2026-08-28 14:06:44.020Z  ReplicaSet/checkout-7d4f  Event  replicaset-controller    ⚠ FailedCreate: pods "checkou…
+2026-08-28 14:07:03.771Z  Pod/checkout-7d4f-ldw5j   Event  default-scheduler        ⚠ FailedScheduling: 0/9 nodes…
+```
+
+`--owned --events-only` is the combination the flag exists for. `--owned` on its own
+**implies `--with-events`**, exactly as `--events-only` does, so the object's own
+changes are interleaved with the whole tree's commentary in one `ts` order.
+
+**The `SUBJECT` column is the point.** A flat merge of three objects' Events with no
+attribution is less useful than three separate invocations, so every row names the
+object it belongs to — read out of the Event's own `involvedObject` (or `regarding`),
+in both API spellings. In `-o json` and `-o yaml` no new field is added: `data` is
+emitted as real JSON, so `.data.involvedObject.name` is the subject verbatim, in the
+spelling [`docs/QUERIES.md`](QUERIES.md) uses in SQL.
+
+**Ownership is resolved from stored rows, never from the cluster.** Asking the API
+server would answer with *today's* tree for a question about a past window — the
+ReplicaSet you are investigating has since been garbage collected — and would make
+the answer depend on a cluster that may no longer exist. The CLI is a read-only
+client of the archive — see [Reading an archive without a
+cluster](#reading-an-archive-without-a-cluster) — and this is no exception.
+
+**It widens the Event correlation and nothing else.** The rows about the object
+itself stay the object's. A recorded change carries no identity of its own — the
+schema's identity columns are the question a timeline asks, not part of its answer —
+so a descendant's modification would arrive as a patch with nothing on it saying
+which object it patched, and the `SUBJECT` column could not be honest about it.
+
+**The walk degrades honestly**, and each way it can be short has its own sentence,
+because each has its own fix:
+
+```
+! the ownership walk could not see the whole tree: 2 objects in namespace payments
+  name an owner the archive does not hold, of kind ReplicaSet, so anything beneath
+  them could not be attributed to payments/checkout. The walk read 2026-08-01T00:00:00Z
+  to 2026-08-28T15:00:00Z: add the kind to a rule so its state is recorded, or pass
+  --since if it was captured before that
+```
+
+| What the walk could not see | Why | The fix it names |
+|---|---|---|
+| An owner the archive does not hold | Its kind was never captured, so no row describes it and nothing below it can be attributed | Add the kind to a rule, or widen the window |
+| An object with rows but no full state in the window | `ownerReferences` live in the recorded state, and a patch is not one | `--since` |
+| More than **4 levels** of ownership | The walk is bounded: an ownership graph is a DAG in principle and a cycle in a corrupted archive | Nothing — the bound is stated, and the real trees are two levels deep |
+| More than **500 descendants** | The tree becomes one query predicate | Narrow the window with `--since` and `--until` |
+
+An object that owns nothing is not an error and is not silent either: the command
+renders its page and says that the walk found nothing, because *"nothing owns this"*
+and *"the flag was ignored"* look identical otherwise.
+
+A backend with no ownership half **refuses** rather than quietly answering the
+un-widened question. That inability is permanent for the life of the sink, so a
+command that degraded would leave you believing you had seen your Pods' Events on
+every invocation; the error names `--with-events` as the question it can answer.
 
 ### What a backend cannot record
 

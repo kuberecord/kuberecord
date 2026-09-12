@@ -340,6 +340,7 @@ That is why an object nobody ever watched can still have Events.
 |---|---|
 | [`timeline --with-events`](CLI.md#--with-events-that-finds-no-events) | Interleaves the Events recorded about the object with the object's own changes, in one table, oldest first. The reading you usually want, since the point is which change an Event followed. |
 | [`timeline --events-only`](CLI.md#--events-only) | The Events and none of the object's own changes. It **implies** `--with-events`. |
+| [`timeline --owned`](CLI.md#--owned) | Also the Events of the objects this one owns, found by walking `metadata.ownerReferences` over recorded state. It **implies** `--with-events` and adds a `SUBJECT` column. |
 
 **An Event that has fired more than once shows its count**, beside the reason:
 
@@ -368,6 +369,47 @@ distinguishes *Events were recorded, none about this object* from *no rule
 streams Events to this sink* from *this backend has no scope log to read*. Only
 the middle one is a configuration gap, and it is printed with the YAML that
 closes it.
+
+### "This Deployment's Pods' Events"
+
+This is the query the filter above cannot express, and it is deliberate rather than
+an omission. A Pod's name carries a generated suffix that does not exist until the
+Pod does and changes on every rollout, so `subjectNames` is useless for it — the
+warning on that field says so where you type it.
+
+It is answered at **read time**, when the names exist:
+
+```
+kuberecord timeline deploy/checkout -n payments --events-only --owned
+```
+
+`--owned` walks `metadata.ownerReferences` from the named object down through its
+ReplicaSets to its Pods and correlates the Events of the whole tree in one `ts`
+order, each row naming the object it belongs to. The tree comes from **stored rows**
+and never from the cluster: the API server would answer with today's tree for a
+question about a past window, and the ReplicaSet you are investigating has usually
+been garbage collected by the time you ask.
+
+The consequence is worth stating plainly, because it is the one that will surprise
+you: **the walk can only see through kinds whose state is being recorded.** A rule
+capturing Deployments, Pods and Events but not ReplicaSets leaves the middle of the
+tree missing, and the Pods below it cannot be attributed to the Deployment above it.
+The command says so, and names the kind — see
+[`docs/CLI.md`](CLI.md#--owned) for the four ways a walk can be short and the fix
+each one names. If you intend to use `--owned`, capture the whole chain:
+
+```yaml
+  resources:
+    - group: "apps"
+      version: v1
+      kind: Deployment
+    - group: "apps"
+      version: v1
+      kind: ReplicaSet
+    - group: ""
+      version: v1
+      kind: Pod
+```
 
 There is **no `kuberecord events` command**. It would ask what `timeline` asks
 and hide rows of the answer; the name is kept for the namespace-wide Event search

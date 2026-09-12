@@ -277,6 +277,41 @@ type TimelineQuery struct {
 	// read plane.
 	IncludeEvents bool `json:"include_events"`
 
+	// Subjects widens the Event correlation from Ref to these objects as well,
+	// merging their Events into the same ts-ordered stream.
+	//
+	// It is read only when IncludeEvents is set, and it does nothing else: the
+	// object's own changes remain Ref's, and no state row of a subject is read. That
+	// asymmetry is deliberate rather than a first cut. A Change carries no identity
+	// of its own — the schema's identity columns are the question, not the answer —
+	// so a modification of a subject would arrive as a patch with nothing on it
+	// saying which object it patched, and a merged multi-object state stream could
+	// not be attributed row by row. An Event, by contrast, names its subject in its
+	// own data, so a merged Event row is self-describing and a renderer can say
+	// which object each line is about.
+	//
+	// # What it is for
+	//
+	// One question: "Events about this Deployment's Pods." The tree is
+	// Deployment → ReplicaSet → Pod and a Pod's name is generated, so no capture-time
+	// filter can express it (D52) — but at read time the names exist, and
+	// [OwnershipResolver] recovers them from the archive's own rows. This field is
+	// how the resulting tree becomes one query instead of one query per node, which
+	// on a backend with no index is the difference between one scan of the window and
+	// one scan per Pod.
+	//
+	// # How a subject is matched
+	//
+	// By (kind, namespace, name) read out of the Event's data, exactly as Ref is, and
+	// never by UID. UID pins Ref because a caller may have chosen one incarnation of
+	// the object they asked about; a subject was discovered by a walk that already
+	// resolved its incarnation, and the forgiving key is the right one for a
+	// dependent that was recreated under the same name inside the window.
+	//
+	// Duplicates and an entry equal to Ref are harmless but pointless: an Event is
+	// emitted once however many subjects it satisfies.
+	Subjects []ObjectRef `json:"subjects"`
+
 	// EventsOnly narrows the stream to those merged Events, emitting none of the
 	// object's own changes.
 	//

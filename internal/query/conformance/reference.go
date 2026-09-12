@@ -460,11 +460,16 @@ func (e *referenceEngine) correlatedEvents(q query.TimelineQuery, uid string) []
 			continue
 		}
 		subject := eventSubjectOf(r.Change.Data)
-		if subject.Kind != q.Ref.Kind || subject.Namespace != q.Ref.Namespace ||
-			subject.Name != q.Ref.Name {
+		root := subject.Kind == q.Ref.Kind && subject.Namespace == q.Ref.Namespace &&
+			subject.Name == q.Ref.Name
+		if !root && !namesASubject(subject, q.Subjects) {
 			continue
 		}
-		if uid != "" && subject.UID != uid {
+		// The pin belongs to the object the caller asked about and to no other. A
+		// dependent an ownership walk found does not share its owner's UID, so a pin
+		// applied to the whole merged stream would correlate the root's Events and
+		// drop the tree's — the widening silently undone by the narrowing beside it.
+		if root && uid != "" && subject.UID != uid {
 			continue
 		}
 		// EventKubernetes is stamped because Change carries no other way to say it: an
@@ -476,6 +481,20 @@ func (e *referenceEngine) correlatedEvents(q query.TimelineQuery, uid string) []
 		out = append(out, change)
 	}
 	return out
+}
+
+// namesASubject reports whether an Event's subject is one of the additional objects
+// a query asked to correlate (query.TimelineQuery.Subjects).
+//
+// By (kind, namespace, name) and never by uid, which is the contract's rule: those
+// subjects came from a walk that had already resolved their incarnations, and the
+// forgiving key is the right one for a dependent recreated under the same name
+// inside the window.
+func namesASubject(subject eventSubject, subjects []query.ObjectRef) bool {
+	return slices.ContainsFunc(subjects, func(ref query.ObjectRef) bool {
+		return subject.Kind == ref.Kind && subject.Namespace == ref.Namespace &&
+			subject.Name == ref.Name
+	})
 }
 
 // isEventKind reports whether an identity is a Kubernetes Event, in either of the
