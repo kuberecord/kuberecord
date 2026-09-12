@@ -70,6 +70,16 @@ const Arrow = "→"
 // space from the one column this release exists to show.
 const WarningGlyph = "⚠"
 
+// CountGlyph introduces how many times a Kubernetes Event has fired.
+//
+// One rune, for Ellipsis's reason, and the one a reader already meets in
+// `kubectl get events`' COUNT column and in `kubectl describe`'s Age column
+// ("47 times in the last 12m"). It is rendered next to the Event's reason rather
+// than at the end of the cell, because the end of the cell is what truncation
+// takes and the count is the half of the row that distinguishes a fault that
+// recurred from one that happened once.
+const CountGlyph = "×"
+
 // DefaultWidth is the column budget used when output is not going to a terminal.
 //
 // A pipe has no width, and the two honest answers are "assume nothing and never

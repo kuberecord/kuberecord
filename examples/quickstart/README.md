@@ -279,7 +279,8 @@ ORDER BY ts DESC LIMIT 1;
 -- What `--with-events` interleaves, in SQL: the Events naming checkout-api as
 -- their subject. The correlation is this predicate — read time, not capture
 -- time — and `diff` is empty on every row, because an Event is recorded as full
--- state each time the API server bumps its count.
+-- state. `count` is cumulative and the rows between two of them are coalesced,
+-- so read the frequency off `count` and never off how many rows come back.
 SELECT ts, JSONExtractString(data, 'reason') AS reason,
        JSONExtractString(data, 'message')    AS message
 FROM  resource_states

@@ -475,9 +475,66 @@ WHERE cluster_id = {cluster:String}
 ORDER BY ts ASC;
 ```
 
-One Event yields one row per `count` bump, so `occurrences` climbing down the
-result is the same warning firing again — that repetition *is* the signal, and
-it is the case this schema exists to keep.
+`occurrences` climbing down the result is the same warning firing again — that
+repetition *is* the signal, and it is the case this schema exists to keep. **It
+does not climb by one per row.** A sink coalesces a bursting Event's rows within
+its `spec.writer.coalesceWindow`, so a row is the Event's state at an instant
+rather than one occurrence of it, and the jump from `3` to `50` between two rows
+is 47 occurrences the archive holds in the second row's number. Which is the whole
+of the next recipe.
+
+### How often did this Event fire?
+
+`count` is cumulative and the number of rows is not a frequency, so this question
+is answered with **`count`, never `count()`** — the one distinction that makes
+coalescing safe to reason about, and the mistake this recipe exists to stop.
+
+```sql
+SELECT
+    name                                          AS event_name,
+    argMax(JSONExtractString(data, 'reason'), ts) AS reason,
+    -- The cumulative count as of the latest row, which is the largest one any row
+    -- carried. Floored at 1 because events.k8s.io/v1 fills a count only for an
+    -- Event it aggregated into a series: carrying none means it fired once.
+    max(greatest(
+        1,
+        JSONExtractUInt(data, 'count'),
+        JSONExtractUInt(data, 'deprecatedCount'),
+        JSONExtractUInt(data, 'series', 'count')
+    ))                                            AS fired,
+    -- And what the archive spent on it. This is the number that is NOT the answer.
+    count()                                       AS recorded_rows,
+    min(ts)                                       AS first_recorded,
+    max(ts)                                       AS last_recorded
+FROM resource_states FINAL
+WHERE cluster_id = {cluster:String}
+  AND kind = 'Event'
+  AND namespace = {namespace:String}
+  AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
+  AND coalesce(
+        nullIf(JSONExtractString(data, 'involvedObject', 'uid'), ''),  -- v1/Event
+        nullIf(JSONExtractString(data, 'regarding',      'uid'), '')   -- events.k8s.io/v1
+      ) = {uid:String}
+GROUP BY uid, name
+ORDER BY fired DESC;
+```
+
+Read `fired` against `recorded_rows`: `fired = 50` over `recorded_rows = 4` is one
+fault restated fifty times and stored four times, which is the coalescing window
+doing its job. `first_recorded` is when it started and is exact under every window
+— a first sighting is never suppressed.
+
+**Two ways to get this wrong, both of which parse and run:**
+
+- `count()` instead of `count` counts rows, so it reports how often the *sink
+  wrote*, not how often the *cluster emitted*. It moves when somebody changes
+  `coalesceWindow` and it was never a frequency even at `0s`, since a warm-up List
+  can deliver an Event already at `count: 12`.
+- `sum(...)` instead of `max(...)` double-counts, because each row restates the
+  running total rather than adding to it. Summing across *different* Event `uid`s
+  is correct and is what the [noisiest
+  reasons](#noisiest-reasons-in-a-window) recipe does; summing across the rows of
+  one is not.
 
 ### By name — survives a recreate
 
@@ -538,28 +595,51 @@ ORDER BY ts ASC;
 
 Triage before you know which object to look at:
 
+Each Event object is reduced to its own cumulative `count` first, and only then
+summed across objects — for the reason the [previous
+recipe](#how-often-did-this-event-fire) spells out: a row is a state, not an
+occurrence, so a `count()` here would rank reasons by how many rows the sink wrote
+rather than by how often the cluster complained.
+
 ```sql
 SELECT
-    JSONExtractString(data, 'reason') AS reason,
-    coalesce(
-      nullIf(JSONExtractString(data, 'involvedObject', 'kind'), ''),
-      nullIf(JSONExtractString(data, 'regarding',      'kind'), '')
-    )                                 AS subject_kind,
-    count()                           AS rows,
-    uniqExact(uid)                    AS distinct_events
-FROM resource_states FINAL
-WHERE cluster_id = {cluster:String}
-  AND kind = 'Event'
-  AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
-  AND JSONExtractString(data, 'type') = 'Warning'
+    reason,
+    subject_kind,
+    sum(fired)         AS occurrences,
+    count()            AS distinct_events,
+    sum(recorded_rows) AS recorded_rows
+FROM (
+    SELECT
+        uid,
+        argMax(JSONExtractString(data, 'reason'), ts) AS reason,
+        argMax(coalesce(
+          nullIf(JSONExtractString(data, 'involvedObject', 'kind'), ''),
+          nullIf(JSONExtractString(data, 'regarding',      'kind'), '')
+        ), ts)                                        AS subject_kind,
+        max(greatest(
+            1,
+            JSONExtractUInt(data, 'count'),
+            JSONExtractUInt(data, 'deprecatedCount'),
+            JSONExtractUInt(data, 'series', 'count')
+        ))                                            AS fired,
+        count()                                       AS recorded_rows
+    FROM resource_states FINAL
+    WHERE cluster_id = {cluster:String}
+      AND kind = 'Event'
+      AND ts BETWEEN {from:DateTime64(3, 'UTC')} AND {to:DateTime64(3, 'UTC')}
+      AND JSONExtractString(data, 'type') = 'Warning'
+    GROUP BY uid
+)
 GROUP BY reason, subject_kind
-ORDER BY rows DESC
+ORDER BY occurrences DESC
 LIMIT 25;
 ```
 
-`rows` counts recorded occurrences (every count bump is a row) while
-`distinct_events` counts Event objects — the gap between them is how much of the
-noise is one thing repeating versus many things going wrong once.
+Three numbers, three different questions. `occurrences` is how many times the
+cluster said it; `distinct_events` is how many Event objects that was, so the gap
+between them is how much of the noise is one thing repeating versus many things
+going wrong once; `recorded_rows` is what the archive spent, so the gap between
+that and `occurrences` is how much the sinks' `coalesceWindow` absorbed.
 
 ## Reading Event history correctly
 
@@ -570,6 +650,13 @@ Two traps, both consequences of Events being ephemera rather than durable state
   when it expires. Do not infer "still live" from the absence of a deletion the
   way you would for a Deployment — read the Event's own `lastTimestamp`
   (`series.lastObservedTime` in `events.k8s.io/v1`) out of `data`.
+- **Row density is not frequency, and `count` is cumulative.** A sink suppresses
+  a bursting Event's rows inside its `spec.writer.coalesceWindow`, so the interval
+  between two rows of one Event is bounded by that window rather than by how often
+  the Event fired. Read `count` off the latest row; never `count()` over the rows,
+  and never `sum(count)` across the rows of one Event. See [How often did this
+  Event fire?](#how-often-did-this-event-fire) and [Rows and
+  occurrences](SCHEMA.md#rows-and-occurrences).
 - **Filter on `api_group` if a rule names both spellings.** `v1/Event` and
   `events.k8s.io/v1/Event` are one storage behind two APIs, so a rule naming both
   records the same Event twice, once per group. Every query above omits

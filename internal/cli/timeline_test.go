@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -618,6 +619,52 @@ func TestTimelineInterleavesKubernetesEvents(t *testing.T) {
 	}
 }
 
+// TestTimelineRendersAnEventsOccurrenceCount is Task 20.2's read-time half.
+//
+// After coalescing, a row no longer means "this Event fired once at this
+// instant": it means "this Event stood in this state at this instant, having
+// fired `count` times since it first appeared". The gap between two rows is
+// bounded by the sink's spec.writer.coalesceWindow rather than by how often the
+// Event fired, so a reader who infers frequency from row density infers it from a
+// storage setting. The count is the only place the frequency survives, the
+// archive has held it all along, and a CLI that did not show it would render a
+// container that has failed fifty times exactly like one that failed once.
+//
+// A golden rather than a substring assertion, for the placement: the count has to
+// still be on the screen after the CHANGE column has truncated the message, and
+// nothing but a laid-out row records that.
+func TestTimelineRendersAnEventsOccurrenceCount(t *testing.T) {
+	engine := &fakeEngine{
+		caps:         clickHouseCapabilities(),
+		changes:      shortHistory(),
+		incarnations: checkoutIncarnations(),
+		intervals: append(deploymentScope(),
+			eventsWatchedBy("", "ClusterStreamRule/all-events")),
+		events: crashLoopEvents(),
+	}
+
+	request := defaultRequest()
+	request.WithEvents, request.EventsOnly = true, true
+	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})
+	if err != nil {
+		t.Fatalf("RunTimeline: %v", err)
+	}
+	assertGolden(t, "event-count", stdout, stderr)
+
+	// The marker survived the column, which is the claim the placement rests on.
+	// Asserted separately from the golden because a golden that was regenerated
+	// after a regression records the regression, while this says what the row is
+	// for.
+	if !strings.Contains(stdout, "BackOff ×50") {
+		t.Errorf("the cumulative count is not on the BackOff row, so a crash-loop renders as a "+
+			"one-off:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Scheduled ×") {
+		t.Errorf("an Event that fired once carries a count marker; the contrast between a marked "+
+			"and an unmarked row is what makes a recurrence visible:\n%s", stdout)
+	}
+}
+
 // Invariant 9 applied to the sub-query --with-events asks.
 //
 // The flag was the one place in this CLI where an empty answer was presented as
@@ -679,6 +726,48 @@ func checkoutEvents() []query.Change {
 				`"note":"pods \"checkout-7d4f-\" is forbidden: exceeded quota",` +
 				`"reportingController":"replicaset-controller"}`,
 		},
+	}
+}
+
+// crashLoopEvents is what a bursting Event looks like once the sink has coalesced
+// it: a handful of rows over twenty minutes, each carrying the cumulative count
+// of everything the suppressed rows would have restated.
+//
+// Three properties are in the fixture on purpose, because each is one a reader
+// gets wrong without the count on the screen:
+//
+//   - The counts climb by far more than the rows do. Four rows, 47 more
+//     occurrences between the first and the last — which is the reading the
+//     rendered count exists to make available, since no amount of row-counting
+//     recovers it.
+//   - The `BackOff` message is long enough that the CHANGE column truncates it at
+//     the golden's width. That is what pins the count's placement: appended to the
+//     message it would be the first thing removed, and the crash-loop row would
+//     render identically to a one-off.
+//   - `Scheduled` fired once and carries `count: 1`, so the golden shows the
+//     contrast rather than only the marked case. A marker on every row would be
+//     noise on most of them.
+func crashLoopEvents() []query.Change {
+	backOff := func(ts string, count int) query.Change {
+		return query.Change{
+			TS: at(ts), EventType: query.EventKubernetes, UID: "e-backoff", APIVersion: "v1",
+			Data: fmt.Sprintf(`{"type":"Warning","reason":"BackOff",`+
+				`"message":"Back-off restarting failed container checkout in pod checkout-7d4f-9xk2l",`+
+				`"count":%d,"source":{"component":"kubelet"}}`, count),
+		}
+	}
+	return []query.Change{
+		{
+			TS: at("2026-08-28T14:03:20.310Z"), EventType: query.EventKubernetes,
+			UID: "e-scheduled", APIVersion: "v1",
+			Data: `{"type":"Normal","reason":"Scheduled",` +
+				`"message":"Successfully assigned payments/checkout-7d4f-9xk2l to node-3",` +
+				`"count":1,"source":{"component":"default-scheduler"}}`,
+		},
+		backOff("2026-08-28T14:04:02.118Z", 3),
+		backOff("2026-08-28T14:05:02.402Z", 14),
+		backOff("2026-08-28T14:06:03.006Z", 31),
+		backOff("2026-08-28T14:07:03.771Z", 50),
 	}
 }
 

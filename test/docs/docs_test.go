@@ -607,7 +607,10 @@ var eventVolumeClaims = []struct {
 	{"non-deterministic", "why the rejection is not merely a preference"},
 	{"rule_ref", "what determinism buys: Event coverage reconstructible from the rule"},
 	{"eventFilter", "the axis that shipped: a page still calling it a candidate would sell a maybe"},
-	{"coalescing", "the axis that did not, marked as a direction and not a promise"},
+	{"coalescing", "the second axis, which shipped as a per-sink window and bounds the depth"},
+	{"coalesceWindow", "the knob, named where the crash-loop arithmetic it bounds is written"},
+	{"cumulative", "why the collapse loses no occurrence: count is a running total"},
+	{"never `count()`", "the mistake an analyst makes instead, said before they make it"},
 }
 
 // TestSchemaPageCoversEventVolume keeps the two halves of Task 16.6 in step: the
@@ -627,6 +630,12 @@ func TestSchemaPageCoversEventVolume(t *testing.T) {
 	if !strings.Contains(page, "#### Event volume") {
 		t.Fatal("docs/SCHEMA.md has no `#### Event volume` heading; three pages and two CRD " +
 			"descriptions link to #event-volume, and a heading rename silently breaks all five")
+	}
+	if !strings.Contains(page, "#### Rows and occurrences") {
+		t.Fatal("docs/SCHEMA.md has no `#### Rows and occurrences` heading. It is where what a " +
+			"row means after coalescing is written down — a row is a state, not an occurrence — " +
+			"and docs/EVENTS.md, docs/QUERIES.md and the CLI's renderer all link to " +
+			"#rows-and-occurrences for it")
 	}
 	for _, tc := range eventVolumeClaims {
 		t.Run(tc.want, func(t *testing.T) {
@@ -708,6 +717,10 @@ var eventsPageClaims = []struct {
 	{"bump writes a whole row", "the amplifier: count is updated in place, so hash dedup cannot suppress it"},
 	{"crash-looping pod", "the worked example, and the case where the amplifier peaks"},
 	{"filtering does not solve", "D50 said in the page's own voice, not implied by omission"},
+	{"coalesceWindow", "the knob that does bound the amplifier, which no filter on the page does"},
+	{"choosing a window", "the operational half: a knob with a default needs advice for changing it"},
+	{"per sink", "where it lives, and why — the trade belongs to whoever pays for the storage"},
+	{"cumulative", "why collapsing rows loses no occurrence, which is what makes the trade safe"},
 	{"namespaceSelector", "the knob that does narrow the stream"},
 	{"maxObjectBytes", "the S3 number a cluster-wide Event rule has to be sized against"},
 	{"Suggested TTL", "the retention number it has to be sized against"},
@@ -802,6 +815,45 @@ func TestEventsPageIsWhereThePointersGo(t *testing.T) {
 				"`make build-installer helm-sync`), since this description is what "+
 				"`kubectl explain streamrule.spec.resources` prints", crd)
 		}
+	}
+}
+
+// TestQueryLibrarySaysWhatACoalescedRowMeans is Task 20.2's SQL half.
+//
+// docs/QUERIES.md is where somebody goes to write an aggregate over Events, and
+// the aggregate they will reach for is `count()`. Since a sink collapses a
+// bursting Event's rows inside its coalesceWindow, that counts how often the sink
+// *wrote* rather than how often the cluster *emitted* — and it is wrong in the way
+// that is hardest to catch: the query parses, runs, and returns a plausible number
+// that moves when somebody changes a storage setting.
+//
+// So the page has to name the distinction rather than merely publish a correct
+// recipe beside an incorrect habit. That the recipe *works* is asserted elsewhere
+// and better: test/queries executes every statement on this page against a
+// ClickHouse built from the shipped DDL and requires rows back. What is checked
+// here is the prose a reader needs in order to pick it.
+func TestQueryLibrarySaysWhatACoalescedRowMeans(t *testing.T) {
+	page := readFile(t, "docs/QUERIES.md")
+
+	if !strings.Contains(page, "### How often did this Event fire?") {
+		t.Fatal("docs/QUERIES.md has no `### How often did this Event fire?` recipe. It is the " +
+			"answer to the question coalescing makes easy to get wrong, and docs/SCHEMA.md's " +
+			"`Rows and occurrences` links to #how-often-did-this-event-fire for it")
+	}
+
+	for _, tc := range []struct{ want, why string }{
+		{"`count`, never `count()`", "the distinction itself, in the page's own words — a " +
+			"correct recipe published beside an unnamed habit does not displace the habit"},
+		{"cumulative", "why max() and not sum(): each row restates the running total"},
+		{"coalesceWindow", "what makes row density a storage setting rather than a frequency"},
+		{"greatest(", "all three spellings of the number, which is what makes this page and the " +
+			"CLI's rendered count agree about one stored row"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(page, tc.want) {
+				t.Errorf("docs/QUERIES.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
 	}
 }
 

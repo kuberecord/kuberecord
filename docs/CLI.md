@@ -537,10 +537,11 @@ them is ever reached.
 
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read
-time, and an occurrence-count bump writes a full row rather than a diff. Read
+time, and an occurrence-count bump the sink's `coalesceWindow` does not suppress
+writes a full row rather than a diff. Read
 [`docs/EVENTS.md`](EVENTS.md) before widening the rule beyond a namespace — it
-has the sizing guidance, and the `eventFilter` that narrows *which* Events a rule
-records.
+has the sizing guidance, the `eventFilter` that narrows *which* Events a rule
+records, and the window that bounds how many rows each one costs.
 
 ### Events and no changes at all
 

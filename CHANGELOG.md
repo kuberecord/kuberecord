@@ -204,8 +204,104 @@ than a summary of them.
   neither is a commitment", and one of them — filtering on fields the Event itself
   carries — is `spec.resources[].eventFilter` in this release. The rejection and
   its reasoning are unchanged; what changed is that the page now says which of the
-  two shipped, and that count-bump coalescing did not. Its closing line, that
-  sizing is still done with the scope, is now the point rather than a placeholder.
+  two shipped — and by the end of this release both had, so the page's closing line
+  is that sizing is done with the scope *and* the window, which is the point rather
+  than a placeholder.
+
+### Changed
+
+- **A bursting Kubernetes Event now writes rows proportional to elapsed time
+  rather than to its `count`.** The API server does not create a second Event when
+  the same thing happens again — it updates the existing one in place, bumping
+  `count`. That changes the content, so the hash dedup that absorbs a no-op resync
+  cannot absorb it, and because Events are never diffed, every bump wrote another
+  complete Event JSON. A handful of pods crash-looping overnight was hundreds of
+  rows describing a situation that had not changed since the first one, and **the
+  amplifier peaked exactly when a cluster was unhealthy** — when the write path has
+  least headroom and somebody is reading the audit trail.
+
+  A new `spec.writer.coalesceWindow`, on `ClickHouseSink` and `S3Sink` alike,
+  bounds it: within the window, an Event whose only change since the last recorded
+  row is its `count` and its timestamps writes nothing at all.
+
+  ```yaml
+  spec:
+    writer:
+      coalesceWindow: 5m   # default 1m; 0s records every bump
+  ```
+
+  **It defaults to `1m`, so the row density of every existing deployment that
+  streams Events changes on upgrade.** `0s` restores the previous behaviour
+  exactly, and the field accepts `0s` or a duration between `1s` and `30m` — the
+  floor because a window below it is indistinguishable from `0s` while looking as
+  though it is on, the ceiling because looking at a suppressed Event again reads it
+  from the watch cache and an Event's TTL is about an hour.
+
+  **No occurrence is lost, because `count` is cumulative.** The rows that survive
+  carry every occurrence the suppressed ones would have restated, and a coalesced
+  archive and an uncoalesced one agree about what fired and when it started: a
+  first sighting is never suppressed, there being nothing yet to compare it
+  against. While a burst runs the archive trails the live `count` by at most one
+  window, and it settles on the true figure within one window of the burst ending —
+  a suppressed bump schedules the Event to be looked at again when the window
+  expires, and that reconsideration writes it as it then stands.
+
+  **Only a restatement is ever suppressed.** The comparison is by exclusion —
+  everything the Event carries is compared *except* the fields a bump rewrites — so
+  a changed `message`, `reason`, `type` or subject writes immediately, and so does
+  a field a future Kubernetes version adds. An allow-list would have started
+  dropping a new signal silently on the day it appeared. The window is per sink,
+  because the trade is archive resolution against write volume and that belongs to
+  whoever pays for the storage; coalescing state is in memory, so the first Event
+  observed after a restart is written — correctly, since the operator cannot know
+  what it did not record. `kuberecord_pipeline_event_coalesce_skips_total` counts
+  what the window absorbed.
+
+- **What an Event row means is now written down, because the gap between two of
+  them became deliberate.** A row was never one occurrence — `count` has always
+  been cumulative, and a warm-up List can deliver an Event already at `count: 12` —
+  but until now the gaps were incidental, and an analyst could read row density as
+  frequency and be roughly right. They no longer can.
+
+  `docs/SCHEMA.md` gains **Rows and occurrences**: a row is the Event's state at an
+  instant, having fired `count` times since it first appeared; the interval between
+  two rows is bounded by the sink's window rather than by how often the Event
+  fired; read `count` off the latest row, never `count()` over the rows, and never
+  `sum(count)` across the rows of one Event. `docs/EVENTS.md` carries the
+  operational half — what the window trades, which is the instant of each
+  intermediate bump and nothing else, and a table for choosing one from `0s` to
+  `30m`.
+
+  `docs/QUERIES.md` gains **How often did this Event fire?**, which uses `count`
+  rather than `count()`. That distinction is what makes coalescing safe to reason
+  about, and it is the mistake the page itself was making: its noisiest-reasons
+  recipe described `rows` as counting occurrences, and it now reduces each Event
+  object to its own cumulative count before summing across objects, reporting
+  occurrences, distinct Events and recorded rows as the three different numbers
+  they are.
+
+- **`kuberecord timeline` renders an Event's count when it is greater than one.**
+  A row reading `BackOff: Back-off restarting failed container` beside one reading
+  the same thing ×50 is the difference between noise and a signal, and the archive
+  has held the number all along.
+
+  ```
+  2026-08-28 14:07:03.771Z  Event  kubelet  ⚠ BackOff ×50: Back-off restarting failed container …
+  ```
+
+  It sits beside the reason rather than at the end of the line, because the CHANGE
+  column truncates from the right and the messages it truncates are the long ones —
+  a quota rejection, a scheduling failure — so an appended count would disappear
+  from exactly the rows that most need it. All three spellings are read (`count`,
+  `deprecatedCount`, `series.count`), taking the largest, which is the form
+  `docs/QUERIES.md` publishes as `greatest(…)`; an Event carrying none of them
+  fired once and is left unmarked, as is one that fired exactly once, because the
+  contrast between a marked row and an unmarked one is what makes a recurrence
+  visible. `-o json` is unchanged: `data` is already the parsed Event object and
+  carries `count` under its own name.
+
+  **No schema change.** `deploy/clickhouse/schema/` is untouched, `count` was
+  always cumulative, and every query that read it still reads it.
 
 ### Fixed
 
