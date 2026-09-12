@@ -58,6 +58,35 @@ than a summary of them.
   No schema change: `deploy/clickhouse/schema/` is untouched, and Event coverage
   stays reconstructible from `rule_ref`.
 
+- **The operator now applies `eventFilter`, handler-side.** The field landed as a
+  CRD contract; this is the evaluator behind it. A rule's filter is canonicalized
+  once by the reconciler, merged into the desired-state registry beside its
+  selectors and its redaction policy, and compiled into a matcher **once** when
+  the watch interest is built — never per Event, which would put JSON parsing in
+  the notification path of the highest-volume kind in the cluster.
+
+  It is evaluated in the informer's event handler, exactly where `labelSelector`
+  already is and for the same reason: one informer per `(GVR, namespace)` is
+  shared by every rule that wants that stream, so a filter belongs to an interest
+  rather than to the watch. Interests are evaluated **independently** — an Event
+  matching rule A's filter and not rule B's is enqueued for A's sink alone — while
+  two rules sharing one sink and scope are one stream, so their filters merge as a
+  union, and one rule that filtered nothing widens it to everything.
+
+  The matcher reads only fields the Event itself carries and looks nothing up: no
+  informer read, no API call, no cache access, and zero allocations per event
+  (`BenchmarkFanOutEventFilter`). `sourceComponents` matches **any** spelling of
+  the emitting component — `source.component` and `reportingComponent` in core
+  `v1`, `reportingController` and `deprecatedSource.component` in
+  `events.k8s.io/v1` — because the two APIs are one storage and which field is
+  populated depends on which recorder wrote the Event. Subject axes read both
+  `involvedObject` and `regarding`, matching what the query side already
+  coalesces. An Event missing a field a filter names does not match it: absent is
+  not empty.
+
+  Still no schema change, and no push-down yet — every filter is evaluated
+  handler-side, and both halves are required to record byte-identical rows.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five

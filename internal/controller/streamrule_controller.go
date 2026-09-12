@@ -838,13 +838,14 @@ func policyAdmits(allowed []v1alpha1.GVKSelector, res v1alpha1.WatchedResource) 
 }
 
 // resolvedResource is one of a rule's resources after the resolver has vetted it:
-// the GVK to watch, the canonical selector to filter with, and the namespaces the
-// rule wants it in.
+// the GVK to watch, the canonical selector to filter with, the canonical Event
+// filter to narrow Events by, and the namespaces the rule wants it in.
 type resolvedResource struct {
-	gvk        schema.GroupVersionKind
-	gvr        schema.GroupVersionResource
-	selector   string
-	namespaces []string
+	gvk         schema.GroupVersionKind
+	gvr         schema.GroupVersionResource
+	selector    string
+	eventFilter string
+	namespaces  []string
 }
 
 // resolveResources vets every named resource against the rule's already-expanded
@@ -869,12 +870,21 @@ func (r *RuleReconciler) resolveResources(namespaces []string,
 			failures = append(failures, fmt.Sprintf("%s: %v", gvk, err))
 			continue
 		}
+		// A filter that cannot be canonicalized joins the per-resource failures
+		// for the reason an unconvertible selector does: it is this entry's
+		// problem, and the four kinds the rule also names must still stream.
+		eventFilter, err := canonicalEventFilter(res.EventFilter)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", gvk, err))
+			continue
+		}
 
 		resolved = append(resolved, resolvedResource{
-			gvk:        gvk,
-			gvr:        gvr,
-			selector:   selector,
-			namespaces: namespacesFor(namespaced, namespaces),
+			gvk:         gvk,
+			gvr:         gvr,
+			selector:    selector,
+			eventFilter: eventFilter,
+			namespaces:  namespacesFor(namespaced, namespaces),
 		})
 	}
 	return resolved, failures
@@ -1010,11 +1020,12 @@ func (r *RuleReconciler) reviewTargets(ctx context.Context, sinkID sink.ID,
 			}
 
 			targets = append(targets, plan.WatchTarget{
-				Sink:      sinkID,
-				GVK:       res.gvk,
-				Namespace: namespace,
-				Selector:  res.selector,
-				Redaction: redaction,
+				Sink:        sinkID,
+				GVK:         res.gvk,
+				Namespace:   namespace,
+				Selector:    res.selector,
+				Redaction:   redaction,
+				EventFilter: res.eventFilter,
 			})
 		}
 	}

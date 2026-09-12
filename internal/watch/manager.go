@@ -687,9 +687,9 @@ func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 		}
 
 		informer := informerKey{GVR: gvr, Namespace: key.Namespace}
-		in, err := newScopeInterest(key, informer, state.Selectors, state.Redactions, state.RuleKeys)
+		in, err := newScopeInterest(state, informer)
 		if err != nil {
-			log.Error(err, "Skipping a watch target whose selectors or redaction policy could not be parsed",
+			log.Error(err, "Skipping a watch target whose selectors, redaction policy or event filter could not be parsed",
 				"sink", key.Sink.String(), "gvk", key.GVK.String(), "namespace", key.Namespace,
 				"rules", state.RuleKeys)
 			continue

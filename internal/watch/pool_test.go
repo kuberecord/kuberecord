@@ -444,3 +444,124 @@ func sinksOf(keys []pipeline.Key) []sink.ID {
 	slices.SortFunc(sinks, sink.ID.Compare)
 	return sinks
 }
+
+// newEvent builds a core v1 Event in eventNamespace as an informer would deliver
+// it, with the subject and emitter the caller cares about and nothing else.
+func newEvent(name, eventType, reason, component, subjectKind string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Event",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": eventNamespace,
+		},
+		"type":   eventType,
+		"reason": reason,
+		"source": map[string]any{"component": component},
+		"involvedObject": map[string]any{
+			"kind": subjectKind, "namespace": eventNamespace, "name": "checkout",
+		},
+	}}
+}
+
+// TestPoolFanOutAppliesEventFiltersPerSink is the independence acceptance
+// criterion: interests on one Event informer are evaluated separately, so an
+// Event matching rule A's filter and not rule B's is enqueued for A's sink alone.
+// Evaluating them as a union would record for B what B declined.
+//
+// Three filtered sinks, one per axis, plus one that filtered nothing — which must
+// receive every Event whatever the others decide, and is what makes a filter that
+// swallowed the whole stream visible rather than merely plausible.
+func TestPoolFanOutAppliesEventFiltersPerSink(t *testing.T) {
+	warnings := eventInterestFor(t, clickHouseSink("sink-warnings"),
+		[]string{mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})}, []string{"rule-warnings"})
+	scheduler := eventInterestFor(t, clickHouseSink("sink-scheduler"),
+		[]string{mustCanonical(t, EventFilterSpec{SourceComponents: []string{"default-scheduler"}})},
+		[]string{"rule-scheduler"})
+	subjects := eventInterestFor(t, clickHouseSink("sink-subjects"),
+		[]string{mustCanonical(t, EventFilterSpec{SubjectKinds: []string{"Pod"}})}, []string{"rule-subjects"})
+	everything := eventInterestFor(t, clickHouseSink("sink-all"), nil, []string{"rule-all"})
+
+	table := newInterestTable()
+	table.replace(map[interestID]*scopeInterest{
+		warnings.id():   warnings,
+		scheduler.id():  scheduler,
+		subjects.id():   subjects,
+		everything.id(): everything,
+	})
+
+	queue := &fakePipeline{}
+	p := newPool(newDynamicClient(t), table, queue, logr.Discard())
+	entry := &informerEntry{key: eventInformer, gvk: eventGVK}
+
+	cases := []struct {
+		name  string
+		event *unstructured.Unstructured
+		want  []sink.ID
+	}{
+		{
+			name:  "a kubelet Warning about a Pod misses the component filter only",
+			event: newEvent("backoff.1", "Warning", "BackOff", "kubelet", "Pod"),
+			want:  []sink.ID{everything.sink, subjects.sink, warnings.sink},
+		},
+		{
+			name:  "a scheduler Warning about a Pod satisfies every filter",
+			event: newEvent("failedsched.1", "Warning", "FailedScheduling", "default-scheduler", "Pod"),
+			want:  []sink.ID{everything.sink, scheduler.sink, subjects.sink, warnings.sink},
+		},
+		{
+			name:  "a scheduler Normal about a Pod misses the type filter only",
+			event: newEvent("scheduled.1", "Normal", "Scheduled", "default-scheduler", "Pod"),
+			want:  []sink.ID{everything.sink, scheduler.sink, subjects.sink},
+		},
+		{
+			name:  "a kubelet Normal about a Pod reaches the subject filter and the unfiltered sink",
+			event: newEvent("pulled.1", "Normal", "Pulled", "kubelet", "Pod"),
+			want:  []sink.ID{everything.sink, subjects.sink},
+		},
+		{
+			name:  "an Event no filter names reaches the unfiltered sink alone",
+			event: newEvent("created.1", "Normal", "SuccessfulCreate", "replicaset-controller", "ReplicaSet"),
+			want:  []sink.ID{everything.sink},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			queue.reset()
+			p.fanOut(entry, tc.event, nil)
+			want := slices.Clone(tc.want)
+			slices.SortFunc(want, func(a, b sink.ID) int { return a.Compare(b) })
+			if got := sinksOf(queue.enqueued()); !slices.Equal(got, want) {
+				t.Errorf("fanOut enqueued keys for %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestPoolFanOutEventTombstone covers the one Event a filter cannot be evaluated
+// against: a tombstone whose inner object was lost carries no fields at all.
+//
+// It fans out rather than being filtered away, for the reason the selector path
+// fans one out — "we cannot know" must not become "it does not match". The
+// consequence here is provably nil rather than merely acceptable: an Event
+// leaving the watch cache is its TTL expiring, which the pipeline drops as
+// ephemeral rather than recording as a deletion (pipeline.ephemeralKind), so the
+// extra key settles as a no-op.
+func TestPoolFanOutEventTombstone(t *testing.T) {
+	in := eventInterestFor(t, sinkA,
+		[]string{mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})}, []string{"rule-1"})
+	table := newInterestTable()
+	table.replace(map[interestID]*scopeInterest{in.id(): in})
+
+	queue := &fakePipeline{}
+	p := newPool(newDynamicClient(t), table, queue, logr.Discard())
+	entry := &informerEntry{key: eventInformer, gvk: eventGVK}
+
+	p.fanOut(entry, cache.DeletedFinalStateUnknown{Key: eventNamespace + "/backoff.1"}, nil)
+
+	want := pipeline.Key{Sink: sinkA, Kind: "Event", Namespace: eventNamespace, Name: "backoff.1"}
+	if got := queue.enqueued(); len(got) != 1 || got[0] != want {
+		t.Fatalf("a tombstone with no object enqueued %+v, want exactly %+v", got, want)
+	}
+}

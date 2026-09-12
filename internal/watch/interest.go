@@ -134,6 +134,17 @@ type scopeInterest struct {
 	// everything, which makes the overwhelmingly common case a single bool read.
 	matchAll bool
 
+	// events is the compiled union of every contributing rule's Event filter
+	// (Task 19.2), compiled once at pool-diff time for the reason the selectors
+	// are parsed here and the redaction policy is compiled here: the alternative
+	// is decoding a filter per Event, inside an informer's notification
+	// goroutine, on the highest-volume kind in the cluster (Invariant 1).
+	//
+	// It is never nil for an interest built by newScopeInterest, and a nil one
+	// still reads as "record everything" — a target nobody narrowed is a target
+	// that streams whole.
+	events *eventMatcher
+
 	// redaction is the compiled union of every contributing rule's redaction
 	// paths (Task 3.3), compiled once at pool-diff time for the same reason the
 	// selectors are parsed here: the alternative is re-parsing a policy per
@@ -143,18 +154,27 @@ type scopeInterest struct {
 }
 
 // newScopeInterest builds the interest for one snapshot target, parsing its
-// merged selector set and compiling its merged redaction policy.
+// merged selector set and compiling its merged redaction policy and Event
+// filter.
 //
-// A selector or redaction path that fails to parse is an anomaly rather than a
-// user error — the registry canonicalized every selector through the same parser
-// before storing it (see plan.Upsert), and the CRD's own validation rejects a
+// It takes the whole TargetState rather than the three merged string sets
+// separately: the state already carries its own Key, and four adjacent []string
+// parameters is the shape in which two of them get swapped in a later edit
+// without the compiler noticing.
+//
+// A selector, redaction path or Event filter that fails to parse is an anomaly
+// rather than a user error — the registry canonicalized every selector through
+// the same parser before storing it (see plan.Upsert), the control plane rendered
+// the filter with CanonicalEventFilter, and the CRD's own validation rejects a
 // malformed redaction path at admission — so it is reported rather than silently
 // dropped, and the caller degrades that one target instead of the whole pass
 // (Invariant 5). Degrading means the target streams nothing, which for a
 // redaction failure is the only safe direction: the alternative would be
-// streaming objects whose author asked for parts of them to be scrubbed.
-func newScopeInterest(key plan.TargetKey, informer informerKey,
-	selectors, redactions, ruleKeys []string) (*scopeInterest, error) {
+// streaming objects whose author asked for parts of them to be scrubbed. For a
+// filter failure it is the same direction for the mirror-image reason — falling
+// back to "no filter" would record the whole stream its author asked to narrow.
+func newScopeInterest(state plan.TargetState, informer informerKey) (*scopeInterest, error) {
+	key := state.Key
 	in := &scopeInterest{
 		informer: informer,
 		gvk:      key.GVK,
@@ -164,10 +184,10 @@ func newScopeInterest(key plan.TargetKey, informer informerKey,
 			Kind:      key.GVK.Kind,
 			Namespace: key.Namespace,
 		},
-		ruleKeys: ruleKeys,
+		ruleKeys: state.RuleKeys,
 	}
 
-	for _, raw := range selectors {
+	for _, raw := range state.Selectors {
 		if raw == "" {
 			// "Select everything" makes every other selector in the union
 			// redundant, so the parsed set is left empty on purpose.
@@ -186,7 +206,7 @@ func newScopeInterest(key plan.TargetKey, informer informerKey,
 		in.matchAll = true
 	}
 
-	paths := redactionPaths(redactions)
+	paths := redactionPaths(state.Redactions)
 	if len(paths) > 0 {
 		policy, err := pipeline.CompileRedaction(paths)
 		if err != nil {
@@ -194,6 +214,13 @@ func newScopeInterest(key plan.TargetKey, informer informerKey,
 		}
 		in.redaction = policy
 	}
+
+	events, err := compileEventFilters(state.EventFilters)
+	if err != nil {
+		return nil, fmt.Errorf("compile event filter: %w", err)
+	}
+	in.events = events
+
 	return in, nil
 }
 
@@ -301,6 +328,28 @@ func (i *scopeInterest) matchesEither(current, previous map[string]string) bool 
 		return true
 	}
 	return previous != nil && i.matches(previous)
+}
+
+// matchesEvent reports whether a Kubernetes Event is one this interest records.
+//
+// Unlike matchesEither there is deliberately no previous-object counterpart. The
+// fields a filter reads — type, reason, the emitting component, the subject — are
+// not mutated in place: the API server updates an Event only to bump its `count`
+// and its timestamps, so an Event never leaves a filter's scope the way an object
+// leaves a selector's. Evaluating the current object alone is also what a
+// field-selector-narrowed watch does on the server, which is what Task 19.3 needs
+// in order to record byte-identical rows (D49), and it costs one evaluation per
+// event rather than two on the highest-volume kind in the cluster.
+func (i *scopeInterest) matchesEvent(obj map[string]any) bool {
+	return i.events.matches(obj)
+}
+
+// recordsEveryEvent reports whether no contributing rule narrowed this interest's
+// Event stream, which is true of every target for any kind but Event and of every
+// Event target nobody filtered. It is the single bool read fan-out takes before
+// deciding whether an Event is worth evaluating at all.
+func (i *scopeInterest) recordsEveryEvent() bool {
+	return i.events.matchesAll()
 }
 
 // interestTable is the thread-safe interest map: the single structure both the

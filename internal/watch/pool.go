@@ -405,7 +405,9 @@ func (p *pool) handlerFor(entry *informerEntry) cache.ResourceEventHandler {
 //
 // previous is the pre-update object on an Update and nil otherwise; it is
 // consulted only so an object leaving a selector's scope still produces a final
-// work item (see scopeInterest.matchesEither).
+// work item (see scopeInterest.matchesEither). An Event filter is evaluated
+// against the current object alone, for the reasons scopeInterest.matchesEvent
+// gives.
 //
 // A key is enqueued for the *identity*, never for the event: the pipeline reads
 // current state from the watch cache when it picks the item up, which is what
@@ -459,6 +461,21 @@ func (p *pool) fanOut(entry *informerEntry, obj, previous any) {
 			if !in.matchesEither(currentLabels, previousLabels) {
 				continue
 			}
+		}
+
+		// The Event filter is evaluated per interest, and a non-match skips only
+		// *this* interest: an Event matching rule A's filter and not rule B's is
+		// enqueued for A's sink alone. Evaluating them as a union would record
+		// for B what B declined.
+		//
+		// A tombstone whose object was lost is fanned out rather than filtered,
+		// for the reason the selector block above fans one out: "we cannot know"
+		// must not become "it does not match". Here the consequence is provably
+		// nil — an Event leaving the watch cache is a TTL expiry, which the
+		// pipeline drops as ephemeral rather than recording as a deletion (see
+		// pipeline.ephemeralKind), so the extra key settles as a no-op.
+		if !in.recordsEveryEvent() && target.obj != nil && !in.matchesEvent(target.obj.Object) {
+			continue
 		}
 		p.queue.Add(in.keyFor(target.namespace, target.name))
 	}

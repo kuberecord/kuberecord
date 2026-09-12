@@ -37,7 +37,9 @@ func interestFor(t *testing.T, sinkID sink.ID, namespace string,
 	selectors, ruleKeys []string) *scopeInterest {
 	t.Helper()
 	key := plan.TargetKey{Sink: sinkID, GVK: podGVK, Namespace: namespace}
-	in, err := newScopeInterest(key, podsInNamespace(namespace), selectors, nil, ruleKeys)
+	in, err := newScopeInterest(
+		plan.TargetState{Key: key, RuleKeys: ruleKeys, Selectors: selectors},
+		podsInNamespace(namespace))
 	if err != nil {
 		t.Fatalf("newScopeInterest(%s, %q, %v): %v", sinkID, namespace, selectors, err)
 	}
@@ -114,7 +116,9 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			key := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
-			in, err := newScopeInterest(key, podsInNamespace("ns-a"), tc.selectors, nil, []string{"rule-1"})
+			in, err := newScopeInterest(
+				plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}, Selectors: tc.selectors},
+				podsInNamespace("ns-a"))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected a selector parse error, got nil")
@@ -139,7 +143,9 @@ func TestNewScopeInterestSelectors(t *testing.T) {
 // (Invariant 7) even though the interest itself carries a versioned GVR.
 func TestScopeInterestDerivedIdentity(t *testing.T) {
 	key := plan.TargetKey{Sink: sinkA, GVK: deploymentGVK, Namespace: "ns-a"}
-	in, err := newScopeInterest(key, informerKey{GVR: deploymentGVR, Namespace: "ns-a"}, nil, nil, []string{"rule-1"})
+	in, err := newScopeInterest(
+		plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}},
+		informerKey{GVR: deploymentGVR, Namespace: "ns-a"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -329,7 +335,9 @@ func TestInterestTableLookupIdentity(t *testing.T) {
 // are the same lookup, and the candidate must not be returned twice.
 func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
 	key := plan.TargetKey{Sink: sinkA, GVK: namespaceGVK, Namespace: ""}
-	in, err := newScopeInterest(key, informerKey{GVR: namespaceGVR}, nil, nil, []string{"rule-1"})
+	in, err := newScopeInterest(
+		plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}},
+		informerKey{GVR: namespaceGVR})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -423,7 +431,9 @@ func TestNewScopeInterestCompilesRedaction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			key := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
-			in, err := newScopeInterest(key, podsInNamespace("ns-a"), nil, tc.redactions, []string{"rule-1"})
+			in, err := newScopeInterest(
+				plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}, Redactions: tc.redactions},
+				podsInNamespace("ns-a"))
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected a redaction compile error, got nil")
@@ -466,14 +476,22 @@ func TestInterestTableSeparatesSinksOfDifferentKinds(t *testing.T) {
 	// Only the ClickHouseSink is interested, and only in ns-a. Distinct redaction
 	// paths so a leak between the two is visible rather than merely possible.
 	inClickHouse, err := newScopeInterest(
-		plan.TargetKey{Sink: clickhouse, GVK: podGVK, Namespace: "ns-a"},
-		podsInNamespace("ns-a"), nil, []string{"data.clickhouse-only"}, []string{"rule-ch"})
+		plan.TargetState{
+			Key:        plan.TargetKey{Sink: clickhouse, GVK: podGVK, Namespace: "ns-a"},
+			RuleKeys:   []string{"rule-ch"},
+			Redactions: []string{"data.clickhouse-only"},
+		},
+		podsInNamespace("ns-a"))
 	if err != nil {
 		t.Fatalf("newScopeInterest(ClickHouseSink): %v", err)
 	}
 	inS3, err := newScopeInterest(
-		plan.TargetKey{Sink: s3, GVK: podGVK, Namespace: "ns-b"},
-		podsInNamespace("ns-b"), nil, []string{"data.s3-only"}, []string{"rule-s3"})
+		plan.TargetState{
+			Key:        plan.TargetKey{Sink: s3, GVK: podGVK, Namespace: "ns-b"},
+			RuleKeys:   []string{"rule-s3"},
+			Redactions: []string{"data.s3-only"},
+		},
+		podsInNamespace("ns-b"))
 	if err != nil {
 		t.Fatalf("newScopeInterest(S3Sink): %v", err)
 	}
@@ -552,13 +570,19 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 	namespaced := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: "ns-a"}
 	clusterWide := plan.TargetKey{Sink: sinkA, GVK: podGVK, Namespace: ""}
 
-	inNamespace, err := newScopeInterest(namespaced, podsInNamespace("ns-a"), nil,
-		[]string{"data.password"}, []string{"rule-ns"})
+	inNamespace, err := newScopeInterest(
+		plan.TargetState{Key: namespaced, RuleKeys: []string{"rule-ns"}, Redactions: []string{"data.password"}},
+		podsInNamespace("ns-a"))
 	if err != nil {
 		t.Fatalf("newScopeInterest(namespaced): %v", err)
 	}
-	inCluster, err := newScopeInterest(clusterWide, podsInNamespace(""), nil,
-		[]string{"spec.containers[*].env[*].value"}, []string{"rule-cluster"})
+	inCluster, err := newScopeInterest(
+		plan.TargetState{
+			Key:        clusterWide,
+			RuleKeys:   []string{"rule-cluster"},
+			Redactions: []string{"spec.containers[*].env[*].value"},
+		},
+		podsInNamespace(""))
 	if err != nil {
 		t.Fatalf("newScopeInterest(cluster-wide): %v", err)
 	}
@@ -598,5 +622,124 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 	// refuses to write through.
 	if _, ok := m.RedactionFor(pipeline.Key{Sink: sinkB, Kind: "Pod", Namespace: "ns-a", Name: "web"}); ok {
 		t.Error("RedactionFor answered for a sink with no interests")
+	}
+}
+
+// eventNamespace is the namespace every Event-filter interest in these tests is
+// pinned to, and eventInformer the one informer serving them. One namespace
+// rather than a parameter because the property under test is per-*interest*
+// independence on a shared informer, and interests in two namespaces are served
+// by two informers and never meet.
+const eventNamespace = "ns-a"
+
+var eventInformer = informerKey{GVR: eventGVR, Namespace: eventNamespace}
+
+// eventInterestFor builds one interest in the Event informer carrying a merged
+// filter set, the way reconcilePool does.
+func eventInterestFor(t *testing.T, sinkID sink.ID, eventFilters, ruleKeys []string) *scopeInterest {
+	t.Helper()
+	key := plan.TargetKey{Sink: sinkID, GVK: eventGVK, Namespace: eventNamespace}
+	in, err := newScopeInterest(
+		plan.TargetState{Key: key, RuleKeys: ruleKeys, EventFilters: eventFilters},
+		eventInformer)
+	if err != nil {
+		t.Fatalf("newScopeInterest(%s, %v): %v", sinkID, eventFilters, err)
+	}
+	return in
+}
+
+// TestNewScopeInterestEventFilters covers the compile half of Task 19.2: a
+// target's merged filter set becomes one matcher when the interest is built, not
+// one per Event, and a set that cannot be compiled degrades the target rather
+// than widening it.
+func TestNewScopeInterestEventFilters(t *testing.T) {
+	warning := mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})
+
+	tests := []struct {
+		name         string
+		eventFilters []string
+		wantErr      bool
+		wantAll      bool
+		// matches maps an Event to whether it must be recorded.
+		matches map[string]struct {
+			event map[string]any
+			want  bool
+		}
+	}{
+		{
+			name:         "no filters records every Event",
+			eventFilters: nil,
+			wantAll:      true,
+		},
+		{
+			name:         "the empty filter makes the rest redundant",
+			eventFilters: []string{"", warning},
+			wantAll:      true,
+		},
+		{
+			name:         "a filter narrows the stream",
+			eventFilters: []string{warning},
+			matches: map[string]struct {
+				event map[string]any
+				want  bool
+			}{
+				"a Warning is recorded": {event: coreEvent(nil), want: true},
+				"a Normal is not": {
+					event: coreEvent(map[string]any{"type": "Normal"}),
+					want:  false,
+				},
+			},
+		},
+		{
+			name: "a filter that cannot be compiled degrades the target",
+			// Bytes CanonicalEventFilter could not have produced: the two tiers
+			// disagree, which must not resolve into recording everything.
+			eventFilters: []string{`{"types":`},
+			wantErr:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			key := plan.TargetKey{Sink: sinkA, GVK: eventGVK, Namespace: eventNamespace}
+			in, err := newScopeInterest(
+				plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}, EventFilters: tc.eventFilters},
+				eventInformer)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected an event filter compile error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newScopeInterest: %v", err)
+			}
+			if got := in.recordsEveryEvent(); got != tc.wantAll {
+				t.Errorf("recordsEveryEvent() = %t, want %t", got, tc.wantAll)
+			}
+			for name, want := range tc.matches {
+				if got := in.matchesEvent(want.event); got != want.want {
+					t.Errorf("%s: matchesEvent() = %t, want %t", name, got, want.want)
+				}
+			}
+		})
+	}
+}
+
+// TestNewScopeInterestCompilesTheFilterOnce is the Invariant 1 half of the
+// acceptance criterion, asserted structurally rather than by timing: the matcher
+// is a field of the interest, so it survives across events and cannot be rebuilt
+// per notification. Two evaluations must see the same compiled instance.
+func TestNewScopeInterestCompilesTheFilterOnce(t *testing.T) {
+	in := eventInterestFor(t, sinkA,
+		[]string{mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})}, []string{"rule-1"})
+
+	first := in.events
+	if first == nil {
+		t.Fatal("newScopeInterest left the matcher nil; every Event would be compiled against nothing")
+	}
+	in.matchesEvent(coreEvent(nil))
+	if in.events != first {
+		t.Error("the matcher was replaced by an evaluation; it must be compiled once, at pool-diff time")
 	}
 }
