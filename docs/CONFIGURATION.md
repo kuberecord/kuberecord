@@ -46,7 +46,8 @@ Operators must be able to size the write path per environment, and a fleet-wide
 default should not have to be repeated on every sink.
 
 Four of the six also back an `S3Sink`'s writer — `queueSize`, `workers`,
-`enqueueTimeout` and `drainTimeout`, the knobs the two backends share. The two
+`enqueueTimeout` and `drainTimeout`, the knobs the two backends share a flag
+with. The two
 batching flags have no `S3Sink` twin, because there the object *is* the batch and
 `spec.rotation` decides when it closes. **`workers` is the one flag that does not
 mean the same thing on both**: on an `S3Sink` it multiplies memory as well as
@@ -59,10 +60,21 @@ state `spec.writer.workers` on the sink. Both are spelled out in
 The per-attempt retry backoff cap (60s) remains an internal default, with no flag
 and no CRD field.
 
-`spec.writer.checkpointEvery` is the one writer field with **no** flag twin: it
-defaults to `50` from the CRD itself, because how often a full state is written
-alongside a diff is a property of the history you want to be able to reconstruct,
-not of the process writing it.
+Two writer fields have **no** flag twin at all, because neither describes the
+process doing the writing. Both default from the CRD itself.
+
+`spec.writer.checkpointEvery` defaults to `50`, because how often a full state is
+written alongside a diff is a property of the history you want to be able to
+reconstruct, not of the process writing it.
+
+`spec.writer.coalesceWindow` defaults to `1m`, and is the fifth knob the two sink
+kinds share — same bounds, same default, on `ClickHouseSink` and `S3Sink` alike.
+It is how long a Kubernetes Event whose only change is a `count` bump is
+suppressed, which bounds how many rows a bursting Event writes; the resolution
+you want the Event stream recorded at belongs to whoever pays for its storage,
+not to a fleet-wide flag. `0s` records every bump. See
+[`docs/CRDS.md`](CRDS.md) for the field and
+[`docs/SCHEMA.md`](SCHEMA.md#event-volume) for what it costs and saves.
 
 Use `make bench-load PROFILE=small|medium|massive` to measure the effect of a
 given tuning against a dockerized ClickHouse; the measured envelope for each

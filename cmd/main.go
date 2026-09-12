@@ -665,14 +665,20 @@ func newSinkConfigBuilder(defaults writerTuning, autoCreateSchema bool) controll
 // newS3SinkConfigBuilder returns the controller.S3SinkConfigBuilder that maps an
 // S3Sink spec plus its resolved credentials onto an object-store configuration.
 //
-// The four writer knobs S3 shares with ClickHouse fall back to the same
-// operator-level --writer-* values, deliberately: an administrator who sized the
-// write path for their cluster on the Deployment should not have to repeat it per
-// sink, and a sink that states a value still wins. spec.rotation has no --writer-*
-// twin — an omitted field resolves to zero, which the S3 writer reads as "use the
-// shipped default" — for the same reason checkpointEvery has none: the CRD already
+// The four writer knobs S3 shares a --writer-* flag with fall back to the same
+// operator-level values, deliberately: an administrator who sized the write path
+// for their cluster on the Deployment should not have to repeat it per sink, and a
+// sink that states a value still wins. spec.rotation has no --writer-* twin — an
+// omitted field resolves to zero, which the S3 writer reads as "use the shipped
+// default" — for the same reason checkpointEvery has none: the CRD already
 // defaults both, so a fleet-wide fallback over them could only disagree with the
 // schema.
+//
+// coalesceWindow is the fifth knob the two sinks share, and it has no flag twin
+// either. It is also the one field here where an omitted value and an explicit
+// `0s` must *not* resolve alike: zero means "record every Event count bump", which
+// an operator states on purpose, so the fallback is taken on a nil pointer only —
+// which is exactly what durationOrDefault does.
 //
 // Like its ClickHouse twin it performs no I/O: it translates a struct, and is
 // called inline from a reconcile (Invariant 1).

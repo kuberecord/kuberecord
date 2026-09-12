@@ -46,6 +46,18 @@ const (
 	defaultDrainTimeout   = 15 * time.Second
 )
 
+// DefaultCoalesceWindow is how long a Kubernetes Event whose only change is a
+// `count` bump is suppressed before the next row for it is written, matching
+// clickhouse.DefaultCoalesceWindow and the CRD default on both sinks — an author
+// who has tuned one sink has tuned both (see api/v1alpha1.S3WriterSpec).
+//
+// It is exported where the defaults above are not, because it is the one writer
+// default this package shares a *meaning* with another backend rather than merely
+// a number: the suppression happens in the pipeline, and both sinks declare the
+// same policy to it. Zero is meaningful here — it records every bump — so, unlike
+// every knob above, a zero Config is honoured rather than defaulted.
+const DefaultCoalesceWindow = 1 * time.Minute
+
 const (
 	// defaultPutTimeout bounds one PUT attempt. It is generous next to
 	// ClickHouse's five-second insert timeout because the unit of work is not
@@ -119,6 +131,18 @@ type Config struct {
 	Workers        int
 	EnqueueTimeout time.Duration
 	DrainTimeout   time.Duration
+
+	// CoalesceWindow is spec.writer.coalesceWindow: how long the pipeline
+	// suppresses a Kubernetes Event whose only change since the last recorded row
+	// is its `count` and its timestamps, bounding the Event volume amplifier.
+	//
+	// It is the exception to the "every non-positive field falls back to the
+	// package default" rule above, and deliberately: zero means "record every
+	// bump", which an operator must be able to ask for, so only a negative value
+	// falls back to DefaultCoalesceWindow. A zero Config therefore behaves like a
+	// pre-Phase-20 one here rather than like a defaulted CR — the safe direction,
+	// since it writes more rows rather than fewer.
+	CoalesceWindow time.Duration
 }
 
 // Metrics is the narrow slice of pipeline metrics this writer records. It is an
@@ -244,6 +268,14 @@ type Writer struct {
 	maxRetryBackoff time.Duration
 	drainTimeout    time.Duration
 
+	// coalesceWindow is this sink's Event count-bump window, read by the pipeline
+	// through the CoalesceWindow method (it implements pipeline.CoalescePolicy).
+	// It is written once, before the writer is handed to the SinkManager, and only
+	// read afterwards — a re-tuned window arrives as a new fingerprint and
+	// therefore as a new instance (see SinkConfig.Fingerprint), never as a
+	// mutation of a running one — which is what keeps this lock-free.
+	coalesceWindow time.Duration
+
 	// mu guards closing and drainCtx; see Enqueue/attemptContext.
 	mu      sync.Mutex
 	closing bool
@@ -305,6 +337,13 @@ func NewWriter(store ObjectStore, cfg Config, metrics Metrics) *Writer {
 	if drainTimeout <= 0 {
 		drainTimeout = defaultDrainTimeout
 	}
+	// Zero is honoured rather than defaulted — it is how a sink says "record every
+	// Event count bump" — so only a negative value, which no CRD-validated spec
+	// can produce, falls back. See Config.CoalesceWindow.
+	coalesceWindow := cfg.CoalesceWindow
+	if coalesceWindow < 0 {
+		coalesceWindow = DefaultCoalesceWindow
+	}
 	return &Writer{
 		store:                store,
 		bucket:               cfg.Bucket,
@@ -320,10 +359,25 @@ func NewWriter(store ObjectStore, cfg Config, metrics Metrics) *Writer {
 		putTimeout:           defaultPutTimeout,
 		maxRetryBackoff:      defaultMaxRetryBackoff,
 		drainTimeout:         drainTimeout,
+		coalesceWindow:       coalesceWindow,
 		drainCtx:             context.Background(),
 		metrics:              metrics,
 	}
 }
+
+// CoalesceWindow implements pipeline.CoalescePolicy: how long this sink suppresses
+// a Kubernetes Event whose only change is a `count` bump, or 0 when the sink's
+// owner wants every bump recorded.
+//
+// An archive tier is the backend that can least afford the unbounded version. It
+// accumulates whole objects in memory before it writes any of them, so a crash
+// loop is paid for twice — once against maxObjectBytes and once in retained
+// storage that Object Lock may make impossible to delete.
+//
+// It is a policy read and not a write-path decision: the pipeline consults it
+// while deciding whether a row exists at all, and this writer only ever encodes
+// the row it is handed.
+func (w *Writer) CoalesceWindow() time.Duration { return w.coalesceWindow }
 
 // Enqueue implements sink.Writer. It renders the record to its JSONL line here,
 // once, and hands the line to the bounded queue — so no worker ever touches a

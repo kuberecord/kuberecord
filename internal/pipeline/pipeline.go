@@ -220,6 +220,31 @@ type Pipeline struct {
 	// asserting the per-key serialization contract) without reaching into the
 	// worker loop. Production always leaves it as Process.
 	processFn func(ctx context.Context, key Key) error
+
+	// requeueAfter re-delivers a key once a delay has passed. It is the mechanism
+	// behind Event count-bump coalescing (see coalesce.go): a suppressed bump
+	// schedules its own reconsideration at the moment the window expires, and the
+	// reconsideration reads the Event's current state and writes it — so the last
+	// bump of a burst is recorded rather than left implied.
+	//
+	// It is the delaying queue's AddAfter rather than AddRateLimited, and that
+	// distinction matters: a coalesced bump is not a failure and must not
+	// accumulate an exponential penalty against the key. Repeated calls for one
+	// key collapse onto the *earliest* deadline (client-go keeps the sooner
+	// readyAt and drops the later one), so a continuously bumping Event flushes on
+	// schedule instead of deferring forever, and one pending wake-up per Event is
+	// the ceiling. It needs no goroutine of its own: the queue's own waiting loop
+	// is what fires it, and that loop already stops with the queue on shutdown.
+	//
+	// Like processFn it is a field so a test can observe the schedule without
+	// waiting on it. Production always leaves it as the queue's AddAfter.
+	requeueAfter func(key Key, after time.Duration)
+
+	// now reads the clock. It is a field for the same reason the two above are:
+	// the coalescing window is a statement about elapsed time between rows, and a
+	// test that asserted it against the wall clock would either sleep or flake.
+	// Production always leaves it as time.Now.
+	now func() time.Time
 }
 
 // New builds a Pipeline. It validates the two mandatory dependencies eagerly
@@ -289,6 +314,8 @@ func New(opts Options) (*Pipeline, error) {
 		unavailableSinkLog: &logThrottle{interval: unavailableSinkLogInterval},
 	}
 	p.processFn = p.Process
+	p.requeueAfter = p.queue.AddAfter
+	p.now = time.Now
 	return p, nil
 }
 
@@ -459,6 +486,13 @@ type sinkState struct {
 	cache     hashCache
 	closeOuts closeOutRetryQueue
 
+	// coalesce holds this sink's Event count-bump state: the bump-free digest of
+	// the last row recorded for each Event identity, and when it was recorded (see
+	// coalesce.go). It is per-sink for the same reason cache is — a row confirmed
+	// on one backend says nothing about what another has — and it is evicted
+	// alongside cache everywhere a scope or a sink goes away.
+	coalesce coalescer
+
 	// mu guards warm only. It is separate from hashCache's own mutex because the
 	// two are read on different paths and at different rates; sharing one lock
 	// would put every Snapshot-tagging check behind the cache's hot path.
@@ -555,12 +589,18 @@ func (r *sinkStateRegistry) evictScope(id sink.ID, scope ScopeKey) {
 	// takes and releases the cache's own mutex, and the gauge Set below runs
 	// strictly after it (no metric call ever runs while a hashCache lock is
 	// held — a Task 0.1 acceptance criterion).
-	removed := st.cache.DeletePrefix(scope.scopeKeyPrefix())
+	prefix := scope.scopeKeyPrefix()
+	removed := st.cache.DeletePrefix(prefix)
+	// The coalescer goes with it, under the same prefix and for a stronger reason
+	// than tidiness: a surviving entry for a scope that is watched again later
+	// would compare the new epoch's first Event row against a row from the old one
+	// and suppress it.
+	coalesced := st.coalesce.deletePrefix(prefix)
 	r.metrics.hashcacheEntries.WithLabelValues(sinkSeries).Set(float64(st.cache.Len()))
 
 	logf.Log.WithName("pipeline").V(1).Info("Evicted watch scope from pipeline cache",
 		"sink", sinkSeries, "group", scope.Group, "kind", scope.Kind, "namespace", scope.Namespace,
-		"entries_removed", removed)
+		"entries_removed", removed, "coalesce_entries_removed", coalesced)
 }
 
 func (r *sinkStateRegistry) markScopeWarm(id sink.ID, scope ScopeKey) {

@@ -136,7 +136,7 @@ func (c SinkConfig) Fingerprint() string {
 	if _, err := fmt.Fprintf(h,
 		"region=%q endpoint=%q pathstyle=%t akid=%q secret=%q token=%q "+
 			"bucket=%q prefix=%q maxbytes=%d maxage=%q lock=%q "+
-			"queue=%d workers=%d enqueue=%q drain=%q",
+			"queue=%d workers=%d enqueue=%q drain=%q coalesce=%q",
 		c.Client.Region, c.Client.Endpoint, c.Client.ForcePathStyle,
 		c.Client.Credentials.AccessKeyID, c.Client.Credentials.SecretAccessKey,
 		c.Client.Credentials.SessionToken,
@@ -144,6 +144,7 @@ func (c SinkConfig) Fingerprint() string {
 		objectLockFingerprint(c.Writer.ObjectLock),
 		c.Writer.QueueSize, c.Writer.Workers,
 		c.Writer.EnqueueTimeout.String(), c.Writer.DrainTimeout.String(),
+		c.Writer.CoalesceWindow.String(),
 	); err != nil {
 		// Unreachable by hash.Hash's contract: its Write never returns an error, so
 		// Fprintf to one cannot fail. The constant is a tombstone, not a mitigation

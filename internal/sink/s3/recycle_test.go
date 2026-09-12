@@ -288,3 +288,39 @@ func TestRotationConfigFingerprintCoversTheCredential(t *testing.T) {
 		t.Errorf("fingerprint %q is not a hex SHA-256 digest", fingerprint)
 	}
 }
+
+// TestFingerprintCoversTheCoalescingWindow is the same precondition for the one
+// writer setting nothing in this package acts on.
+//
+// The Event coalescing window is read off the *running* writer by the pipeline
+// (see Writer.CoalesceWindow), never used by the write path itself, which makes it
+// exactly the kind of field a fingerprint can plausibly be written without. If it
+// were, an operator who widened the window on a live sink would see the CR
+// accepted and the old window still bounding their Event stream until the next
+// restart — with nothing anywhere saying so.
+//
+// Zero is asserted alongside a changed value because zero is not "unset" here: it
+// is the opt-out, and turning coalescing off must recycle just as surely as
+// re-tuning it.
+func TestFingerprintCoversTheCoalescingWindow(t *testing.T) {
+	withWindow := func(window time.Duration) SinkConfig {
+		cfg := rotationConfig("secret")
+		cfg.Writer.CoalesceWindow = window
+		return cfg
+	}
+
+	base := withWindow(DefaultCoalesceWindow)
+	if base.Fingerprint() != withWindow(DefaultCoalesceWindow).Fingerprint() {
+		t.Fatal("two identical configurations fingerprint differently; every reconcile " +
+			"would recycle the sink and this test would pass for the wrong reason")
+	}
+
+	if withWindow(5*time.Minute).Fingerprint() == base.Fingerprint() {
+		t.Error("a re-tuned Event coalescing window produced the same fingerprint, so the " +
+			"sink would keep bounding its Event stream by the old one until it restarted")
+	}
+	if withWindow(0).Fingerprint() == base.Fingerprint() {
+		t.Error("disabling coalescing produced the same fingerprint as the default window; " +
+			"zero is the opt-out here, not an unset field")
+	}
+}

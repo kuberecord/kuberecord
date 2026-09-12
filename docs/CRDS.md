@@ -111,10 +111,11 @@ spec:
   is additive in every direction and is **not** a way to stream `v1/Secret`. See
   [`docs/SCHEMA.md`](SCHEMA.md#redaction).
 - Writer knobs are bounded: `workers` in `[1, 64]`, `batchMaxRows` in
-  `[1, 100000]`, `checkpointEvery` in `[0, 10000]`. Omitted fields default to the
-  same values as the `--writer-*` flags
-  ([`docs/CONFIGURATION.md`](CONFIGURATION.md)), except `checkpointEvery`, which
-  has no flag twin and defaults to `50`.
+  `[1, 100000]`, `checkpointEvery` in `[0, 10000]`, `coalesceWindow` either `0s`
+  or between `1s` and `30m`. Omitted fields default to the same values as the
+  `--writer-*` flags ([`docs/CONFIGURATION.md`](CONFIGURATION.md)), except
+  `checkpointEvery` and `coalesceWindow`, which have no flag twin and default to
+  `50` and `1m`.
 - `spec.writer.checkpointEvery` is how many consecutive diff-only `Modified` rows
   one object gets before the next is written as a `Checkpoint` — a row carrying
   the full state *as well as* the diff, so reconstructing "state at time T"
@@ -123,6 +124,17 @@ spec:
   out larger than the object it describes is checkpointed regardless of the
   cadence (unless it is off). See
   [`docs/SCHEMA.md`](SCHEMA.md#checkpoint-rows) for the reconstruction recipe.
+- `spec.writer.coalesceWindow` is how long the sink suppresses a Kubernetes Event
+  whose only change since the last recorded row is its `count` and its
+  timestamps. The API server bumps an Event's `count` in place, so every bump is
+  a full-state row and a crash-looping pod writes one per re-emission; within
+  this window those rows collapse to one. **Only a bump is suppressed** — a
+  changed `message`, `reason`, `type` or subject writes immediately, and so does
+  any field a future Kubernetes version adds. `count` is cumulative, so no
+  occurrence is lost, and the last bump of a burst is recorded within one window
+  of the burst ending. `0s` records every bump. It is the fifth writer knob
+  `S3Sink` shares, with the same bounds and the same default. See
+  [`docs/SCHEMA.md`](SCHEMA.md#event-volume).
 
 `kubectl get` renders `READY`, `SINK`, `SINK-KIND`, `WATCHES`, `AGE` for both rule
 kinds, and `READY`, `ADDR`, `AGE` for sinks. The sink's kind gets a column of its

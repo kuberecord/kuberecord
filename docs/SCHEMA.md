@@ -287,8 +287,8 @@ With capture-time correlation it would not be — Event coverage would become a
 function of runtime state nothing records, and a coverage claim that cannot be
 reconstructed from the rule is not a claim anyone should make.
 
-**Where this went instead.** One of these has shipped and one has not, and the
-difference is the whole point of this section:
+**Where this went instead.** Two separate axes, and the difference between them
+is the whole point of this section:
 
 - **Filtering on fields the Event itself carries** — shipped, as
   `spec.resources[].eventFilter`: `type`, `reason` (or a list of reasons to
@@ -298,13 +298,18 @@ difference is the whole point of this section:
   attestable, which is exactly what `collectEvents` is not.
   [`docs/EVENTS.md`](EVENTS.md) is the reference.
 - **Count-bump coalescing** — attacking the amplifier rather than the width of
-  the stream — has **not** shipped, and remains a direction rather than a
-  commitment. The rows a crash-loop writes are near-identical by construction,
-  and that is a different lever from deciding which Events to capture at all.
+  the stream — shipped as `spec.writer.coalesceWindow` on both sink kinds. Within
+  the window, an Event whose only change is its `count` and its timestamps writes
+  no row, so a bursting Event costs rows proportional to elapsed time rather than
+  to `count`. Anything else about it — a changed `message`, `reason`, `type` or
+  subject — writes immediately, and `0s` records every bump. This is a different
+  lever from deciding which Events to capture at all, and neither substitutes for
+  the other.
 
-**So sizing is still done with the scope.** An `eventFilter` chooses which Event
-streams are kept; nothing yet changes how many rows a recurring Event produces,
-so size a rule as though no filter were on it.
+**So sizing is done with the scope and the window.** An `eventFilter` chooses
+which Event streams are kept, and `coalesceWindow` bounds how deep each one goes;
+a filter on its own changes no recurring Event's row count, so size a rule as
+though no filter were on it.
 
 ### Redaction
 

@@ -104,6 +104,23 @@ type PipelineMetrics struct {
 	// hash was unchanged — the proportion of work the hashCache saves.
 	dedupSkips prometheus.Counter
 
+	// eventCoalesceSkips counts Kubernetes Event rows suppressed because the only
+	// thing that changed was a `count` bump inside the sink's coalescing window
+	// (see coalesce.go).
+	//
+	// It sits beside dedupSkips rather than becoming a third `dropped` reason
+	// because it is the same kind of event: a redundant row that was not written.
+	// Both of dropped's reasons are cases where there is nothing truthful to write
+	// at all, whereas this is a real change whose content the next row already
+	// carries — `count` is cumulative. Read against dedupSkips and the write
+	// counters it is also the only way to see the amplifier as a ratio, which is
+	// the number that says whether a cluster-wide Event rule is affordable.
+	//
+	// It carries no sink label for the reason diffRefusals carries no identity: it
+	// is a fleet-level "is this happening, and how much" series, and the per-sink
+	// question is answered by the window each sink declares.
+	eventCoalesceSkips prometheus.Counter
+
 	// hashcacheEntries reports the live entry count per sink, the in-memory
 	// baseline footprint that Task 0.7 works to shrink. It is labelled by sink
 	// rather than by kind because there is exactly one hashCache per sink,
@@ -251,6 +268,13 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 			Name:      "dedup_skips_total",
 			Help:      "Count of pipeline work items short-circuited because the object's hash was unchanged.",
 		}),
+		eventCoalesceSkips: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "pipeline",
+			Name:      "event_coalesce_skips_total",
+			Help: "Count of Kubernetes Event rows suppressed because only the count bump changed " +
+				"within the sink's coalescing window.",
+		}),
 		hashcacheEntries: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "hashcache_entries",
@@ -298,6 +322,7 @@ func NewPipelineMetrics(reg prometheus.Registerer) *PipelineMetrics {
 		m.enqueueBlock,
 		m.enqueueTimeouts,
 		m.dedupSkips,
+		m.eventCoalesceSkips,
 		m.hashcacheEntries,
 		m.safeMode,
 		m.dropped,

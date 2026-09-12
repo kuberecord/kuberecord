@@ -40,8 +40,9 @@ naming the sink CR it belongs to — `sink="ClickHouseSink/default"`, not
 label two writers would overwrite each other's series; the *kind* is in the value
 because a name is only unique within a kind, so two same-named sinks of different
 kinds would otherwise merge into one series describing neither. Metrics the
-shared pipeline owns (`dedup_skips_total`, `pipeline_dropped_total`) carry no
-`sink` label, because they describe the workqueue rather than any one backend. A
+shared pipeline owns (`dedup_skips_total`, `pipeline_dropped_total`,
+`pipeline_event_coalesce_skips_total`) carry no `sink` label, because they
+describe the workqueue rather than any one backend. A
 sink's series are deleted when the sink is deleted, so an absent backend does not
 linger as a live-but-idle one.
 
@@ -62,6 +63,7 @@ nothing.
 | `kuberecord_enqueue_block_seconds` | histogram | `sink` | How long the hot path waited for queue room. |
 | `kuberecord_enqueue_timeouts_total` | counter | `sink` | Enqueues that gave up because the queue stayed full. |
 | `kuberecord_dedup_skips_total` | counter | — | Work items short-circuited by an unchanged hash. |
+| `kuberecord_pipeline_event_coalesce_skips_total` | counter | — | Kubernetes Event rows suppressed because only the `count` bump changed inside the sink's `spec.writer.coalesceWindow`. A healthy nonzero rate wherever Events are streamed; read against `dedup_skips_total` and the write counters it is how much of the Event volume amplifier the window is absorbing. |
 | `kuberecord_hashcache_entries` | gauge | `sink` | Live dedup-baseline entries; the in-memory footprint. |
 | `kuberecord_safe_mode` | gauge | `sink`, `group`, `kind`, `namespace` | 1 while a scope is still warming its baseline from sink history. Pinned at 1 forever on a `Writer`-only sink — see below. |
 | `kuberecord_pipeline_dropped_total` | counter | `reason` | Items deliberately discarded: `scope_stopped` (the scope was deactivated first) or `ephemeral_delete` (a Kubernetes Event's TTL expired — expected to tick continuously wherever Events are streamed). |
