@@ -80,6 +80,10 @@ func runTimelineStructured(
 	from, to, windowNotice := timelineBounds(request, capabilities, opts.Zone)
 	notices := appendNotice(nil, windowNotice)
 
+	// Same position as the gathered path's, and for the same reason: it qualifies
+	// the question rather than the answer, so it leads what is written to stderr.
+	notices = appendNotice(notices, inertPredicateNotice(request))
+
 	// Same position as the gathered path's, and for the same reason: this is before
 	// the first query of the invocation, incarnation listing included. See
 	// coldscan.Begin.
@@ -90,11 +94,16 @@ func runTimelineStructured(
 	defer scan.Stop()
 	ctx = scan.Ctx
 
-	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
+	selection, selectionNotices := chooseIncarnation(ctx, backend.Engine, request, from, to)
 	notices = append(notices, selectionNotices...)
 
-	coverage, err := askCoverage(
-		ctx, backend, request.scopeQuery(from, to), describeObject(request.Ref))
+	// The scope the rows will come from, which under --events-only is the Events'
+	// rather than the object's — and which reaches metadata.coverage in the envelope
+	// as well as the table's header. A script comparing two runs is owed the same
+	// substitution a reader is (relevantCoverage): the intervals it carries name the
+	// kind they are about, so the narrowing is legible there rather than only in the
+	// prose summary beside them.
+	coverage, err := relevantCoverage(ctx, backend, request, from, to)
 	if err != nil {
 		return err
 	}
@@ -132,7 +141,20 @@ func runTimelineStructured(
 		emptyErr     error
 		eventNotice  render.Notice
 	)
-	if emitErr == nil {
+	switch {
+	case emitErr != nil:
+		// Nothing to explain. Every notice below is about the shape of an answer,
+		// and this invocation did not produce one.
+	case request.EventsOnly:
+		// The trap, closed on this path too, and in the same words: everything the
+		// other branch does is about the object's own changes, which this question
+		// excluded — and its last step is the no-coverage finding, which would exit 3
+		// over the absence of state the reader had just declined. What is left is the
+		// question that was asked, answered from the Event coverage already in hand.
+		// See gatherChanges, whose branch this mirrors.
+		eventNotice = noEventsNotice(
+			request, from, to, coverage, nil, emitted.sawEvent, opts.Zone)
+	default:
 		predicate, attributed = predicateNotice(
 			ctx, backend.Engine, request, selection, from, to, emitted.sawChange, opts.Zone)
 		if !attributed {

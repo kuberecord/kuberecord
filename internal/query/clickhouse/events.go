@@ -63,7 +63,7 @@ func (e *Engine) mergeEvents(
 ) (query.ChangeIterator, error) {
 	// uid is either one the caller pinned, one the newest-incarnation probe
 	// resolved, or empty — for an all-incarnations timeline, or for an object whose
-	// own changes were never recorded (eventsWithoutState). Empty falls back to the
+	// own changes were never recorded (eventsOnly). Empty falls back to the
 	// forgiving key, (kind, namespace, name), which is the right one for a question
 	// that spans a delete-and-recreate and the only one available for a subject with
 	// no incarnation to pin.

@@ -1,0 +1,7 @@
+=== stdout ===
+[2mKind:[0m              apps/Deployment
+[2mObject:[0m            payments/checkout
+[2mCluster:[0m           prod-eu-1
+[2mCoverage (Events):[0m not reported by this backend
+=== stderr ===
+! [33m--events-only found no Events for payments/checkout in 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z, and this backend has no scope log: it cannot say whether that means nothing was recorded about it or that no rule streams Events to this sink[0m

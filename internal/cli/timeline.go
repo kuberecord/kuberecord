@@ -56,6 +56,13 @@ import (
 //   - --with-events that interleaves nothing is explained against the coverage of
 //     Events themselves, because a flag whose output is identical to its absence
 //     cannot be told from a flag that was ignored (Invariant 9, D31).
+//   - --events-only moves the *subject* of all of that from the object to the
+//     Events about it: the coverage stated in the header, the explanation of an
+//     empty page, and the scope a silence is measured against are all the Event
+//     scope. A header describing a scope the rows did not come from would be a
+//     document disagreeing with itself (D45), and the object's own no-coverage
+//     finding would be an error about state raised against a reader who had just
+//     excluded it.
 //
 // The command writes the document to stdout and every qualification of it to
 // stderr. See internal/cli/render for the rule and why it is worth keeping.
@@ -100,6 +107,7 @@ type timelineFlags struct {
 	allIncarnations bool
 	full            bool
 	withEvents      bool
+	eventsOnly      bool
 }
 
 // newTimelineCommand builds `timeline`.
@@ -123,6 +131,12 @@ several objects with different UIDs, and splicing their histories together would
 be a coherent-looking account of something that never happened, so the newest is
 chosen, the others are named, and --all-incarnations shows them all.
 
+--with-events adds the Kubernetes Events recorded about the object, and
+--events-only shows those and none of its own changes — a Deployment's rows are
+mostly status churn, and the Events are where the decisions are. Under it the
+coverage reported is the coverage of Events, because that is the scope the rows
+came from.
+
 An empty result is never presented on its own. It is explained against the watch
 scopes that were open at the time: "nothing changed" and "nothing was watching"
 are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
@@ -136,7 +150,10 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   kuberecord timeline deploy/checkout -n payments --field spec.template.spec.containers --full
 
   # With the Kubernetes Events that were recorded about it, newest first.
-  kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse`,
+  kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse
+
+  # Only what Kubernetes said about it, without the status churn in between.
+  kuberecord timeline deploy/checkout -n payments --events-only`,
 
 		// The kind completes from the static short-name table; the name is an
 		// object in a cluster or an archive, and is not read from here. See
@@ -179,6 +196,12 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
 		"Print every operation of every patch, unshortened.")
 	command.Flags().BoolVar(&local.withEvents, "with-events", local.withEvents,
 		"Interleave the Kubernetes Events recorded about this object. Both Event API groups are correlated.")
+	command.Flags().BoolVar(&local.eventsOnly, "events-only", local.eventsOnly,
+		"Show those Events and none of the object's own changes. Implies --with-events, and the "+
+			"header then reports the coverage of Events rather than of the object, because that is "+
+			"the scope the rows came from. An Event carries no patch, so --full and --field have "+
+			"nothing to act on; --actor and --all-incarnations likewise, and any of them is reported "+
+			"as ignored rather than dropped quietly. --uid still pins the Events to one incarnation.")
 
 	return command
 }
@@ -239,6 +262,7 @@ func runTimelineCommand(
 		Limit:           local.limit,
 		Reverse:         local.reverse,
 		WithEvents:      local.withEvents,
+		EventsOnly:      local.eventsOnly,
 		Structured:      structured,
 		Scan:            coldscan.OptionsFrom(flags, streams),
 	}
@@ -391,6 +415,9 @@ func timelineRenderOptions(
 		Wide:  flags.Output == options.OutputWide,
 		Full:  local.full,
 		Zone:  flags.Zone(),
+		// The footer names --events-only under a document that holds both kinds of
+		// row, and must not name it to somebody already using it. See eventsHint.
+		EventsOnly: local.eventsOnly,
 	}
 }
 
@@ -605,6 +632,23 @@ type TimelineRequest struct {
 	// WithEvents interleaves the Kubernetes Events recorded about the object.
 	WithEvents bool
 
+	// EventsOnly narrows the answer to those Events, showing none of the object's
+	// own changes.
+	//
+	// It implies WithEvents rather than requiring it — see includeEvents, which is
+	// how every reader of the pair asks the question — because the two compose and
+	// demanding both would be a usage error for a request nobody could misread.
+	//
+	// What it changes beyond the rows is the *subject*. A document made of Events
+	// is explained by the coverage of Events: the header reports that scope, the
+	// empty case is explained against it, and the object's own scope is not
+	// consulted at all. That last part is the trap this field exists around. A
+	// timeline of an object nobody watched is the no-coverage finding, and under
+	// this flag it would be an error about state answering a question nobody asked
+	// — suppressing a page of perfectly good commentary to report the absence of
+	// something the reader had excluded. See gatherChanges.
+	EventsOnly bool
+
 	// Scan is the cold-scan safety surface: the confirmation, the circuit breaker
 	// and whether either can be shown. It travels with the request rather than
 	// being read from the flags where it is used, so that a test can drive the
@@ -627,8 +671,45 @@ type TimelineRequest struct {
 // values read out of it would be confident and wrong — which in an audit
 // timeline is worse than their being absent.
 func (r TimelineRequest) filtered() bool {
+	if r.EventsOnly {
+		// The predicates narrow the object's own changes, and there are none to
+		// narrow: every row is commentary, which --actor and --field deliberately
+		// leave alone (see sawChange). Reporting a filter in force here would send
+		// predicateNotice to re-read a window for an emptiness no predicate caused,
+		// and would suppress the prior-value replay that is already a no-op. What the
+		// reader is owed instead is the flag they passed and its absence of effect,
+		// which inertPredicateNotice says once and in those terms.
+		return false
+	}
 	return len(r.Actors) > 0 || len(r.ExcludeActors) > 0 || len(r.FieldPaths) > 0
 }
+
+// includeEvents reports whether the answer carries Kubernetes Events at all.
+//
+// It is the question every reader of the pair asks, and it exists so that
+// --events-only implying --with-events is a fact about the request rather than
+// something four call sites have to remember. A field the wiring had to set twice
+// is one a second entry point — a test, a future command — sets once, and the half
+// it forgot is a flag that silently does nothing.
+func (r TimelineRequest) includeEvents() bool { return r.WithEvents || r.EventsOnly }
+
+// eventsFlag is the flag an Event notice names.
+//
+// A notice that named --with-events to somebody who typed --events-only would be
+// telling them about a flag they did not pass, which is the affordance sweep's
+// complaint in reverse: the route out has to be the one they are on.
+func (r TimelineRequest) eventsFlag() string {
+	if r.EventsOnly {
+		return eventsOnlyFlag
+	}
+	return withEventsFlag
+}
+
+// The two spellings of the Event question, as a reader typed them.
+const (
+	withEventsFlag = "--with-events"
+	eventsOnlyFlag = "--events-only"
+)
 
 // RunTimeline answers one timeline request against an opened backend and renders
 // the result.
@@ -662,6 +743,7 @@ func RunTimeline(
 		UID:            gathered.UID,
 		Incarnations:   gathered.Incarnations,
 		Coverage:       gathered.Coverage.Summary(opts.Zone),
+		CoverageOf:     coverageSubject(request),
 		CoverageAbsent: gathered.Coverage.Absent(),
 		Rows:           gathered.Rows,
 		Notices:        gathered.Notices,
@@ -670,6 +752,25 @@ func RunTimeline(
 		return exit.RuntimeErrorf("%w", writeErr)
 	}
 	return gathered.Empty
+}
+
+// coverageSubject names the scope the header's coverage line is about, when it is
+// not the object's own.
+//
+// It is the rendering half of relevantCoverage, and the two are deliberately one
+// decision expressed twice: what the command *asked* about and what the header
+// *says* it asked about must be the same scope, and the alternative — a renderer
+// inferring the subject from the intervals it was handed — would be a second
+// reading of an answer the command already has.
+//
+// "Events" rather than "Kubernetes Events" because the label is a column of a
+// header block whose other labels are one word, and the rows under it say Event in
+// their own column.
+func coverageSubject(request TimelineRequest) string {
+	if request.EventsOnly {
+		return "Events"
+	}
+	return ""
 }
 
 // timelineBounds completes the window a backend insists on, and says so.
@@ -734,7 +835,8 @@ func (r TimelineRequest) timelineQuery(selection incarnationChoice, from, to tim
 		FieldPaths:      r.FieldPaths,
 		Limit:           r.Limit,
 		Reverse:         true,
-		IncludeEvents:   r.WithEvents,
+		IncludeEvents:   r.includeEvents(),
+		EventsOnly:      r.EventsOnly,
 	}
 }
 

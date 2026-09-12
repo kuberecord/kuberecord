@@ -1,0 +1,7 @@
+=== stdout ===
+Kind:              apps/Deployment
+Object:            payments/checkout
+Cluster:           prod-eu-1
+Coverage (Events): not reported by this backend
+=== stderr ===
+! --events-only found no Events for payments/checkout in 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z, and this backend has no scope log: it cannot say whether that means nothing was recorded about it or that no rule streams Events to this sink

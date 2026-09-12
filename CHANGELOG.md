@@ -126,6 +126,57 @@ than a summary of them.
   every filter here. New [`docs/EVENTS.md`](docs/EVENTS.md) says so plainly,
   alongside which filters push down and which do not.
 
+- **`kuberecord timeline --events-only` shows what Kubernetes said and nothing
+  else.** A Deployment's timeline is mostly status churn — `observedGeneration`,
+  condition timestamps, replica counts — with a few Events carrying the
+  decisions. The flag implies `--with-events`; the two compose, and requiring
+  both would be pedantic.
+
+  ```
+  $ kuberecord timeline deploy/checkout -n payments --events-only
+
+  Kind:              apps/Deployment
+  Object:            payments/checkout
+  Cluster:           prod-eu-1
+  Coverage (Events): 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+
+  TIME (UTC)                EVENT  ACTOR                    CHANGE
+  2026-08-28 14:03:20.310Z  Event  kube-controller-manager  ScalingReplicaSet: Scaled up replica set checkout-7d4f to 5
+  2026-08-28 14:06:44.020Z  Event  replicaset-controller    ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: exceeded quota
+  ```
+
+  **The header reports the coverage of Events, and says so.** The rows come from
+  the Event scope rather than from the object's, and a coverage summary is a
+  well-formed interval with a rule reference on it either way — so the label
+  carries the distinction the value cannot. The same substitution reaches
+  `metadata.coverage` in `-o json`.
+
+  **The object's own scope is not consulted at all.** An object nobody was ever
+  watching is normally the exit `3` no-coverage finding, and under this flag that
+  would fail the command over the absence of something the reader had just
+  excluded, with a page of correlated Events sitting above the error. An empty
+  answer is still explained — the same three states as `--with-events`, naming
+  this flag — and stays at exit `0`.
+
+  The state half of the query is **skipped, not filtered**: a new
+  `TimelineQuery.EventsOnly` reaches both backends, so the table one issues a
+  single statement and neither the incarnation probe nor the state select runs,
+  and the archive one never decodes a state line into a row it would discard. On
+  a backend with no index that scan is the expensive half of the question.
+
+  Four flags have nothing to act on under it and are reported as ignored rather
+  than dropped quietly: `--actor` and `--exclude-actor` (an Event's actors are
+  the field managers of the *Event*), `--field` and `--full` (an Event carries no
+  patch), and `--all-incarnations` (there are no state rows to span). `--uid`
+  still pins the Events to one incarnation of the subject. Where a timeline holds
+  both kinds of row, the footer names the flag once — beside the `--full` hint,
+  and only there, because a hint under a page with no Events on it teaches
+  readers to skip footers.
+
+  There is **no `kuberecord events` command and no alias**. It would ask what
+  `timeline` asks and hide rows of the answer, and the name is kept for the
+  namespace-wide Event search that would be a differently-shaped question.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five

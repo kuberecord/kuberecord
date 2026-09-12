@@ -126,6 +126,46 @@ func TestNoNoticeNamesAFlagItsCommandRejects(t *testing.T) {
 				return stderr
 			},
 		},
+		{
+			// --events-only's two lines name five flags between them — the three
+			// predicates it leaves inert, --all-incarnations, and itself in the
+			// footer — and every one of them is an instruction to the command the
+			// reader is running rather than a place to go. `timeline` is the only
+			// command that can reach either notice, and the only one that has all
+			// five.
+			name:    "timeline whose predicates the flag left inert",
+			command: "timeline",
+			guard:   "narrows the object's own changes",
+			stderr: func(t *testing.T) string {
+				t.Helper()
+				request := eventsOnlyRequest()
+				request.Actors = []string{"kube-controller-manager"}
+				request.FieldPaths = []string{"spec.replicas"}
+				request.AllIncarnations = true
+
+				_, stderr, err := runTimeline(t, watchedObjectWithEvents(), request, render.Options{})
+				if err != nil {
+					t.Fatalf("RunTimeline: %v", err)
+				}
+				return stderr
+			},
+		},
+		{
+			name:    "timeline that could have been narrowed to its Events",
+			command: "timeline",
+			guard:   "pass --events-only",
+			stderr: func(t *testing.T) string {
+				t.Helper()
+				request := withEventsRequest()
+				request.From, request.To = at("2026-08-01T00:00:00Z"), at("2026-08-28T15:00:00Z")
+
+				_, stderr, err := runTimeline(t, watchedObjectWithEvents(), request, render.Options{})
+				if err != nil {
+					t.Fatalf("RunTimeline: %v", err)
+				}
+				return stderr
+			},
+		},
 	}
 
 	for _, tc := range tests {

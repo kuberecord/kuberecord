@@ -62,6 +62,30 @@ type incarnationChoice struct {
 	listed []string
 }
 
+// chooseIncarnation is selectIncarnation, or the decision an events-only timeline
+// has already made.
+//
+// Listing the incarnations is a read of the object's own rows, and --events-only
+// declines those: paying for the listing in order to name a UID in the header of a
+// document that holds none of that incarnation's changes would be buying a round
+// trip to print something the page does not support. So the choice is the user's
+// own --uid or nothing, which is exactly what the read plane does with an
+// events-only query (query.TimelineQuery.EventsOnly) — the pin narrows the
+// commentary, and its absence leaves the forgiving (kind, namespace, name) key.
+//
+// Nothing is said about the incarnations that are not being shown, because none of
+// them is being shown: the banner answers "which of the several objects that wore
+// this name is this?", and an events-only page is about the name rather than about
+// any one of them.
+func chooseIncarnation(
+	ctx context.Context, engine query.QueryEngine, request TimelineRequest, from, to time.Time,
+) (incarnationChoice, []render.Notice) {
+	if request.EventsOnly {
+		return incarnationChoice{uid: request.UID, pinned: request.UID}, nil
+	}
+	return selectIncarnation(ctx, engine, request, from, to)
+}
+
 // selectIncarnation decides which incarnation to show and what to say about the
 // others.
 //

@@ -14,3 +14,4 @@ TIME (UTC)                EVENT     ACTOR                      CHANGE
 2026-08-28 14:09:40.900Z  Modified  unknown                    ~ metadata.…deployment.kubernetes.io/revision: 1 → 2
 === stderr ===
 ! 3 rows are shortened to fit the CHANGE column; pass --full to print every operation
+! this timeline interleaves Kubernetes Events with the object's own changes; pass --events-only for the Events alone

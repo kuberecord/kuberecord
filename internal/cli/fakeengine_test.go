@@ -103,6 +103,24 @@ type fakeEngine struct {
 	// and must not also pay for the prior-value replay it does not render, and a
 	// second round trip is invisible in output.
 	stateCalls int
+
+	// stateScans counts the Timeline queries that actually read the object's own
+	// history, which is the half `--events-only` exists to skip.
+	//
+	// It is a counter rather than an assertion over the recorded queries because
+	// the property is about what the *engine did*, not about what it was handed: a
+	// backend reading the rows and discarding them afterwards satisfies every
+	// assertion a caller could make about the query, returns the identical answer,
+	// and costs exactly what it cost before. A fake that stepped over the history
+	// when the field was set and counted when it did not is the smallest thing that
+	// can tell those apart on this side of the seam (the backends' own suites hold
+	// the other side).
+	stateScans int
+
+	// incarnationCalls counts the incarnation listings, which are a read of the
+	// same rows under another name — and the one an events-only timeline would
+	// otherwise pay for in order to print a UID its page does not support.
+	incarnationCalls int
 }
 
 func (f *fakeEngine) Capabilities() query.Capabilities { return f.caps }
@@ -123,14 +141,20 @@ func (f *fakeEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.C
 	}
 
 	var selected []query.Change
-	for _, change := range f.changes {
-		switch {
-		case !inWindow(change.TS, q.From, q.To):
-		case q.UID != "" && change.UID != q.UID:
-		case !query.MatchesActors(change, q.Actors, q.ExcludeActors):
-		case !query.MatchesFieldPaths(change, q.FieldPaths):
-		default:
-			selected = append(selected, change)
+	if !q.EventsOnly {
+		// The skip the contract asks for, modelled as a skip. Everything below this
+		// line is the object's own history, and an events-only query is not to reach
+		// any of it — including the scan the counter records.
+		f.stateScans++
+		for _, change := range f.changes {
+			switch {
+			case !inWindow(change.TS, q.From, q.To):
+			case q.UID != "" && change.UID != q.UID:
+			case !query.MatchesActors(change, q.Actors, q.ExcludeActors):
+			case !query.MatchesFieldPaths(change, q.FieldPaths):
+			default:
+				selected = append(selected, change)
+			}
 		}
 	}
 	if q.IncludeEvents {
@@ -277,6 +301,7 @@ func matchesScope(interval query.ScopeInterval, q query.ScopeQuery) bool {
 func (f *fakeEngine) Incarnations(
 	_ context.Context, _ query.ObjectRef, _, _ time.Time,
 ) ([]query.Incarnation, error) {
+	f.incarnationCalls++
 	if f.incarnationsErr != nil {
 		return nil, f.incarnationsErr
 	}

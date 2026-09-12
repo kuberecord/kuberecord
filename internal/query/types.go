@@ -276,6 +276,36 @@ type TimelineQuery struct {
 	// until Task 18.6, and it made the events-only case unreachable for the whole
 	// read plane.
 	IncludeEvents bool `json:"include_events"`
+
+	// EventsOnly narrows the stream to those merged Events, emitting none of the
+	// object's own changes.
+	//
+	// It is read only when IncludeEvents is set. The pair spells one question —
+	// "the commentary, and nothing else" — and a query carrying this alone has
+	// asked for no Events and excluded everything else, which is an empty result
+	// rather than a contradiction to refuse.
+	//
+	// # It is a skip, not a filter
+	//
+	// An engine must not read the object's own rows and discard them. That is the
+	// whole of what the field buys: on a backend with no index the state half is
+	// the expensive half, and one that filtered afterwards would cost exactly what
+	// it cost before. The observable consequence is that the incarnation is *not*
+	// resolved, since resolving it means reading those rows — so an engine takes
+	// UID as it was given and nothing else.
+	//
+	// # What that does to the two incarnation fields
+	//
+	// UID still pins, and it pins the commentary: an Event names its subject's uid
+	// in its own row, so narrowing to one incarnation needs no state read
+	// (D40). Empty leaves the forgiving (kind, namespace, name) key, which is the
+	// right one for a question spanning a delete-and-recreate and the only one
+	// available when nothing resolved an incarnation.
+	//
+	// AllIncarnations is therefore inert here rather than contradictory: with no
+	// state rows to span, "every incarnation" and "no uid predicate" are the same
+	// result, and the second is what an engine produces.
+	EventsOnly bool `json:"events_only"`
 }
 
 // ScopeQuery asks which watch scopes were active, and when.

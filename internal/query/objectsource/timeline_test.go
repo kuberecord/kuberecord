@@ -699,3 +699,139 @@ func TestEventsSurviveAMissingIncarnation(t *testing.T) {
 		})
 	}
 }
+
+// TimelineQuery.EventsOnly, on the backend where the field is worth having.
+//
+// The two halves below are two different claims, and only the first is about rows.
+// A skipping implementation and a filtering one return the identical answer — that
+// is the contract's wording and the reason nothing downstream can tell them apart —
+// so the answer is asserted for what it holds, and the skip is asserted where it is
+// observable: the scan this query builds retains nothing.
+
+// TestEventsOnlyReturnsTheCommentaryAndNoneOfTheObjectsOwnChanges is the rows half.
+func TestEventsOnlyReturnsTheCommentaryAndNoneOfTheObjectsOwnChanges(t *testing.T) {
+	t.Parallel()
+
+	// An object with plenty of its own history, so that "no state rows" is a decision
+	// rather than the fixture's shape: the events-only subject would answer this way
+	// under an engine that ignored the field entirely.
+	history := reusedNameHistory()
+	history.Rows = append(history.Rows,
+		eventRow(30*time.Second, "", "checkout.core", "ScalingReplicaSet", uidOld),
+		eventRow(150*time.Second, "events.k8s.io", "checkout.next", "FailedCreate", uidNew),
+	)
+	engine, _ := engineOver(t, history, Options{Prefix: "audit"})
+
+	q := wholeWindow(testRef())
+	q.AllIncarnations = true
+	q.IncludeEvents = true
+	q.EventsOnly = true
+
+	got := drain(t, engine, q)
+	if len(got) != 2 {
+		t.Fatalf("an events-only timeline returned %d row(s), want the 2 Events: the object's four "+
+			"own changes are what the flag declines, and they include the boundaries a field-path "+
+			"predicate would have kept: %v", len(got), got)
+	}
+	for i, change := range got {
+		if change.EventType != query.EventKubernetes {
+			t.Errorf("row %d is stamped %q, want %q: every row of this answer is commentary",
+				i, change.EventType, query.EventKubernetes)
+		}
+	}
+	if !isOrderedByTS(got) {
+		t.Errorf("the events-only timeline is not in ts order: %v", instantsOf(got))
+	}
+
+	// The merged question over the same archive returns the same two Events beside the
+	// object's changes, which is what makes the flag a narrowing of one answer rather
+	// than a second question with a correlation of its own.
+	q.EventsOnly = false
+	if merged := drain(t, engine, q); len(merged) != 6 {
+		t.Errorf("the merged timeline returned %d row(s), want 6 — four changes and the same two "+
+			"Events. If this number moved, the comparison above is no longer about one question "+
+			"asked two ways: %v", len(merged), merged)
+	}
+}
+
+// TestAnEventsOnlyScanRetainsNoState is the cost half, and it is the reason the field
+// exists at all.
+//
+// There is no index here, so the window's objects are read either way; what the flag
+// buys is that a state line is never decoded into a Change carrying its whole recorded
+// document, never held, and never sorted. That is invisible in the answer by design,
+// so it is asserted against the scan the query builds — through timelineScan, which is
+// the function scanTimeline itself calls rather than a restatement of it.
+func TestAnEventsOnlyScanRetainsNoState(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		query  query.TimelineQuery
+		retain bool
+		why    string
+	}{
+		"events only": {
+			query:  query.TimelineQuery{Ref: testRef(), IncludeEvents: true, EventsOnly: true},
+			retain: false,
+			why: "the caller declined the object's own rows, so a scan that retained them and " +
+				"dropped them afterwards would cost exactly what it cost before",
+		},
+		"events merged": {
+			query:  query.TimelineQuery{Ref: testRef(), IncludeEvents: true},
+			retain: true,
+			why:    "the merged question wants both halves",
+		},
+		"no events": {
+			query:  query.TimelineQuery{Ref: testRef()},
+			retain: true,
+			why:    "the ordinary timeline is the state half",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			scan := timelineScan(test.query)
+			if scan.retain != test.retain {
+				t.Errorf("the scan for %s retains %t, want %t: %s", name, scan.retain, test.retain, test.why)
+			}
+			if scan.events != test.query.IncludeEvents {
+				t.Errorf("the scan for %s collects events %t, want %t: EventsOnly narrows what is "+
+					"retained and never what is correlated", name, scan.events, test.query.IncludeEvents)
+			}
+		})
+	}
+}
+
+// TestANonRetainingScanDecodesNoState is the same property one layer down: the skip
+// happens as a line is read, not after a slice of them has been collected.
+func TestANonRetainingScanDecodesNoState(t *testing.T) {
+	t.Parallel()
+
+	history := reusedNameHistory()
+	history.Rows = append(history.Rows,
+		eventRow(30*time.Second, "", "checkout.core", "ScalingReplicaSet", uidOld))
+
+	engine, _ := engineOver(t, history, Options{Prefix: "audit"})
+	q := wholeWindow(testRef())
+	q.IncludeEvents = true
+	q.EventsOnly = true
+
+	var collected timelineAccumulator
+	scan := timelineScan(q)
+	if err := scanPartitions(context.Background(), engine,
+		engine.recordPrefixes(q.Ref.ClusterID, q.From, q.To), scan.decode, collected.merge); err != nil {
+		t.Fatalf("scanning the fixture archive: %v", err)
+	}
+
+	if len(collected.changes) != 0 {
+		t.Errorf("a non-retaining scan collected %d state change(s); the decoder is meant to discard "+
+			"a line rather than the accumulator a slice of them: %v", len(collected.changes),
+			collected.changes)
+	}
+	if len(collected.events) != 1 {
+		t.Errorf("the same scan collected %d event(s), want 1: retaining nothing must not stop the "+
+			"commentary being correlated", len(collected.events))
+	}
+}

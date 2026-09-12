@@ -245,15 +245,21 @@ type agreementQuery struct {
 	// name identifies the question in a subtest name and in every failure message
 	// it produces.
 	name string
-	// eventsOnly asks the question about the corpus's second identity — the object
-	// named by Events and holding no state records — rather than about the object
-	// the rest of the corpus records.
+	// commentaryOnlySubject asks the question about the corpus's second identity —
+	// the object named by Events and holding no state records — rather than about
+	// the object the rest of the corpus records.
 	//
 	// It is a flag rather than a query.ObjectRef so that a question states which of
 	// the corpus's two identities it is about and cannot name a third: an agreement
 	// question pointed at an identity the corpus never seeded would compare two
 	// empty answers and pass forever.
-	eventsOnly bool
+	//
+	// It is deliberately not spelled `eventsOnly`, which is now the name of a field
+	// on the query itself (TimelineQuery.EventsOnly). The two are independent and
+	// easy to conflate: this one says *which object* is being asked about, and that
+	// one says *which half of its timeline* is wanted. Several questions below set
+	// both.
+	commentaryOnlySubject bool
 	// query is the question in its unbounded, unlimited form. Bounds are supplied
 	// per backend from Capabilities; the limit is posed as a second question, so
 	// that a limited answer can be checked against the unlimited one it is a prefix
@@ -354,7 +360,7 @@ func agreementQueries() []agreementQuery {
 		// state records answered correctly whenever the *incarnation resolution* was
 		// bypassed, and wrongly on exactly the path the flagship command takes.
 		{
-			name: "EventsOnlyObject", eventsOnly: true,
+			name: "EventsOnlyObject", commentaryOnlySubject: true,
 			query: query.TimelineQuery{IncludeEvents: true}, limit: 2, deletions: 0, events: 4,
 			why: "an object with no state records still has the Events naming it: an Event names " +
 				"its subject in its own row, so the two halves of a merged timeline are independent " +
@@ -362,30 +368,82 @@ func agreementQueries() []agreementQuery {
 				"and stops when there is none answers this with an emptiness it never measured",
 		},
 		{
-			name: "EventsOnlyWithoutTheFlag", eventsOnly: true,
+			name: "EventsOnlyWithoutTheFlag", commentaryOnlySubject: true,
 			query: query.TimelineQuery{}, deletions: 0,
 			why: "nobody asked about Events, so there is no second question to answer and the empty " +
 				"result is the whole of it — the half of the fix that must not have changed",
 		},
 		{
-			name: "EventsOnlyPinnedToTheSubject", eventsOnly: true,
+			name: "EventsOnlyPinnedToTheSubject", commentaryOnlySubject: true,
 			query:     query.TimelineQuery{IncludeEvents: true, UID: EventsOnlySubjectUID},
 			deletions: 0, events: 4,
 			why: "the uid the Events themselves name, recorded nowhere else: pinning it must narrow " +
 				"the commentary to it rather than exclude commentary for having no state behind it",
 		},
 		{
-			name: "EventsOnlyPinnedToAnUnrecordedIncarnation", eventsOnly: true,
+			name: "EventsOnlyPinnedToAnUnrecordedIncarnation", commentaryOnlySubject: true,
 			query: query.TimelineQuery{IncludeEvents: true, UID: CorpusUnrecordedUID}, deletions: 0,
 			why: "a pinned incarnation nothing recorded, in either half: it is named by no Event, so " +
 				"the narrowing leaves nothing, and both backends must leave the same nothing",
+		},
+
+		// TimelineQuery.EventsOnly, which is a different question from the identity
+		// above and is asked here about both of them.
+		//
+		// What these can and cannot pin is worth stating, because the field's whole
+		// purpose is invisible from this file. "Skipped, not filtered" is a claim
+		// about the reads an engine performs, and two engines that both *filtered*
+		// would agree with each other and with everything below. That property is
+		// pinned where it is observable — the statement a table backend issues, the
+		// lines an archive scan retains — and what these questions pin is the half a
+		// cross-backend comparison can: that declining the state half removes the
+		// same rows from both answers, and leaves the commentary identical to what
+		// the merged question returned.
+		{
+			name:  "EventsOnlyFlagOverAnObjectWithHistory",
+			query: query.TimelineQuery{IncludeEvents: true, EventsOnly: true}, deletions: 0, events: 0,
+			why: "the flag over the object the corpus records nine changes for, none of them " +
+				"commented on: the answer is empty, and emptily so in a way a field-path predicate " +
+				"never is. Those keep every row carrying no patch — the first sighting, the " +
+				"full-state fallback, the deletion — because they are the boundaries of the " +
+				"object's existence, and this removes them, because the question is not about the " +
+				"object's existence at all. The declared deletion count is what makes that " +
+				"positive on the backend that can store one",
+		},
+		{
+			name:  "EventsOnlyFlagWithoutTheEventsFlag",
+			query: query.TimelineQuery{EventsOnly: true}, deletions: 0, events: 0,
+			why: "the contract's one sentence about the pair: EventsOnly is read only when " +
+				"IncludeEvents is set, so this asks for no Events and excludes everything else. " +
+				"That is an empty result rather than a contradiction to refuse, and a backend " +
+				"reading the field on its own would answer with the commentary nobody asked for",
+		},
+		{
+			name: "EventsOnlyFlagOverCommentary", commentaryOnlySubject: true,
+			query: query.TimelineQuery{IncludeEvents: true, EventsOnly: true},
+			limit: 2, deletions: 0, events: 4,
+			why: "the same four Events the merged question returns for this subject, so the flag " +
+				"narrows the answer and never the correlation. The limit is asked as well because " +
+				"a reverse-limited walk may now settle on commentary alone — nothing resolves an " +
+				"incarnation here, so no unread partition can change the narrowing — and a walk " +
+				"that settled early must return the prefix the unlimited answer starts with",
+		},
+		{
+			name: "EventsOnlyFlagPinnedToTheSubject", commentaryOnlySubject: true,
+			query: query.TimelineQuery{
+				IncludeEvents: true, EventsOnly: true, UID: EventsOnlySubjectUID,
+			},
+			deletions: 0, events: 4,
+			why: "a pin reaching the commentary with no state read behind it: the uid is recorded " +
+				"only in the Events themselves, so an engine that narrowed by resolving an " +
+				"incarnation would have nothing to resolve and must take the caller's word",
 		},
 	}
 }
 
 // refFor names the corpus identity a question is about.
 func refFor(q agreementQuery, c Corpus) query.ObjectRef {
-	if q.eventsOnly {
+	if q.commentaryOnlySubject {
 		return c.EventsOnlyRef()
 	}
 	return c.Ref()

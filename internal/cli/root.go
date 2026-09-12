@@ -170,6 +170,27 @@ func NewRootCommand(invokedAs string, streams genericiooptions.IOStreams) (*cobr
 	// and every test that builds a root — get the same tree, and so that each one
 	// is constructed with the same parsed flag surface rather than reaching for a
 	// package-level global two concurrently-built roots would share.
+	//
+	// # Why there is no `events` command (D51)
+	//
+	// This is where one would be added, so this is where the decision belongs.
+	//
+	// `kuberecord events <resource>` asks exactly what `timeline` asks and hides
+	// rows of the answer, so it is a filter on one question rather than a second
+	// question — which is what `--events-only` is. Each of the commands below asks
+	// a differently-shaped one: `scopes` asks what was being recorded, `get` asks
+	// what an object looked like, `diff` asks what two instants differ by, `blame`
+	// asks who last wrote each field. An `events` command would instead need most
+	// of `timeline`'s nine local flags plus the window flags, --tz, -o and the
+	// whole resolution chain, and it would drift from them the first time somebody
+	// answers "does this flag apply to `events` too?" wrongly.
+	//
+	// The name is also worth keeping unspent. A namespace-wide Event search —
+	// "everything Kubernetes said in payments this afternoon" — is a question
+	// `timeline` structurally cannot express, because `timeline` is about one
+	// object, and that question would deserve exactly this name.
+	//
+	// TestThereIsNoEventsCommand asserts the absence, including as an alias.
 	root.AddCommand(
 		newTimelineCommand(flags, streams, invokedAs),
 		newDiffCommand(flags, streams, invokedAs),

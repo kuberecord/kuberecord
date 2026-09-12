@@ -1,0 +1,11 @@
+=== stdout ===
+Kind:              apps/Deployment
+Object:            payments/checkout
+Cluster:           prod-eu-1
+Coverage (Events): none recorded for this scope
+=== stderr ===
+! --events-only found no Events: no rule streams Events to this sink.
+  Add them to a rule and they will appear here:
+      - group: ""
+        version: v1
+        kind: Event

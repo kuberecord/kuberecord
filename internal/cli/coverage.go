@@ -326,7 +326,12 @@ type eventCoverageFunc func() (coverageAnswer, error)
 // failure would report the wrong one of the two. The cause is named rather than
 // swallowed (Invariant 4).
 func eventsClause(request TimelineRequest, events eventCoverageFunc, zone render.Zone) (clause, fix string) {
-	if !request.WithEvents {
+	// Reachable under --with-events alone: --events-only never arrives at the
+	// finding this qualifies, because the finding is about the object's own scope
+	// and that is the question the flag excludes (gatherChanges). The accessor is
+	// used anyway rather than the field, so that the gate cannot come to disagree
+	// with the one the query was built from.
+	if !request.includeEvents() {
 		// Nobody asked. See the paragraph above the function this serves.
 		return "", ""
 	}
@@ -488,6 +493,10 @@ func explainNoEvents(
 ) render.Notice {
 	object := describeObject(request.Ref)
 	window := options.DescribeWindow(from, to, zone)
+	// The flag the reader typed, not the one this function was written for. Both ask
+	// the same question and only one of them was passed, and a notice naming the
+	// other would be answering somebody else's invocation.
+	flag := request.eventsFlag()
 
 	switch {
 	case readErr != nil:
@@ -497,20 +506,20 @@ func explainNoEvents(
 		// forbids, and a command that failed over it would throw away a timeline
 		// that had already been gathered — in the streaming case, already written.
 		return render.Notice{Text: fmt.Sprintf(
-			"--with-events found no Events for %s in %s, and the watch scopes could not be read to "+
-				"say why: %v", object, window, readErr)}
+			"%s found no Events for %s in %s, and the watch scopes could not be read to "+
+				"say why: %v", flag, object, window, readErr)}
 	case coverage.Gap != nil:
 		return render.Notice{Text: fmt.Sprintf(
-			"--with-events found no Events for %s in %s, and this backend has no scope log: it cannot "+
+			"%s found no Events for %s in %s, and this backend has no scope log: it cannot "+
 				"say whether that means nothing was recorded about it or that no rule streams Events "+
-				"to this sink", object, window)}
+				"to this sink", flag, object, window)}
 	case len(coverage.Intervals) == 0:
 		// The fix is three lines of YAML and every other route to it — read the
 		// rule, find the field, learn that `group` is the empty string for a core
 		// kind — is longer than printing it. Both Event spellings work here and
 		// the core one is given, because it is the shorter of the two and a rule
 		// naming either gets the same stream.
-		return render.Notice{Text: "--with-events found no Events: no rule streams Events to this " +
+		return render.Notice{Text: flag + " found no Events: no rule streams Events to this " +
 			"sink.\nAdd them to a rule and they will appear here:\n" + eventRuleFragment()}
 	}
 
@@ -519,9 +528,9 @@ func explainNoEvents(
 	// prints both ends of it so a reader can see for themselves how much of their
 	// window it covers.
 	return render.Notice{Text: fmt.Sprintf(
-		"--with-events found no Events for %s in %s. Events were confirmed recorded over %s, so "+
+		"%s found no Events for %s in %s. Events were confirmed recorded over %s, so "+
 			"nothing was said about it while that scope was open",
-		object, window, describeInterval(coverage.Intervals[0], zone))}
+		flag, object, window, describeInterval(coverage.Intervals[0], zone))}
 }
 
 // Invariant 9 applied to a predicate, and D31's fourth instance.

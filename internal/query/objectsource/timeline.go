@@ -89,8 +89,13 @@ type recordScan struct {
 	// answer. nil keeps everything.
 	keep func(query.Change) bool
 
-	// retain is false for a scan that only needs to know which incarnations exist,
-	// which then holds marks and no state at all.
+	// retain is false for a scan that wants none of the object's own state, which
+	// then holds marks and nothing else.
+	//
+	// Two scans want that, for unrelated reasons: one needs only to know which
+	// incarnations exist, and one was asked for the commentary alone
+	// (TimelineQuery.EventsOnly). The second leaves the marks unread rather than
+	// unpopulated — see timelineScan.
 	retain bool
 
 	// events asks for Kubernetes Events naming the object to be collected too.
@@ -193,13 +198,7 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 	// that gap reporting zero against an estimate that had not started being earned.
 	e.beginScan()
 
-	scan := recordScan{
-		ref: q.Ref, from: q.From, to: q.To, retain: true, events: q.IncludeEvents,
-		keep: func(c query.Change) bool {
-			return query.MatchesActors(c, q.Actors, q.ExcludeActors) &&
-				query.MatchesFieldPaths(c, q.FieldPaths)
-		},
-	}
+	scan := timelineScan(q)
 
 	var collected timelineAccumulator
 	var failure error
@@ -220,7 +219,17 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 	slices.SortStableFunc(changes, byChangeTS)
 	slices.SortStableFunc(marks, func(a, b incarnationMark) int { return a.ts.Compare(b.ts) })
 
-	uid, recorded := resolveIncarnation(q, marks)
+	// EventsOnly resolves nothing. The incarnation lives in the object's own lines,
+	// which this scan deliberately did not retain, and the contract's answer is the
+	// uid the caller pinned or none at all — which is also the forgiving key the
+	// commentary is correlated by (TimelineQuery.EventsOnly). The marks the decoder
+	// still collected are two strings and an instant apiece; they are left unread
+	// rather than suppressed, because a second flag on recordScan to skip them would
+	// cost more to reason about than it saves.
+	uid, recorded := q.UID, false
+	if !q.EventsOnly {
+		uid, recorded = resolveIncarnation(q, marks)
+	}
 	if !recorded && !q.IncludeEvents {
 		// Nothing named this object in the window and nothing beyond it was asked
 		// about. That is an empty result and not a statement that nothing happened —
@@ -255,6 +264,31 @@ func (e *Engine) scanTimeline(ctx context.Context, q query.TimelineQuery) ([]que
 		changes = changes[:q.Limit]
 	}
 	return changes, failure
+}
+
+// timelineScan is the per-line decision one timeline query makes, and the place
+// TimelineQuery.EventsOnly is honoured.
+//
+// Honouring it here is the whole of what the field buys on this backend. There is no
+// index to seek with, so the window's objects are read either way; what a caller is
+// spared is the expensive half of reading them — decoding each state line into a
+// Change carrying its whole recorded document, holding every one of them, and sorting
+// the result. A scan that retained them and dropped them afterwards would cost exactly
+// what it cost before, which is the filter the contract forbids.
+//
+// It is a function rather than four lines inside scanTimeline so that the decision is
+// assertable: whether a query reads the state half is a property of the scan and not
+// of the answer, and the answer cannot show it — a filtering implementation and a
+// skipping one return the identical rows, which is the point of the contract's wording
+// and the reason nothing downstream can tell them apart.
+func timelineScan(q query.TimelineQuery) recordScan {
+	return recordScan{
+		ref: q.Ref, from: q.From, to: q.To, retain: !q.EventsOnly, events: q.IncludeEvents,
+		keep: func(c query.Change) bool {
+			return query.MatchesActors(c, q.Actors, q.ExcludeActors) &&
+				query.MatchesFieldPaths(c, q.FieldPaths)
+		},
+	}
 }
 
 // reverseLimited reports whether a query asks for the newest N changes, which is the
@@ -403,11 +437,19 @@ type timelineWalkStep struct {
 // naming it — so a walk that stopped on Event rows alone could return rows a full scan
 // would have excluded, which is the divergence between the limited and unlimited forms
 // of one question that this whole function exists to prevent.
+//
+// An events-only query is the exception, and it is one because the reasoning above
+// turns on a *resolution* it does not perform. Nothing there consults a mark, so no
+// unread partition can change which commentary the answer holds, and the walk may
+// settle on Event rows alone. That is the same inequality as every other case, applied
+// to a narrowing that was fixed before the scan began.
 func (e *Engine) answerIsSettled(q query.TimelineQuery, steps []timelineWalkStep, lo time.Time) bool {
 	ceiling := lo.Add(e.objectSpan)
 
 	var uid string
 	switch {
+	case q.EventsOnly:
+		uid = q.UID
 	case q.UID != "":
 		uid = q.UID
 	case q.AllIncarnations:

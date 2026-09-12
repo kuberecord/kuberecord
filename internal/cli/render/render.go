@@ -120,6 +120,15 @@ type Options struct {
 	// Nothing is shortened under it: that is what the flag is for.
 	Full bool
 
+	// EventsOnly says the answer was already narrowed to Kubernetes Events, which
+	// is what keeps the footer from advertising the flag to somebody using it.
+	//
+	// It is here beside Full for exactly the reason Full is: both are flags the
+	// footer names when their absence is visible, and a renderer cannot tell
+	// "nothing to expand" from "already expanded" without being told which one it
+	// is looking at. See eventsHint.
+	EventsOnly bool
+
 	// Zone is the frame every human-facing instant is rendered in. The zero value
 	// is UTC, which is the default (D46) and the only frame the structured path
 	// ever uses — see Zone.

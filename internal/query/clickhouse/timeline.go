@@ -45,10 +45,18 @@ import (
 // What the resolution decides is which incarnation the *state* half is about, and
 // nothing more. An object with no state rows still has a timeline when Events were
 // asked for, because the two halves are independent queries (D40) — see
-// eventsWithoutState, which is the path this used to return an empty iterator on.
+// eventsOnly, which is the path this used to return an empty iterator on.
 func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.ChangeIterator, error) {
 	if err := e.ensureOpen(); err != nil {
 		return nil, err
+	}
+
+	if q.EventsOnly {
+		// Before the incarnation probe, which is itself a read of the object's own
+		// rows: a caller that asked for the commentary alone must not pay for the
+		// state half in order to be told it was skipped. The uid is whatever was
+		// pinned, because nothing here resolves one — see TimelineQuery.EventsOnly.
+		return e.eventsOnly(ctx, q, q.UID)
 	}
 
 	uid, err := e.resolveIncarnation(ctx, q)
@@ -56,7 +64,7 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 		return nil, err
 	}
 	if uid == noIncarnation {
-		return e.eventsWithoutState(ctx, q)
+		return e.eventsOnly(ctx, q, "")
 	}
 
 	// A limit may only be pushed into SQL when nothing is left to apply
@@ -93,8 +101,17 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 	return it, nil
 }
 
-// eventsWithoutState answers a timeline for an object whose own changes were never
-// recorded.
+// eventsOnly answers a timeline made of commentary and nothing else.
+//
+// # Two callers, one shape
+//
+// One is an object whose own changes were never recorded, and the other is a
+// caller that asked for the commentary alone (TimelineQuery.EventsOnly). They
+// arrive from opposite directions — the first has read the state half and found
+// nothing, the second has declined to read it — and what they need is identical: a
+// merge whose changes side is already exhausted. The uid is the parameter because
+// that is the whole of their difference, and the reasoning below is written for
+// the first because it is the one that was got wrong.
 //
 // # No state rows is not no timeline
 //
@@ -120,19 +137,20 @@ func (e *Engine) Timeline(ctx context.Context, q query.TimelineQuery) (query.Cha
 //
 // # The uid, and the limit
 //
-// The uid handed to mergeEvents is the empty string, which eventsStatement reads as
-// "no uid predicate" and leaves matching on the forgiving (kind, namespace, name)
-// key. That is the right key and the only available one: an object with no
-// incarnation has no incarnation to pin. A caller who pinned one never arrives here
-// — resolveIncarnation hands a pinned UID straight back — so the narrowing a pinned
-// timeline gets is unchanged.
+// The uid reaching mergeEvents is the empty string for the no-state caller, which
+// eventsStatement reads as "no uid predicate" and leaves matching on the forgiving
+// (kind, namespace, name) key. That is the right key and the only available one: an
+// object with no incarnation has no incarnation to pin. A caller who pinned one
+// never arrives that way — resolveIncarnation hands a pinned UID straight back — so
+// the narrowing a pinned timeline gets is unchanged, and an events-only caller
+// carries its own pin here for the same reason.
 //
 // The limit is applied over the stream rather than pushed down, for the same reason
 // the merged path applies it there: eventsStatement renders no LIMIT, and it should
 // not learn one to serve this. The statement was already right for this question;
 // what was missing was the call.
-func (e *Engine) eventsWithoutState(
-	ctx context.Context, q query.TimelineQuery,
+func (e *Engine) eventsOnly(
+	ctx context.Context, q query.TimelineQuery, uid string,
 ) (query.ChangeIterator, error) {
 	if !q.IncludeEvents {
 		// Nobody asked about Events, so there is genuinely nothing to read: no rows
@@ -145,7 +163,7 @@ func (e *Engine) eventsWithoutState(
 	// carries the EventKubernetes stamp, the emission order, the failure wrapping and
 	// the Close discipline, and a second path holding copies of those four is a second
 	// path for one of them to be got wrong in.
-	it, err := e.mergeEvents(ctx, q, "", emptyIterator{})
+	it, err := e.mergeEvents(ctx, q, uid, emptyIterator{})
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +190,7 @@ const noIncarnation = "\x00none"
 // the window holds no rows for the object *itself*, which settles which incarnation
 // the state half is about — there is none — and settles nothing at all about the
 // Events naming it, since those are found by a query this one is not an input to
-// (D40). See eventsWithoutState.
+// (D40). See eventsOnly.
 func (e *Engine) resolveIncarnation(ctx context.Context, q query.TimelineQuery) (string, error) {
 	if q.UID != "" {
 		return q.UID, nil
