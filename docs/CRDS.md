@@ -67,7 +67,7 @@ spec:
   names are generated and change on every rollout. **None of this bounds volume:**
   a recurring Event is updated in place to bump its `count`, so every recurrence
   is another full row under every filter — see
-  [`docs/SCHEMA.md`](SCHEMA.md#event-volume).
+  [`docs/EVENTS.md`](EVENTS.md#the-volume-amplifier).
 - `spec.sink` is **required** and names the target backend as a `{kind, name}`
   pair. `kind` defaults to `ClickHouseSink` and is constrained to the sink kinds
   this build actually serves, so a rule naming a kind no reconciler implements is
@@ -262,10 +262,12 @@ because the operator that must release it is not running.
 
 ## See also
 
+- [`docs/EVENTS.md`](EVENTS.md) — before putting `kind: Event` in a `resources`
+  list: what that captures, what `eventFilter` narrows and what it does not
+  bound, and how to size the one entry whose cost is not proportional to how many
+  objects it names.
 - [`docs/SCHEMA.md`](SCHEMA.md) — what the rows these resources produce look like,
-  and — before putting `kind: Event` in a `resources` list —
-  [Event volume](SCHEMA.md#event-volume), which is the one entry whose cost is not
-  proportional to how many objects it names.
+  including [Event volume](SCHEMA.md#event-volume) at the schema level.
 - [`docs/RBAC.md`](RBAC.md) — what a rule is allowed to watch, and how to grant more.
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — the operator-level settings that
   back a sink's omitted writer fields.

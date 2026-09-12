@@ -120,12 +120,14 @@ var bannedConfig = []struct {
 // maps that name them: they are gitignored, but they are the agent-workflow files,
 // present in the working tree of every session that runs this suite, and they
 // legitimately quote the retired names in order to record what replaced them.
-// (This map names CLAUDE.md only. It previously carried a "task.txt" entry for a
-// file that has never existed under that name in this repository, which is why a
-// working tree holding a task.md reports it here.)
+// (This map long named CLAUDE.md only: it carried a "task.txt" entry for a file
+// that has never existed under that name in this repository, so a working tree
+// holding a task.md reported it here. The entry below is that typo corrected, and
+// it is the same file the sinkRef map has always named.)
 var allowedToNameBannedConfig = map[string]string{
 	"CHANGELOG.md":           "the removal record and its migration table",
 	"CLAUDE.md":              "the contributor guide, where D5 records what was removed",
+	"task.md":                "the task brief handed to the agent",
 	"test/docs/docs_test.go": "this test",
 }
 
@@ -604,7 +606,8 @@ var eventVolumeClaims = []struct {
 	{"FailedScheduling", "the class of Event capture-time correlation would drop"},
 	{"non-deterministic", "why the rejection is not merely a preference"},
 	{"rule_ref", "what determinism buys: Event coverage reconstructible from the rule"},
-	{"v0.5.0 candidates", "the forward direction, marked as a direction and not a promise"},
+	{"eventFilter", "the axis that shipped: a page still calling it a candidate would sell a maybe"},
+	{"coalescing", "the axis that did not, marked as a direction and not a promise"},
 }
 
 // TestSchemaPageCoversEventVolume keeps the two halves of Task 16.6 in step: the
@@ -654,6 +657,150 @@ func TestSchemaPageCoversEventVolume(t *testing.T) {
 			t.Errorf("%s does not point at the Event volume section; run `make manifests` "+
 				"(and `make build-installer helm-sync`), since this description is what "+
 				"`kubectl explain` prints", crd)
+		}
+	}
+}
+
+//
+// The Event subsystem has one page, and it says all of it (Task 19.5)
+//
+
+// eventsPageSections are the subjects docs/EVENTS.md must carry, in the order it
+// must carry them.
+//
+// The order is checked and not merely the presence, because the page exists to be
+// read start to finish by somebody deciding whether to type `kind: Event`, and the
+// sequence is the argument: what a rule records has to precede how to narrow it,
+// and both have to precede what narrowing does not buy. A page that opened with
+// the filter would read as though the filter were the answer, which is the exact
+// misreading D50 exists to prevent.
+var eventsPageSections = []string{
+	"\n## What a rule records\n",
+	"\n## Filtering what is captured\n",
+	"\n## Where a filter is evaluated\n",
+	"\n## The volume amplifier\n",
+	"\n## Sizing an Event rule\n",
+	"\n## Reading Events back\n",
+}
+
+// eventsPageClaims is what the page has to keep saying. Each entry is something a
+// rule author cannot work out from anywhere else, and that they need at the moment
+// they decide to capture Events.
+//
+// Presence is checked, never wording, exactly as eventVolumeClaims is: the prose
+// should stay free to improve. What must not happen is a half going quiet — the
+// filter without the amplifier it does not bound, the amplifier without the sizing
+// guidance that does, or the capture model without the read-time half that is the
+// other end of it.
+var eventsPageClaims = []struct {
+	want string
+	why  string
+}{
+	{"capture is scope-wide", "the model: a rule naming Event streams every Event in its namespaces"},
+	{"read time", "the other half of the model — correlation to a subject happens in the reader"},
+	{"FailedScheduling", "the class of Event a capture-time subject filter would drop (D32/D47)"},
+	{"non-deterministic", "the second objection: coverage would stop being reconstructible"},
+	{"rule_ref", "what determinism buys, and the property a filter must not cost"},
+	{"labelSelector", "the knob a reader reaches for on an Event entry, which yields an empty scope"},
+	{"excludeReasons", "the filter form to prefer, and the one that pushes down completely"},
+	{"field selector", "the mechanism push-down uses, and the reason a multi-valued include cannot"},
+	{"performance", "push-down is a performance decision and never a content one (D49)"},
+	{"bump writes a whole row", "the amplifier: count is updated in place, so hash dedup cannot suppress it"},
+	{"crash-looping pod", "the worked example, and the case where the amplifier peaks"},
+	{"filtering does not solve", "D50 said in the page's own voice, not implied by omission"},
+	{"namespaceSelector", "the knob that does narrow the stream"},
+	{"maxObjectBytes", "the S3 number a cluster-wide Event rule has to be sized against"},
+	{"Suggested TTL", "the retention number it has to be sized against"},
+	{"--with-events", "the read-time half a rule author is sizing the capture for"},
+	{"--events-only", "and its sibling, whose coverage means something different"},
+	{"Coverage (Events)", "the header substitution, which is the part a reader can misread"},
+}
+
+// TestEventsPageCoversItsSubject holds docs/EVENTS.md to the job it took on.
+//
+// The page is load-bearing in a way a reference page usually is not: Task 19.5
+// moved the Event story *out* of the places it was scattered across and pointed
+// them here, so the `resources` CRD description and examples/quickstart/rule.yaml
+// now defer to it. A section quietly lost here is therefore not a gap in one page
+// — it is a rule author meeting the volume amplifier for the first time in a
+// storage graph, with every pointer they followed having promised this page would
+// tell them.
+func TestEventsPageCoversItsSubject(t *testing.T) {
+	page := readFile(t, "docs/EVENTS.md")
+
+	at := 0
+	for _, section := range eventsPageSections {
+		index := strings.Index(page[at:], section)
+		if index < 0 {
+			t.Fatalf("docs/EVENTS.md is missing %q, or carries it out of order (expected order: %v)",
+				strings.TrimSpace(section), eventsPageSections)
+		}
+		at += index + len(section)
+	}
+
+	for _, tc := range eventsPageClaims {
+		t.Run(tc.want, func(t *testing.T) {
+			if !strings.Contains(strings.ToLower(page), strings.ToLower(tc.want)) {
+				t.Errorf("docs/EVENTS.md no longer says %q — %s", tc.want, tc.why)
+			}
+		})
+	}
+
+	// The generated-name warning has to be *in* the filter section rather than
+	// linked from it. A reader sizing a `subjectNames` list is deciding whether the
+	// field does what they want, and they will not follow a link to find out that
+	// it does not — they will write the list, see nothing recorded, and have a rule
+	// reporting Ready the whole time.
+	_, filters, found := strings.Cut(page, "\n## Filtering what is captured\n")
+	if !found {
+		t.Fatal("docs/EVENTS.md has no filter section to check the subjectNames warning in")
+	}
+	if next := strings.Index(filters, "\n## "); next >= 0 {
+		filters = filters[:next]
+	}
+	for _, tc := range []struct{ want, why string }{
+		{"generated", "that the names a Deployment's Pods carry are not authored"},
+		{"checkout-api-", "the worked example of one, which is what makes it obvious"},
+		{"every rollout", "that it is not a one-time mismatch but a recurring one"},
+	} {
+		if !strings.Contains(filters, tc.want) {
+			t.Errorf("the `subjectNames` warning in docs/EVENTS.md's filter section no longer says "+
+				"%q — %s. It must be repeated here, not linked from here.", tc.want, tc.why)
+		}
+	}
+}
+
+// TestEventsPageIsWhereThePointersGo is the other half: the page is only worth
+// writing if the places an author is standing send them to it.
+//
+// Each of these was carrying a piece of the Event story before Task 19.5 and now
+// defers to the page for the rest, so a pointer that rots leaves the deferral
+// behind — a comment that stops explaining something *and* stops saying where the
+// explanation went. The CRD descriptions are the sharpest case, because they are
+// generated: a Go comment edited without `make manifests` publishes to godoc and
+// to nothing a cluster ever shows anyone.
+func TestEventsPageIsWhereThePointersGo(t *testing.T) {
+	for _, tc := range []struct{ file, why string }{
+		{"api/v1alpha1/shared_types.go", "the `resources` comment, read while the entry is typed"},
+		{"examples/quickstart/rule.yaml", "the Event entry a reader copies out of the quickstart"},
+		{"docs/CLI.md", "the read-time half, whose reader is asking what was captured"},
+		{"docs/CRDS.md", "the rule reference, where `eventFilter` is specified field by field"},
+		{"docs/SCHEMA.md", "the row-level account, which is the same subject one layer down"},
+		{"README.md", "the documentation index; a page nothing links is a page nobody opens"},
+	} {
+		if !strings.Contains(readFile(t, tc.file), "EVENTS.md") {
+			t.Errorf("%s no longer points at docs/EVENTS.md — %s", tc.file, tc.why)
+		}
+	}
+
+	for _, crd := range []string{
+		"config/crd/bases/kuberecord.io_streamrules.yaml",
+		"config/crd/bases/kuberecord.io_clusterstreamrules.yaml",
+	} {
+		if !strings.Contains(readFile(t, crd), "docs/EVENTS.md") {
+			t.Errorf("%s does not point at docs/EVENTS.md; run `make manifests` (and "+
+				"`make build-installer helm-sync`), since this description is what "+
+				"`kubectl explain streamrule.spec.resources` prints", crd)
 		}
 	}
 }

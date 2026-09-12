@@ -178,7 +178,9 @@ and the one knob that looks like it narrows it and does not, are below.
 
 Everything above is about what an Event row *means*. This is what it costs, and
 it is the part to read before an `Event` entry goes into a rule rather than after
-the first bill.
+the first bill. [`docs/EVENTS.md`](EVENTS.md) carries the same subject with the
+filter, the sizing and the read-time half beside it; this section is the
+schema-level account.
 
 **Capture is scope-wide; correlation happens at read time.** A rule naming
 `Event` streams **every** Event in the namespaces it selects — not only the ones
@@ -285,22 +287,24 @@ With capture-time correlation it would not be — Event coverage would become a
 function of runtime state nothing records, and a coverage claim that cannot be
 reconstructed from the rule is not a claim anyone should make.
 
-**Where this is likely to go instead.** Both of these are **v0.5.0 candidates and
-neither is a commitment**; they are recorded so the rejection above reads as a
-direction rather than a dead end:
+**Where this went instead.** One of these has shipped and one has not, and the
+difference is the whole point of this section:
 
-- **Filtering on fields the Event itself carries** — `type: Warning`, a list of
-  `reason`s, an `involvedObject.kind`. Every one of those is decided by the Event
-  in hand, needs no lookup against anything, and is reconstructible from the rule
-  — so it is deterministic and coverage stays attestable, which is exactly what
-  `collectEvents` is not.
-- **Count-bump coalescing** — attacking the amplifier rather than the width of the
-  stream. The rows a crash-loop writes are near-identical by construction, and
-  that is a different lever from deciding which Events to capture at all.
+- **Filtering on fields the Event itself carries** — shipped, as
+  `spec.resources[].eventFilter`: `type`, `reason` (or a list of reasons to
+  exclude), the emitting component, and the subject's kind and name. Every one of
+  those is decided by the Event in hand, needs no lookup against anything, and is
+  reconstructible from the rule — so it is deterministic and coverage stays
+  attestable, which is exactly what `collectEvents` is not.
+  [`docs/EVENTS.md`](EVENTS.md) is the reference.
+- **Count-bump coalescing** — attacking the amplifier rather than the width of
+  the stream — has **not** shipped, and remains a direction rather than a
+  commitment. The rows a crash-loop writes are near-identical by construction,
+  and that is a different lever from deciding which Events to capture at all.
 
-**No CRD change ships in v0.4.0.** `spec.resources` takes a Kind and an optional
-`labelSelector` today and takes exactly that after this release; sizing is done
-with the scope, as above.
+**So sizing is still done with the scope.** An `eventFilter` chooses which Event
+streams are kept; nothing yet changes how many rows a recurring Event produces,
+so size a rule as though no filter were on it.
 
 ### Redaction
 

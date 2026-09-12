@@ -177,6 +177,36 @@ than a summary of them.
   `timeline` asks and hide rows of the answer, and the name is kept for the
   namespace-wide Event search that would be a differently-shaped question.
 
+- **Kubernetes Events are documented on one page: [`docs/EVENTS.md`](docs/EVENTS.md).**
+  The behaviour was spread across a rule's YAML comment, `docs/CLI.md`,
+  `docs/SCHEMA.md` and three decision records, so a rule author deciding whether to
+  add `kind: Event` had four places to read and no way to know they had found them
+  all. The page runs in the order the decision is made: what a rule records and why
+  capture is scope-wide, the filter axes and their semantics, which filters reach
+  the API server and why that is a performance difference and never a content one,
+  **the volume amplifier**, how to size a rule against it, and what `--with-events`
+  and `--events-only` do at the other end.
+
+  **The amplifier is named rather than implied.** A `count` bump writes a whole
+  row, a crash-looping pod writes one per re-emission of `BackOff`, and **no filter
+  on that page bounds it** — `types: [Warning]` drops most rows in a healthy
+  cluster and almost none in an unhealthy one, which is when the operator is
+  writing most. Shipping a relevance control without saying that plainly would let
+  it read as the volume fix it is not.
+
+  The `spec.resources` CRD description and `examples/quickstart/rule.yaml` now
+  defer to the page instead of growing further, and the `subjectNames` section
+  **repeats** the generated-name warning rather than linking to it: somebody sizing
+  a filter will not follow a link to find out the field cannot do what they want.
+
+- **`docs/SCHEMA.md` no longer calls a shipped feature a candidate.** Its rejection
+  of `collectEvents` closed by naming two directions as "v0.5.0 candidates and
+  neither is a commitment", and one of them — filtering on fields the Event itself
+  carries — is `spec.resources[].eventFilter` in this release. The rejection and
+  its reasoning are unchanged; what changed is that the page now says which of the
+  two shipped, and that count-bump coalescing did not. Its closing line, that
+  sizing is still done with the scope, is now the point rather than a placeholder.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five

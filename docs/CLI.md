@@ -538,8 +538,9 @@ them is ever reached.
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read
 time, and an occurrence-count bump writes a full row rather than a diff. Read
-[Event volume](SCHEMA.md#event-volume) before widening the rule beyond a
-namespace.
+[`docs/EVENTS.md`](EVENTS.md) before widening the rule beyond a namespace — it
+has the sizing guidance, and the `eventFilter` that narrows *which* Events a rule
+records.
 
 ### Events and no changes at all
 
@@ -600,7 +601,9 @@ TIME (UTC)                EVENT  ACTOR                    CHANGE
 ```
 
 It **implies `--with-events`**; the two compose and passing both is neither an
-error nor necessary.
+error nor necessary. Which Events exist to be shown is a property of the rule
+that captured them: [`docs/EVENTS.md`](EVENTS.md) is what a scope holds and how
+to narrow it.
 
 **The coverage in the header is the coverage of Events.** The rows come from the
 Event scope rather than from the object's, and a coverage summary is a well-formed

@@ -705,8 +705,12 @@ type StreamRuleSpec struct {
 	// Event carries — but it does not change how many rows a recurring one
 	// produces, so it is a relevance control and not a volume bound.
 	//
-	// See docs/SCHEMA.md ("Kubernetes Events" for what the rows mean, "Event
-	// volume" for what they cost) and docs/QUERIES.md.
+	// See docs/EVENTS.md for the subsystem on one page — this paragraph in full,
+	// the filter's semantics, which filters reach the API server, how to size a
+	// rule, and what --with-events and --events-only do at read time. The
+	// row-level detail stays in docs/SCHEMA.md ("Kubernetes Events" for what the
+	// rows mean, "Event volume" for what they cost), and the SQL in
+	// docs/QUERIES.md.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	Resources []WatchedResource `json:"resources"`

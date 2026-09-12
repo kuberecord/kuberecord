@@ -59,9 +59,11 @@ spec:
   #   sizing decision rather than a checkbox: prefer a namespaced StreamRule, and
   #   size retention before you widen the scope.
   #
-  # docs/SCHEMA.md#kubernetes-events is what the rows look like — including why an
-  # expiring Event gets no Deleted row — and docs/CLI.md is what they cost to read
-  # back.
+  # docs/EVENTS.md is this comment in full and everything after it: the
+  # `eventFilter` that narrows which Events are recorded, what it does and does
+  # not bound, and what `--with-events` and `--events-only` do at read time.
+  # docs/SCHEMA.md#kubernetes-events is what the rows look like, including why an
+  # expiring Event gets no Deleted row.
   #
   # Two other things have to agree, or this entry streams nothing: the sink's
   # policy.allowedGVKs must admit it (sink.yaml — that refusal is all-or-nothing,
