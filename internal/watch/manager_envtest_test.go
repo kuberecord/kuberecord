@@ -254,7 +254,7 @@ func TestWatchManagerStreamsAndEvictsThroughTheRealPipeline(t *testing.T) {
 		})
 
 	// --- Deactivate ns-a ---
-	entryA, informerRunning := watchMgr.pool.entryFor(podsInNamespace(nsA))
+	entryA, informerRunning := watchMgr.pool.entryFor(podsInformer(nsA))
 	if !informerRunning {
 		t.Fatal("the ns-a informer is not running")
 	}

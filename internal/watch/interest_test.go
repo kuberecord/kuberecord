@@ -25,9 +25,14 @@ import (
 	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
-// podsInNamespace is the informer key these tests key most of their interests on.
-func podsInNamespace(namespace string) informerKey {
-	return informerKey{GVR: podGVR, Namespace: namespace}
+// podsInNamespace is the informer scope these tests key most of their interests
+// on, and podsInformer the unfiltered pool key that serves it.
+func podsInNamespace(namespace string) informerScope {
+	return informerScope{GVR: podGVR, Namespace: namespace}
+}
+
+func podsInformer(namespace string) informerKey {
+	return informerKey{informerScope: podsInNamespace(namespace)}
 }
 
 // interestFor builds one interest the way reconcilePool does, failing the test if
@@ -145,7 +150,7 @@ func TestScopeInterestDerivedIdentity(t *testing.T) {
 	key := plan.TargetKey{Sink: sinkA, GVK: deploymentGVK, Namespace: "ns-a"}
 	in, err := newScopeInterest(
 		plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}},
-		informerKey{GVR: deploymentGVR, Namespace: "ns-a"})
+		informerScope{GVR: deploymentGVR, Namespace: "ns-a"})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -240,7 +245,7 @@ func TestInterestTableReplaceReportsRemovals(t *testing.T) {
 	if removed[0].sink != sinkB {
 		t.Errorf("removed sink = %s, want %s", removed[0].sink, sinkB)
 	}
-	if got := table.interestsFor(podsInNamespace("ns-a")); len(got) != 1 || got[0] != narrowed {
+	if got := table.interestsFor(podsInformer("ns-a")); len(got) != 1 || got[0] != narrowed {
 		t.Errorf("interestsFor returned %+v, want only the narrowed interest", got)
 	}
 }
@@ -253,7 +258,7 @@ func TestInterestTableFanOutIsSortedBySink(t *testing.T) {
 	alpha := interestFor(t, clickHouseSink("alpha"), "ns-a", nil, []string{"rule-2"})
 	table.replace(map[interestID]*scopeInterest{zeta.id(): zeta, alpha.id(): alpha})
 
-	interests := table.interestsFor(podsInNamespace("ns-a"))
+	interests := table.interestsFor(podsInformer("ns-a"))
 	sinks := make([]sink.ID, 0, len(interests))
 	for _, in := range interests {
 		sinks = append(sinks, in.sink)
@@ -337,7 +342,7 @@ func TestInterestTableLookupIdentityClusterScoped(t *testing.T) {
 	key := plan.TargetKey{Sink: sinkA, GVK: namespaceGVK, Namespace: ""}
 	in, err := newScopeInterest(
 		plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}},
-		informerKey{GVR: namespaceGVR})
+		informerScope{GVR: namespaceGVR})
 	if err != nil {
 		t.Fatalf("newScopeInterest: %v", err)
 	}
@@ -375,7 +380,7 @@ func TestInterestTableConcurrentAccess(t *testing.T) {
 	}()
 
 	for range 200 {
-		for _, in := range table.interestsFor(podsInNamespace("ns-a")) {
+		for _, in := range table.interestsFor(podsInformer("ns-a")) {
 			_ = in.matches(map[string]string{"app": "web"})
 		}
 		for _, in := range table.lookupIdentity(ref) {
@@ -632,7 +637,10 @@ func TestWatchManagerRedactionForUnionsInterests(t *testing.T) {
 // by two informers and never meet.
 const eventNamespace = "ns-a"
 
-var eventInformer = informerKey{GVR: eventGVR, Namespace: eventNamespace}
+var (
+	eventScope    = informerScope{GVR: eventGVR, Namespace: eventNamespace}
+	eventInformer = informerKey{informerScope: eventScope}
+)
 
 // eventInterestFor builds one interest in the Event informer carrying a merged
 // filter set, the way reconcilePool does.
@@ -641,7 +649,7 @@ func eventInterestFor(t *testing.T, sinkID sink.ID, eventFilters, ruleKeys []str
 	key := plan.TargetKey{Sink: sinkID, GVK: eventGVK, Namespace: eventNamespace}
 	in, err := newScopeInterest(
 		plan.TargetState{Key: key, RuleKeys: ruleKeys, EventFilters: eventFilters},
-		eventInformer)
+		eventScope)
 	if err != nil {
 		t.Fatalf("newScopeInterest(%s, %v): %v", sinkID, eventFilters, err)
 	}
@@ -704,7 +712,7 @@ func TestNewScopeInterestEventFilters(t *testing.T) {
 			key := plan.TargetKey{Sink: sinkA, GVK: eventGVK, Namespace: eventNamespace}
 			in, err := newScopeInterest(
 				plan.TargetState{Key: key, RuleKeys: []string{"rule-1"}, EventFilters: tc.eventFilters},
-				eventInformer)
+				eventScope)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected an event filter compile error, got nil")

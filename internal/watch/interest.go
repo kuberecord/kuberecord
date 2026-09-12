@@ -32,32 +32,61 @@ import (
 	"github.com/kuberecord/kuberecord/internal/sink"
 )
 
-// informerKey identifies one running informer: a resource plus the namespace it
+// informerScope is *what* one informer watches: a resource plus the namespace it
 // lists from (the empty string meaning cluster-wide).
 //
 // It deliberately excludes the sink. Informers are the expensive, shared
 // resource — one List of every Pod in a namespace costs the same whether one
 // sink or five want it — so the pool is keyed by what actually talks to the API
 // server, and per-sink fan-out happens afterwards through the interest map. It
-// also excludes the selector: selectors are applied handler-side (see
+// also excludes the label selector: selectors are applied handler-side (see
 // scopeInterest.matches), so a rule editing its selector never invalidates an
 // informer.
 //
 // The GVR carries a concrete version because that is what the dynamic client
 // needs; object *identity* stays version-agnostic (Invariant 7) and lives in
 // identityKey instead.
-type informerKey struct {
+type informerScope struct {
 	GVR       schema.GroupVersionResource
 	Namespace string
 }
 
-// String renders an informerKey for logs and error messages, with "cluster-wide"
-// spelled out rather than rendered as an empty field an operator has to guess at.
-func (k informerKey) String() string {
-	if k.Namespace == "" {
-		return k.GVR.String() + " (cluster-wide)"
+// String renders an informerScope for logs and error messages, with
+// "cluster-wide" spelled out rather than rendered as an empty field an operator
+// has to guess at.
+func (s informerScope) String() string {
+	if s.Namespace == "" {
+		return s.GVR.String() + " (cluster-wide)"
 	}
-	return k.GVR.String() + " in namespace " + k.Namespace
+	return s.GVR.String() + " in namespace " + s.Namespace
+}
+
+// informerKey identifies one *running* informer: an informerScope plus the field
+// selector its ListWatch narrows the stream with.
+//
+// The selector is part of the key because it is part of the watch: two informers
+// asking the API server for different subsets of a resource are two different
+// watches and cannot share a cache, however identical their scope (Task 19.3).
+// It is empty for every informer that watches its stream whole, which is every
+// informer for any kind but Event and every Event informer whose interests could
+// not agree on one.
+type informerKey struct {
+	informerScope
+
+	// FieldSelector is the derived server-side narrowing, in the form
+	// metav1.ListOptions.FieldSelector takes. It is derived from Event filters
+	// alone (see deriveEventFieldSelector) and is never authored directly.
+	FieldSelector string
+}
+
+// String renders an informerKey, naming the field selector when it carries one
+// so that "watching every Event in ns-a" and "watching the Warnings in ns-a" are
+// distinguishable in a log line rather than identical.
+func (k informerKey) String() string {
+	if k.FieldSelector == "" {
+		return k.informerScope.String()
+	}
+	return k.informerScope.String() + " (field selector " + k.FieldSelector + ")"
 }
 
 // interestID is the identity of one entry in the interest map: "this sink wants
@@ -67,8 +96,20 @@ func (k informerKey) String() string {
 // GVR), and it is the granularity at which scopes start and stop: a target
 // appearing here is a `Started` transition, its disappearance a `Stopped` one,
 // regardless of how many rules contributed it.
+//
+// It holds the informer *scope* rather than the whole informerKey, and that is
+// load-bearing rather than tidy. Whether a filter is pushed to the API server
+// depends on what other rules exist — a second rule that derives a different
+// selector flips its neighbours' informer back to unfiltered — so a selector-
+// bearing identity would move under a rule edit that has nothing to do with this
+// interest. The scope would then be reported as Stopped and immediately Started
+// again, its dedup baselines evicted, and the recorder (which pairs the two edges
+// by ScopeTransition.Target) would be handed a Stopped whose Target never matched
+// its Started, leaving the epoch open forever. Push-down is a performance
+// decision (D49); it must be invisible to everything that records what was
+// watched.
 type interestID struct {
-	informer informerKey
+	informer informerScope
 	sink     sink.ID
 }
 
@@ -103,6 +144,12 @@ type identityKey struct {
 // informer noticing anything happened.
 type scopeInterest struct {
 	// informer is which pool entry serves this interest.
+	//
+	// Its FieldSelector is *not* set by newScopeInterest, because it cannot be:
+	// an informer is shared, so which selector it runs with is a property of
+	// every interest on the scope rather than of this one. WatchManager.translate
+	// stamps it once the whole snapshot has been seen, before the interest is
+	// published to the table.
 	informer informerKey
 
 	// gvk is the kind rules named. It is the authority for the Kind on every
@@ -145,6 +192,17 @@ type scopeInterest struct {
 	// that streams whole.
 	events *eventMatcher
 
+	// fieldSelector is the server-side narrowing this interest's filter *could*
+	// be served by (Task 19.3) — a candidate, not a decision. The decision is
+	// taken per informer, because one is shared: a selector is pushed only when
+	// every interest on the scope derives the same one, and they otherwise watch
+	// unfiltered and filter handler-side (see WatchManager.translate).
+	//
+	// The empty string means this interest can be served only by an unfiltered
+	// watch, which is true of every non-Event target and of every filter a field
+	// selector cannot express.
+	fieldSelector string
+
 	// redaction is the compiled union of every contributing rule's redaction
 	// paths (Task 3.3), compiled once at pool-diff time for the same reason the
 	// selectors are parsed here: the alternative is re-parsing a policy per
@@ -173,10 +231,10 @@ type scopeInterest struct {
 // streaming objects whose author asked for parts of them to be scrubbed. For a
 // filter failure it is the same direction for the mirror-image reason — falling
 // back to "no filter" would record the whole stream its author asked to narrow.
-func newScopeInterest(state plan.TargetState, informer informerKey) (*scopeInterest, error) {
+func newScopeInterest(state plan.TargetState, scope informerScope) (*scopeInterest, error) {
 	key := state.Key
 	in := &scopeInterest{
-		informer: informer,
+		informer: informerKey{informerScope: scope},
 		gvk:      key.GVK,
 		sink:     key.Sink,
 		scope: pipeline.ScopeKey{
@@ -215,11 +273,12 @@ func newScopeInterest(state plan.TargetState, informer informerKey) (*scopeInter
 		in.redaction = policy
 	}
 
-	events, err := compileEventFilters(state.EventFilters)
+	events, err := compileEventFilters(scope.GVR.GroupResource(), state.EventFilters)
 	if err != nil {
 		return nil, fmt.Errorf("compile event filter: %w", err)
 	}
 	in.events = events
+	in.fieldSelector = events.fieldSelector
 
 	return in, nil
 }
@@ -250,9 +309,10 @@ func redactionPaths(redactions []string) []string {
 	return paths
 }
 
-// id returns this interest's identity in the table.
+// id returns this interest's identity in the table. It is deliberately blind to
+// the informer's derived field selector; see interestID.
 func (i *scopeInterest) id() interestID {
-	return interestID{informer: i.informer, sink: i.sink}
+	return interestID{informer: i.informer.informerScope, sink: i.sink}
 }
 
 // transition renders this interest as the scope edge the recorder consumes,
@@ -262,8 +322,11 @@ func (i *scopeInterest) transition(at time.Time) ScopeTransition {
 		Sink:  i.sink,
 		Scope: i.scope,
 		// The informer identity is what makes two same-scope interests
-		// distinguishable; it already renders uniquely per (GVR, namespace).
-		Target:     i.informer.String(),
+		// distinguishable; it already renders uniquely per (GVR, namespace). The
+		// derived field selector is left out for the reason interestID leaves it
+		// out: the recorder pairs a Stopped with its Started by this string, and
+		// push-down may flip between the two edges without the scope changing.
+		Target:     i.informer.informerScope.String(),
 		APIVersion: i.gvk.Version,
 		RuleKeys:   i.ruleKeys,
 		At:         at,

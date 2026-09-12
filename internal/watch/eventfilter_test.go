@@ -19,6 +19,8 @@ package watch
 import (
 	"sync"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // coreEvent builds a core v1 Event of the shape client-go's legacy tools/record
@@ -80,18 +82,40 @@ func mustCanonical(t *testing.T, spec EventFilterSpec) string {
 	return canonical
 }
 
+// coreEventsResource and modernEventsResource are the two Event APIs the
+// push-down table knows, and someResource stands for every kind that is not an
+// Event — the case that must never acquire a field selector.
+// warningTypeSelector is the selector `types: [Warning]` derives — the simplest
+// pushable filter, and the one several cases below expect unchanged.
+const warningTypeSelector = "type=Warning"
+
+var (
+	coreEventsResource   = schema.GroupResource{Resource: "events"}
+	modernEventsResource = schema.GroupResource{Group: "events.k8s.io", Resource: "events"}
+	someResource         = schema.GroupResource{Group: "apps", Resource: "deployments"}
+)
+
 // mustCompile compiles one filter into the matcher, through the canonical form
 // the data plane actually receives — never straight from the spec, so every test
 // below exercises the round-trip a rule's filter really makes.
+//
+// It compiles against core `v1/events`, which is the resource every evaluation
+// test here is about; the push-down tests name their resource explicitly through
+// mustCompileFor because that is the variable they vary.
 func mustCompile(t *testing.T, specs ...EventFilterSpec) *eventMatcher {
+	t.Helper()
+	return mustCompileFor(t, coreEventsResource, specs...)
+}
+
+func mustCompileFor(t *testing.T, gr schema.GroupResource, specs ...EventFilterSpec) *eventMatcher {
 	t.Helper()
 	canonical := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		canonical = append(canonical, mustCanonical(t, spec))
 	}
-	m, err := compileEventFilters(canonical)
+	m, err := compileEventFilters(gr, canonical)
 	if err != nil {
-		t.Fatalf("compileEventFilters(%q): %v", canonical, err)
+		t.Fatalf("compileEventFilters(%s, %q): %v", gr, canonical, err)
 	}
 	return m
 }
@@ -178,7 +202,7 @@ func TestCanonicalEventFilterDoesNotMutateItsArgument(t *testing.T) {
 // disagree — the target must degrade (Invariant 5), never fall back to recording
 // the whole stream its author asked to narrow.
 func TestCompileEventFiltersRejectsMalformed(t *testing.T) {
-	if _, err := compileEventFilters([]string{`{"types":`}); err == nil {
+	if _, err := compileEventFilters(coreEventsResource, []string{`{"types":`}); err == nil {
 		t.Fatal("expected a decode error for a truncated filter, got nil")
 	}
 }
@@ -428,9 +452,13 @@ func TestEventMatcherUnionsContributingFilters(t *testing.T) {
 // filter in the merged set redundant — exactly as one rule with no label selector
 // widens the merged selector set.
 func TestEventMatcherUnfilteredContributorWidensTheUnion(t *testing.T) {
-	m, err := compileEventFilters([]string{"", mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})})
+	m, err := compileEventFilters(coreEventsResource,
+		[]string{"", mustCanonical(t, EventFilterSpec{Types: []string{"Warning"}})})
 	if err != nil {
 		t.Fatalf("compileEventFilters: %v", err)
+	}
+	if m.fieldSelector != "" {
+		t.Errorf("fieldSelector = %q; a union one contributor left unfiltered pushes nothing down", m.fieldSelector)
 	}
 	if !m.matchesAll() {
 		t.Error("matchesAll() = false; an unfiltered contributor must widen the union to everything")
@@ -445,7 +473,7 @@ func TestEventMatcherUnfilteredContributorWidensTheUnion(t *testing.T) {
 // everything", never "record nothing" — the same direction the selector union
 // takes, and the only one that cannot silence a stream by accident.
 func TestEventMatcherEmptySetMatchesEverything(t *testing.T) {
-	m, err := compileEventFilters(nil)
+	m, err := compileEventFilters(coreEventsResource, nil)
 	if err != nil {
 		t.Fatalf("compileEventFilters(nil): %v", err)
 	}
@@ -496,4 +524,192 @@ func TestEventMatcherIsSafeForConcurrentUse(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+//
+// Push-down: what a field selector can express of a filter (Task 19.3)
+//
+
+// TestDeriveEventFieldSelector is the derivation rule, case by case. It is the
+// whole design of Task 19.3 and it is not obvious, so every branch of it is
+// pinned here rather than inferred from the two informer-level tests that consume
+// it.
+//
+// The shape to keep in mind throughout: field selectors AND their terms and have
+// no OR. So a single-valued include pushes down, an exclusion pushes down at any
+// length, and a multi-valued include cannot push down at all.
+func TestDeriveEventFieldSelector(t *testing.T) {
+	tests := []struct {
+		name string
+		gr   schema.GroupResource
+		spec EventFilterSpec
+		want string
+	}{
+		{
+			name: "a single-valued type pushes down",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Types: []string{"Warning"}},
+			want: warningTypeSelector,
+		},
+		{
+			name: "a single-valued reason pushes down",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Reasons: []string{"BackOff"}},
+			want: "reason=BackOff",
+		},
+		{
+			// The asymmetry that matters: this is the filter people most want —
+			// drop the startup chatter, keep everything else — and it is the one
+			// that pushes down completely, because an AND of != terms *is*
+			// "none of these".
+			name: "exclusions push down at length",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{ExcludeReasons: []string{"Created", "Pulled", "Started"}},
+			want: "reason!=Created,reason!=Pulled,reason!=Started",
+		},
+		{
+			name: "a multi-valued reason include does not push down",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Reasons: []string{"BackOff", "Killing"}},
+			want: "",
+		},
+		{
+			name: "a multi-valued type include does not push down",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Types: []string{"Normal", "Warning"}},
+			want: "",
+		},
+		{
+			// Per-axis independence: one axis being inexpressible leaves that
+			// axis to the handler and costs the others nothing.
+			name: "a multi-valued axis does not suppress a single-valued one",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Types: []string{"Warning"}, Reasons: []string{"BackOff", "Killing"}},
+			want: warningTypeSelector,
+		},
+		{
+			name: "every pushable axis at once, in a fixed order",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{
+				Types:        []string{"Warning"},
+				Reasons:      []string{"FailedScheduling"},
+				SubjectKinds: []string{"Pod"},
+				SubjectNames: []string{"checkout-api"},
+			},
+			want: "type=Warning,reason=FailedScheduling,involvedObject.kind=Pod,involvedObject.name=checkout-api",
+		},
+		{
+			// Measured, not assumed: core's `source` is a fallback chain
+			// (`source.component`, else `reportingController`) while
+			// componentMatches is an OR over four spellings, so the two disagree
+			// for an Event carrying both. Pushing it would change which rows are
+			// recorded (D49).
+			name: "sourceComponents never pushes down, even single-valued",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{SourceComponents: []string{"default-scheduler"}},
+			want: "",
+		},
+		{
+			name: "sourceComponents leaves the other axes pushable",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Types: []string{"Warning"}, SourceComponents: []string{"kubelet"}},
+			want: warningTypeSelector,
+		},
+		{
+			// The CRD rejects this shape at admission. If one arrives anyway the
+			// reason axis is left wholly to the handler rather than rendered as
+			// two operators on one key, which is a selector shape nothing here
+			// has verified a server against.
+			name: "a filter carrying both reason lists pushes neither",
+			gr:   coreEventsResource,
+			spec: EventFilterSpec{Reasons: []string{"BackOff"}, ExcludeReasons: []string{"Pulled"}},
+			want: "",
+		},
+		{
+			// events.k8s.io/v1 renamed the subject and registers the renamed
+			// labels; sending the core spelling would be rejected with "field
+			// label not supported" and retried forever by the reflector.
+			name: "the modern API uses its own subject labels",
+			gr:   modernEventsResource,
+			spec: EventFilterSpec{SubjectKinds: []string{"Pod"}, SubjectNames: []string{"checkout-api"}},
+			want: "regarding.kind=Pod,regarding.name=checkout-api",
+		},
+		{
+			name: "the modern API shares type and reason unchanged",
+			gr:   modernEventsResource,
+			spec: EventFilterSpec{Types: []string{"Warning"}, ExcludeReasons: []string{"Pulled"}},
+			want: "type=Warning,reason!=Pulled",
+		},
+		{
+			name: "the modern API pushes no component either",
+			gr:   modernEventsResource,
+			spec: EventFilterSpec{SourceComponents: []string{"kubelet"}},
+			want: "",
+		},
+		{
+			// A resource the table does not know derives nothing, which covers
+			// both "some other kind" and "an Event API this code has not been
+			// verified against".
+			name: "a resource that is not an Event derives nothing",
+			gr:   someResource,
+			spec: EventFilterSpec{Types: []string{"Warning"}},
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveEventFieldSelector(tc.gr, tc.spec); got != tc.want {
+				t.Errorf("deriveEventFieldSelector(%s) = %q, want %q", tc.gr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCompileEventFiltersDerivesTheSelector covers the wiring from the merged
+// filter set to the matcher's selector, which is where a union has to give up.
+func TestCompileEventFiltersDerivesTheSelector(t *testing.T) {
+	warning := EventFilterSpec{Types: []string{"Warning"}}
+	backoff := EventFilterSpec{Reasons: []string{"BackOff"}}
+
+	if got := mustCompile(t, warning).fieldSelector; got != warningTypeSelector {
+		t.Errorf("one filter derived %q, want %s", got, warningTypeSelector)
+	}
+	// Two contributing rules are a union — an OR — and no field selector can
+	// express one. Watching the intersection would silence a rule; watching
+	// either disjunct would record for the other what it declined.
+	if got := mustCompile(t, warning, backoff).fieldSelector; got != "" {
+		t.Errorf("a union of two filters derived %q, want nothing pushed down", got)
+	}
+	if got := mustCompile(t).fieldSelector; got != "" {
+		t.Errorf("an empty merged set derived %q, want nothing pushed down", got)
+	}
+}
+
+// TestDeriveEventFieldSelectorIsDeterministic guards the property the sharing
+// decision rests on: two interests that asked for the same thing must render
+// byte-identical selectors, whatever order their author wrote the lists in.
+//
+// It is asserted rather than assumed because the consequence of losing it is
+// silent — agreedFieldSelector compares strings, so two identical filters that
+// rendered differently would look like a disagreement and quietly give up the
+// push-down, costing bandwidth with nothing anywhere reporting it.
+func TestDeriveEventFieldSelectorIsDeterministic(t *testing.T) {
+	one := mustCanonical(t, EventFilterSpec{ExcludeReasons: []string{"Started", "Created", "Pulled"}})
+	two := mustCanonical(t, EventFilterSpec{ExcludeReasons: []string{"Pulled", "Pulled", "Created", "Started"}})
+	if one != two {
+		t.Fatalf("the canonical forms already differ:\n %q\n %q", one, two)
+	}
+
+	first, err := compileEventFilters(coreEventsResource, []string{one})
+	if err != nil {
+		t.Fatalf("compileEventFilters: %v", err)
+	}
+	second, err := compileEventFilters(coreEventsResource, []string{two})
+	if err != nil {
+		t.Fatalf("compileEventFilters: %v", err)
+	}
+	if first.fieldSelector != second.fieldSelector {
+		t.Errorf("two spellings of one filter derived %q and %q", first.fieldSelector, second.fieldSelector)
+	}
 }

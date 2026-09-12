@@ -224,7 +224,7 @@ func TestPoolFanOutAppliesSelectorsPerSink(t *testing.T) {
 
 	queue := &fakePipeline{}
 	p := newPool(newDynamicClient(t), table, queue, logr.Discard())
-	entry := &informerEntry{key: podsInNamespace("ns-a"), gvk: podGVK}
+	entry := &informerEntry{key: podsInformer("ns-a"), gvk: podGVK}
 
 	// A matching object reaches both sinks.
 	p.fanOut(entry, newPod("ns-a", "web", map[string]string{"app": "web"}), nil)
@@ -263,7 +263,7 @@ func TestPoolFanOutTombstone(t *testing.T) {
 
 	queue := &fakePipeline{}
 	p := newPool(newDynamicClient(t), table, queue, logr.Discard())
-	entry := &informerEntry{key: podsInNamespace("ns-a"), gvk: podGVK}
+	entry := &informerEntry{key: podsInformer("ns-a"), gvk: podGVK}
 	handler := p.handlerFor(entry)
 
 	wantKey := pipeline.Key{Sink: sinkA, Kind: "Pod", Namespace: "ns-a", Name: "web"}
@@ -310,7 +310,7 @@ func TestPoolStartStop(t *testing.T) {
 	queue := &fakePipeline{}
 	p := newPool(dyn, table, queue, logr.Discard())
 
-	key := podsInNamespace(namespace)
+	key := podsInformer(namespace)
 	if err := p.start(t.Context(), key, podGVK); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestPoolStopReportsALeakedGoroutine(t *testing.T) {
 	p := newPool(newDynamicClient(t), newInterestTable(), &fakePipeline{}, capture.logger())
 	p.stopTimeout = 20 * time.Millisecond
 
-	key := podsInNamespace("ns-a")
+	key := podsInformer("ns-a")
 	// An entry whose goroutine never finishes: stopped is never closed.
 	p.entries[key] = &informerEntry{key: key, gvk: podGVK, cancel: func() {}, stopped: make(chan struct{})}
 
@@ -374,8 +374,8 @@ func TestPoolRetainLevelTriggers(t *testing.T) {
 	dyn := newDynamicClient(t)
 	namespace := newNamespaces(t, dyn, "ns-a")[0]
 	p := newPool(dyn, newInterestTable(), &fakePipeline{}, logr.Discard())
-	pods := podsInNamespace(namespace)
-	configMaps := informerKey{GVR: configMapGVR, Namespace: namespace}
+	pods := podsInformer(namespace)
+	configMaps := informerKey{informerScope: informerScope{GVR: configMapGVR, Namespace: namespace}}
 
 	p.retain(t.Context(), map[informerKey]schema.GroupVersionKind{pods: podGVK})
 	if p.size() != 1 {
@@ -410,9 +410,9 @@ func TestPoolStopAllStopsEveryInformer(t *testing.T) {
 	namespaces := newNamespaces(t, dyn, "ns-a", "ns-b")
 	p := newPool(dyn, newInterestTable(), &fakePipeline{}, logr.Discard())
 	p.retain(t.Context(), map[informerKey]schema.GroupVersionKind{
-		podsInNamespace(namespaces[0]):                podGVK,
-		podsInNamespace(namespaces[1]):                podGVK,
-		{GVR: configMapGVR, Namespace: namespaces[0]}: configMapGVK,
+		podsInformer(namespaces[0]): podGVK,
+		podsInformer(namespaces[1]): podGVK,
+		{informerScope: informerScope{GVR: configMapGVR, Namespace: namespaces[0]}}: configMapGVK,
 	})
 	if p.size() != 3 {
 		t.Fatalf("pool size = %d, want 3", p.size())

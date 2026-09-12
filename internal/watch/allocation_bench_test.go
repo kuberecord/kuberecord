@@ -45,12 +45,14 @@ type countingEnqueuer struct{ n int }
 
 func (c *countingEnqueuer) Add(pipeline.Key) { c.n++ }
 
-// benchInformerKey is the (GVR, namespace) target every benchmark's events arrive
-// from.
-var benchInformerKey = informerKey{
+// benchInformerScope is the (GVR, namespace) target every benchmark's events
+// arrive from, and benchInformerKey the unfiltered informer that serves it.
+var benchInformerScope = informerScope{
 	GVR:       schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	Namespace: "",
 }
+
+var benchInformerKey = informerKey{informerScope: benchInformerScope}
 
 var benchGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 
@@ -76,7 +78,7 @@ func benchTable(b *testing.B, sinks []sink.ID, selectors, eventFilters []string)
 				Selectors:    selectors,
 				EventFilters: eventFilters,
 			},
-			benchInformerKey,
+			benchInformerScope,
 		)
 		if err != nil {
 			b.Fatalf("newScopeInterest: %v", err)
@@ -192,11 +194,12 @@ func BenchmarkLookupIdentity(b *testing.B) {
 // benchEvent is the informer target and object the Event-filter benchmark runs
 // against: a core v1 Event of the shape client-go's legacy recorder writes.
 var (
-	benchEventInformerKey = informerKey{
+	benchEventInformerScope = informerScope{
 		GVR:       schema.GroupVersionResource{Version: "v1", Resource: "events"},
 		Namespace: "production",
 	}
-	benchEventGVK = schema.GroupVersionKind{Version: "v1", Kind: "Event"}
+	benchEventInformerKey = informerKey{informerScope: benchEventInformerScope}
+	benchEventGVK         = schema.GroupVersionKind{Version: "v1", Kind: "Event"}
 )
 
 func benchEventObject() *unstructured.Unstructured {
@@ -234,7 +237,7 @@ func benchEventTable(b *testing.B, eventFilters []string) *interestTable {
 			RuleKeys:     []string{"StreamRule/bench"},
 			EventFilters: eventFilters,
 		},
-		benchEventInformerKey,
+		benchEventInformerScope,
 	)
 	if err != nil {
 		b.Fatalf("newScopeInterest: %v", err)

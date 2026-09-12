@@ -288,7 +288,7 @@ func TestWatchManagerSharesOneInformerPerTarget(t *testing.T) {
 func TestWatchManagerSelectorChangeKeepsTheInformer(t *testing.T) {
 	h := newManagerHarness(t)
 	namespace := newNamespaces(t, h.dyn, "ns-a")[0]
-	informer := podsInNamespace(namespace)
+	informer := podsInformer(namespace)
 
 	h.upsert(t, "rule-1", podTarget(sinkA, namespace, "app=web"))
 	before, running := h.manager.pool.entryFor(informer)
@@ -366,7 +366,7 @@ func TestWatchManagerStopsStaleTargets(t *testing.T) {
 	if got := h.manager.PoolSize(); got != 1 {
 		t.Errorf("pool size after removing one rule = %d, want 1", got)
 	}
-	if _, running := h.manager.pool.entryFor(podsInNamespace(nsA)); running {
+	if _, running := h.manager.pool.entryFor(podsInformer(nsA)); running {
 		t.Error("the stopped scope's informer is still running")
 	}
 

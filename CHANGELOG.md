@@ -84,8 +84,47 @@ than a summary of them.
   coalesces. An Event missing a field a filter names does not match it: absent is
   not empty.
 
-  Still no schema change, and no push-down yet — every filter is evaluated
-  handler-side, and both halves are required to record byte-identical rows.
+  Still no schema change. Handler-side evaluation is the fallback that has to
+  exist for every case push-down cannot reach, and it stays authoritative: both
+  halves are required to record byte-identical rows.
+
+- **Event filters are pushed to the API server where the configuration permits.**
+  Filtering in the operator alone is the worst outcome at scale — the informer
+  still lists and watches every Event in the namespace, caches it, strips its
+  `managedFields`, and only then discards it. Core `v1/Event` is one of the few
+  resources with rich field-selector support, so where a filter can be expressed
+  as one it now travels with the List and the Watch.
+
+  Field selectors AND their terms and have no OR, which decides every case: a
+  **single-valued include** pushes down (`types: [Warning]` → `type=Warning`), an
+  **exclusion pushes down at any length** (`reason!=Pulled,reason!=Created,reason!=Started`),
+  and a **multi-valued include** stays in the operator. The happy accident is
+  that "drop the startup chatter, keep the rest" — the filter most people
+  actually want — is the one that pushes down completely.
+
+  **Both Event APIs are covered, and they are not symmetric.** `events.k8s.io/v1`
+  renamed the subject, so `regarding.kind` is sent there and
+  `involvedObject.kind` to core `v1`; `type` and `reason` are shared unchanged.
+  `sourceComponents` is never pushed on either: a rule matches all four spellings
+  of "who emitted this", while the API server's `source` is a fallback chain, and
+  for an Event carrying both spellings the two disagree. This was measured
+  against the pinned Kubernetes rather than assumed, and a test re-measures it so
+  a future version cannot change it silently.
+
+  **Whether a rule's filter reaches the API server depends on what other rules
+  exist.** One informer serves every rule watching the same resource in the same
+  namespace, so a selector is pushed only when all of them derive the same one;
+  otherwise the stream is watched whole and every rule is filtered in the
+  operator. **This affects performance only and never what is recorded** — the
+  operator re-evaluates every filter in full either way, which is asserted
+  directly by running one Event corpus through both paths and comparing the rows
+  byte for byte. Push-down is also invisible to the scope log: gaining or losing
+  one opens and closes no epoch and evicts no dedup state.
+
+  Still no schema change, and **still not a fix for volume**: a recurring Event
+  is updated in place to bump its `count`, so it writes another full row under
+  every filter here. New [`docs/EVENTS.md`](docs/EVENTS.md) says so plainly,
+  alongside which filters push down and which do not.
 
 ## [0.4.0] - 2026-09-11
 

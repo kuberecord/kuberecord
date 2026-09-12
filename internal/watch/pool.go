@@ -89,7 +89,9 @@ type Enqueuer interface {
 // informerEntry is one running informer plus everything needed to stop it and to
 // read from it.
 type informerEntry struct {
-	// key is the (GVR, namespace) identity this informer serves.
+	// key is the identity this informer serves: a (GVR, namespace) plus the
+	// field selector its ListWatch narrows with, since two selectors over one
+	// scope are two watches and cannot share a cache.
 	key informerKey
 
 	// gvk is the kind the GVR was resolved from, carried so the handler can key
@@ -112,8 +114,8 @@ type informerEntry struct {
 	stopped chan struct{}
 }
 
-// pool is the set of running informers, one per (GVR, namespace) target, each
-// with its own context and goroutine.
+// pool is the set of running informers, one per informerKey target, each with
+// its own context and goroutine.
 //
 // It owns lifecycle only. What an event *means* — which sinks care, which
 // selectors match — is the interest table's business, consulted at event time so
@@ -211,7 +213,13 @@ func (p *pool) keys() []informerKey {
 // is running, and because an event delivered before the handler existed would be
 // an object silently missing from the stream.
 func (p *pool) start(ctx context.Context, key informerKey, gvk schema.GroupVersionKind) error {
-	log := p.log.WithValues("gvr", key.GVR.String(), "namespace", key.Namespace, "kind", gvk.Kind)
+	log := p.log.WithValues("gvr", key.GVR.String(), "namespace", key.Namespace, "kind", gvk.Kind,
+		// Empty for every informer that watches its stream whole, which is most
+		// of them. It is logged unconditionally anyway: "this watch is narrowed
+		// and here is how" is the first thing anyone asks when a filtered rule
+		// records less than they expected, and an absent key reads as a missing
+		// feature rather than as an empty one.
+		"fieldSelector", key.FieldSelector)
 
 	informer := cache.NewSharedIndexInformerWithOptions(
 		p.listWatchFor(key),
@@ -341,20 +349,44 @@ var errInformerStopTimeout = errors.New("informer goroutine outlived its stop ti
 // listWatchFor builds the ListWatch one informer runs on, straight off the
 // dynamic client.
 //
-// No field or label selector is set. Label filtering is applied handler-side (see
+// No *label* selector is set. Label filtering is applied handler-side (see
 // scopeInterest.matches) so that two rules with different selectors share one
 // informer and a selector edit needs no re-List: the documented trade-off is
 // informer bandwidth (we watch a superset of what any single rule wants) for pool
 // simplicity, and it is the right side of that trade because a re-List is the
 // most expensive thing this operator can ask an API server to do.
+//
+// A *field* selector is different, and Task 19.3 sets one when the key carries it
+// — on the Watch as well as the List, since a narrowed List feeding an unnarrowed
+// Watch would refill the cache with everything the List declined. Field selectors
+// are worth the informer churn that label selectors are not, for two reasons that
+// only hold here: core `v1/Event` genuinely registers them (see
+// eventSelectableFields), and Events are the highest-volume kind in a cluster, so
+// handler-side filtering pays full network I/O, full informer memory and full
+// SetTransform CPU for rows it is about to discard. The sharing that label
+// selectors protect is protected anyway — a selector is pushed only when every
+// interest on the informer derives the same one (see agreedFieldSelector).
+//
+// It is set on the options the reflector hands in rather than replacing them:
+// ResourceVersion, Limit, Continue and the watch-list flags are client-go's and
+// must survive. A restart with a different selector re-Lists, which for an Event
+// is free of consequence — an Event is ephemera and never produces a Deleted row
+// (see pipeline.ephemeralKind), so a narrowing watch cannot strand one as
+// deleted.
 func (p *pool) listWatchFor(key informerKey) *cache.ListWatch {
 	resource := p.dyn.Resource(key.GVR).Namespace(key.Namespace)
+	narrow := func(options metav1.ListOptions) metav1.ListOptions {
+		if key.FieldSelector != "" {
+			options.FieldSelector = key.FieldSelector
+		}
+		return options
+	}
 	return &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-			return resource.List(ctx, options)
+			return resource.List(ctx, narrow(options))
 		},
 		WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
-			return resource.Watch(ctx, options)
+			return resource.Watch(ctx, narrow(options))
 		},
 	}
 }
@@ -603,10 +635,14 @@ func TransformObject(obj any) (any, error) {
 	return u, nil
 }
 
-// compareInformerKeys orders informer keys for stable iteration.
+// compareInformerKeys orders informer keys for stable iteration. The field
+// selector is part of the ordering because it is part of the key: two informers
+// over one scope differ only there, and an ordering blind to it would make their
+// relative order depend on map iteration.
 func compareInformerKeys(a, b informerKey) int {
 	return cmp.Or(
 		cmp.Compare(a.GVR.String(), b.GVR.String()),
 		cmp.Compare(a.Namespace, b.Namespace),
+		cmp.Compare(a.FieldSelector, b.FieldSelector),
 	)
 }
