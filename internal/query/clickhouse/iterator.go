@@ -189,7 +189,7 @@ func (it *limitIterator) Close() error         { return it.inner.Close() }
 // with no state rows still has the Events naming it, found by a query the probe is
 // not an input to (D40), so this iterator is the answer to "nothing was recorded and
 // nothing was asked beyond it" — never to "the object's own rows are missing". It
-// also serves as the exhausted side of that merge; see eventsWithoutState.
+// also serves as the exhausted side of that merge; see eventsOnly.
 type emptyIterator struct{}
 
 func (emptyIterator) Next() bool           { return false }

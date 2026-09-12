@@ -123,6 +123,11 @@ func gatherChanges(
 	result.From, result.To = from, to
 	result.Notices = appendNotice(result.Notices, windowNotice)
 
+	// Before anything about the answer, because it is about the question: a
+	// predicate that could not act did not act on these rows or on any others, and a
+	// reader who typed one is owed that before they start reading (D31).
+	result.Notices = appendNotice(result.Notices, inertPredicateNotice(request))
+
 	// Before the first query rather than before the timeline query: listing the
 	// incarnations costs the same partitions, so a guard placed after it would
 	// narrate the second scan of a question that had already silently run one.
@@ -133,7 +138,7 @@ func gatherChanges(
 	defer scan.Stop()
 	ctx = scan.Ctx
 
-	selection, selectionNotices := selectIncarnation(ctx, backend.Engine, request, from, to)
+	selection, selectionNotices := chooseIncarnation(ctx, backend.Engine, request, from, to)
 	result.Notices = append(result.Notices, selectionNotices...)
 	result.UID = selection.uid
 	result.Incarnations = selection.listed
@@ -170,8 +175,7 @@ func gatherChanges(
 		slices.Reverse(result.Rows)
 	}
 
-	coverage, err := askCoverage(
-		ctx, backend, request.scopeQuery(from, to), describeObject(request.Ref))
+	coverage, err := relevantCoverage(ctx, backend, request, from, to)
 	if err != nil {
 		// Not routed through timelineQueryError: this failure is about the scope log
 		// rather than about the timeline, and askCoverage has already said so in the
@@ -191,6 +195,27 @@ func gatherChanges(
 	// anything — and answering each from its own walk of the rows is how two of
 	// them come to disagree about what was on the page.
 	shape := shapeOf(result.Rows)
+
+	if request.EventsOnly {
+		// The trap, closed. Everything between here and the return is about the
+		// object's own changes: whether a predicate emptied them, and — if not —
+		// what the scope log says about the silence. Under --events-only there are
+		// no such changes by construction, so all of it would be reasoning about an
+		// absence the reader created on purpose, and the last step of that reasoning
+		// is uncoveredNoChanges: an object nobody watched is the no-coverage
+		// finding, at exit 3, suppressing a page of correlated Events to report that
+		// the state nobody asked for was never recorded.
+		//
+		// So the whole block is skipped rather than conditioned inside, and what is
+		// left is the one question that was asked. coverage above *is* the Event
+		// scope's, which is what makes this a decision rather than a second round
+		// trip: relevantCoverage asked about the rows the reader is looking at, and
+		// explainNoEvents is handed that same answer rather than a second
+		// formulation of the same question (see eventCoverage).
+		result.Notices = appendNotice(result.Notices,
+			noEventsNotice(request, from, to, coverage, nil, shape.events, zone))
+		return result, nil
+	}
 
 	// The same question about the predicates the *query* carried, which the two
 	// counts above cannot answer: those rows were removed before they arrived, so
@@ -243,6 +268,77 @@ func gatherChanges(
 	return result, nil
 }
 
+// relevantCoverage consults the scope the rendered rows came from.
+//
+// Two scopes, one header field, and which of them belongs in it is decided by what
+// the reader is looking at. An ordinary timeline is the object's own history, so
+// the object's scope is what explains a silence in it. An events-only one holds no
+// state rows at all, and stating the coverage of a scope the page says nothing
+// about would be a header describing a different subject than the rows beneath it
+// — the disagreement D45 exists to prevent, and one a reader has no way to detect,
+// since both answers are a well-formed interval with a rule reference on it.
+//
+// It is one function because the answer is spent twice: the header states it, and
+// the explanation of an empty page is measured against it. Asking twice would be
+// two round trips for one question, and asking two *different* questions is how the
+// header and the notice beneath it come to disagree about the same scope log.
+func relevantCoverage(
+	ctx context.Context, backend *resolve.Backend, request TimelineRequest, from, to time.Time,
+) (coverageAnswer, error) {
+	if request.EventsOnly {
+		return eventCoverage(ctx, backend, request, from, to)
+	}
+	return askCoverage(ctx, backend, request.scopeQuery(from, to), describeObject(request.Ref))
+}
+
+// inertPredicateNotice names the flags --events-only left with nothing to act on.
+//
+// D31: a flag that produces no visible effect must say why. These produce none for
+// a reason that is arithmetic rather than policy — an Event carries no patch, and
+// its actors column holds the field managers of the Event object rather than of
+// whoever changed the subject (see mergeEvents) — so the honest report is that the
+// page was not narrowed by them, not that they were wrong to pass.
+//
+// They are accepted rather than refused because they do not contradict the flag;
+// they simply have nothing to bite on. `--uid` and `--all-incarnations` do
+// contradict each other and are refused by name, which is the line between the two
+// treatments: a contradiction is a request nobody can carry out, and this is a
+// request that was carried out and narrowed nothing.
+//
+// --full is deliberately absent from the list. It is already silent under any
+// timeline whose rows the CHANGE column held whole, which is every events-only one
+// — fullHint names it exactly when there is something to expand, and it withholds
+// itself here for the reason it withholds itself there rather than for a new one.
+func inertPredicateNotice(request TimelineRequest) render.Notice {
+	if !request.EventsOnly {
+		return render.Notice{}
+	}
+
+	var parts []string
+	if len(request.Actors) > 0 {
+		parts = append(parts, "--actor "+strings.Join(request.Actors, ", "))
+	}
+	if len(request.ExcludeActors) > 0 {
+		parts = append(parts, "--exclude-actor "+strings.Join(request.ExcludeActors, ", "))
+	}
+	if len(request.FieldPaths) > 0 {
+		parts = append(parts, "--field "+strings.Join(request.FieldPaths, ", "))
+	}
+	if request.AllIncarnations {
+		parts = append(parts, "--all-incarnations")
+	}
+	if len(parts) == 0 {
+		return render.Notice{}
+	}
+	return render.Notice{Text: fmt.Sprintf(
+		"%s narrows the object's own changes, which %s excludes: this answer holds Kubernetes "+
+			"Events and nothing else, an Event carries no patch, and the actors recorded on one are "+
+			"the field managers of the Event rather than of whoever changed the subject. Nothing "+
+			"here was filtered by it. `%s` without %s answers the same question about the object's "+
+			"history",
+		joinClauses(parts), eventsOnlyFlag, timelineCommand, eventsOnlyFlag)}
+}
+
 // eventsNotice explains a --with-events that interleaved nothing, and says
 // nothing when the flag was not passed.
 //
@@ -262,11 +358,33 @@ func eventsNotice(
 	ctx context.Context, backend *resolve.Backend, request TimelineRequest,
 	from, to time.Time, interleaved bool, zone render.Zone,
 ) render.Notice {
-	if !request.WithEvents || interleaved {
+	if !request.includeEvents() || interleaved {
 		return render.Notice{}
 	}
 	coverage, err := eventCoverage(ctx, backend, request, from, to)
-	return explainNoEvents(request, from, to, coverage, err, zone)
+	return noEventsNotice(request, from, to, coverage, err, interleaved, zone)
+}
+
+// noEventsNotice is eventsNotice's decision, over an Event coverage answer the
+// caller already holds.
+//
+// It exists for --events-only, which has that answer in hand: the coverage its
+// header states *is* the Event scope's (relevantCoverage), so asking again would be
+// a second round trip for a question already answered, and asking it a second way
+// is how two sentences about one scope log come to disagree (see eventCoverage).
+//
+// The gate is repeated here rather than left to the caller because it is the same
+// gate: the flag was passed — either of them — and no Event reached the page. A
+// caller that had to remember the condition is a caller that eventually prints this
+// beneath a document full of Events.
+func noEventsNotice(
+	request TimelineRequest, from, to time.Time, coverage coverageAnswer, readErr error,
+	interleaved bool, zone render.Zone,
+) render.Notice {
+	if !request.includeEvents() || interleaved {
+		return render.Notice{}
+	}
+	return explainNoEvents(request, from, to, coverage, readErr, zone)
 }
 
 // eventCoverage asks the scope log whether Events were being recorded where the
@@ -405,7 +523,13 @@ func anyChangeInWindow(
 ) (bool, error) {
 	q := request.timelineQuery(selection, from, to)
 	q.Actors, q.ExcludeActors, q.FieldPaths = nil, nil, nil
-	q.IncludeEvents = false
+	// Both halves of the Event pair, because they mean nothing apart: EventsOnly
+	// left set over a probe that wants state would ask for the commentary and then
+	// exclude everything, and report that a window holding a hundred changes held
+	// none (query.TimelineQuery.EventsOnly). This probe is unreachable under
+	// --events-only today — filtered() is false there — and it must not become a
+	// silent falsehood on the day some other caller reaches it.
+	q.IncludeEvents, q.EventsOnly = false, false
 	q.Limit = 1
 
 	changes, err := collectChanges(ctx, engine, q)

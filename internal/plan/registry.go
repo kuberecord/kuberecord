@@ -107,6 +107,24 @@ type WatchTarget struct {
 	// re-projects the interest without tearing down and re-listing the informer
 	// serving it.
 	Redaction string
+
+	// EventFilter is the canonical form of this rule's `eventFilter` for this
+	// target (Task 19.2): which Kubernetes Events it wants, by fields the Event
+	// itself carries. The empty string means "every Event in scope" — what a
+	// rule naming Event without an `eventFilter` asks for, and what every target
+	// for any other kind carries, since the CRD admits the field on an Event
+	// alone.
+	//
+	// It is one opaque string for both the reasons Redaction is: a WatchTarget
+	// must stay comparable to be a map key, and the grammar is none of the
+	// registry's business. The control plane renders it (see
+	// watch.CanonicalEventFilter) and the data plane compiles it (see
+	// watch.compileEventFilters); nothing here ever parses it.
+	//
+	// Like Selector and Redaction it is not part of TargetKey, so editing a
+	// filter re-projects the interest without tearing down and re-listing the
+	// informer serving it.
+	EventFilter string
 }
 
 // TargetKey is the identity of a watch target as the data plane sees it.
@@ -165,6 +183,23 @@ type TargetState struct {
 	// unredact the other's stream. The data plane merges them accordingly (see
 	// pipeline.MergeRedaction).
 	Redactions []string
+
+	// EventFilters are the distinct canonical Event filters the contributing
+	// rules asked for, sorted, deduplicated — each entry being one rule's
+	// WatchTarget.EventFilter.
+	//
+	// They are a *union*, like Selectors and for the same reason: there is one
+	// stored stream per (sink, identity), so two rules wanting the same scope
+	// cannot be served two different subsets of it, and honouring only their
+	// intersection would let one rule's existence silence another's.
+	//
+	// The empty string is a real member of this set rather than an absence. It
+	// is "record every Event", so its presence makes every other entry
+	// redundant — which is why an unfiltered contribution is counted here while
+	// an empty redaction set is not (see targetEntry). On this axis "" means "I
+	// constrain nothing", and that *is* a statement about the union; in
+	// Redactions it would mean "I add no paths", which is not.
+	EventFilters []string
 }
 
 // CanonicalSelector renders a metav1.LabelSelector as the canonical string form
@@ -225,6 +260,12 @@ type targetEntry struct {
 	// selectors are: one rule can contribute several targets to the same key and
 	// the last one removed must not drop a path set an earlier one still wants.
 	redactions map[string]int
+	// eventFilters counts how many contributions ask for each canonical Event
+	// filter, across all rules. The empty filter is counted, like the empty
+	// selector and unlike the empty redaction set: it is the member that makes
+	// the merged filter match every Event, so dropping it would let one rule's
+	// filter narrow a stream another rule asked to keep whole.
+	eventFilters map[string]int
 }
 
 // Registry is the thread-safe desired-state registry: rule keys in, merged
@@ -374,6 +415,8 @@ func (r *Registry) Snapshot() map[TargetKey]TargetState {
 			RuleKeys:   slices.Sorted(maps.Keys(entry.rules)),
 			Selectors:  slices.Sorted(maps.Keys(entry.selectors)),
 			Redactions: slices.Sorted(maps.Keys(entry.redactions)),
+
+			EventFilters: slices.Sorted(maps.Keys(entry.eventFilters)),
 		}
 	}
 	return out
@@ -443,14 +486,20 @@ func (r *Registry) addRefLocked(ruleKey string, t WatchTarget) {
 	entry, ok := r.targets[key]
 	if !ok {
 		entry = &targetEntry{
-			rules:      make(map[string]int),
-			selectors:  make(map[string]int),
-			redactions: make(map[string]int),
+			rules:        make(map[string]int),
+			selectors:    make(map[string]int),
+			redactions:   make(map[string]int),
+			eventFilters: make(map[string]int),
 		}
 		r.targets[key] = entry
 	}
 	entry.rules[ruleKey]++
 	entry.selectors[t.Selector]++
+	// Counted unconditionally, empty filter included: "" here means "record every
+	// Event", which is a member of the union rather than an abstention from it.
+	// See targetEntry.eventFilters for why that differs from the redaction set
+	// three lines below.
+	entry.eventFilters[t.EventFilter]++
 	if t.Redaction != "" {
 		// A rule that configured no redaction contributes nothing to the union,
 		// so it is not counted at all. That is not the same treatment the empty
@@ -481,6 +530,9 @@ func (r *Registry) dropRefLocked(ruleKey string, t WatchTarget) {
 	}
 	if entry.selectors[t.Selector]--; entry.selectors[t.Selector] <= 0 {
 		delete(entry.selectors, t.Selector)
+	}
+	if entry.eventFilters[t.EventFilter]--; entry.eventFilters[t.EventFilter] <= 0 {
+		delete(entry.eventFilters, t.EventFilter)
 	}
 	if t.Redaction != "" {
 		if entry.redactions[t.Redaction]--; entry.redactions[t.Redaction] <= 0 {

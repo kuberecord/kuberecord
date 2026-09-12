@@ -19,6 +19,7 @@ package render
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -75,10 +76,12 @@ const UnknownActor = "unknown"
 // only matches in one.
 const incarnationsLabel = "Incarnations"
 
-// coverageLabel is the header row whose *value* changes weight, which is why it
-// is a constant for the reason incarnationsLabel is one: renderHeader branches on
-// it in order to decide the tier, and a label matched by literal in two places is
-// a label that eventually only matches in one.
+// coverageLabel is the header row whose *value* changes weight and whose label a
+// command may qualify — `Coverage (Events)` under `timeline --events-only`.
+//
+// It is a constant because it is the stem both of those build on: coverageOfLabel
+// appends the qualifier to it, and renderHeader decides the tier from a flag beside
+// the field rather than by matching this string, so the two cannot come apart.
 const coverageLabel = "Coverage"
 
 // uidPrefixLength is how much of a UID a narrow table shows.
@@ -188,6 +191,9 @@ type TimelineDocument struct {
 	Incarnations []string
 	// Coverage is the pre-rendered coverage summary for the header.
 	Coverage string
+	// CoverageOf names the scope that summary is about, when it is not the
+	// object's own. See documentHeader.CoverageOf.
+	CoverageOf string
 	// CoverageAbsent reports that the summary above says nothing was watching.
 	// See documentHeader.CoverageAbsent.
 	CoverageAbsent bool
@@ -217,6 +223,7 @@ func (d TimelineDocument) header() documentHeader {
 		UID:            d.UID,
 		Incarnations:   d.Incarnations,
 		Coverage:       d.Coverage,
+		CoverageOf:     d.CoverageOf,
 		CoverageAbsent: d.CoverageAbsent,
 	}
 }
@@ -252,6 +259,21 @@ type documentHeader struct {
 	Base string
 	// Coverage is the pre-rendered coverage summary.
 	Coverage string
+	// CoverageOf names the scope the summary is about, and is set only when that
+	// is not the object the document is about.
+	//
+	// `timeline --events-only` is the one command that sets it. Its rows come from
+	// the Event scope rather than from the object's, so the summary describes a
+	// different subject from the one three lines above it — and a coverage line is
+	// a well-formed interval with a rule reference on it either way, so a reader
+	// has nothing to detect the substitution with (D45). The label carries the
+	// distinction because the value cannot.
+	//
+	// The renderer branches on a flag rather than on the label text for the reason
+	// CoverageAbsent is a flag: the command decides, the renderer renders, and a
+	// label matched by literal in two places is a label that eventually only
+	// matches in one.
+	CoverageOf string
 	// CoverageAbsent reports that the summary above says nothing was ever
 	// watching this scope, which is what puts the value in the Warning tier.
 	//
@@ -286,11 +308,15 @@ func WriteTimeline(out, errOut io.Writer, doc TimelineDocument, opts Options) er
 		}
 	}
 
-	notices := doc.Notices
-	if hint := fullHint(shortened, opts); hint != "" {
-		// Appended to a copy: doc is the caller's, and growing its slice in place
-		// would put a rendering decision into a value the command still holds.
-		notices = append(append([]Notice(nil), notices...), Notice{Text: hint})
+	// The footers, in the order a reader meets them: what the page withheld, then
+	// what would narrow it. They are appended to a clone because doc is the
+	// caller's, and growing its slice in place would put a rendering decision into
+	// a value the command still holds.
+	notices := slices.Clone(doc.Notices)
+	for _, hint := range []string{fullHint(shortened, opts), eventsHint(doc, opts)} {
+		if hint != "" {
+			notices = append(notices, Notice{Text: hint})
+		}
 	}
 	if errOut == nil || len(notices) == 0 {
 		return nil
@@ -329,6 +355,51 @@ func fullHint(shortened int, opts Options) string {
 	}
 	return fmt.Sprintf("%d %s shortened to fit the %s column; pass --full to print every operation",
 		shortened, verb, columnChange)
+}
+
+// eventsHint is the footer that names --events-only, or nothing.
+//
+// # Why a footer and not a command
+//
+// `kuberecord events` would be the discoverable spelling and it is the one this
+// release refuses (D51, and the note in root.go): it asks what `timeline` asks and
+// hides rows of the answer, so it would be a second surface over the same question,
+// and the name is worth keeping for the namespace-wide Event search `timeline`
+// structurally cannot express. A flag with no entry in `--help`'s first screen is
+// discovered by being named where it would have helped, which is here.
+//
+// # Why it is conditional, and on what
+//
+// Two rows, not one. The hint is printed when the page holds a Kubernetes Event
+// *and* a change of the object's own — which is to say, when the flag would visibly
+// remove something. That is fullHint's own rule ("only when the column actually
+// withheld something") applied to a different flag, and it is the rule that matters
+// here for a specific reason: a document made entirely of Event rows already
+// carries a notice saying so (explainNoChanges), and following that with an offer
+// to hide the changes it has just reported the absence of would be a footer
+// promising a change it cannot deliver. A reader who finds one untrue footer stops
+// reading footers, and --full's depends on being read.
+//
+// It is silent under --events-only itself for the obvious reason and the important
+// one: the flag is already on, and a line advertising a flag the reader has just
+// used reads as the tool not having noticed.
+func eventsHint(doc TimelineDocument, opts Options) string {
+	if opts.EventsOnly {
+		return ""
+	}
+	var events, changes bool
+	for _, row := range doc.Rows {
+		if row.Change.EventType == query.EventKubernetes {
+			events = true
+			continue
+		}
+		changes = true
+	}
+	if !events || !changes {
+		return ""
+	}
+	return "this timeline interleaves Kubernetes Events with the object's own changes; " +
+		"pass --events-only for the Events alone"
 }
 
 // WriteNotices writes a document's qualifications to errOut, and nothing to
@@ -430,29 +501,37 @@ func renderTimeline(doc TimelineDocument, opts Options) (string, int) {
 // 18.5). The labels stay in the provenance tier they were always in, which is what
 // keeps the amber on the fact rather than on the word in front of it.
 func renderHeader(doc documentHeader, severity Severity) string {
-	type field struct{ label, value string }
+	type field struct {
+		label, value string
+		// coverage marks the one field whose value can change weight, and does so
+		// by identity rather than by its label's text: the label carries a
+		// qualifier when a command narrowed the scope (CoverageOf), and a tier
+		// decided by matching prose would silently stop applying to it.
+		coverage bool
+	}
 
 	fields := []field{
-		{"Kind", doc.Kind},
-		{"Object", doc.Object},
-		{"Cluster", doc.Cluster},
+		{label: "Kind", value: doc.Kind},
+		{label: "Object", value: doc.Object},
+		{label: "Cluster", value: doc.Cluster},
 	}
 	switch {
 	case len(doc.Incarnations) > 0:
-		fields = append(fields, field{incarnationsLabel, ""})
+		fields = append(fields, field{label: incarnationsLabel})
 	case doc.UID != "":
-		fields = append(fields, field{"UID", doc.UID})
+		fields = append(fields, field{label: "UID", value: doc.UID})
 	}
 	// Only when a command set them, so that the header of a document that has no
 	// use for either is exactly the header it was before they existed — which is
 	// what the checked-in golden files of the other commands assert.
 	if doc.Window != "" {
-		fields = append(fields, field{"Window", doc.Window})
+		fields = append(fields, field{label: "Window", value: doc.Window})
 	}
 	if doc.Base != "" {
-		fields = append(fields, field{"Base", doc.Base})
+		fields = append(fields, field{label: "Base", value: doc.Base})
 	}
-	fields = append(fields, field{coverageLabel, doc.Coverage})
+	fields = append(fields, field{label: coverageOfLabel(doc.CoverageOf), value: doc.Coverage,
+		coverage: true})
 
 	labelWidth := 0
 	for _, f := range fields {
@@ -474,12 +553,25 @@ func renderHeader(doc documentHeader, severity Severity) string {
 		// uncoloured rendering has to carry too — which is the one thing the tiers
 		// may not do to a line (TestColourIsNothingButColour). The label already
 		// says what the value is about; what the tier adds is how much it matters.
-		if f.label == coverageLabel && doc.CoverageAbsent {
+		if f.coverage && doc.CoverageAbsent {
 			value = severity.Warning(value)
 		}
 		built.WriteString(label + value + "\n")
 	}
 	return built.String()
+}
+
+// coverageOfLabel qualifies the coverage label with the scope it is about.
+//
+// Unqualified is the ordinary case and renders exactly as it always has, so every
+// checked-in golden of every other command is unaffected — which is the property
+// worth having here, since the header block is shared by four commands and only one
+// of them can narrow the scope.
+func coverageOfLabel(of string) string {
+	if of == "" {
+		return coverageLabel
+	}
+	return coverageLabel + " (" + of + ")"
 }
 
 // renderIncarnations lists every UID in the window, one per line, marking the

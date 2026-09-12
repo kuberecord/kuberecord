@@ -1,0 +1,11 @@
+=== stdout ===
+[2mKind:[0m              apps/Deployment
+[2mObject:[0m            payments/checkout
+[2mCluster:[0m           prod-eu-1
+[2mCoverage (Events):[0m [33mnone recorded for this scope[0m
+=== stderr ===
+! [33m--events-only found no Events: no rule streams Events to this sink.[0m
+  [33mAdd them to a rule and they will appear here:[0m
+  [33m    - group: ""[0m
+  [33m      version: v1[0m
+  [33m      kind: Event[0m

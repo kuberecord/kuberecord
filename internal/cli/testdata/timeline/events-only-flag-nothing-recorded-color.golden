@@ -1,0 +1,7 @@
+=== stdout ===
+[2mKind:[0m              apps/Deployment
+[2mObject:[0m            payments/checkout
+[2mCluster:[0m           prod-eu-1
+[2mCoverage (Events):[0m 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+=== stderr ===
+! [33m--events-only found no Events for payments/checkout in 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z. Events were confirmed recorded over 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events), so nothing was said about it while that scope was open[0m

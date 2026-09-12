@@ -479,3 +479,98 @@ func TestTheEventsOnlyPathAddsNoStatement(t *testing.T) {
 			len(conn.statements()))
 	}
 }
+
+// TimelineQuery.EventsOnly, where "skipped, not filtered" is observable.
+//
+// The answer cannot show it. A backend that read the object's rows and dropped them
+// afterwards returns exactly what one that never read them returns, which is the
+// contract's own wording and the reason the agreement suite cannot pin this. What can
+// show it is the SQL: the statements below are the whole of what the engine said, and
+// an events-only timeline has to say one thing.
+
+// TestEventsOnlyIssuesNoStateQuery is the cost property, asserted as statements.
+func TestEventsOnlyIssuesNoStateQuery(t *testing.T) {
+	engine, conn := seededEngine(t, eventFixture())
+	from, to := fixtureWindow()
+
+	// The fixture's Deployment, which has state rows *and* commentary: an object with
+	// no rows of its own would reach the same answer through a different path and
+	// would certify nothing about this one.
+	got := drainTimeline(t, engine, query.TimelineQuery{
+		Ref: testRef(), From: from, To: to, IncludeEvents: true, EventsOnly: true,
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("an events-only timeline returned %d row(s), want the 2 Events: %v", len(got), got)
+	}
+	for i, change := range got {
+		if change.EventType != query.EventKubernetes {
+			t.Errorf("row %d is stamped %q, want %q: every row of this answer is commentary",
+				i, change.EventType, query.EventKubernetes)
+		}
+	}
+
+	statements := conn.statements()
+	if len(statements) != 1 {
+		t.Fatalf("an events-only timeline issued %d statement(s), want exactly 1. Neither the "+
+			"newest-incarnation probe nor the state select may run: they are the object's own rows, "+
+			"which is the half the flag declines, and a backend that read them and filtered "+
+			"afterwards would cost exactly what it cost before:\n%s",
+			len(statements), strings.Join(statements, "\n---\n"))
+	}
+	if !strings.Contains(statements[0], "involvedObject") {
+		t.Errorf("the one statement an events-only timeline issued is not the Events one:\n%s",
+			statements[0])
+	}
+}
+
+// TestEventsOnlyPinsTheCommentaryWithoutResolvingAnIncarnation is the other half of
+// the same skip: a pin still reaches the Events, and still costs no probe.
+func TestEventsOnlyPinsTheCommentaryWithoutResolvingAnIncarnation(t *testing.T) {
+	engine, conn := seededEngine(t, eventFixture())
+	from, to := fixtureWindow()
+
+	// uidB is the incarnation the fixture's Events name in their own subject, and the
+	// one its state rows carry. Pinning it must narrow the commentary by the uid the
+	// caller gave rather than by one the engine went and resolved.
+	got := drainTimeline(t, engine, query.TimelineQuery{
+		Ref: testRef(), From: from, To: to, IncludeEvents: true, EventsOnly: true, UID: uidB,
+	})
+	if len(got) != 2 {
+		t.Fatalf("an events-only timeline pinned to %s returned %d row(s), want the 2 Events "+
+			"naming it: %v", uidB, len(got), got)
+	}
+
+	statements := conn.statements()
+	if len(statements) != 1 {
+		t.Fatalf("a pinned events-only timeline issued %d statement(s), want exactly 1:\n%s",
+			len(statements), strings.Join(statements, "\n---\n"))
+	}
+	if !strings.Contains(statements[0], "'uid'") {
+		t.Errorf("the events-only statement carries no uid predicate, so the pin the caller gave "+
+			"narrowed nothing:\n%s", statements[0])
+	}
+}
+
+// TestEventsOnlyWithoutTheEventsFlagReadsNothing pins the contract's one sentence
+// about the pair: EventsOnly is read only when IncludeEvents is set.
+//
+// The combination asks for no Events and excludes everything else, which is an empty
+// result rather than a contradiction to refuse — and it must be an empty result the
+// engine reached without reading anything, since there was nothing it was asked for.
+func TestEventsOnlyWithoutTheEventsFlagReadsNothing(t *testing.T) {
+	engine, conn := seededEngine(t, eventFixture())
+	from, to := fixtureWindow()
+
+	got := drainTimeline(t, engine, query.TimelineQuery{
+		Ref: testRef(), From: from, To: to, EventsOnly: true,
+	})
+	if len(got) != 0 {
+		t.Errorf("an events-only timeline that did not ask for Events returned %d row(s), want "+
+			"none: %v", len(got), got)
+	}
+	if statements := conn.statements(); len(statements) != 0 {
+		t.Errorf("it issued %d statement(s), want none — there was no question to ask:\n%s",
+			len(statements), strings.Join(statements, "\n---\n"))
+	}
+}

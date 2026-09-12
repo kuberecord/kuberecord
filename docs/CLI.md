@@ -316,6 +316,7 @@ find its meaning depends on the shell that produced it.
 | `--all-incarnations` | Show every incarnation in the window, with a `UID` column. |
 | `--full` | Print every operation of every patch, unshortened. The footer names it when a row was shortened without it. |
 | `--with-events` | Interleave the Kubernetes Events recorded about the object. |
+| `--events-only` | Show those Events and none of the object's own changes. Implies `--with-events`. The coverage in the header becomes the coverage of **Events**, because that is the scope the rows came from — see [below](#--events-only). |
 
 `-o wide` adds the full UID and the resource version, and prints timestamps at the
 nanosecond precision the schema records.
@@ -537,8 +538,9 @@ them is ever reached.
 Closing that gap is a sizing decision as much as a configuration one: Events are
 captured for the whole watched scope and correlated to a subject here, at read
 time, and an occurrence-count bump writes a full row rather than a diff. Read
-[Event volume](SCHEMA.md#event-volume) before widening the rule beyond a
-namespace.
+[`docs/EVENTS.md`](EVENTS.md) before widening the rule beyond a namespace — it
+has the sizing guidance, and the `eventFilter` that narrows *which* Events a rule
+records.
 
 ### Events and no changes at all
 
@@ -578,6 +580,62 @@ A timeline with changes in it says none of this, and neither does an empty one �
 the [three answers](#an-empty-result-is-never-presented-on-its-own) already cover
 that, and both readings go through the same function against the same scope log,
 so they cannot come to disagree about it.
+
+### `--events-only`
+
+A Deployment's timeline is mostly status churn — `observedGeneration`, condition
+timestamps, replica counts — with a few Events carrying the decisions. This shows
+the Events and nothing else:
+
+```
+$ kuberecord timeline deploy/checkout -n payments --events-only
+
+Kind:              apps/Deployment
+Object:            payments/checkout
+Cluster:           prod-eu-1
+Coverage (Events): 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+
+TIME (UTC)                EVENT  ACTOR                    CHANGE
+2026-08-28 14:03:20.310Z  Event  kube-controller-manager  ScalingReplicaSet: Scaled up replica set checkout-7d4f to 5
+2026-08-28 14:06:44.020Z  Event  replicaset-controller    ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: exceeded quota
+```
+
+It **implies `--with-events`**; the two compose and passing both is neither an
+error nor necessary. Which Events exist to be shown is a property of the rule
+that captured them: [`docs/EVENTS.md`](EVENTS.md) is what a scope holds and how
+to narrow it.
+
+**The coverage in the header is the coverage of Events.** The rows come from the
+Event scope rather than from the object's, and a coverage summary is a well-formed
+interval with a rule reference on it either way — so the label says which scope it
+is about, because the value cannot. The same substitution reaches
+`metadata.coverage` in `-o json`.
+
+**The object's own scope is not consulted at all**, and that is deliberate rather
+than an optimisation. An object nobody was ever watching is normally the exit **3**
+[no-coverage finding](#an-empty-result-is-never-presented-on-its-own) — correctly,
+for somebody who asked about the object. Under this flag they did not, so raising
+it would fail the command over the absence of something they excluded, with a page
+of correlated Events sitting above the error. An empty answer is still explained:
+it goes through the same three answers as
+[`--with-events`](#--with-events-that-finds-no-events), naming this flag, and stays
+at exit `0`.
+
+The state half of the query is **skipped, not filtered**. On an object archive
+there is no index to seek with, so that scan is the expensive half of the question,
+and declining it is the point of the flag rather than a detail of it.
+
+Four flags have nothing to act on under it, and the command says so rather than
+ignoring them quietly: `--actor` and `--exclude-actor` (an Event's actors are the
+field managers of the *Event*, not of whoever changed the subject), `--field` and
+`--full` (an Event carries no patch), and `--all-incarnations` (there are no state
+rows to span). `--uid` still works: it pins the Events to one incarnation of the
+subject.
+
+There is **no `kuberecord events` command**, and this is why: it would ask what
+`timeline` asks and hide rows of the answer, so it would need most of `timeline`'s
+flags and would drift from them. The name is kept for a namespace-wide Event search,
+which would be a differently-shaped question.
 
 ### What a backend cannot record
 

@@ -89,7 +89,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: minio
-        image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+        image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
         # The image is side-loaded into the kind node by whoever brings this up,
         # so it must never be re-pulled from a registry mid-run.
         imagePullPolicy: IfNotPresent

@@ -72,6 +72,19 @@ const (
 	archivePrefix      = "audit"
 )
 
+// archiveCluster is the cluster identity this fixture's archive is written under,
+// and it is the suite's rather than this package's for a reason worth stating.
+//
+// archivetest stamps every *scope* line with conformance.FixtureClusterID —
+// deliberately, because a ScopeTransition carries no cluster of its own — while the
+// records take theirs from the rows. A test that asked about a different identity
+// therefore got a scope log it could not read, and an empty scope log answers "no
+// coverage" for every question put to it. That is the answer this file's first test
+// happens to want, so the mismatch was invisible: it passed, for a reason that had
+// nothing to do with what the fixture declares. It stopped being invisible the
+// moment a test here needed the Event scope to come back *present*.
+const archiveCluster = conformance.FixtureClusterID
+
 // archiveEpoch is the instant the fixture archive is dated from — fixed, so a
 // failure names the same timestamps today as in a log pasted last week.
 func archiveEpoch() time.Time { return time.Date(2026, 8, 28, 14, 0, 0, 0, time.UTC) }
@@ -79,7 +92,7 @@ func archiveEpoch() time.Time { return time.Date(2026, 8, 28, 14, 0, 0, 0, time.
 // archiveSubject is the object the timeline is asked about.
 func archiveSubject() query.ObjectRef {
 	return query.ObjectRef{
-		ClusterID: fixtureCluster,
+		ClusterID: archiveCluster,
 		APIGroup:  "",
 		Kind:      "Pod",
 		Namespace: "payments",
@@ -102,7 +115,7 @@ func TestAnEventsOnlyTimelineOverARealBackendExplainsItself(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := cli.RunTimeline(context.Background(), &resolve.Backend{Engine: engine, ClusterID: fixtureCluster},
+	err := cli.RunTimeline(context.Background(), &resolve.Backend{Engine: engine, ClusterID: archiveCluster},
 		request, ioStreams(&out, &errOut), render.Options{Width: goldenWidth})
 	if err != nil {
 		// Exit 0 with a notice, not the no-coverage finding: the command produced
@@ -231,5 +244,70 @@ func archiveEventRow(offset time.Duration, apiGroup, name, reason string) confor
 			Actors: []string{"kubelet"},
 			Data:   data,
 		},
+	}
+}
+
+// TestEventsOnlyOverARealBackendDoesNotRaiseANoCoverageFinding is Task 19.4's guard
+// with the fakes taken away.
+//
+// The CLI's own fake engine answers an Event query from a slice, so it models the
+// contract and not either backend's way of obeying it — which is exactly what let
+// the events-only page be unreachable for a whole release (D42, Task 18.6). The
+// same class of defect is available here in a new place: the flag's coverage
+// switch, its skipped state read and its suppressed finding all have to hold over
+// an engine that really walks an archive, resolves nothing, and correlates from the
+// Event rows themselves.
+//
+// The fixture is the one this file already has, and it is the worst case on purpose:
+// the Pod's own scope was never watched, so the finding this test asserts the
+// absence of is the one the same invocation raises without the flag.
+func TestEventsOnlyOverARealBackendDoesNotRaiseANoCoverageFinding(t *testing.T) {
+	engine := archiveEngine(t)
+
+	request := cli.TimelineRequest{
+		Ref:        archiveSubject(),
+		From:       archiveEpoch().Add(-time.Hour),
+		To:         archiveEpoch().Add(time.Hour),
+		Now:        archiveEpoch().Add(time.Hour),
+		Limit:      100,
+		EventsOnly: true,
+	}
+
+	var out, errOut bytes.Buffer
+	err := cli.RunTimeline(context.Background(), &resolve.Backend{Engine: engine, ClusterID: archiveCluster},
+		request, ioStreams(&out, &errOut), render.Options{Width: goldenWidth, EventsOnly: true})
+	if err != nil {
+		t.Fatalf("an events-only timeline over a real archive failed with %v; the Pod's own scope "+
+			"is uncovered and that is not the question this invocation asked", err)
+	}
+
+	stdout, stderr := out.String(), errOut.String()
+
+	// Every Event, through a backend that resolved no incarnation: the flag skips the
+	// state half, so nothing narrowed the commentary and the forgiving key found all
+	// four.
+	for _, reason := range []string{"Scheduled", "Pulling", "FailedScheduling", "Killing"} {
+		if !strings.Contains(stdout, reason) {
+			t.Errorf("the events-only timeline does not render the Event %q:\n%s", reason, stdout)
+		}
+	}
+
+	// The header reports the Event scope — the one the rows came from — and names the
+	// rule that opened it, which is the evidence a reader checks.
+	if !strings.Contains(stdout, "Coverage (Events):") {
+		t.Errorf("the header does not say which scope its coverage is about:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, archiveEventsRule) {
+		t.Errorf("the header does not name the rule that recorded these Events:\n%s", stdout)
+	}
+
+	// And nothing explains the absence of state rows, because nothing asked about
+	// them. Under --with-events this same fixture produces the Task 17.3 notice; here
+	// it would be a paragraph about a question the reader excluded.
+	for _, absent := range []string{"every row here is a Kubernetes Event", "nothing was ever watching"} {
+		if strings.Contains(stderr, absent) {
+			t.Errorf("stderr explains the absence of the Pod's own records (%q), which --events-only "+
+				"excluded:\n%s", absent, stderr)
+		}
 	}
 }

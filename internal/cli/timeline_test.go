@@ -634,6 +634,12 @@ func TestTimelineInterleavesKubernetesEvents(t *testing.T) {
 // the string independently, or it is asserting that the code agrees with itself.
 const eventKindName = "Event"
 
+// eventsOnlyFlagName is the flag Task 19.4 adds, spelled here for the reason
+// eventKindName is: these tests are an external package and cannot see the CLI's
+// own constant, and a test asserting that a line names the flag has to name the
+// string independently or it is asserting that the code agrees with itself.
+const eventsOnlyFlagName = "--events-only"
+
 // eventsWatchedSince is when every Event scope below opens: the same instant the
 // object's own scope does, so that nothing in these fixtures turns on one scope
 // having started before another.
@@ -1155,14 +1161,21 @@ func TestTimelineExplainsAnEmptyWithEventsResultWhenStructured(t *testing.T) {
 // of Events, no Modified rows, and concludes the object never changed. It did;
 // nobody was watching it.
 
-// eventsOnlyEngine holds Kubernetes Events about the object and none of the
+// commentaryOnlyEngine holds Kubernetes Events about the object and none of the
 // object's own history.
+//
+// It was eventsOnlyEngine until Task 19.4, and the rename is worth the churn: an
+// events-only *timeline* is now also what --events-only produces, and these
+// fixtures are the opposite situation. Here the archive has nothing else to give;
+// there the reader asked for nothing else. The sentences a reader is owed differ
+// accordingly, and two states that read the same on the page must not share a name
+// in the tests that tell them apart.
 //
 // incarnations is empty as well as changes, which is the honest fixture: a kind
 // nothing ever watched has no rows to list incarnations from, and an engine that
 // answered with one would be putting a UID in the header that no row in the
 // archive supports.
-func eventsOnlyEngine(intervals []query.ScopeInterval) *fakeEngine {
+func commentaryOnlyEngine(intervals []query.ScopeInterval) *fakeEngine {
 	return &fakeEngine{
 		caps:      clickHouseCapabilities(),
 		events:    checkoutEvents(),
@@ -1170,7 +1183,7 @@ func eventsOnlyEngine(intervals []query.ScopeInterval) *fakeEngine {
 	}
 }
 
-// eventsOnlyRequest bounds the window, which the three states below need for a
+// commentaryOnlyRequest bounds the window, which the three states below need for a
 // reason worth stating.
 //
 // An unbounded window makes from.IsZero() true, and explainNoChanges reads that
@@ -1178,7 +1191,7 @@ func eventsOnlyEngine(intervals []query.ScopeInterval) *fakeEngine {
 // watched-and-quiet answer is unreachable without a lower bound, and the fixture
 // would be pinning a different sentence from the one it claims to. It is the same
 // bound TestTimelineExplainsAnEmptyResultAgainstCoverage uses, for the same reason.
-func eventsOnlyRequest() cli.TimelineRequest {
+func commentaryOnlyRequest() cli.TimelineRequest {
 	request := withEventsRequest()
 	request.From = at("2026-08-01T00:00:00Z")
 	request.To = at("2026-08-28T15:00:00Z")
@@ -1226,11 +1239,11 @@ func TestTimelineExplainsAnEventsOnlyTimeline(t *testing.T) {
 	for name, test := range tests {
 		for mode, color := range map[string]bool{"": false, "-color": true} {
 			t.Run(name+mode, func(t *testing.T) {
-				engine := eventsOnlyEngine(test.intervals)
+				engine := commentaryOnlyEngine(test.intervals)
 				engine.coverageErr = test.coverErr
 
 				stdout, stderr, err := runTimeline(
-					t, engine, eventsOnlyRequest(), render.Options{Color: color})
+					t, engine, commentaryOnlyRequest(), render.Options{Color: color})
 				if err != nil {
 					t.Fatalf("an Events-only timeline is a notice, not a finding: %v", err)
 				}
@@ -1259,9 +1272,9 @@ func TestTimelineExplainsAnEventsOnlyTimeline(t *testing.T) {
 // ClickHouse. Neither branch may answer for the other: the finding's clause is
 // for a reader looking at a blank page, and this reader is not.
 func TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding(t *testing.T) {
-	engine := eventsOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
+	engine := commentaryOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
 
-	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	_, stderr, err := runTimeline(t, engine, commentaryOnlyRequest(), render.Options{})
 	if err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
@@ -1288,14 +1301,23 @@ func TestAnEventsOnlyTimelineWithNoCoverageIsNotAFinding(t *testing.T) {
 	}
 }
 
-// TestATimelineWithBothKindsOfRowSaysNothing is the first silence, and it is as
-// load-bearing as the notices above.
+// TestATimelineWithBothKindsOfRowExplainsNothing is the first silence, and it is
+// as load-bearing as the notices above.
 //
 // The object's own changes are on the page. Nothing about them needs explaining,
-// and a notice volunteered here would appear under the ordinary invocation —
+// and an explanation volunteered here would appear under the ordinary invocation —
 // which is every invocation — and teach a reader to stop reading the stream the
 // other three states are written to.
-func TestATimelineWithBothKindsOfRowSaysNothing(t *testing.T) {
+//
+// The one line it does carry since Task 19.4 is the affordance footer, and the
+// distinction is the whole of why this test still means what it meant. An
+// explanation says why the answer is the shape it is; an affordance names a flag at
+// the moment its absence is visible, which is what --full's footer does under a
+// shortened row and what this does under a page holding both kinds of row. It is
+// emitted on exactly the documents where --events-only would remove something, so
+// it cannot arrive under a bare invocation: there are no Event rows without the
+// flag that asks for them.
+func TestATimelineWithBothKindsOfRowExplainsNothing(t *testing.T) {
 	engine := &fakeEngine{
 		caps:         clickHouseCapabilities(),
 		changes:      shortHistory(),
@@ -1304,12 +1326,27 @@ func TestATimelineWithBothKindsOfRowSaysNothing(t *testing.T) {
 		intervals:    deploymentScope(),
 	}
 
-	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	_, stderr, err := runTimeline(t, engine, commentaryOnlyRequest(), render.Options{})
 	if err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
-	if stderr != "" {
-		t.Errorf("a timeline holding both kinds of row qualified itself anyway:\n%s", stderr)
+
+	// Every sentence this file's other states produce, named by a fragment. A
+	// document with both kinds of row is the one that earns none of them.
+	for _, explanation := range []string{
+		"found no Events", "every row here is a Kubernetes Event", "no changes recorded",
+		"nothing was ever watching",
+	} {
+		if strings.Contains(stderr, explanation) {
+			t.Errorf("a timeline holding both kinds of row explained itself anyway (%q):\n%s",
+				explanation, stderr)
+		}
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], eventsOnlyFlagName) {
+		t.Errorf("stderr holds %d line(s), want exactly the footer naming %s:\n%s",
+			len(lines), eventsOnlyFlagName, stderr)
 	}
 }
 
@@ -1351,9 +1388,9 @@ func TestAWhollyEmptyTimelineKeepsItsOwnMessage(t *testing.T) {
 // the wording. A parallel implementation would have had three answers and would
 // have told this reader the window was covered.
 func TestAnEventsOnlyTimelineReachesTheMidWindowAnswer(t *testing.T) {
-	engine := eventsOnlyEngine(watchedSince("2026-08-20T11:30:00Z", "StreamRule/payments/checkout-audit"))
+	engine := commentaryOnlyEngine(watchedSince("2026-08-20T11:30:00Z", "StreamRule/payments/checkout-audit"))
 
-	_, stderr, err := runTimeline(t, engine, eventsOnlyRequest(), render.Options{})
+	_, stderr, err := runTimeline(t, engine, commentaryOnlyRequest(), render.Options{})
 	if err != nil {
 		t.Fatalf("RunTimeline: %v", err)
 	}
@@ -1377,9 +1414,9 @@ func TestAnEventsOnlyTimelineReachesTheMidWindowAnswer(t *testing.T) {
 // document made of Kubernetes Events from one holding the object's history — and
 // emission.shape is what replaced it.
 func TestTimelineExplainsAnEventsOnlyTimelineWhenStructured(t *testing.T) {
-	engine := eventsOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
+	engine := commentaryOnlyEngine([]query.ScopeInterval{eventsWatchedBy("", "ClusterStreamRule/all-events")})
 
-	request := eventsOnlyRequest()
+	request := commentaryOnlyRequest()
 	request.Structured = render.StructuredJSON
 
 	stdout, stderr, err := runTimeline(t, engine, request, render.Options{})

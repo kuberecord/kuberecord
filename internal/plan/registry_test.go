@@ -45,6 +45,13 @@ const (
 	selEverything = ""
 	selAppWeb     = "app=web"
 	selAppAPI     = "app=api"
+
+	// filterEverything is the canonical form of "no eventFilter": the same
+	// sentinel selEverything is, and a real member of the merged set rather than
+	// an absence from it.
+	filterEverything = ""
+	filterWarnings   = `{"types":["Warning"]}`
+	filterScheduler  = `{"sourceComponents":["default-scheduler"]}`
 )
 
 var (
@@ -68,8 +75,20 @@ func tkey(sinkID sink.ID, gvk schema.GroupVersionKind, namespace string) TargetK
 	return TargetKey{Sink: sinkID, GVK: gvk, Namespace: namespace}
 }
 
+// state builds the expected TargetState for a target nobody filtered Events on,
+// which is every target in this file bar the eventFilter tests' own.
+//
+// EventFilters is spelled rather than left nil because "" is a real member of
+// that union — it is "record every Event", the thing that makes every other
+// filter in the set redundant — so an unfiltered target snapshots as [""] for the
+// reason it snapshots as selectors [""]. See targetEntry.eventFilters.
 func state(key TargetKey, ruleKeys, selectors []string) TargetState {
-	return TargetState{Key: key, RuleKeys: ruleKeys, Selectors: selectors}
+	return TargetState{
+		Key:          key,
+		RuleKeys:     ruleKeys,
+		Selectors:    selectors,
+		EventFilters: []string{filterEverything},
+	}
 }
 
 // pending drains the change channel without blocking and reports how many
@@ -89,8 +108,8 @@ func pending(ch <-chan struct{}) int {
 func formatSnapshot(snap map[TargetKey]TargetState) string {
 	lines := make([]string, 0, len(snap))
 	for key, st := range snap {
-		lines = append(lines, fmt.Sprintf("  %s|%s|%s rules=%v selectors=%q redactions=%q",
-			key.Sink, key.GVK, key.Namespace, st.RuleKeys, st.Selectors, st.Redactions))
+		lines = append(lines, fmt.Sprintf("  %s|%s|%s rules=%v selectors=%q redactions=%q eventFilters=%q",
+			key.Sink, key.GVK, key.Namespace, st.RuleKeys, st.Selectors, st.Redactions, st.EventFilters))
 	}
 	slices.Sort(lines)
 	if len(lines) == 0 {
@@ -286,10 +305,13 @@ func TestSnapshotIsDeepCopy(t *testing.T) {
 
 	snap := reg.Snapshot()
 	st := snap[key]
-	st.RuleKeys[0] = "vandalised"
-	st.Selectors[0] = "vandalised"
+	const vandalised = "vandalised"
+	st.RuleKeys[0] = vandalised
+	st.Selectors[0] = vandalised
+	st.EventFilters[0] = vandalised
 	st.RuleKeys = append(st.RuleKeys, "extra")
 	st.Selectors = append(st.Selectors, "extra")
+	st.EventFilters = append(st.EventFilters, "extra")
 	st.Key = tkey(sinkAudit, gvkPod, nsStaging)
 	snap[key] = st
 	snap[tkey(sinkAudit, gvkPod, nsStaging)] = st
@@ -772,10 +794,11 @@ func TestRedactionMergesAsAUnion(t *testing.T) {
 	})
 
 	want := TargetState{
-		Key:        key,
-		RuleKeys:   []string{ruleA, ruleB, ruleC},
-		Selectors:  []string{selEverything},
-		Redactions: []string{floorOnly, withExtra},
+		Key:          key,
+		RuleKeys:     []string{ruleA, ruleB, ruleC},
+		Selectors:    []string{selEverything},
+		Redactions:   []string{floorOnly, withExtra},
+		EventFilters: []string{filterEverything},
 	}
 	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
 
@@ -807,10 +830,11 @@ func TestRedactionRefCountsAcrossOneRulesTargets(t *testing.T) {
 	})
 	assertSnapshot(t, reg, map[TargetKey]TargetState{
 		key: {
-			Key:        key,
-			RuleKeys:   []string{ruleA},
-			Selectors:  []string{selAppAPI, selAppWeb},
-			Redactions: []string{redaction},
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selAppAPI, selAppWeb},
+			Redactions:   []string{redaction},
+			EventFilters: []string{filterEverything},
 		},
 	})
 
@@ -821,10 +845,11 @@ func TestRedactionRefCountsAcrossOneRulesTargets(t *testing.T) {
 	})
 	assertSnapshot(t, reg, map[TargetKey]TargetState{
 		key: {
-			Key:        key,
-			RuleKeys:   []string{ruleA},
-			Selectors:  []string{selAppAPI},
-			Redactions: []string{redaction},
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selAppAPI},
+			Redactions:   []string{redaction},
+			EventFilters: []string{filterEverything},
 		},
 	})
 }
@@ -857,10 +882,163 @@ func TestRedactionEditIsATargetChange(t *testing.T) {
 	key := tkey(sinkDefault, gvkDeployment, nsProd)
 	assertSnapshot(t, reg, map[TargetKey]TargetState{
 		key: {
-			Key:        key,
-			RuleKeys:   []string{ruleA},
-			Selectors:  []string{selEverything},
-			Redactions: []string{"data.password\ndata.token"},
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selEverything},
+			Redactions:   []string{"data.password\ndata.token"},
+			EventFilters: []string{filterEverything},
+		},
+	})
+}
+
+// filteringTarget is the Event-filter counterpart of redactingTarget: the same
+// Deployment target with a canonical filter stamped on it. The GVK is irrelevant
+// here — the registry never inspects it, and admission is what confines an
+// eventFilter to an Event entry.
+func filteringTarget(selector, eventFilter string) WatchTarget {
+	t := target(sinkDefault, gvkDeployment, nsProd, selector)
+	t.EventFilter = eventFilter
+	return t
+}
+
+// TestEventFilterMergesAsAUnion covers the Task 19.2 property the data plane
+// depends on: rules landing on one target contribute their Event filters to a
+// union, and a filter survives exactly as long as some rule still asks for it.
+//
+// Union rather than intersection is forced by the architecture rather than
+// chosen. One target is one hashCache entry and one stored stream, so two rules
+// wanting the same scope for the same sink cannot be served two different subsets
+// of it; intersecting would let one rule's existence silence another's.
+//
+// It also covers the way this differs from Redactions, which is the part easy to
+// get wrong on a later edit: the *empty* filter is a real member here. "" means
+// "record every Event", so a third rule that names no eventFilter widens the
+// merged set rather than abstaining from it — the treatment the empty selector
+// gets, not the one the empty redaction set gets.
+func TestEventFilterMergesAsAUnion(t *testing.T) {
+	reg := New()
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{filteringTarget(selEverything, filterWarnings)})
+	mustUpsert(t, reg, ruleB, []WatchTarget{filteringTarget(selEverything, filterScheduler)})
+
+	want := TargetState{
+		Key:          key,
+		RuleKeys:     []string{ruleA, ruleB},
+		Selectors:    []string{selEverything},
+		EventFilters: []string{filterScheduler, filterWarnings},
+	}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	// A third rule filtering nothing widens the union to everything, and is a
+	// member of the set rather than an absence from it.
+	mustUpsert(t, reg, ruleC, []WatchTarget{filteringTarget(selEverything, filterEverything)})
+	want.RuleKeys = []string{ruleA, ruleB, ruleC}
+	want.EventFilters = []string{filterEverything, filterScheduler, filterWarnings}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	// Dropping the unfiltered rule takes its "" with it, which re-narrows the
+	// merged set. A filter that outlived the rule asking for it would keep
+	// recording a stream nobody asked for.
+	reg.Remove(ruleC)
+	want.RuleKeys = []string{ruleA, ruleB}
+	want.EventFilters = []string{filterScheduler, filterWarnings}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	reg.Remove(ruleB)
+	want.RuleKeys = []string{ruleA}
+	want.EventFilters = []string{filterWarnings}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+}
+
+// TestIdenticalEventFiltersCollapseToOneEntry is the reason the control plane
+// canonicalizes before storing: two rules expressing the same filter must produce
+// byte-identical strings, so the merged set holds one entry and the ref count
+// reaches zero only when the last of them lets go.
+func TestIdenticalEventFiltersCollapseToOneEntry(t *testing.T) {
+	reg := New()
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{filteringTarget(selEverything, filterWarnings)})
+	mustUpsert(t, reg, ruleB, []WatchTarget{filteringTarget(selEverything, filterWarnings)})
+
+	want := TargetState{
+		Key:          key,
+		RuleKeys:     []string{ruleA, ruleB},
+		Selectors:    []string{selEverything},
+		EventFilters: []string{filterWarnings},
+	}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+
+	// One contributor leaving must not drop a filter the other still wants.
+	reg.Remove(ruleA)
+	want.RuleKeys = []string{ruleB}
+	assertSnapshot(t, reg, map[TargetKey]TargetState{key: want})
+}
+
+// TestEventFilterRefCountsAcrossOneRulesTargets covers the ref-counting case the
+// per-key counters exist for, the Event-filter half of
+// TestRedactionRefCountsAcrossOneRulesTargets: one rule contributing the same
+// target twice under two selectors must not have the first contribution's removal
+// drop a filter the second still wants.
+func TestEventFilterRefCountsAcrossOneRulesTargets(t *testing.T) {
+	reg := New()
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{
+		filteringTarget(selAppWeb, filterWarnings),
+		filteringTarget(selAppAPI, filterWarnings),
+	})
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selAppAPI, selAppWeb},
+			EventFilters: []string{filterWarnings},
+		},
+	})
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{filteringTarget(selAppAPI, filterWarnings)})
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selAppAPI},
+			EventFilters: []string{filterWarnings},
+		},
+	})
+}
+
+// TestEventFilterEditIsATargetChange covers the level-triggering consequence: a
+// filter edit is a new WatchTarget, so the data plane is woken and re-projects
+// the interest — while a re-Upsert of the same filter is not a change and must
+// wake nobody, since the WatchManager's response to a notification is a full
+// diff pass.
+func TestEventFilterEditIsATargetChange(t *testing.T) {
+	reg := New()
+	initial := []WatchTarget{filteringTarget(selEverything, filterWarnings)}
+
+	mustUpsert(t, reg, ruleA, initial)
+	if n := pending(reg.Changes()); n != 1 {
+		t.Fatalf("after the initial Upsert: pending notifications = %d, want 1", n)
+	}
+
+	mustUpsert(t, reg, ruleA, initial)
+	if n := pending(reg.Changes()); n != 0 {
+		t.Errorf("re-Upserting an unchanged filter notified %d times, want 0", n)
+	}
+
+	mustUpsert(t, reg, ruleA, []WatchTarget{filteringTarget(selEverything, filterScheduler)})
+	if n := pending(reg.Changes()); n != 1 {
+		t.Errorf("editing the filter notified %d times, want 1", n)
+	}
+	key := tkey(sinkDefault, gvkDeployment, nsProd)
+	assertSnapshot(t, reg, map[TargetKey]TargetState{
+		key: {
+			Key:          key,
+			RuleKeys:     []string{ruleA},
+			Selectors:    []string{selEverything},
+			EventFilters: []string{filterScheduler},
 		},
 	})
 }

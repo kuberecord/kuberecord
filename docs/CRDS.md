@@ -34,6 +34,12 @@ spec:
     version: v1
     kind: ConfigMap
     labelSelector: {matchLabels: {kuberecord.io/audit: "true"}}
+  - group: ""
+    version: v1
+    kind: Event
+    eventFilter:               # Events only — see below
+      excludeReasons: [Pulling, Pulled, Created, Started, Scheduled]
+      subjectKinds: [Pod, ReplicaSet]
   extraRedaction:              # optional — adds to the sink's own floor
   - {fieldPath: "data.password"}
   - {annotation: my.company.io/api-token}
@@ -44,6 +50,24 @@ spec:
 - `kind` must be the Kind (`Deployment`), not the plural resource
   (`deployments`); `version` must look like `v1` / `v2beta1`; `group` must be
   empty (core) or a DNS-1123 subdomain. `resources` must be non-empty.
+- `spec.resources[].eventFilter` narrows Event capture, and is valid **only** on
+  an Event entry (`v1/Event` or `events.k8s.io/v1/Event`) — a filter on a
+  Deployment is rejected at admission, because a Deployment carries none of the
+  fields the filter reads and the entry would record an empty stream while the
+  rule reported `Ready=True`. Its six axes are `types` (`Normal` / `Warning`, a
+  closed enum), `reasons`, `excludeReasons`, `sourceComponents`, `subjectKinds`
+  and `subjectNames`; within a list they OR, across fields they AND, and an absent
+  or empty list constrains nothing. `reasons` and `excludeReasons` are **mutually
+  exclusive** — two fields doing inverse jobs need a stated answer to "what if
+  both?", and rejection is the honest one. `subjectNames` is exact-match with no
+  prefix or glob form, deliberately: a prefix cannot be expressed as a Kubernetes
+  field selector, so supporting one would mean pulling the namespace's whole Event
+  stream over the network to discard most of it locally. It is therefore useful
+  for stable names (`postgres-0`) and useless for the Pods of a Deployment, whose
+  names are generated and change on every rollout. **None of this bounds volume:**
+  a recurring Event is updated in place to bump its `count`, so every recurrence
+  is another full row under every filter — see
+  [`docs/EVENTS.md`](EVENTS.md#the-volume-amplifier).
 - `spec.sink` is **required** and names the target backend as a `{kind, name}`
   pair. `kind` defaults to `ClickHouseSink` and is constrained to the sink kinds
   this build actually serves, so a rule naming a kind no reconciler implements is
@@ -238,10 +262,12 @@ because the operator that must release it is not running.
 
 ## See also
 
+- [`docs/EVENTS.md`](EVENTS.md) — before putting `kind: Event` in a `resources`
+  list: what that captures, what `eventFilter` narrows and what it does not
+  bound, and how to size the one entry whose cost is not proportional to how many
+  objects it names.
 - [`docs/SCHEMA.md`](SCHEMA.md) — what the rows these resources produce look like,
-  and — before putting `kind: Event` in a `resources` list —
-  [Event volume](SCHEMA.md#event-volume), which is the one entry whose cost is not
-  proportional to how many objects it names.
+  including [Event volume](SCHEMA.md#event-volume) at the schema level.
 - [`docs/RBAC.md`](RBAC.md) — what a rule is allowed to watch, and how to grant more.
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — the operator-level settings that
   back a sink's omitted writer fields.

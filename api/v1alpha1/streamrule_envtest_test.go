@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,7 +120,7 @@ type ruleEditor struct {
 // satisfy identically.
 func ruleValidationCases(e ruleEditor) []apiCase {
 	withResource := func(r WatchedResource) clientObject { return e.build(ruleSpec(r)) }
-	return []apiCase{
+	return append([]apiCase{
 		{
 			name: "minimal-valid-rule-is-accepted",
 			obj:  e.build(ruleSpec(deploymentResource())),
@@ -305,6 +306,224 @@ func ruleValidationCases(e ruleEditor) []apiCase {
 			name:    "redaction-empty-field-path-is-rejected",
 			obj:     e.build(redactingSpec(RedactionRule{FieldPath: ""})),
 			wantErr: "exactly one of fieldPath or annotation must be set",
+		},
+	}, eventFilterCases(e)...)
+}
+
+// eventResource is a `v1/Event` entry carrying filter, which may be nil. Every
+// eventFilter case is built from this or from its events.k8s.io twin, because
+// Event in one of those two groups is the only place the filter is valid.
+func eventResource(filter *EventFilter) WatchedResource {
+	return WatchedResource{Group: "", Version: "v1", Kind: "Event", EventFilter: filter}
+}
+
+// modernEventResource is the same entry named through `events.k8s.io/v1`. Both
+// groups are one storage behind two APIs, so the CEL rule must admit either —
+// and a test that exercised only the core spelling would pass against a rule
+// that had quietly lost half its disjunction.
+func modernEventResource(filter *EventFilter) WatchedResource {
+	return WatchedResource{Group: "events.k8s.io", Version: "v1", Kind: "Event", EventFilter: filter}
+}
+
+// unstructuredEventRule builds a rule whose single resource is a `v1/Event`
+// carrying exactly the given eventFilter, as raw JSON.
+//
+// It exists for the one property the typed client cannot express: `reasons: []`.
+// Every list on EventFilter is `omitempty`, so an explicitly-empty slice
+// marshals to nothing at all and the case it is meant to drive — a present but
+// empty list alongside a populated excludeReasons — never reaches the API
+// server. That case is what pins the mutual-exclusion rule to comparing *sizes*
+// rather than presence, which is in turn what keeps it consistent with the
+// documented semantics: a list that is present and empty constrains nothing, and
+// something that constrains nothing cannot conflict with anything.
+func unstructuredEventRule(kind, namespace string, filter map[string]any) clientObject {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(GroupVersion.WithKind(kind))
+	if namespace != "" {
+		u.SetNamespace(namespace)
+	}
+	spec := map[string]any{
+		"sink": map[string]any{"name": defaultSinkName},
+		"resources": []any{map[string]any{
+			"group": "", "version": "v1", "kind": "Event",
+			"eventFilter": filter,
+		}},
+	}
+	if err := unstructured.SetNestedMap(u.Object, spec, "spec"); err != nil {
+		panic("building unstructured event rule: " + err.Error())
+	}
+	return u
+}
+
+// reasonList builds n distinct, individually valid reasons, so a MaxItems
+// rejection is unambiguously about the bound rather than about an entry.
+func reasonList(n int) []string {
+	out := make([]string, 0, n)
+	for i := range n {
+		out = append(out, fmt.Sprintf("Reason%d", i))
+	}
+	return out
+}
+
+// eventFilterCases are the admission expectations for `eventFilter`, appended to
+// the shared rule table so both CRDs run them.
+//
+// They are a separate function only for readability; running them through
+// ruleEditor is the point, since the two CEL rules under test live on
+// WatchedResource and on EventFilter, and reach ClusterStreamRule solely by way
+// of StreamRuleSpec being inlined. A suite that checked one CRD would report
+// half a regression.
+func eventFilterCases(e ruleEditor) []apiCase {
+	withResource := func(r WatchedResource) clientObject { return e.build(ruleSpec(r)) }
+	filtered := func(f *EventFilter) clientObject { return withResource(eventResource(f)) }
+
+	return []apiCase{
+		// The accepting direction, field by field. A rule that rejected every
+		// filter would satisfy the rejections below and nothing else.
+		{
+			name: "event-rule-without-a-filter-is-accepted",
+			obj:  filtered(nil),
+		},
+		{
+			name: "empty-event-filter-is-accepted",
+			obj:  filtered(&EventFilter{}),
+		},
+		{
+			name: "event-filter-types-alone-is-accepted",
+			obj:  filtered(&EventFilter{Types: []EventType{EventTypeWarning}}),
+		},
+		{
+			// Naming both members is legal and means what naming neither means.
+			// It is also the only value MaxItems=2 admits at full length.
+			name: "event-filter-with-both-types-is-accepted",
+			obj:  filtered(&EventFilter{Types: []EventType{EventTypeNormal, EventTypeWarning}}),
+		},
+		{
+			name: "event-filter-reasons-alone-is-accepted",
+			obj:  filtered(&EventFilter{Reasons: []string{"BackOff", "FailedScheduling"}}),
+		},
+		{
+			name: "event-filter-exclude-reasons-alone-is-accepted",
+			obj:  filtered(&EventFilter{ExcludeReasons: []string{"Pulling", "Pulled", "Created"}}),
+		},
+		{
+			// Bare and qualified spellings both, because events/v1 documents
+			// `kubernetes.io/kubelet` as the shape of a reportingController while
+			// every legacy source.component in a cluster is bare.
+			name: "event-filter-source-components-alone-is-accepted",
+			obj: filtered(&EventFilter{
+				SourceComponents: []string{"default-scheduler", "kubernetes.io/kubelet"},
+			}),
+		},
+		{
+			name: "event-filter-subject-kinds-alone-is-accepted",
+			obj:  filtered(&EventFilter{SubjectKinds: []string{"Pod", "ReplicaSet"}}),
+		},
+		{
+			name: "event-filter-subject-names-alone-is-accepted",
+			obj:  filtered(&EventFilter{SubjectNames: []string{"postgres-0", "postgres-1"}}),
+		},
+		{
+			// The one character EventSubjectNamePattern adds to a DNS-1123
+			// subdomain. An Event about a ClusterRole is rare, not impossible,
+			// and its subject's name is the only common one shaped like this.
+			name: "event-filter-subject-name-with-rbac-colons-is-accepted",
+			obj: filtered(&EventFilter{
+				SubjectNames: []string{"system:controller:deployment-controller"},
+			}),
+		},
+		{
+			// Every field that can coexist, at once: the AND-across-fields shape
+			// the type comment describes.
+			name: "event-filter-combining-every-compatible-field-is-accepted",
+			obj: filtered(&EventFilter{
+				Types:            []EventType{EventTypeWarning},
+				ExcludeReasons:   []string{"Pulling", "Pulled"},
+				SourceComponents: []string{"default-scheduler"},
+				SubjectKinds:     []string{"Pod", "ReplicaSet"},
+				SubjectNames:     []string{"postgres-0"},
+			}),
+		},
+		{
+			name: "event-filter-on-the-events-group-is-accepted",
+			obj:  withResource(modernEventResource(&EventFilter{Types: []EventType{EventTypeWarning}})),
+		},
+		{
+			// The size-based half of the mutual-exclusion rule: a present but
+			// empty reasons list constrains nothing, so it conflicts with
+			// nothing. Rewriting that rule as `has(x) && has(y)` fails here.
+			name: "event-filter-empty-reasons-beside-exclude-reasons-is-accepted",
+			obj: unstructuredEventRule(e.kind, e.namespace, map[string]any{
+				"reasons":        []any{},
+				"excludeReasons": []any{"Pulled"},
+			}),
+		},
+
+		// The rejections. The first two are the whole reason the rule lives on
+		// WatchedResource rather than on the filter: a filter on a kind that
+		// carries none of its axes would match nothing, and the entry would
+		// record an empty stream while the rule reported Ready.
+		{
+			name:    "event-filter-on-a-non-event-kind-is-rejected",
+			obj:     withResource(WatchedResource{Group: "apps", Version: "v1", Kind: "Deployment", EventFilter: &EventFilter{Types: []EventType{EventTypeWarning}}}),
+			wantErr: "eventFilter is only valid on a Kubernetes Event",
+		},
+		{
+			// The group half of the same rule. A CRD-backed kind that happens to
+			// be called Event is not a Kubernetes Event and carries none of the
+			// fields a filter reads.
+			name:    "event-filter-on-an-event-kind-in-another-group-is-rejected",
+			obj:     withResource(WatchedResource{Group: "kuberecord.io", Version: "v1alpha1", Kind: "Event", EventFilter: &EventFilter{Types: []EventType{EventTypeWarning}}}),
+			wantErr: "eventFilter is only valid on a Kubernetes Event",
+		},
+		{
+			name: "event-filter-reasons-with-exclude-reasons-is-rejected",
+			obj: filtered(&EventFilter{
+				Reasons:        []string{"BackOff"},
+				ExcludeReasons: []string{"Pulled"},
+			}),
+			wantErr: "reasons and excludeReasons are mutually exclusive",
+		},
+		{
+			name:    "event-filter-invalid-type-is-rejected",
+			obj:     filtered(&EventFilter{Types: []EventType{"warning"}}),
+			wantErr: "Unsupported value",
+		},
+		{
+			// The same mistake KindPattern exists to catch, one level deeper:
+			// involvedObject.kind is a Kind, never a plural resource name.
+			name:    "event-filter-lowercase-subject-kind-is-rejected",
+			obj:     filtered(&EventFilter{SubjectKinds: []string{"pod"}}),
+			wantErr: "should match",
+		},
+		{
+			// A reason no emitter can ever produce. Admitted, it would narrow the
+			// rule to silence with nothing to say why.
+			name:    "event-filter-reason-with-a-space-is-rejected",
+			obj:     filtered(&EventFilter{Reasons: []string{"Failed Scheduling"}}),
+			wantErr: "should match",
+		},
+		{
+			name:    "event-filter-source-component-with-a-space-is-rejected",
+			obj:     filtered(&EventFilter{SourceComponents: []string{"default scheduler"}}),
+			wantErr: "should match",
+		},
+		{
+			name:    "event-filter-uppercase-subject-name-is-rejected",
+			obj:     filtered(&EventFilter{SubjectNames: []string{"Postgres-0"}}),
+			wantErr: "should match",
+		},
+		{
+			// listType=set, which is what makes a duplicate an apiserver
+			// rejection rather than a CEL uniqueness rule nobody wrote.
+			name:    "event-filter-duplicate-reason-is-rejected",
+			obj:     filtered(&EventFilter{Reasons: []string{"BackOff", "BackOff"}}),
+			wantErr: "Duplicate value",
+		},
+		{
+			name:    "event-filter-too-many-reasons-is-rejected",
+			obj:     filtered(&EventFilter{Reasons: reasonList(65)}),
+			wantErr: "must have at most 64 items",
 		},
 	}
 }

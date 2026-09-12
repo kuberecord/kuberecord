@@ -182,6 +182,16 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				"pattern: " + RedactionFieldPathPattern,
 				"pattern: " + RedactionAnnotationPattern,
 				"rule: has(self.fieldPath) != has(self.annotation)",
+				// The Event filter's shapes. The type enum is matched with its
+				// list items for the same reason the sink-kind enum is: `Normal`
+				// and `Warning` are a closed set, and a third member would be an
+				// upstream API fact, not a refactor. The two CEL rules are
+				// line-folded by controller-gen, so they are asserted whole by
+				// TestEventFilterRulesAreGenerated rather than here.
+				"enum:\n                            - Normal\n                            - Warning\n",
+				"pattern: " + EventReasonPattern,
+				"pattern: " + EventSourceComponentPattern,
+				"pattern: " + EventSubjectNamePattern,
 			},
 			mustNotExist: []string{
 				// The retired v0.1.0 field. It is not merely absent from the Go
@@ -222,6 +232,13 @@ func TestGeneratedCRDsContainValidationRules(t *testing.T) {
 				// Inlining must carry the redaction rules across too.
 				"pattern: " + RedactionFieldPathPattern,
 				"rule: has(self.fieldPath) != has(self.annotation)",
+				// And the Event filter, whose two CEL rules hang off
+				// WatchedResource and EventFilter — types reached only by way of
+				// this spec being inlined, which is exactly what could drop them.
+				"enum:\n                            - Normal\n                            - Warning\n",
+				"pattern: " + EventReasonPattern,
+				"pattern: " + EventSourceComponentPattern,
+				"pattern: " + EventSubjectNamePattern,
 				"namespaceSelector:",
 			},
 			mustNotExist: []string{"sinkRef:"},
@@ -272,6 +289,11 @@ func TestCRDPatternConstantsMatchMarkers(t *testing.T) {
 		{name: "redactionFieldPathOnSink", file: "kuberecord.io_clickhousesinks.yaml",
 			pattern: RedactionFieldPathPattern},
 		{name: "s3Prefix", file: "kuberecord.io_s3sinks.yaml", pattern: S3PrefixPattern},
+		{name: "eventReason", file: "kuberecord.io_streamrules.yaml", pattern: EventReasonPattern},
+		{name: "eventSourceComponent", file: "kuberecord.io_streamrules.yaml",
+			pattern: EventSourceComponentPattern},
+		{name: "eventSubjectName", file: "kuberecord.io_streamrules.yaml",
+			pattern: EventSubjectNamePattern},
 		{name: "redactionFieldPathOnS3Sink", file: "kuberecord.io_s3sinks.yaml",
 			pattern: RedactionFieldPathPattern},
 	}
@@ -616,4 +638,134 @@ func TestSharedWriterKnobsAgreeAcrossSinks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEventFilterRulesAreGenerated asserts that the two CEL rules governing
+// `eventFilter` reached both rule CRDs on disk, in full.
+//
+// It reads the parsed document rather than matching substrings for the reason
+// TestS3SinkWorkerMemoryRuleIsGenerated does: controller-gen line-folds an
+// expression this long, so a literal match could only ever cover the first fold.
+// Parsing gives each expression back whole, which lets the load-bearing pieces be
+// named individually — and each of them is a thing that could be dropped in an
+// edit that still looked like a working rule.
+//
+// Both files are read, never one as a representative. Neither rule is declared on
+// a rule CRD's own type: one lives on WatchedResource and one on EventFilter, and
+// they reach ClusterStreamRule solely because StreamRuleSpec is inlined into it.
+// That indirection is precisely what could silently stop working.
+func TestEventFilterRulesAreGenerated(t *testing.T) {
+	for _, file := range ruleCRDFiles {
+		t.Run(strings.TrimSuffix(file, ".yaml"), func(t *testing.T) {
+			resourceItems := schemaNode(t, file, crdSpecSchema(t, file),
+				"properties", "resources", "items")
+
+			// The kind guard, on the resources *item*. A filter on a kind that
+			// carries none of its axes matches nothing, so the entry records an
+			// empty stream while the rule reports Ready — which is why this is
+			// admission's job rather than a field comment's.
+			rule, message := celRule(t, file, resourceItems, "spec.resources items", "eventFilter")
+			for _, want := range []string{
+				// Guard first: CEL errors on an absent-key access, so a rule
+				// whose has() checks were removed as redundant would reject every
+				// entry that omits the optional field.
+				"!has(self.eventFilter)",
+				"self.kind == 'Event'",
+				// Both accepted groups. v1/Event and events.k8s.io/v1/Event are
+				// one storage behind two APIs; admitting only one spelling would
+				// reject a rule the data plane serves identically.
+				"size(self.group) == 0",
+				"self.group == 'events.k8s.io'",
+			} {
+				if !strings.Contains(rule, want) {
+					t.Errorf("the generated eventFilter kind guard does not contain %q.\nrule: %s", want, rule)
+				}
+			}
+			if !strings.Contains(message, "eventFilter is only valid on a Kubernetes Event") {
+				t.Errorf("the eventFilter kind-guard rejection message does not say what is wrong.\n"+
+					"message: %s", message)
+			}
+
+			filter := schemaNode(t, file, resourceItems, "properties", "eventFilter")
+
+			// The mutual-exclusion rule, and specifically its *size* comparisons.
+			// Rewritten as `has(self.reasons) && has(self.excludeReasons)` it
+			// would still read as a working rule and would still pass the
+			// rejection half of the envtest table — while rejecting a present but
+			// empty reasons list, which this type documents as no constraint at
+			// all. Naming the sizes here is what makes that edit fail.
+			rule, message = celRule(t, file, filter, "spec.resources items eventFilter", "excludeReasons")
+			for _, want := range []string{
+				"size(self.reasons) > 0",
+				"size(self.excludeReasons) > 0",
+			} {
+				if !strings.Contains(rule, want) {
+					t.Errorf("the generated reasons/excludeReasons rule does not contain %q.\n"+
+						"A presence-only rule rejects an empty list, which this type documents as "+
+						"no constraint.\nrule: %s", want, rule)
+				}
+			}
+			if !strings.Contains(message, "mutually exclusive") {
+				t.Errorf("the reasons/excludeReasons rejection message does not name the conflict.\n"+
+					"message: %s", message)
+			}
+
+			// The closed set itself, in order. It is asserted as a whole list
+			// rather than by membership because both directions are the promise:
+			// a value dropped makes a legal filter unspellable, and a value added
+			// is an upstream API fact that has to be a deliberate release
+			// decision here too.
+			types := schemaNode(t, file, filter, "properties", "types", "items")
+			if got := types["enum"]; !slices.Equal(toStrings(t, file, got), []string{"Normal", "Warning"}) {
+				t.Errorf("generated CRD %s declares eventFilter.types as %v, want [Normal Warning]", file, got)
+			}
+		})
+	}
+}
+
+// celRule returns the one x-kubernetes-validations entry on node whose rule text
+// mentions marker, with the rule and its message.
+//
+// It selects by content rather than by index so that adding a second rule to
+// either schema cannot silently re-point an assertion at the wrong expression.
+func celRule(t *testing.T, file string, node map[string]any, where, marker string) (rule, message string) {
+	t.Helper()
+
+	validations, ok := node["x-kubernetes-validations"].([]any)
+	if !ok {
+		t.Fatalf("generated CRD %s carries no x-kubernetes-validations on %s "+
+			"(did you run `make manifests`?)", file, where)
+	}
+	for _, entry := range validations {
+		validation, isMap := entry.(map[string]any)
+		if !isMap {
+			t.Fatalf("generated CRD %s has a non-object validation on %s: %v", file, where, entry)
+		}
+		if text, _ := validation["rule"].(string); strings.Contains(text, marker) {
+			msg, _ := validation["message"].(string)
+			return text, msg
+		}
+	}
+	t.Fatalf("generated CRD %s has no rule mentioning %q on %s.\nvalidations: %v",
+		file, marker, where, validations)
+	return "", ""
+}
+
+// toStrings converts a decoded YAML list to []string, failing on anything else.
+func toStrings(t *testing.T, file string, node any) []string {
+	t.Helper()
+
+	list, ok := node.([]any)
+	if !ok {
+		t.Fatalf("generated CRD %s: expected a list, got %v", file, node)
+	}
+	out := make([]string, 0, len(list))
+	for _, entry := range list {
+		text, isString := entry.(string)
+		if !isString {
+			t.Fatalf("generated CRD %s: expected a list of strings, got %v", file, node)
+		}
+		out = append(out, text)
+	}
+	return out
 }

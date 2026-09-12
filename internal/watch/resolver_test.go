@@ -120,11 +120,13 @@ func newRESTMapper(t *testing.T) meta.RESTMapper {
 // exist until the self-healing test installs it.
 var (
 	podGVK        = schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
+	eventGVK      = schema.GroupVersionKind{Version: "v1", Kind: "Event"}
 	deploymentGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
 	namespaceGVK  = schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}
 	widgetGVK     = schema.GroupVersionKind{Group: "test.kuberecord.io", Version: "v1", Kind: "Widget"}
 
 	podGVR        = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	eventGVR      = schema.GroupVersionResource{Version: "v1", Resource: "events"}
 	deploymentGVR = deploymentGVK.GroupVersion().WithResource("deployments")
 	namespaceGVR  = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 	widgetGVR     = widgetGVK.GroupVersion().WithResource("widgets")

@@ -150,6 +150,15 @@ var noopAudit = []auditedFlag{
 		"finding absorbs the flag rather than printing a second paragraph beneath itself, and " +
 		"eventsClause gives the same three states inside it — measured through the same " +
 		"eventScopeQuery, never assumed (Tasks 18.5 and 18.7)"},
+	{"events-only", explained, "it cannot produce a page identical to its absence — the header " +
+		"reports the coverage of Events rather than of the object, and the state rows are gone — but " +
+		"the answer it narrows to can be empty, and that is the case it has to account for. It " +
+		"routes through the same explainNoEvents as --with-events, naming itself rather than the " +
+		"flag the function was written for, and gives the three states: Events recorded and none " +
+		"about this object, no rule streaming Events at all with the YAML that fixes it, and a " +
+		"backend that cannot say. The flags it leaves with nothing to act on are named too, once " +
+		"and with their values, by inertPredicateNotice: --actor and --field narrow the object's " +
+		"own changes, which this excludes, and a predicate that filtered nothing must say so (D31)"},
 	{"depth", deliberatelySilent, "it collapses paths onto their prefixes and merges the rows " +
 		"that coincide, so it can make a table shorter and can never make it empty. " +
 		"See blameFilterNotice for why it is not part of that predicate"},

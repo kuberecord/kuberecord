@@ -664,10 +664,20 @@ func (m *WatchManager) newlyServing(desired map[interestID]*scopeInterest) []*sc
 // Degraded condition is the operator-facing report — Task 1.7 raises it from the
 // same resolver verdict — so this path logs rather than duplicating that
 // judgement.
+//
+// It runs in two passes because push-down cannot be decided one target at a
+// time: a field selector belongs to the *informer*, one informer serves every
+// interest on a (GVR, namespace), and which selector it may run with therefore
+// depends on all of them. The first pass builds the interests and derives each
+// one's candidate selector; the second settles the informer's, stamps it onto
+// every interest the informer serves, and only then publishes them.
 func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 	log logr.Logger) (map[interestID]*scopeInterest, map[informerKey]schema.GroupVersionKind) {
 	desired := make(map[interestID]*scopeInterest, len(snapshot))
 	wanted := make(map[informerKey]schema.GroupVersionKind, len(snapshot))
+
+	byScope := make(map[informerScope][]*scopeInterest, len(snapshot))
+	kinds := make(map[informerScope]schema.GroupVersionKind, len(snapshot))
 
 	for key, state := range snapshot {
 		gvr, namespaced, err := m.resolver.Resolve(key.GVK)
@@ -686,23 +696,69 @@ func (m *WatchManager) translate(snapshot map[plan.TargetKey]plan.TargetState,
 			continue
 		}
 
-		informer := informerKey{GVR: gvr, Namespace: key.Namespace}
-		in, err := newScopeInterest(key, informer, state.Selectors, state.Redactions, state.RuleKeys)
+		scope := informerScope{GVR: gvr, Namespace: key.Namespace}
+		in, err := newScopeInterest(state, scope)
 		if err != nil {
-			log.Error(err, "Skipping a watch target whose selectors or redaction policy could not be parsed",
+			log.Error(err, "Skipping a watch target whose selectors, redaction policy or event filter could not be parsed",
 				"sink", key.Sink.String(), "gvk", key.GVK.String(), "namespace", key.Namespace,
 				"rules", state.RuleKeys)
 			continue
 		}
 
-		desired[in.id()] = in
-		wanted[informer] = key.GVK
+		byScope[scope] = append(byScope[scope], in)
+		kinds[scope] = key.GVK
+	}
+
+	for scope, interests := range byScope {
+		selector := agreedFieldSelector(interests)
+		informer := informerKey{informerScope: scope, FieldSelector: selector}
+		for _, in := range interests {
+			// Stamped before the interest is published to the table, so the
+			// "immutable once installed" property scopeInterest documents still
+			// holds: nothing outside this loop has seen it yet.
+			in.informer = informer
+			desired[in.id()] = in
+		}
+		wanted[informer] = kinds[scope]
 	}
 	return desired, wanted
 }
 
 // errClusterScopedTarget backs the log line above; nothing branches on it.
 var errClusterScopedTarget = errors.New("a namespaced watch target cannot be served by a cluster-scoped resource")
+
+// agreedFieldSelector returns the field selector to run one informer with: the
+// one every interest on it derived, or the empty string when they diverge.
+//
+// This is the least-restrictive-watch rule, and it is the price of sharing. One
+// informer per (GVR, namespace) is what keeps two rules on one resource from
+// costing two Lists, so a selector may only be pushed when nobody on that
+// informer would be under-served by it. An interest deriving nothing — an
+// unfiltered rule, a multi-valued include, `sourceComponents` — is a divergence
+// like any other: it needs the whole stream, so everyone watches the whole
+// stream and filters handler-side.
+//
+// The consequence is worth stating plainly because it surprises people: whether
+// a rule's filter reaches the API server depends on what *other* rules exist. It
+// is acceptable only because it can never change what is recorded — the handler
+// re-evaluates every filter in full either way (D49) — so it is a performance
+// property, and docs/EVENTS.md documents it as one.
+//
+// Comparing rendered strings rather than filters is what makes "the same filter"
+// cheap to decide: deriveEventFieldSelector renders canonical input in a fixed
+// order, so two rules that asked for the same thing produce identical bytes.
+func agreedFieldSelector(interests []*scopeInterest) string {
+	selector := interests[0].fieldSelector
+	if selector == "" {
+		return ""
+	}
+	for _, in := range interests[1:] {
+		if in.fieldSelector != selector {
+			return ""
+		}
+	}
+	return selector
+}
 
 // logResolveFailure reports a target whose kind could not be resolved, at the
 // severity the verdict deserves.

@@ -90,14 +90,24 @@ func (e *referenceEngine) Close() error { return nil }
 // case both live backends answered with an unmeasured emptiness until Task 18.6.
 // The reference implementation models the contract rather than either
 // implementation of it (D42), which for this property means issuing the second
-// selection whether or not the first found anything.
+// selection whether or not the first found anything — and, under EventsOnly, not
+// performing the first at all.
 func (e *referenceEngine) Timeline(_ context.Context, q query.TimelineQuery) (query.ChangeIterator, error) {
 	if e.caps.TimeBoundRequired && q.From.IsZero() && q.To.IsZero() {
 		return nil, fmt.Errorf("timeline for %s/%s: %w", q.Ref.Kind, q.Ref.Name, query.ErrTimeBoundRequired)
 	}
 
-	rows := e.window(e.forRef(q.Ref), q.From, q.To)
-	rows = selectIncarnation(rows, q.UID, q.AllIncarnations)
+	// The object's own rows, unless the caller declined them. EventsOnly is a skip
+	// rather than a filter, so the selection does not happen at all — which is also
+	// why no incarnation is resolved below: incarnationOf reads the rows, and there
+	// are none. The contract is modelled here rather than either engine's way of
+	// obeying it (D42), and a reference that selected these rows and then discarded
+	// them would agree with a backend that filtered, which is the implementation the
+	// contract forbids.
+	var rows []Row
+	if !q.EventsOnly {
+		rows = selectIncarnation(e.window(e.forRef(q.Ref), q.From, q.To), q.UID, q.AllIncarnations)
+	}
 
 	changes := make([]query.Change, 0, len(rows))
 	for _, r := range rows {

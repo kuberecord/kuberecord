@@ -16,6 +16,229 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Added
+
+- **`spec.resources[].eventFilter` narrows Event capture by the fields an Event
+  carries.** Naming `v1/Event` in a rule has until now been one switch: every Event
+  in the scope is recorded, so an operator who wants scheduling failures also takes
+  every `Pulled` and `Started` in the namespace. A `labelSelector` cannot help —
+  it matches the *Event's* own labels, and Events carry essentially none, so it
+  narrows the scope to nothing rather than to something.
+
+  Six axes, each a column of the Event itself: `types` (`Normal`, `Warning`),
+  `reasons` and `excludeReasons` (mutually exclusive), `sourceComponents`,
+  `subjectKinds` and `subjectNames`. Within a list, OR; across fields, AND; an
+  absent or empty list is no constraint, and a rule with no `eventFilter` records
+  exactly what it recorded before.
+
+  ```yaml
+  - group: ""
+    version: v1
+    kind: Event
+    eventFilter:
+      excludeReasons: [Pulling, Pulled, Created, Started, Scheduled]
+      subjectKinds: [Pod, ReplicaSet]
+  ```
+
+  **This narrows relevance, not volume.** A recurring Event is updated in place to
+  bump its `count`, so its content genuinely changes, hash dedup cannot suppress
+  it, and every recurrence writes another full row — under every filter here. The
+  distributions make that worse than it sounds: `Normal` events are numerous and
+  fire roughly once, while `Warning` events are fewer and recur for as long as the
+  fault persists, so `types: [Warning]` drops most rows in a healthy cluster and
+  almost none in an unhealthy one.
+
+  An `eventFilter` on anything but an Event is **rejected at admission**, because
+  a Deployment carries none of these fields: the filter would match nothing and
+  the entry would record an empty stream while the rule reported `Ready=True`.
+  `subjectNames` is exact-match only and says so where it is typed — it fits
+  stable names (`postgres-0`) and is useless for the Pods of a Deployment, whose
+  names are generated and change on every rollout.
+
+  No schema change: `deploy/clickhouse/schema/` is untouched, and Event coverage
+  stays reconstructible from `rule_ref`.
+
+- **The operator now applies `eventFilter`, handler-side.** The field landed as a
+  CRD contract; this is the evaluator behind it. A rule's filter is canonicalized
+  once by the reconciler, merged into the desired-state registry beside its
+  selectors and its redaction policy, and compiled into a matcher **once** when
+  the watch interest is built — never per Event, which would put JSON parsing in
+  the notification path of the highest-volume kind in the cluster.
+
+  It is evaluated in the informer's event handler, exactly where `labelSelector`
+  already is and for the same reason: one informer per `(GVR, namespace)` is
+  shared by every rule that wants that stream, so a filter belongs to an interest
+  rather than to the watch. Interests are evaluated **independently** — an Event
+  matching rule A's filter and not rule B's is enqueued for A's sink alone — while
+  two rules sharing one sink and scope are one stream, so their filters merge as a
+  union, and one rule that filtered nothing widens it to everything.
+
+  The matcher reads only fields the Event itself carries and looks nothing up: no
+  informer read, no API call, no cache access, and zero allocations per event
+  (`BenchmarkFanOutEventFilter`). `sourceComponents` matches **any** spelling of
+  the emitting component — `source.component` and `reportingComponent` in core
+  `v1`, `reportingController` and `deprecatedSource.component` in
+  `events.k8s.io/v1` — because the two APIs are one storage and which field is
+  populated depends on which recorder wrote the Event. Subject axes read both
+  `involvedObject` and `regarding`, matching what the query side already
+  coalesces. An Event missing a field a filter names does not match it: absent is
+  not empty.
+
+  Still no schema change. Handler-side evaluation is the fallback that has to
+  exist for every case push-down cannot reach, and it stays authoritative: both
+  halves are required to record byte-identical rows.
+
+- **Event filters are pushed to the API server where the configuration permits.**
+  Filtering in the operator alone is the worst outcome at scale — the informer
+  still lists and watches every Event in the namespace, caches it, strips its
+  `managedFields`, and only then discards it. Core `v1/Event` is one of the few
+  resources with rich field-selector support, so where a filter can be expressed
+  as one it now travels with the List and the Watch.
+
+  Field selectors AND their terms and have no OR, which decides every case: a
+  **single-valued include** pushes down (`types: [Warning]` → `type=Warning`), an
+  **exclusion pushes down at any length** (`reason!=Pulled,reason!=Created,reason!=Started`),
+  and a **multi-valued include** stays in the operator. The happy accident is
+  that "drop the startup chatter, keep the rest" — the filter most people
+  actually want — is the one that pushes down completely.
+
+  **Both Event APIs are covered, and they are not symmetric.** `events.k8s.io/v1`
+  renamed the subject, so `regarding.kind` is sent there and
+  `involvedObject.kind` to core `v1`; `type` and `reason` are shared unchanged.
+  `sourceComponents` is never pushed on either: a rule matches all four spellings
+  of "who emitted this", while the API server's `source` is a fallback chain, and
+  for an Event carrying both spellings the two disagree. This was measured
+  against the pinned Kubernetes rather than assumed, and a test re-measures it so
+  a future version cannot change it silently.
+
+  **Whether a rule's filter reaches the API server depends on what other rules
+  exist.** One informer serves every rule watching the same resource in the same
+  namespace, so a selector is pushed only when all of them derive the same one;
+  otherwise the stream is watched whole and every rule is filtered in the
+  operator. **This affects performance only and never what is recorded** — the
+  operator re-evaluates every filter in full either way, which is asserted
+  directly by running one Event corpus through both paths and comparing the rows
+  byte for byte. Push-down is also invisible to the scope log: gaining or losing
+  one opens and closes no epoch and evicts no dedup state.
+
+  Still no schema change, and **still not a fix for volume**: a recurring Event
+  is updated in place to bump its `count`, so it writes another full row under
+  every filter here. New [`docs/EVENTS.md`](docs/EVENTS.md) says so plainly,
+  alongside which filters push down and which do not.
+
+- **`kuberecord timeline --events-only` shows what Kubernetes said and nothing
+  else.** A Deployment's timeline is mostly status churn — `observedGeneration`,
+  condition timestamps, replica counts — with a few Events carrying the
+  decisions. The flag implies `--with-events`; the two compose, and requiring
+  both would be pedantic.
+
+  ```
+  $ kuberecord timeline deploy/checkout -n payments --events-only
+
+  Kind:              apps/Deployment
+  Object:            payments/checkout
+  Cluster:           prod-eu-1
+  Coverage (Events): 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-events)
+
+  TIME (UTC)                EVENT  ACTOR                    CHANGE
+  2026-08-28 14:03:20.310Z  Event  kube-controller-manager  ScalingReplicaSet: Scaled up replica set checkout-7d4f to 5
+  2026-08-28 14:06:44.020Z  Event  replicaset-controller    ⚠ FailedCreate: pods "checkout-7d4f-" is forbidden: exceeded quota
+  ```
+
+  **The header reports the coverage of Events, and says so.** The rows come from
+  the Event scope rather than from the object's, and a coverage summary is a
+  well-formed interval with a rule reference on it either way — so the label
+  carries the distinction the value cannot. The same substitution reaches
+  `metadata.coverage` in `-o json`.
+
+  **The object's own scope is not consulted at all.** An object nobody was ever
+  watching is normally the exit `3` no-coverage finding, and under this flag that
+  would fail the command over the absence of something the reader had just
+  excluded, with a page of correlated Events sitting above the error. An empty
+  answer is still explained — the same three states as `--with-events`, naming
+  this flag — and stays at exit `0`.
+
+  The state half of the query is **skipped, not filtered**: a new
+  `TimelineQuery.EventsOnly` reaches both backends, so the table one issues a
+  single statement and neither the incarnation probe nor the state select runs,
+  and the archive one never decodes a state line into a row it would discard. On
+  a backend with no index that scan is the expensive half of the question.
+
+  Four flags have nothing to act on under it and are reported as ignored rather
+  than dropped quietly: `--actor` and `--exclude-actor` (an Event's actors are
+  the field managers of the *Event*), `--field` and `--full` (an Event carries no
+  patch), and `--all-incarnations` (there are no state rows to span). `--uid`
+  still pins the Events to one incarnation of the subject. Where a timeline holds
+  both kinds of row, the footer names the flag once — beside the `--full` hint,
+  and only there, because a hint under a page with no Events on it teaches
+  readers to skip footers.
+
+  There is **no `kuberecord events` command and no alias**. It would ask what
+  `timeline` asks and hide rows of the answer, and the name is kept for the
+  namespace-wide Event search that would be a differently-shaped question.
+
+- **Kubernetes Events are documented on one page: [`docs/EVENTS.md`](docs/EVENTS.md).**
+  The behaviour was spread across a rule's YAML comment, `docs/CLI.md`,
+  `docs/SCHEMA.md` and three decision records, so a rule author deciding whether to
+  add `kind: Event` had four places to read and no way to know they had found them
+  all. The page runs in the order the decision is made: what a rule records and why
+  capture is scope-wide, the filter axes and their semantics, which filters reach
+  the API server and why that is a performance difference and never a content one,
+  **the volume amplifier**, how to size a rule against it, and what `--with-events`
+  and `--events-only` do at the other end.
+
+  **The amplifier is named rather than implied.** A `count` bump writes a whole
+  row, a crash-looping pod writes one per re-emission of `BackOff`, and **no filter
+  on that page bounds it** — `types: [Warning]` drops most rows in a healthy
+  cluster and almost none in an unhealthy one, which is when the operator is
+  writing most. Shipping a relevance control without saying that plainly would let
+  it read as the volume fix it is not.
+
+  The `spec.resources` CRD description and `examples/quickstart/rule.yaml` now
+  defer to the page instead of growing further, and the `subjectNames` section
+  **repeats** the generated-name warning rather than linking to it: somebody sizing
+  a filter will not follow a link to find out the field cannot do what they want.
+
+- **`docs/SCHEMA.md` no longer calls a shipped feature a candidate.** Its rejection
+  of `collectEvents` closed by naming two directions as "v0.5.0 candidates and
+  neither is a commitment", and one of them — filtering on fields the Event itself
+  carries — is `spec.resources[].eventFilter` in this release. The rejection and
+  its reasoning are unchanged; what changed is that the page now says which of the
+  two shipped, and that count-bump coalescing did not. Its closing line, that
+  sizing is still done with the scope, is now the point rather than a placeholder.
+
+### Fixed
+
+- **The MinIO fixture is pulled from `quay.io`; Docker Hub no longer serves it.**
+  MinIO withdrew the `minio/minio` repository from Docker Hub, and every pin here
+  named it in the short form that resolves there. Three workflows failed at once
+  on the same line — the e2e S3 scenario, the integration suites and the
+  zero-infrastructure quickstart — each reporting `pull access denied for
+  minio/minio, repository does not exist or may require 'docker login'`. That
+  message names authentication, which was never the problem: the repository
+  itself is gone, and `latest` fails identically to the pinned tag.
+
+  The image is unchanged. `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` is
+  MinIO's other official registry serving the same release — `sha256:a1ea29fa…`,
+  `linux/amd64` and `linux/arm64`, and the same `mc` and `base64` that
+  `test/harness` execs inside the pod to read an archive back. Only the address
+  changed, in the six files that carry it: the integration target's container,
+  the e2e fixture and the constant that side-loads it, the zero-infrastructure
+  quickstart's script and manifest, and the tee example's cold tier.
+
+  **A test now holds the six together**, because six spellings of one string with
+  nothing connecting them is what turned a vendor's registry decision into three
+  red workflows. It checks that they are one value, and that each names its
+  registry — by Docker's own resolution rule, that the first path component
+  contains a dot or a colon, so any unqualified pin is caught rather than this
+  one specifically. It checks separately that each side-load agrees with the
+  manifest consuming it, which is the quiet half: both quickstarts load the image
+  into the kind node and apply it `IfNotPresent`, so a drift there does not fail
+  at apply time — it makes the kubelet pull, and a bump becomes an intermittent
+  timeout on whichever runner has the slowest registry access. The e2e tee
+  scenario already avoided this by reading the pin out of the example instead of
+  repeating it; these two pairs repeat it.
+
 ## [0.4.0] - 2026-09-11
 
 The release that makes the CLI teach rather than only answer. v0.3.0 shipped five

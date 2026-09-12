@@ -191,6 +191,60 @@ const (
 	// later without invalidating a single object already written, which is not true
 	// of narrowing it.
 	S3PrefixPattern = `^([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)?$`
+
+	// EventReasonPattern matches one entry of an EventFilter's `reasons` or
+	// `excludeReasons`: an Event's `reason`, as every emitter in practice spells
+	// it — `BackOff`, `FailedScheduling`, `SuccessfulCreate`.
+	//
+	// It is deliberately stricter than Kubernetes is. The API server constrains
+	// `reason` by length alone (128 characters; see events/v1.Event.Reason in
+	// k8s.io/api), so any byte sequence is a legal reason and a pattern that
+	// admitted all of them would admit `Failed Scheduling` typed with a space —
+	// which matches no Event ever written, on a rule that stays Ready. A filter
+	// narrowed to silence rather than to relevance is the one authoring mistake
+	// this field can make with no feedback at all, and rejecting whitespace at
+	// admission is where it is cheapest to learn.
+	//
+	// Excluding `,` and `=` is the second reason: an entry is rendered into a
+	// field-selector term when the filter pushes down, and those two are that
+	// grammar's separators.
+	EventReasonPattern = `^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`
+
+	// EventSourceComponentPattern matches one entry of an EventFilter's
+	// `sourceComponents`: the component that emitted an Event, spelled either
+	// bare (`kubelet`, `default-scheduler`) or qualified (`kubernetes.io/kubelet`,
+	// which is the example events/v1 itself gives for `reportingController`).
+	//
+	// It is a Kubernetes qualified name because that is what the API server
+	// validates `reportingController` as. The legacy `source.component` carries no
+	// validation, but both spellings are written by the same controllers, so
+	// holding the field to the stricter of the two shapes rejects nothing a real
+	// cluster emits.
+	//
+	// It is byte-identical to RedactionAnnotationPattern and is deliberately a
+	// separate constant. An annotation key and an Event's reporting component are
+	// unrelated things that happen to share Kubernetes' qualified-name grammar,
+	// and that pattern's exclusion of quotes and backslashes is load-bearing for a
+	// reason — path rendering in the data plane — which has nothing to do with
+	// this field. Folding one into the other would make a future edit to either
+	// silently an edit to both.
+	EventSourceComponentPattern = `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+
+	// EventSubjectNamePattern matches one entry of an EventFilter's
+	// `subjectNames`: the `metadata.name` of the object an Event is about.
+	//
+	// It is a DNS-1123 subdomain widened by exactly one character, `:`, which no
+	// workload's name may contain but which is the ordinary shape of an RBAC
+	// object's — `system:controller:deployment-controller` — and an Event about a
+	// ClusterRole is rare rather than impossible.
+	//
+	// ObjectReference.Name has no validation of its own in Kubernetes, so this
+	// bound is kuberecord's rather than the API server's. It exists to reject the
+	// uppercase and whitespace typos that would otherwise yield a filter matching
+	// nothing, which is this field's characteristic failure (see the field
+	// comment). Widening it later invalidates no rule already authored; narrowing
+	// it would.
+	EventSubjectNamePattern = `^[a-z0-9]([-a-z0-9.:]*[a-z0-9])?$`
 )
 
 // RedactionRule names one value to scrub out of every streamed object before it
@@ -239,6 +293,186 @@ type RedactionRule struct {
 	Annotation string `json:"annotation,omitempty"`
 }
 
+// EventType is the `type` axis of a Kubernetes Event: the two-valued severity
+// every emitter sets.
+//
+// It is a named type carrying its own enum rather than a `[]string` field with
+// an items-level marker, so the closed set lives with the thing it closes and
+// the evaluator that compiles a filter compares against named constants rather
+// than bare literals. The values mirror corev1.EventTypeNormal and
+// corev1.EventTypeWarning exactly; they are restated here because a CRD field's
+// enum must be a marker on a type in this package, not a reference to one in
+// another module.
+//
+// There is no `excludeTypes` counterpart. With two members, excluding one is
+// spelling the other, and a second field that can only ever be a synonym for the
+// first is one more thing to keep consistent for no expressive gain.
+//
+// +kubebuilder:validation:Enum=Normal;Warning
+type EventType string
+
+const (
+	// EventTypeNormal is an Event reporting that something happened as intended
+	// — `Scheduled`, `Pulled`, `Created`, `Started`. These are numerous, and
+	// each fires roughly once.
+	EventTypeNormal EventType = "Normal"
+
+	// EventTypeWarning is an Event reporting that something did not —
+	// `BackOff`, `FailedScheduling`, `Unhealthy`. These are fewer, and they
+	// recur: the API server bumps an Event's `count` in place for as long as the
+	// fault persists, and every bump is another full row.
+	//
+	// The two distributions run opposite to intuition, which is worth knowing
+	// before sizing anything on them. `types: [Warning]` drops most rows in a
+	// healthy cluster and almost none in an unhealthy one — so it narrows a
+	// stream to what an operator wants to read, and does not bound what the
+	// stream costs when the cluster is on fire. Relevance and volume are
+	// different axes; see EventFilter.
+	EventTypeWarning EventType = "Warning"
+)
+
+// EventFilter narrows which Kubernetes Events a rule records, using fields the
+// Event itself carries.
+//
+// **Semantics.** Within a list, OR: `reasons: [BackOff, FailedScheduling]`
+// matches an Event whose reason is either. Across fields, AND: a filter naming
+// both `types` and `reasons` records only the Events matching both. An absent or
+// empty list is no constraint at all, and an absent `eventFilter` is what every
+// rule did before this field existed — every Event in the rule's scope is
+// recorded.
+//
+// **Every axis is a column of the Event**, which is the design rule rather than
+// a coincidence. A filter is evaluated per Event inside an informer handler, so
+// it may read only what is already in hand and may look nothing up
+// (Invariant 1). The *subject's* labels are absent for a second and sharper
+// reason: matching them would mean consulting a cache of objects that exist, and
+// the Events worth most during an incident — `FailedScheduling`, `FailedCreate`,
+// `Killing` — are about objects that failed to exist or are ceasing to. A filter
+// on the subject's labels would drop precisely those.
+//
+// `involvedObject.uid` is absent for a third reason: a UID does not exist until
+// its object does and changes on every recreation, so no rule could be authored
+// against one in advance. It is a query predicate, not a capture predicate, and
+// it is available when querying the recorded stream.
+//
+// **This narrows relevance, not volume.** Filtering chooses which Event streams
+// are kept; it does not change how deep each one goes. An Event that recurs is
+// updated in place to bump its `count`, so its content genuinely changes, hash
+// dedup cannot suppress it, and every recurrence writes another full row —
+// under every filter here, including one that keeps a single reason. See the
+// `resources` field comment for what that costs and docs/SCHEMA.md
+// ("Event volume") for how to size it.
+//
+// The rule below states the answer to "what if both `reasons` and
+// `excludeReasons`?", because two fields doing inverse jobs need one. It
+// compares sizes rather than mere presence so that it agrees with the semantics
+// above: a list that is present and empty constrains nothing, and something that
+// constrains nothing cannot be in conflict with anything.
+//
+// +kubebuilder:validation:XValidation:rule="!(has(self.reasons) && size(self.reasons) > 0 && has(self.excludeReasons) && size(self.excludeReasons) > 0)",message="reasons and excludeReasons are mutually exclusive: name the reasons you want, or the ones you do not"
+type EventFilter struct {
+	// Types restricts capture to Events of these types — `Normal`, `Warning`, or
+	// both, which is the same as naming neither.
+	//
+	// The bound is the enum's own size, so it can reject nothing a set of these
+	// values could hold; it is spelled anyway because every list on this type is
+	// bounded, and a member added to EventType later would otherwise silently
+	// widen this one.
+	// +optional
+	// +kubebuilder:validation:MaxItems=2
+	// +listType=set
+	Types []EventType `json:"types,omitempty"`
+
+	// Reasons restricts capture to Events whose `reason` is one of these —
+	// `BackOff`, `FailedScheduling`, `Unhealthy`.
+	//
+	// A reason is emitter-defined, so the set worth naming depends on which
+	// controllers run in the cluster; `kubectl get events -o custom-columns=:.reason`
+	// over a representative window is the honest way to find it. Mutually
+	// exclusive with ExcludeReasons.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=128
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`
+	// +listType=set
+	Reasons []string `json:"reasons,omitempty"`
+
+	// ExcludeReasons drops Events whose `reason` is one of these, recording
+	// everything else — `Pulling`, `Pulled`, `Created`, `Started`: the startup
+	// chatter a rollout produces once per container and nobody reads twice.
+	//
+	// It is the inverse of Reasons and the two may not both be used. Prefer this
+	// one where either would do. An exclusion keeps the reasons nobody has
+	// thought of yet, which for a stream written by every controller in the
+	// cluster is most of them — and an include list silently stops recording the
+	// day a new operator starts emitting something worth seeing.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=128
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`
+	// +listType=set
+	ExcludeReasons []string `json:"excludeReasons,omitempty"`
+
+	// SourceComponents restricts capture to Events emitted by these components —
+	// `default-scheduler`, `kubelet`, `deployment-controller`.
+	//
+	// The two Event APIs spell this field differently — `source.component` in
+	// `v1`, `reportingController` in `events.k8s.io/v1` — and they are one
+	// storage behind two APIs, so an entry here is matched against whichever
+	// spelling the stored Event carries rather than against one of them. A
+	// component may be bare or qualified (`kubernetes.io/kubelet`); name it as
+	// `kubectl get events -o custom-columns=:.source.component` prints it.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=128
+	// +kubebuilder:validation:items:Pattern=`^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
+	// +listType=set
+	SourceComponents []string `json:"sourceComponents,omitempty"`
+
+	// SubjectKinds restricts capture to Events about objects of these Kinds —
+	// `Pod`, `ReplicaSet`. It reads the Event's `involvedObject.kind`, which is
+	// the Kind as the emitter spelled it, not a plural resource name.
+	//
+	// Note what this does *not* do: it selects Events by the kind of their
+	// subject, and has no relationship to the `resources` list this rule also
+	// names. Event capture is scope-wide, so `subjectKinds: [Pod]` records
+	// Events about every Pod in scope, including Pods no other entry in this
+	// rule watches.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[A-Z][A-Za-z0-9]{0,62}$`
+	// +listType=set
+	SubjectKinds []string `json:"subjectKinds,omitempty"`
+
+	// SubjectNames restricts capture to Events about objects with these exact
+	// names, read from the Event's `involvedObject.name`.
+	//
+	// ⚠️ **Exact match only, and its usefulness is inverted from what you would
+	// expect.** It works for objects whose names a human chose and which survive
+	// a rollout — a Deployment, a Service, a StatefulSet's Pods (`postgres-0`,
+	// `postgres-1`, which are ordinal and stable). It is **useless for the Pods
+	// of a Deployment**: those names are generated
+	// (`checkout-api-69dfc5f67d-ldw5j`), they change on every rollout, and a name
+	// that no longer exists matches nothing while the rule stays Ready — so the
+	// stream goes quiet with nothing anywhere saying why. To follow an ownership
+	// tree, ask at read time, where the names exist; a capture-time filter cannot
+	// express one.
+	//
+	// There is no prefix or glob form, deliberately. A prefix cannot be expressed
+	// as a Kubernetes field selector, so it could not be pushed to the API server
+	// and would instead pull the entire Event stream of the namespace over the
+	// network, cache it, transform it and discard most of it locally — spending
+	// the exact cost this type exists to avoid, on the highest-volume kind in the
+	// cluster.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9.:]*[a-z0-9])?$`
+	// +listType=set
+	SubjectNames []string `json:"subjectNames,omitempty"`
+}
+
 // WatchedResource names one resource type a rule wants streamed.
 //
 // It is a (group, version, kind) triple plus an optional label selector rather
@@ -246,6 +480,24 @@ type RedactionRule struct {
 // the same vocabulary they read in `kubectl explain` and YAML `apiVersion` /
 // `kind` fields; the plural GVR is derived by the REST mapper, which
 // is also where an unknown kind is detected and parked.
+//
+// The rule below is written at *type* level rather than on `eventFilter`, which
+// is not a style choice: a field-level rule's `self` is the field itself, and
+// this one has to read two of the field's siblings. It lands on the `items`
+// schema of `resources` and is therefore carried into ClusterStreamRule by the
+// same inlining that carries every other rule on this spec.
+//
+// It rejects an `eventFilter` on anything but an Event because such a rule
+// cannot do what it says — none of the filter's axes exists on a Deployment, so
+// the filter would match nothing and the entry would record an empty stream
+// while reporting Ready. Admission is where that is cheapest to learn.
+//
+// The core group is spelled `size(self.group) == 0` rather than as a comparison
+// against an empty string literal: gofmt rewrites a doubled quote inside a doc
+// comment into a typographic one, which would silently corrupt the rule this
+// marker generates.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.eventFilter) || (self.kind == 'Event' && (!has(self.group) || size(self.group) == 0 || self.group == 'events.k8s.io'))",message="eventFilter is only valid on a Kubernetes Event: name kind Event in the core or the events.k8s.io group"
 type WatchedResource struct {
 	// Group is the API group, e.g. "apps" or "networking.k8s.io". Empty means
 	// the core group (`v1/Pod`). Must be empty or a DNS-1123 subdomain.
@@ -286,10 +538,26 @@ type WatchedResource struct {
 	// rather than against those of whatever the Event is about, and Events —
 	// written by kubelet, the scheduler and the controllers — carry essentially
 	// none. The result is an empty scope, not a narrower one, on a rule that
-	// stays Ready. Narrow Events by namespace instead; see docs/SCHEMA.md
+	// stays Ready. Narrow Events by namespace, or by `eventFilter` below, which
+	// reads fields the Event itself carries; see docs/SCHEMA.md
 	// ("Event volume").
 	// +optional
 	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
+
+	// EventFilter optionally narrows which Kubernetes Events this entry records,
+	// by fields the Event carries — its type, its reason, the component that
+	// emitted it, and the kind and name of the object it is about.
+	//
+	// It is valid only on an Event entry (`v1/Event` or `events.k8s.io/v1/Event`)
+	// and is rejected at admission anywhere else; see the rule on this type. Nil
+	// records every Event in scope, which is what a rule naming Event did before
+	// this field existed.
+	//
+	// It is the Event-shaped counterpart of LabelSelector above, and exists
+	// because that field cannot do this job: a selector matches the *Event's*
+	// labels, and Events carry essentially none.
+	// +optional
+	EventFilter *EventFilter `json:"eventFilter,omitempty"`
 }
 
 // GVKSelector matches a set of resource types for sink admission policy.
@@ -433,10 +701,16 @@ type StreamRuleSpec struct {
 	// another full row: a crash-looping namespace, not a busy one, is what
 	// dominates write volume. Prefer a namespaced StreamRule or a
 	// namespaceSelector; a labelSelector does not narrow this (see the field
-	// below).
+	// below). An `eventFilter` narrows *which* Events are recorded, by fields the
+	// Event carries — but it does not change how many rows a recurring one
+	// produces, so it is a relevance control and not a volume bound.
 	//
-	// See docs/SCHEMA.md ("Kubernetes Events" for what the rows mean, "Event
-	// volume" for what they cost) and docs/QUERIES.md.
+	// See docs/EVENTS.md for the subsystem on one page — this paragraph in full,
+	// the filter's semantics, which filters reach the API server, how to size a
+	// rule, and what --with-events and --events-only do at read time. The
+	// row-level detail stays in docs/SCHEMA.md ("Kubernetes Events" for what the
+	// rows mean, "Event volume" for what they cost), and the SQL in
+	// docs/QUERIES.md.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	Resources []WatchedResource `json:"resources"`
