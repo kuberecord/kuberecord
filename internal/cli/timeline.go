@@ -108,6 +108,7 @@ type timelineFlags struct {
 	full            bool
 	withEvents      bool
 	eventsOnly      bool
+	owned           bool
 }
 
 // newTimelineCommand builds `timeline`.
@@ -137,6 +138,12 @@ mostly status churn, and the Events are where the decisions are. Under it the
 coverage reported is the coverage of Events, because that is the scope the rows
 came from.
 
+--owned follows metadata.ownerReferences from the named object down to its
+descendants and correlates their Events too, so a Deployment's page carries the
+scheduling failures of the Pods its ReplicaSets made. The tree is read from
+stored rows and never from the cluster, and every part of it the archive cannot
+show is named rather than left out silently.
+
 An empty result is never presented on its own. It is explained against the watch
 scopes that were open at the time: "nothing changed" and "nothing was watching"
 are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `.`,
@@ -153,7 +160,10 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
   kuberecord timeline pod/checkout-7d4f -n payments --with-events --reverse
 
   # Only what Kubernetes said about it, without the status churn in between.
-  kuberecord timeline deploy/checkout -n payments --events-only`,
+  kuberecord timeline deploy/checkout -n payments --events-only
+
+  # And what Kubernetes said about the ReplicaSets and Pods underneath it.
+  kuberecord timeline deploy/checkout -n payments --events-only --owned`,
 
 		// The kind completes from the static short-name table; the name is an
 		// object in a cluster or an archive, and is not read from here. See
@@ -202,6 +212,12 @@ are different findings, and the second exits ` + fmt.Sprint(exit.NoCoverage) + `
 			"the scope the rows came from. An Event carries no patch, so --full and --field have "+
 			"nothing to act on; --actor and --all-incarnations likewise, and any of them is reported "+
 			"as ignored rather than dropped quietly. --uid still pins the Events to one incarnation.")
+	command.Flags().BoolVar(&local.owned, "owned", local.owned,
+		fmt.Sprintf("Also correlate the Events of the objects this one owns, walking "+
+			"metadata.ownerReferences down at most %d levels. Implies --with-events. The tree "+
+			"is read from recorded state rather than from the cluster, so a descendant whose "+
+			"state was never captured cannot be discovered, and the command says so rather "+
+			"than presenting a partial tree as complete.", query.MaxOwnershipDepth))
 
 	return command
 }
@@ -263,6 +279,7 @@ func runTimelineCommand(
 		Reverse:         local.reverse,
 		WithEvents:      local.withEvents,
 		EventsOnly:      local.eventsOnly,
+		Owned:           local.owned,
 		Structured:      structured,
 		Scan:            coldscan.OptionsFrom(flags, streams),
 	}
@@ -418,6 +435,9 @@ func timelineRenderOptions(
 		// The footer names --events-only under a document that holds both kinds of
 		// row, and must not name it to somebody already using it. See eventsHint.
 		EventsOnly: local.eventsOnly,
+		// The SUBJECT column exists only when a row could be about something other
+		// than the object named in the header. See subjectCell.
+		Owned: local.owned,
 	}
 }
 
@@ -649,6 +669,24 @@ type TimelineRequest struct {
 	// something the reader had excluded. See gatherChanges.
 	EventsOnly bool
 
+	// Owned widens the Event correlation to the objects this one owns, discovered
+	// by walking metadata.ownerReferences over recorded state.
+	//
+	// It implies WithEvents, for the reason EventsOnly does: the pair composes, and
+	// a flag whose only effect is on Events would otherwise be inert on its own —
+	// a no-op the reader would have to be told about instead of one the tool can
+	// simply carry out (D31). See includeEvents.
+	Owned bool
+
+	// Subjects are the descendants the walk found, filled in by resolveOwnedTree
+	// rather than by the flag layer.
+	//
+	// It is on the request rather than passed alongside it because timelineQuery is
+	// what turns a request into a query, and a field the two rendering paths had to
+	// remember to thread separately is one that eventually reaches the streaming
+	// path empty — a --owned document with a SUBJECT column and no descendant in it.
+	Subjects []query.ObjectRef
+
 	// Scan is the cold-scan safety surface: the confirmation, the circuit breaker
 	// and whether either can be shown. It travels with the request rather than
 	// being read from the flags where it is used, so that a test can drive the
@@ -691,7 +729,7 @@ func (r TimelineRequest) filtered() bool {
 // something four call sites have to remember. A field the wiring had to set twice
 // is one a second entry point — a test, a future command — sets once, and the half
 // it forgot is a flag that silently does nothing.
-func (r TimelineRequest) includeEvents() bool { return r.WithEvents || r.EventsOnly }
+func (r TimelineRequest) includeEvents() bool { return r.WithEvents || r.EventsOnly || r.Owned }
 
 // eventsFlag is the flag an Event notice names.
 //
@@ -699,13 +737,20 @@ func (r TimelineRequest) includeEvents() bool { return r.WithEvents || r.EventsO
 // telling them about a flag they did not pass, which is the affordance sweep's
 // complaint in reverse: the route out has to be the one they are on.
 func (r TimelineRequest) eventsFlag() string {
-	if r.EventsOnly {
+	switch {
+	case r.EventsOnly:
 		return eventsOnlyFlag
+	case r.WithEvents:
+		return withEventsFlag
+	default:
+		// --owned on its own, which implied the question rather than spelling it.
+		// Naming --with-events here would tell a reader about a flag they did not
+		// pass and did not need.
+		return ownedFlag
 	}
-	return withEventsFlag
 }
 
-// The two spellings of the Event question, as a reader typed them.
+// The spellings of the Event question, as a reader typed them.
 const (
 	withEventsFlag = "--with-events"
 	eventsOnlyFlag = "--events-only"
@@ -744,6 +789,8 @@ func RunTimeline(
 		Incarnations:   gathered.Incarnations,
 		Coverage:       gathered.Coverage.Summary(opts.Zone),
 		CoverageOf:     coverageSubject(request),
+		Owned:          gathered.Owned,
+		Subject:        describeSubject(request.Ref),
 		CoverageAbsent: gathered.Coverage.Absent(),
 		Rows:           gathered.Rows,
 		Notices:        gathered.Notices,
@@ -837,6 +884,7 @@ func (r TimelineRequest) timelineQuery(selection incarnationChoice, from, to tim
 		Reverse:         true,
 		IncludeEvents:   r.includeEvents(),
 		EventsOnly:      r.EventsOnly,
+		Subjects:        r.Subjects,
 	}
 }
 
@@ -1046,6 +1094,14 @@ func describeKind(ref query.ObjectRef) string {
 	}
 	return ref.APIGroup + "/" + ref.Kind
 }
+
+// describeSubject renders an object the way the SUBJECT column names one.
+//
+// Kind and name, and no namespace: every row of a `--owned` page is in one
+// namespace by construction — a namespaced object's dependents must share its
+// namespace — so repeating it on every line would spend the column's width on the
+// one part of the identity that cannot vary.
+func describeSubject(ref query.ObjectRef) string { return ref.Kind + "/" + ref.Name }
 
 // describeObject renders an object's namespace and name.
 func describeObject(ref query.ObjectRef) string {

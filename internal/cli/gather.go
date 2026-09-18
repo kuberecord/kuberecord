@@ -74,6 +74,13 @@ type gatherResult struct {
 	// being shown. Its presence is what gives a table its UID column.
 	Incarnations []string
 
+	// Owned is the header's `Owned` line: how many descendants an ownership walk
+	// reached and of which kinds, or empty when nothing did. It travels with the
+	// answer rather than being recomputed by the renderer for the reason every
+	// other pre-rendered header field does — the decision belongs to the command
+	// that made the walk.
+	Owned string
+
 	// Coverage is what the watch scopes said, carried whole rather than
 	// pre-rendered: the header wants a sentence and the structured envelope wants
 	// the intervals themselves, and building one from the other afterwards would
@@ -142,6 +149,18 @@ func gatherChanges(
 	result.Notices = append(result.Notices, selectionNotices...)
 	result.UID = selection.uid
 	result.Incarnations = selection.listed
+
+	// After the incarnation and before the timeline query, which is the only place
+	// it can go: the walk starts from the UID the choice above resolved, and the
+	// subjects it finds are a predicate of the query below. It is inside the
+	// cold-scan guard because it reads rows like any other question here.
+	owned, err := resolveOwnedTree(ctx, backend, request, selection, from, to, zone)
+	if err != nil {
+		return gatherResult{}, err
+	}
+	request.Subjects = owned.subjects
+	result.Owned = owned.summary
+	result.Notices = append(result.Notices, owned.notices...)
 
 	changes, err := collectChanges(ctx, backend.Engine, request.timelineQuery(selection, from, to))
 	if err != nil {
@@ -530,6 +549,11 @@ func anyChangeInWindow(
 	// --events-only today — filtered() is false there — and it must not become a
 	// silent falsehood on the day some other caller reaches it.
 	q.IncludeEvents, q.EventsOnly = false, false
+	// And the tree with them, for the same reason: the subjects are correlated
+	// Events, this probe wants state, and a field left set over a query that has
+	// switched the Event half off is one somebody later reads as still meaning
+	// something.
+	q.Subjects = nil
 	q.Limit = 1
 
 	changes, err := collectChanges(ctx, engine, q)

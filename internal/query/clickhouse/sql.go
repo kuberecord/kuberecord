@@ -89,6 +89,18 @@ const (
 	// scopeColumns is one watch-scope transition, as Coverage pairs them.
 	scopeColumns = "api_group, kind, namespace, action, rule_ref, ts"
 
+	// ownershipColumns is one captured object's ownership, as the read-time walk
+	// needs it: its identity, its incarnation, whether the window holds a full state
+	// of it at all, and the ownerReferences of the newest one that does.
+	//
+	// state_rows is a UInt64 count rather than a boolean for the reason
+	// incarnationColumns' deletions is: countIf yields UInt64, and a scan target
+	// would otherwise have to guess the Go type behind a comparison ClickHouse
+	// evaluates as UInt8.
+	ownershipColumns = "api_group, kind, namespace, name, uid, " +
+		"countIf(data != '') AS state_rows, " +
+		"argMaxIf(JSONExtractRaw(data, 'metadata', 'ownerReferences'), ts, data != '') AS owner_refs"
+
 	// clusterIDColumn is the projection of the cluster-identity probe. DISTINCT is
 	// part of it rather than a clause of its own because the probe's whole result
 	// is a short list of low-cardinality values, and asking the server to reduce
@@ -391,19 +403,115 @@ func subjectMatch(field string) string {
 // still finds events for an object since recreated; uid is the exact one, and it
 // is right to add precisely when the caller has already said which incarnation
 // they mean.
-func eventsStatement(ref query.ObjectRef, from, to time.Time, uid string, reverse bool) statement {
+//
+// subjects are the additional objects an ownership walk found
+// (query.TimelineQuery.Subjects). With none — every timeline before Task 21.1, and
+// every one without --owned since — the statement is exactly what it was: three
+// predicates, ANDed with the rest, and a fourth when an incarnation was pinned.
+// That is worth keeping rather than folding into the general form, because it is
+// the statement almost every invocation emits and the one a reader will meet in a
+// query log.
+func eventsStatement(
+	ref query.ObjectRef, from, to time.Time, uid string, subjects []query.ObjectRef, reverse bool,
+) statement {
 	var c conditions
 	c.add("cluster_id = ?", ref.ClusterID)
 	c.add(eventGroups)
 	c.add("kind = ?", eventKind)
 	windowConditions(&c, from, to)
-	c.add(subjectMatch("kind"), ref.Kind)
-	c.add(subjectMatch("namespace"), ref.Namespace)
-	c.add(subjectMatch("name"), ref.Name)
-	if uid != "" {
-		c.add(subjectMatch("uid"), uid)
+	if len(subjects) == 0 {
+		c.add(subjectMatch("kind"), ref.Kind)
+		c.add(subjectMatch("namespace"), ref.Namespace)
+		c.add(subjectMatch("name"), ref.Name)
+		if uid != "" {
+			c.add(subjectMatch("uid"), uid)
+		}
+	} else {
+		subjectAlternatives(&c, ref, uid, subjects)
 	}
 	return renderSelect(changeColumns, tableResourceStates, true, c, orderByTS(reverse))
+}
+
+// subjectAlternatives renders the subject predicate for a timeline correlating the
+// Events of several objects.
+//
+// One parenthesised disjunction rather than several conditions, because the
+// alternatives are ORed and every other predicate in the statement is ANDed: a bare
+// OR dropped into that list would silently widen the whole WHERE clause to every
+// Event in the cluster.
+//
+// It is rendered on one line however long the tree is, because the canonical layout
+// every statement here follows is one predicate per line — that is what lets a
+// reader, and the stand-in connection, take a statement apart clause by clause
+// instead of parsing SQL. A predicate wrapped over several lines would read as
+// several predicates to both.
+//
+// The uid pin belongs to the *root's* alternative alone. It is there because the
+// caller pinned the object they asked about, and applying it to a dependent would
+// require that dependent to share its owner's UID — which nothing does, so a pinned
+// --owned timeline would correlate the root's Events and nothing else. The subjects
+// therefore match on the forgiving (kind, namespace, name) key, which is also the
+// right one for a Pod recreated under the same name inside the window.
+func subjectAlternatives(c *conditions, ref query.ObjectRef, uid string, subjects []query.ObjectRef) {
+	alternatives := make([]string, 0, len(subjects)+1)
+	args := make([]any, 0, (len(subjects)+1)*3+1)
+
+	root := []string{subjectMatch("kind"), subjectMatch("namespace"), subjectMatch("name")}
+	args = append(args, ref.Kind, ref.Namespace, ref.Name)
+	if uid != "" {
+		root = append(root, subjectMatch("uid"))
+		args = append(args, uid)
+	}
+	alternatives = append(alternatives, "("+strings.Join(root, " AND ")+")")
+
+	for _, subject := range subjects {
+		alternatives = append(alternatives, "("+strings.Join([]string{
+			subjectMatch("kind"), subjectMatch("namespace"), subjectMatch("name"),
+		}, " AND ")+")")
+		args = append(args, subject.Kind, subject.Namespace, subject.Name)
+	}
+	c.add("("+strings.Join(alternatives, " OR ")+")", args...)
+}
+
+// ownershipStatement renders the ownership edges of one scope: every captured
+// object in the window, its incarnation, and the owners its recorded state named.
+//
+// # Why it groups instead of streaming rows
+//
+// The walk needs one entry per object, not one per change, and an object under
+// reconcile pressure has thousands of the latter. Grouping server-side turns the
+// answer into a row per (identity, incarnation) whatever the cluster's churn was.
+//
+// # Why it projects the references rather than the document
+//
+// argMaxIf pulls the ownerReferences array out of the newest data-bearing row and
+// nothing else. Selecting `data` and reading the field in Go would fetch every
+// captured object's whole manifest across the window in order to read four strings
+// out of each — the same answer at a hundred times the bytes.
+//
+// countIf is what separates "owns nothing" from "no full state in this window": a
+// patch and a deletion are rows, and an object that has only those in the window
+// has ownership the archive does not state within these bounds. Reporting it as
+// owning nothing would turn a narrow window into a small tree (Invariant 9), so the
+// count travels and the caller says which of the two it is.
+//
+// # Why Events are excluded
+//
+// An Event carries no ownerReferences and is never a member of an ownership tree,
+// and it is the most numerous kind in almost every archive. Excluding it cannot
+// change the answer and removes the great majority of the rows the group would
+// otherwise fold — the only kind of exclusion this contract permits.
+func ownershipStatement(q query.OwnershipQuery) statement {
+	var c conditions
+	c.add("cluster_id = ?", q.ClusterID)
+	windowConditions(&c, q.From, q.To)
+	if q.Namespace != "" {
+		c.add("namespace = ?", q.Namespace)
+	}
+	c.add(fmt.Sprintf("NOT (kind = '%s' AND %s)", eventKind, eventGroups))
+	return renderSelect(ownershipColumns, tableResourceStates, true, c,
+		"GROUP BY api_group, kind, namespace, name, uid",
+		"ORDER BY api_group, kind, namespace, name, uid")
 }
 
 // coverageStatement renders the watch-scope transitions a coverage query is

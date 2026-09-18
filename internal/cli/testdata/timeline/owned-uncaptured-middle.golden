@@ -1,0 +1,14 @@
+=== stdout ===
+Kind:     apps/Deployment
+Object:   payments/checkout
+Cluster:  prod-eu-1
+UID:      7c9e6679-7425-40de-944b-e07fc1f90ae7
+Coverage: 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+TIME (UTC)                SUBJECT              EVENT     ACTOR                      CHANGE
+2026-08-28 14:02:58.001Z  Deployment/checkout  Added     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:20.310Z  Deployment/checkout  Event     kube-controller-manager    ScalingReplicaSet: Scaled up replic…
+2026-08-28 14:05:02.117Z  Deployment/checkout  Modified  kube-controller-manager    ~ spec.replicas: 3 → 5
+=== stderr ===
+! the ownership walk could not see the whole tree: 2 objects in namespace payments name an owner the archive does not hold, of kind ReplicaSet, so anything beneath them could not be attributed to payments/checkout. The walk read 2026-08-01T00:00:00Z to 2026-08-28T15:00:00Z: add the kind to a rule so its state is recorded, or pass --since if it was captured before that
+! this timeline interleaves Kubernetes Events with the object's own changes; pass --events-only for the Events alone

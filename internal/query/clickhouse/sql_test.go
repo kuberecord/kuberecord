@@ -53,6 +53,16 @@ func testRef() query.ObjectRef {
 	}
 }
 
+// testSubjects is the ownership tree a --owned timeline correlates the Events of:
+// the ReplicaSet under the test Deployment and a Pod under that.
+func testSubjects() []query.ObjectRef {
+	return []query.ObjectRef{
+		{ClusterID: "prod", APIGroup: "apps", Kind: "ReplicaSet",
+			Namespace: "payments", Name: "checkout-7d4f"},
+		{ClusterID: "prod", Kind: "Pod", Namespace: "payments", Name: "checkout-7d4f-ldw5j"},
+	}
+}
+
 // testWindow is a bounded window with a nanosecond component on each side, so a
 // bound that lost precision is visible in the rendered argument.
 func testWindow() (time.Time, time.Time) {
@@ -98,8 +108,16 @@ func TestEveryResourceStatesReadCarriesADedupForm(t *testing.T) {
 		{"incarnations", incarnationsStatement(ref, from, to)},
 		{"replay", replayStatement(ref, at, "uid-a")},
 		{"newest incarnation at an instant", newestIncarnationAtStatement(ref, at)},
-		{"events", eventsStatement(ref, from, to, "uid-a", false)},
-		{"events without a pinned incarnation", eventsStatement(ref, from, to, "", true)},
+		{"events", eventsStatement(ref, from, to, "uid-a", nil, false)},
+		{"events without a pinned incarnation", eventsStatement(ref, from, to, "", nil, true)},
+		{"events correlated across an ownership tree",
+			eventsStatement(ref, from, to, "uid-a", testSubjects(), false)},
+		{"ownership", ownershipStatement(query.OwnershipQuery{
+			ClusterID: ref.ClusterID, Namespace: ref.Namespace, From: from, To: to,
+		})},
+		{"ownership over every namespace", ownershipStatement(query.OwnershipQuery{
+			ClusterID: ref.ClusterID, From: from, To: to,
+		})},
 		{"cluster identity probe over the record table", clusterIDsFromRecordsStatement()},
 	}
 
@@ -383,7 +401,7 @@ func TestNewestIncarnationProbeCarriesNoFilters(t *testing.T) {
 func TestEventsStatementHandlesBothGroupSpellings(t *testing.T) {
 	ref := testRef()
 	from, to := testWindow()
-	stmt := eventsStatement(ref, from, to, "uid-a", false)
+	stmt := eventsStatement(ref, from, to, "uid-a", nil, false)
 
 	for _, want := range []string{"involvedObject", "regarding", eventGroups} {
 		if !strings.Contains(stmt.SQL, want) {

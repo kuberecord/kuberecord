@@ -1,0 +1,16 @@
+=== stdout ===
+[2mKind:[0m     apps/Deployment
+[2mObject:[0m   payments/checkout
+[2mCluster:[0m  prod-eu-1
+[2mUID:[0m      7c9e6679-7425-40de-944b-e07fc1f90ae7
+[2mOwned:[0m    3 objects (Pod, ReplicaSet)
+[2mCoverage:[0m 2026-07-02T09:14:00Z → open (ClusterStreamRule/all-workloads)
+
+[2mTIME (UTC)                SUBJECT                   EVENT     ACTOR                      CHANGE[0m
+2026-08-28 14:02:58.001Z  Deployment/checkout       [32mAdded[0m     kubectl-client-side-apply  full state recorded
+2026-08-28 14:03:20.310Z  Deployment/checkout       [35mEvent[0m     kube-controller-manager    ScalingReplicaSet: Scaled up re…
+2026-08-28 14:05:02.117Z  Deployment/checkout       [33mModified[0m  kube-controller-manager    ~ spec.replicas: 3 → 5
+2026-08-28 14:06:44.020Z  ReplicaSet/checkout-7d4f  [35mEvent[0m     replicaset-controller      [31m⚠[0m FailedCreate: pods "checkout-…
+2026-08-28 14:07:03.771Z  Pod/checkout-7d4f-ldw5j   [35mEvent[0m     default-scheduler          [31m⚠[0m FailedScheduling: 0/9 nodes a…
+=== stderr ===
+! [33mthis timeline interleaves Kubernetes Events with the object's own changes; pass --events-only for the Events alone[0m

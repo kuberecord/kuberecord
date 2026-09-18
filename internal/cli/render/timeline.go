@@ -50,8 +50,12 @@ const (
 	// Zone.TimeColumn, because the column's contents are in whatever zone the
 	// invocation asked for and a heading that named a different one would be the
 	// disagreement Task 18.9 exists to close, one layer along.
-	columnTime     = "TIME"
-	columnUID      = "UID"
+	columnTime = "TIME"
+	columnUID  = "UID"
+	// columnSubject names the object a row is about, and appears only under
+	// `timeline --owned`, where a row may be about a descendant rather than about
+	// the object in the header.
+	columnSubject  = "SUBJECT"
 	columnEvent    = "EVENT"
 	columnRevision = "RESOURCE VERSION"
 	columnActor    = "ACTOR"
@@ -61,6 +65,16 @@ const (
 // gutter separates two columns. Two spaces, as kubectl uses, so that an eye
 // scanning down a column does not have to find its edge.
 const gutter = "  "
+
+// UnknownSubject is what an Event whose payload names no subject renders as in the
+// SUBJECT column.
+//
+// It is the same word UnknownActor uses and for the same reason: a blank cell reads
+// as "nobody", and "we could not read which object this was about" is the true
+// statement. It should be unreachable — an Event reaches the table by matching a
+// subject — and it is rendered rather than assumed away, because a renderer whose
+// impossible branch prints the wrong object is worse than one that admits it.
+const UnknownSubject = "unknown"
 
 // UnknownActor is what an actorless change renders as.
 //
@@ -197,6 +211,18 @@ type TimelineDocument struct {
 	// CoverageAbsent reports that the summary above says nothing was watching.
 	// See documentHeader.CoverageAbsent.
 	CoverageAbsent bool
+	// Owned describes the ownership tree the answer was widened to, and is written
+	// only when a walk reached one. See documentHeader.Owned.
+	Owned string
+	// Subject names the object in the header the way the SUBJECT column names one,
+	// and is what that column shows for a row that is not a Kubernetes Event.
+	//
+	// It is supplied rather than assembled from Kind and Object because the two
+	// spell an identity for different readers: the header block is read once and
+	// carries the group and the namespace, and the column is read down and carries
+	// neither. A renderer deriving one from the other would have to un-render the
+	// header's own formatting to do it.
+	Subject string
 	// Rows are the changes, in the order they are to be displayed.
 	Rows []TimelineRow
 	// Notices are written to standard error, in order.
@@ -222,6 +248,7 @@ func (d TimelineDocument) header() documentHeader {
 		Cluster:        d.Cluster,
 		UID:            d.UID,
 		Incarnations:   d.Incarnations,
+		Owned:          d.Owned,
 		Coverage:       d.Coverage,
 		CoverageOf:     d.CoverageOf,
 		CoverageAbsent: d.CoverageAbsent,
@@ -250,6 +277,16 @@ type documentHeader struct {
 	// carry an attribution rather than a change, and a cell reading
 	// "(before window)" is unreadable without the window it is before.
 	Window string
+	// Owned is the ownership tree the answer was widened to — how many descendants
+	// the walk reached and of which kinds — and is written only by
+	// `timeline --owned`, and only when the walk reached one.
+	//
+	// It is in the header rather than in a notice because it describes the answer
+	// instead of qualifying it: a reader looking at a page where two thirds of the
+	// rows name objects they did not type needs to know what the tool decided the
+	// tree was, and every notice this CLI writes renders in the Warning tier (D30).
+	// A successful traversal reported in amber would be a warning about nothing.
+	Owned string
 	// Base names the recorded row a reconstruction or an attribution started
 	// from, and is written only when a command sets it.
 	//
@@ -524,6 +561,9 @@ func renderHeader(doc documentHeader, severity Severity) string {
 	// Only when a command set them, so that the header of a document that has no
 	// use for either is exactly the header it was before they existed — which is
 	// what the checked-in golden files of the other commands assert.
+	if doc.Owned != "" {
+		fields = append(fields, field{label: "Owned", value: doc.Owned})
+	}
 	if doc.Window != "" {
 		fields = append(fields, field{label: "Window", value: doc.Window})
 	}
@@ -608,6 +648,9 @@ func renderTable(doc TimelineDocument, opts Options, p palette) (string, int) {
 	if showUID {
 		headings = append(headings, columnUID)
 	}
+	if opts.Owned {
+		headings = append(headings, columnSubject)
+	}
 	headings = append(headings, columnEvent)
 	if opts.Wide {
 		headings = append(headings, columnRevision)
@@ -624,7 +667,7 @@ func renderTable(doc TimelineDocument, opts Options, p palette) (string, int) {
 
 	plain := make([][]string, 0, len(doc.Rows))
 	for _, row := range doc.Rows {
-		cells := plainCells(row, showUID, opts)
+		cells := plainCells(row, doc.Subject, showUID, opts)
 		for i := range widths {
 			widths[i] = max(widths[i], displayWidth(cells[i]))
 		}
@@ -667,10 +710,13 @@ func headerLine(headings []string, widths []int) string {
 
 // plainCells renders every column but CHANGE, unpainted, so the layout can be
 // measured.
-func plainCells(row TimelineRow, showUID bool, opts Options) []string {
+func plainCells(row TimelineRow, subject string, showUID bool, opts Options) []string {
 	cells := []string{formatTimestamp(row.Change.TS, opts.Wide, opts.Zone)}
 	if showUID {
 		cells = append(cells, formatUID(row.Change.UID, opts.Wide))
+	}
+	if opts.Owned {
+		cells = append(cells, subjectCell(row, subject))
 	}
 	cells = append(cells, row.Change.EventType)
 	if opts.Wide {
@@ -678,6 +724,31 @@ func plainCells(row TimelineRow, showUID bool, opts Options) []string {
 	}
 	cells = append(cells, actorCell(row))
 	return cells
+}
+
+// subjectCell names the object one row is about.
+//
+// A merged Kubernetes Event describes something that happened *to* an object, and
+// which object is in the Event's own payload — which is exactly why `--owned`
+// widens the Event correlation and nothing else (query.TimelineQuery.Subjects). A
+// row of any other kind is a change to the object the header names, because the
+// state half of a timeline is never widened.
+//
+// The fallback is UnknownSubject rather than the header's object, and the
+// distinction is worth the word: an Event reached this table by matching a subject,
+// so a payload that names none is one this renderer could not read, and attributing
+// it to the object in the header would be inventing the attribution the column
+// exists to report.
+func subjectCell(row TimelineRow, subject string) string {
+	if row.Change.EventType != query.EventKubernetes {
+		return subject
+	}
+	if detail, ok := ParseEvent(row.Change.Data); ok {
+		if named := detail.Subject(); named != "" {
+			return named
+		}
+	}
+	return UnknownSubject
 }
 
 // renderRow writes one change, and the operations beneath it when --full is set.

@@ -453,3 +453,140 @@ func expectedIndices(caps query.Capabilities, rows []Row, indices []int) []query
 	}
 	return want
 }
+
+// The identities the ownership fixture records, and the incarnations they wore.
+const (
+	ownershipNS      = "default"
+	ownershipDeploy  = "checkout"
+	ownershipRS      = "checkout-7d4f"
+	ownershipPodA    = "checkout-7d4f-ldw5j"
+	ownershipPodB    = "checkout-7d4f-x92kk"
+	ownershipDeployU = "aaaaaaaa-0000-0000-0000-000000000001"
+	ownershipRSU     = "aaaaaaaa-0000-0000-0000-000000000002"
+	ownershipPodAU   = "aaaaaaaa-0000-0000-0000-000000000003"
+	ownershipPodBU   = "aaaaaaaa-0000-0000-0000-000000000004"
+)
+
+// OwnershipFixture is a known past whose ownership edges both backends must read
+// out identically, together with the question to ask and the answer required.
+//
+// It is exported, which no other fixture in this file is, and the reason is the
+// same reason FixtureClusterID is exported one hole along.
+// [query.OwnershipResolver] is an optional half of the read plane, so it is not
+// among the properties RunQuerySuite runs — those are the obligations *every*
+// engine carries, and a suite that skipped one for a backend that declined it would
+// certify an omission. What is left is each backend's own tests, and two backends
+// asserting a tree against two hand-written pasts would be two implementations
+// agreeing with their own fixtures rather than with each other. One past, stated
+// here, is what makes them agree about the same archive (D42).
+type OwnershipFixture struct {
+	// History is the past to seed.
+	History History
+	// Query is the question to ask of it.
+	Query query.OwnershipQuery
+	// Objects is the whole answer, in the order the contract requires: by
+	// identity, then by incarnation.
+	Objects []query.OwnedObject
+}
+
+// OwnershipHistory is a Deployment → ReplicaSet → Pod tree with the four things an
+// ownership read has to get right around it.
+//
+// A Pod whose only row in the window is a modification, so its own ownership cannot
+// be read there and StateRecorded must say so rather than the answer reporting it as
+// owning nothing. A Kubernetes Event about one of the Pods, which must not appear —
+// an Event owns nothing, is owned by nothing, and is the most numerous kind in an
+// archive, so a read that folded them would pay for the whole commentary to learn
+// nothing. An object in another namespace, which the namespace predicate must
+// exclude. And a Deployment that names no owner at all, which is not the same fact
+// as a Deployment whose owners could not be read.
+func OwnershipHistory() OwnershipFixture {
+	deployRef := ownedRef("apps", "Deployment", ownershipDeploy)
+	rsRef := ownedRef("apps", "ReplicaSet", ownershipRS)
+	podARef := ownedRef("", "Pod", ownershipPodA)
+	podBRef := ownedRef("", "Pod", ownershipPodB)
+
+	rows := make([]Row, 0, 6)
+	rows = append(rows, buildRows(deployRef, 100, []changeSpec{{
+		after: time.Minute, event: query.EventAdded, uid: ownershipDeployU,
+		state: ownedDocument(ownershipDeploy, ""),
+	}})...)
+	rows = append(rows, buildRows(rsRef, 200, []changeSpec{{
+		after: 2 * time.Minute, event: query.EventAdded, uid: ownershipRSU,
+		state: ownedDocument(ownershipRS,
+			ownerJSON("Deployment", ownershipDeploy, ownershipDeployU)),
+	}})...)
+	rows = append(rows, buildRows(podARef, 300, []changeSpec{{
+		after: 3 * time.Minute, event: query.EventAdded, uid: ownershipPodAU,
+		state: ownedDocument(ownershipPodA,
+			ownerJSON("ReplicaSet", ownershipRS, ownershipRSU)),
+	}})...)
+	rows = append(rows, buildRows(podBRef, 400, []changeSpec{{
+		after: 4 * time.Minute, event: query.EventModified, uid: ownershipPodBU,
+		state: ownedDocument(ownershipPodB,
+			ownerJSON("ReplicaSet", ownershipRS, ownershipRSU)),
+		diff: `[{"op":"replace","path":"/status/phase","value":"Running"}]`,
+	}})...)
+	rows = append(rows, buildRows(ownedRef("", "Event", "checkout-7d4f-ldw5j.17c"), 500,
+		[]changeSpec{{
+			after: 5 * time.Minute, event: query.EventAdded, uid: "aaaaaaaa-0000-0000-0000-00000000000e",
+			state: `{"involvedObject":{"kind":"Pod","namespace":"default",` +
+				`"name":"checkout-7d4f-ldw5j","uid":"` + ownershipPodAU + `"},` +
+				`"reason":"FailedScheduling","type":"Warning"}`,
+		}})...)
+	rows = append(rows, buildRows(query.ObjectRef{
+		ClusterID: FixtureClusterID, Kind: "Pod", Namespace: "kube-system", Name: "elsewhere",
+	}, 600, []changeSpec{{
+		after: 6 * time.Minute, event: query.EventAdded, uid: "aaaaaaaa-0000-0000-0000-00000000000f",
+		state: ownedDocument("elsewhere",
+			ownerJSON("DaemonSet", "node-agent", "aaaaaaaa-0000-0000-0000-0000000000da")),
+	}})...)
+
+	return OwnershipFixture{
+		History: History{Rows: rows},
+		Query: query.OwnershipQuery{
+			ClusterID: FixtureClusterID, Namespace: ownershipNS,
+			From: windowFrom(), To: windowTo(),
+		},
+		Objects: []query.OwnedObject{
+			{Ref: podARef, UID: ownershipPodAU, StateRecorded: true, Owners: []query.OwnerReference{
+				{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: ownershipRS, UID: ownershipRSU},
+			}},
+			// No owners and StateRecorded false: the modification carries a patch and
+			// no document, so this window holds nothing to read its references out of.
+			{Ref: podBRef, UID: ownershipPodBU},
+			{Ref: deployRef, UID: ownershipDeployU, StateRecorded: true},
+			{Ref: rsRef, UID: ownershipRSU, StateRecorded: true, Owners: []query.OwnerReference{
+				{APIVersion: "apps/v1", Kind: "Deployment", Name: ownershipDeploy, UID: ownershipDeployU},
+			}},
+		},
+	}
+}
+
+// ownedRef is one identity of the ownership fixture.
+func ownedRef(group, kind, name string) query.ObjectRef {
+	return query.ObjectRef{
+		ClusterID: FixtureClusterID, APIGroup: group, Kind: kind,
+		Namespace: ownershipNS, Name: name,
+	}
+}
+
+// ownedDocument is a recorded object carrying an ownerReferences array, or none.
+func ownedDocument(name, owners string) string {
+	if owners == "" {
+		return `{"metadata":{"name":"` + name + `"},"spec":{"replicas":1}}`
+	}
+	return `{"metadata":{"name":"` + name + `","ownerReferences":[` + owners + `]},"spec":{"replicas":1}}`
+}
+
+// ownerJSON is one entry of an ownerReferences array, with the two members a walk
+// never reads present so that a decoding that took them for the ones it does read
+// would be visible.
+//
+// The apiVersion is the suite's own throughout: it is provenance on a reference
+// whose identity is the uid, so a fixture varying it would be varying the one field
+// nothing joins on.
+func ownerJSON(kind, name, uid string) string {
+	return `{"apiVersion":"` + fixtureAPIVer + `","kind":"` + kind + `","name":"` + name +
+		`","uid":"` + uid + `","controller":true,"blockOwnerDeletion":true}`
+}

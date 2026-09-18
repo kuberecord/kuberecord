@@ -208,6 +208,56 @@ than a summary of them.
   is that sizing is done with the scope *and* the window, which is the point rather
   than a placeholder.
 
+- **`timeline --owned` answers "this Deployment's Pods' Events".** It is the
+  most-wanted Event query and the one no capture-time filter can express: the tree
+  is Deployment → ReplicaSet → Pod, and a Pod's name carries a generated suffix that
+  does not exist until the Pod does and changes on every rollout, so `subjectNames`
+  looks like it answers this and does not.
+
+  At read time the names exist. `metadata.ownerReferences` is in the stored state of
+  every captured object, so the walk is a query over rows the archive already holds
+  — **never a question put to the cluster**, which would answer with today's tree
+  for a question about a past window and would make the answer depend on a cluster
+  that may no longer exist.
+
+  ```
+  $ kuberecord timeline deploy/checkout -n payments --events-only --owned
+
+  Owned: 3 objects (Pod, ReplicaSet)
+
+  TIME (UTC)                SUBJECT                   EVENT  CHANGE
+  2026-08-28 14:06:44.020Z  ReplicaSet/checkout-7d4f  Event  ⚠ FailedCreate: exceeded quota
+  2026-08-28 14:07:03.771Z  Pod/checkout-7d4f-ldw5j   Event  ⚠ FailedScheduling: 0/9 nodes …
+  ```
+
+  It **implies `--with-events`**, as `--events-only` does, and adds a `SUBJECT`
+  column: a flat merge of three objects' Events with no attribution is less useful
+  than three separate invocations. The subject is read out of the Event's own
+  `involvedObject` or `regarding`, so `-o json` gains no field — `data` is already
+  real JSON, and `.data.involvedObject.name` is the same expression
+  `docs/QUERIES.md` uses in SQL.
+
+  **It widens the Event correlation and nothing else.** A recorded change carries no
+  identity of its own, so a descendant's modification would arrive as a patch with
+  nothing on it saying which object it patched; the state half of a timeline stays
+  the object's.
+
+  **The walk degrades honestly**, which is Invariant 9 applied to a traversal. A
+  descendant whose state was never captured cannot be discovered — there is no row
+  to read it from — so the command counts what it could not attribute and names
+  those kinds, apart from the objects whose own ownership could not be read within
+  the window, because those two have different fixes. Depth is bounded at four
+  levels and breadth at five hundred descendants, and each bound reports itself when
+  it actually cuts something. An object that owns nothing is not an error and not
+  silent either.
+
+  Two additions to the read plane make it work: an optional `query.OwnershipResolver`
+  half, implemented by both shipped backends, and `query.TimelineQuery.Subjects`,
+  which correlates a whole tree's Events in **one** query rather than one per node —
+  on an object archive the difference is one scan of the window instead of one per
+  Pod. Both backends are held to the same tree over one shared past. No schema
+  change: `deploy/clickhouse/schema/` is untouched.
+
 ### Changed
 
 - **A bursting Kubernetes Event now writes rows proportional to elapsed time
