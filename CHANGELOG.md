@@ -16,6 +16,42 @@ than a summary of them.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-27
+
+The release that makes Kubernetes Events affordable to record. Until now, naming
+`kind: Event` in a rule was one switch with two costs attached: every Event in the
+scope whether anyone wanted it or not, and a full row for every `count` bump of
+every Event that recurred — so the archive grew fastest exactly when a cluster was
+unhealthy. Those are two different problems, and v0.5.0 answers them separately:
+`spec.resources[].eventFilter` decides *which* Events are recorded, sent to the API
+server as a field selector where one can express it, and
+`spec.writer.coalesceWindow` decides *how often* a recurring one is. At the reading
+end, `timeline --events-only` and `timeline --owned` ask the questions Events were
+being recorded to answer — what Kubernetes said about this Deployment, and about
+its Pods — and [`docs/EVENTS.md`](docs/EVENTS.md) puts all of it on one page.
+
+**One default changes what an existing deployment writes.** `coalesceWindow`
+defaults to `1m` on every `ClickHouseSink` and `S3Sink`, so a sink that streams
+Events writes fewer rows after the upgrade than before it. No occurrence is lost,
+because `count` is cumulative, but row density no longer tracks frequency;
+`coalesceWindow: 0s` restores the previous behaviour exactly. A query that counted
+rows as occurrences was already wrong and will now be visibly so —
+[`docs/SCHEMA.md`](docs/SCHEMA.md) and [`docs/QUERIES.md`](docs/QUERIES.md) say what
+to read instead.
+
+**Upgrade the CRDs before the operator.** Both new fields are additions to
+`v1alpha1` — nothing is removed or renamed and nothing needs migrating — but
+`helm upgrade` never touches `crds/`, and an API server still serving the v0.4.0
+schema drops a field it does not know without an error. An `eventFilter` dropped
+that way leaves its rule recording every Event, and a dropped `coalesceWindow: 0s`
+leaves the new `1m` default in force. The chart README's
+[upgrade sequence](deploy/charts/kuberecord/README.md#upgrades-and-crds) applies
+the CRDs first; `dist/install.yaml` carries them itself.
+
+Neither frozen format moved and no RBAC changed: `deploy/clickhouse/schema/` and
+`jsonl-v1` are untouched, and every new read, `--owned`'s ownership walk included,
+is a query over rows the archive already holds. `-o json` gains no field.
+
 ### Added
 
 - **`spec.resources[].eventFilter` narrows Event capture by the fields an Event
@@ -2734,7 +2770,8 @@ The full walkthrough is the README's [Installing](README.md#installing)
 section, and [`examples/quickstart/`](examples/quickstart/) is the same sequence
 as a runnable ten-minute path on a throwaway cluster.
 
-[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kuberecord/kuberecord/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kuberecord/kuberecord/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kuberecord/kuberecord/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/kuberecord/kuberecord/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kuberecord/kuberecord/compare/v0.3.0...v0.3.1

@@ -693,7 +693,7 @@ jobs:
   # The bot automates *version bumps* for a plugin krew-index already carries. The
   # first submission is a manual pull request the krew maintainers review, so
   # v0.4.0 is hand-submitted with `make krew-index-pr` and this takes over from
-  # v0.4.1.
+  # v0.5.0.
   #
   # There is no job-level `if:` here either, for the reason recorded above the tap
   # job: GitHub does not expose the `env` context to one.

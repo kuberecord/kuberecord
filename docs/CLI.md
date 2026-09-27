@@ -49,12 +49,12 @@ brew install kuberecord/tap/kuberecord
 
 # 3. The release archive, directly. Verifiable, and the only way to install on
 #    Windows.
-curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.4.0/kuberecord_v0.4.0_linux_amd64.tar.gz
-tar -xzf kuberecord_v0.4.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/kuberecord/kuberecord/releases/download/v0.5.0/kuberecord_v0.5.0_linux_amd64.tar.gz
+tar -xzf kuberecord_v0.5.0_linux_amd64.tar.gz
 install -m 0755 kubectl-kuberecord kuberecord ~/.local/bin/
 
 # 4. From source, with a Go toolchain.
-go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.4.0
+go install github.com/kuberecord/kuberecord/cmd/kubectl-kuberecord@v0.5.0
 ```
 
 They do not all give you the same thing, and the difference is the two names:
@@ -79,7 +79,7 @@ and nothing else, it reports the module version rather than the release stamp â€
 no signature over a binary you compiled yourself. Pin a tag rather than `@latest`
 if you want to know what you got.
 
-**Windows** is release archives only: `kuberecord_v0.4.0_windows_amd64.zip`, which
+**Windows** is release archives only: `kuberecord_v0.5.0_windows_amd64.zip`, which
 carries `kubectl-kuberecord.exe` and `kuberecord.exe`. krew supports Windows and
 the plugin manifest declares it; Homebrew does not run there.
 
@@ -1227,7 +1227,7 @@ Which build is running, and what it can read.
 
 ```console
 $ kuberecord version
-kuberecord v0.4.0
+kuberecord v0.5.0
   commit  77514b632925
   built   2026-09-05T11:02:44Z
   go      go1.25.7 linux/amd64
@@ -1266,7 +1266,7 @@ $ kuberecord version -o json
 {
   "apiVersion": "cli.kuberecord.io/v1alpha1",
   "kind": "Version",
-  "version": "v0.4.0",
+  "version": "v0.5.0",
   "commit": "77514b632925",
   "buildDate": "2026-09-05T11:02:44Z",
   "goVersion": "go1.25.7",
@@ -1321,7 +1321,7 @@ back:
 
 ```console
 $ kuberecord version --check
-kuberecord v0.4.0
+kuberecord v0.5.0
   commit  77514b632925
   built   2026-09-05T11:02:44Z
   go      go1.25.7 linux/amd64

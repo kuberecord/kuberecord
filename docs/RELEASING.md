@@ -218,7 +218,7 @@ A **prerelease is never pushed to the tap.** `brew install` has no way to ask fo
 stable version, so a formula pointing at `v0.3.0-rc.1` hands the candidate to
 everybody. `make release-brew-push` refuses one by name and says so.
 
-**krew is automatic too, from v0.4.1 onward.** The workflow's `krew` job asks
+**krew is automatic too, from v0.5.0 onward.** The workflow's `krew` job asks
 [`rajatjindal/krew-release-bot`](https://github.com/rajatjindal/krew-release-bot)
 — which krew's own developer guide strongly recommends, and which the maintainers
 reviewing this plugin's submission asked for — to open the version-bump pull
@@ -249,7 +249,7 @@ Four things follow, and all four are worth knowing before you tag:
 - **The first submission is manual, and always will be.** The bot automates
   *version bumps* for a plugin krew-index already carries; a plugin's first entry
   is a pull request the krew maintainers review by hand. v0.4.0 is hand-submitted
-  with `make krew-index-pr`, and the bot takes over from v0.4.1.
+  with `make krew-index-pr`, and the bot takes over from v0.5.0.
 - **A prerelease is never submitted.** krew-index carries the one version
   `kubectl krew install kuberecord` serves, and krew gives a user no way to ask
   for a stable one. The job skips a candidate tag and says on the run summary that
