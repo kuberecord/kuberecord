@@ -55,7 +55,7 @@ CHART="${ZERO_INFRA_CHART:-${REPO_ROOT}/deploy/charts/kuberecord}"
 # quickstart's is: two places naming one value, and a run that never rewrites a
 # committed file.
 IMG="kuberecord/zero-infra:local"
-MINIO_IMAGE="quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"
+MINIO_IMAGE="docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
 PAUSE_IMAGE="registry.k8s.io/pause:3.10"
 
 # Must match examples/zero-infra/minio.yaml, secret.yaml and sink.yaml. test/docs

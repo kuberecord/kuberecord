@@ -16,6 +16,25 @@ than a summary of them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The MinIO fixture is pulled from `docker.io/pgsty/minio`; `quay.io` no longer
+  serves it anonymously.** `quay.io/minio/minio`, where the fixture moved when
+  Docker Hub's `minio/minio` disappeared, now answers every pull — and its tag API —
+  with `401 unauthorized`. The same three workflows failed on the same line: the
+  integration target's `docker run`, the zero-infrastructure quickstart's
+  side-load, and the e2e S3 scenario that side-loads the same image.
+
+  No official anonymous source is left, so the six pins now name
+  `docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z` (`sha256:b6bfe723…`,
+  `linux/amd64` and `linux/arm64`), a community-maintained build of MinIO made from
+  the upstream Dockerfile. It is a drop-in for everything here: the same
+  `docker-entrypoint.sh` that prepends `minio` to `server /data`, the same `/data`
+  volume, no baked-in user, and `mc`, `curl` and GNU `base64` in `/usr/bin` for
+  `test/harness`, the integration target's health check and the quickstart
+  script. The manifests and the harness are unchanged; only the address and the
+  MinIO release moved. `TestMinIOImagePinsAgree` still holds the six together.
+
 ## [0.5.0] - 2026-09-27
 
 The release that makes Kubernetes Events affordable to record. Until now, naming

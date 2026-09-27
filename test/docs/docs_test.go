@@ -2275,7 +2275,10 @@ var minioSideloadPairs = []struct{ loader, manifest string }{
 // repository that is not there and fails with `pull access denied ... may require
 // 'docker login'`. That message names authentication, which is not the problem,
 // so the next person to shorten a pin back to `minio/minio` would spend the
-// afternoon on registry credentials instead. The rule is therefore mechanical
+// afternoon on registry credentials instead. quay.io/minio/minio, the replacement
+// that pin moved to, then went behind authentication too, so the pin now names a
+// community build of MinIO (pgsty/minio) made from the upstream Dockerfile — same
+// entrypoint, same /data, same mc and base64 on PATH. The rule is therefore mechanical
 // rather than a matter of taste: every pin names its registry explicitly, and the
 // check is Docker's own resolution rule — a reference's first path component is a
 // registry only if it contains a dot or a colon.

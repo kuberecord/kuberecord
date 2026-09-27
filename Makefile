@@ -126,7 +126,7 @@ CH_IT_ADDR ?= 127.0.0.1:19000
 CH_IT_USER ?= kuberecord
 CH_IT_PASSWORD ?= kuberecord
 
-MINIO_IT_IMAGE ?= quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+MINIO_IT_IMAGE ?= docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
 MINIO_IT_CONTAINER ?= kuberecord-it-minio
 MINIO_IT_ENDPOINT ?= http://127.0.0.1:19100
 MINIO_IT_USER ?= kuberecord
