@@ -294,6 +294,10 @@ is a query over rows the archive already holds. `-o json` gains no field.
   Pod. Both backends are held to the same tree over one shared past. No schema
   change: `deploy/clickhouse/schema/` is untouched.
 
+- **The chart has a logo.** `Chart.yaml` gains `icon`, pointing at
+  `docs/images/logo.png`, so the Artifact Hub listing (and any Helm UI that reads
+  the field) shows the kuberecord mark instead of a placeholder.
+
 ### Changed
 
 - **A bursting Kubernetes Event now writes rows proportional to elapsed time

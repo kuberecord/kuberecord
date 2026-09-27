@@ -16,6 +16,13 @@ appVersion: "v0.5.0"
 # `x-kubernetes-validations` on all schema nodes are generally available.
 kubeVersion: ">= 1.29.0-0"
 home: https://github.com/kuberecord/kuberecord
+# The logo Artifact Hub shows on the listing. It must be a URL, not a path in
+# the chart: Artifact Hub fetches it once, when it indexes a chart version, and
+# serves its own copy from then on — so a new logo appears only with the next
+# version it indexes, and pointing at main rather than at a tag is safe. A PNG
+# rather than the SVG master, because a raster is what every consumer of this
+# field (Artifact Hub, Rancher, Helm dashboards) is certain to render.
+icon: https://raw.githubusercontent.com/kuberecord/kuberecord/main/docs/images/logo.png
 sources:
   - https://github.com/kuberecord/kuberecord
 keywords:
