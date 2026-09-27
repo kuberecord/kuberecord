@@ -16,25 +16,6 @@ than a summary of them.
 
 ## [Unreleased]
 
-### Fixed
-
-- **The MinIO fixture is pulled from `docker.io/pgsty/minio`; `quay.io` no longer
-  serves it anonymously.** `quay.io/minio/minio`, where the fixture moved when
-  Docker Hub's `minio/minio` disappeared, now answers every pull — and its tag API —
-  with `401 unauthorized`. The same three workflows failed on the same line: the
-  integration target's `docker run`, the zero-infrastructure quickstart's
-  side-load, and the e2e S3 scenario that side-loads the same image.
-
-  No official anonymous source is left, so the six pins now name
-  `docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z` (`sha256:b6bfe723…`,
-  `linux/amd64` and `linux/arm64`), a community-maintained build of MinIO made from
-  the upstream Dockerfile. It is a drop-in for everything here: the same
-  `docker-entrypoint.sh` that prepends `minio` to `server /data`, the same `/data`
-  volume, no baked-in user, and `mc`, `curl` and GNU `base64` in `/usr/bin` for
-  `test/harness`, the integration target's health check and the quickstart
-  script. The manifests and the harness are unchanged; only the address and the
-  MinIO release moved. `TestMinIOImagePinsAgree` still holds the six together.
-
 ## [0.5.0] - 2026-09-27
 
 The release that makes Kubernetes Events affordable to record. Until now, naming
@@ -414,22 +395,29 @@ is a query over rows the archive already holds. `-o json` gains no field.
 
 ### Fixed
 
-- **The MinIO fixture is pulled from `quay.io`; Docker Hub no longer serves it.**
-  MinIO withdrew the `minio/minio` repository from Docker Hub, and every pin here
-  named it in the short form that resolves there. Three workflows failed at once
-  on the same line — the e2e S3 scenario, the integration suites and the
-  zero-infrastructure quickstart — each reporting `pull access denied for
-  minio/minio, repository does not exist or may require 'docker login'`. That
-  message names authentication, which was never the problem: the repository
-  itself is gone, and `latest` fails identically to the pinned tag.
+- **The MinIO fixture is pulled from `docker.io/pgsty/minio`; MinIO no longer
+  serves its image anonymously anywhere.** MinIO withdrew the `minio/minio`
+  repository from Docker Hub, and every pin here named it in the short form that
+  resolves there. Three workflows failed at once on the same line — the e2e S3
+  scenario, the integration suites and the zero-infrastructure quickstart — each
+  reporting `pull access denied for minio/minio, repository does not exist or may
+  require 'docker login'`. That message names authentication, which was not the
+  problem: the repository itself is gone, and `latest` fails identically to the
+  pinned tag. `quay.io/minio/minio`, MinIO's other official registry, then went
+  the same way — it now answers every pull, and its tag API, with `401
+  unauthorized` — so no official anonymous source is left.
 
-  The image is unchanged. `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` is
-  MinIO's other official registry serving the same release — `sha256:a1ea29fa…`,
-  `linux/amd64` and `linux/arm64`, and the same `mc` and `base64` that
-  `test/harness` execs inside the pod to read an archive back. Only the address
-  changed, in the six files that carry it: the integration target's container,
-  the e2e fixture and the constant that side-loads it, the zero-infrastructure
-  quickstart's script and manifest, and the tee example's cold tier.
+  The six pins now name `docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z`
+  (`sha256:b6bfe723…`, `linux/amd64` and `linux/arm64`), a community-maintained
+  build of MinIO made from the upstream Dockerfile. It is a drop-in for everything
+  here: the same `docker-entrypoint.sh` that prepends `minio` to `server /data`,
+  the same `/data` volume, no baked-in user, and `mc`, `curl` and GNU `base64` in
+  `/usr/bin` for `test/harness`, the integration target's health check and the
+  quickstart script. The manifests and the harness are unchanged; only the
+  address and the MinIO release moved, in the six files that carry it: the
+  integration target's container, the e2e fixture and the constant that
+  side-loads it, the zero-infrastructure quickstart's script and manifest, and
+  the tee example's cold tier.
 
   **A test now holds the six together**, because six spellings of one string with
   nothing connecting them is what turned a vendor's registry decision into three
